@@ -2047,6 +2047,50 @@ def _codex_meta(path: str) -> tuple[str | None, str | None]:
         return None, None
 
 
+def _codex_child_add_dirs(extra: list[str] | None = None) -> list[str]:
+    """Writable roots for a Codex agent launched by the product.
+
+    Mirrors codex_child_add_dirs in hooks/spawn_child.sh: project, NEW AGENT
+    presets and typeahead roots, install dir, worktree base, ~/.claude,
+    ~/.codex, then AGENTSTACK_CODEX_ADD_DIRS. Missing directories are dropped
+    and duplicates collapse on realpath (macOS /tmp -> /private/tmp)."""
+    raw: list[str] = [PROJECT_KEY or VAULT]
+    raw += os.environ.get("AGENTSTACK_SPAWN_DIRS", "").split(":")
+    raw += os.environ.get("AGENTSTACK_SPAWN_ROOTS", "").split(":")
+    raw += [os.environ.get("AGENTSTACK_HOME") or os.path.expanduser("~/.agentstack"),
+            "/tmp/cc-worktrees", os.path.expanduser("~/.claude"),
+            os.path.expanduser("~/.codex")]
+    raw += list(extra or [])
+    raw += os.environ.get("AGENTSTACK_CODEX_ADD_DIRS", "").split(":")
+    seen: list[str] = []
+    for entry in raw:
+        if not entry:
+            continue
+        expanded = os.path.expanduser(entry)
+        if not os.path.isdir(expanded):
+            continue
+        resolved = os.path.realpath(expanded)
+        if resolved not in seen:
+            seen.append(resolved)
+    return seen
+
+
+def _codex_child_launch_flags(extra_dirs: list[str] | None = None) -> str:
+    """Sandbox / approval / network / --add-dir flags for a product-launched Codex.
+
+    Same policy as spawn_child.sh: AGENTSTACK_CODEX_CHILD_APPROVAL (default
+    `never` — an unattended agent has nobody to answer prompts),
+    AGENTSTACK_CODEX_NETWORK (default on; workspace-write blocks the network
+    otherwise and every curl / git fetch becomes a prompt or a failure)."""
+    approval = os.environ.get("AGENTSTACK_CODEX_CHILD_APPROVAL", "").strip() or "never"
+    network = os.environ.get("AGENTSTACK_CODEX_NETWORK", "").strip().lower() or "on"
+    parts = [f"--sandbox workspace-write --ask-for-approval {shlex.quote(approval)}"]
+    if network not in ("0", "off", "false", "no"):
+        parts.append("-c sandbox_workspace_write.network_access=true")
+    parts += [f"--add-dir {shlex.quote(d)}" for d in _codex_child_add_dirs(extra_dirs)]
+    return " ".join(parts)
+
+
 def _do_resume_codex(session: str) -> dict:
     """Codex agent を `codex resume <sid>` で tmux 再開する。
 
@@ -2071,18 +2115,13 @@ def _do_resume_codex(session: str) -> dict:
     # zsh -lic で .zshrc を読ませ codex を PATH 解決。bootstrap が無ければ
     # source をスキップ（AGENT_NAME export と resume は維持）。
     src = f'source {shlex.quote(bootstrap)}; ' if os.path.exists(bootstrap) else ''
-    add_dirs = ''
-    if VAULT:
-        add_dirs = f' --add-dir {shlex.quote(VAULT)}'
     inner = (
         'export PATH="$HOME/.local/bin:$PATH"; '
         f'export AGENT_NAME={session}; '
         f'{src}'
         f'exec env -u OPENAI_API_KEY codex resume {sid} '
         f'-C {shlex.quote(cwd)} '
-        '--sandbox workspace-write --ask-for-approval on-request '
-        f'{add_dirs} '
-        '--add-dir "$HOME/.claude" --add-dir "$HOME/.codex"'
+        f'{_codex_child_launch_flags()}'
     )
     launch = _open_terminal_tmux(
         ["tmux", "new-session", "-A", "-s", session, "-c", cwd,
@@ -2985,11 +3024,33 @@ _WIN_TRUNC_RE = re.compile(
 #   Claude Code: "| Opus 4.6 | ctx: 59% used"
 #   Codex:       "gpt-5.4 xhigh · Context 46% left"
 # 登録時 model 文字列は warm pool claim 等で書き換わるため信用しない。
+#   2026-09-04: Fable/Mythos を追加。未知の Claude family だと statusline を
+#   素通りし、末尾10行の会話中に出た "gpt-5.6" を実モデルと誤読して provider
+#   まで openai に化けた（ProOpus が cockpit で Codex 表示になった実害）。
+#   同時に、ctx 表示と同じ行（= statusline）を最優先で読むようにし、会話中の
+#   モデル名（"gpt-5.6-sol に委任"）を statusline より先に拾わないようにする。
 _MODEL_PANE_RE = re.compile(
-    r"\b(Opus|Sonnet|Haiku)\s+(\d+(?:\.\d+)?)\b"
+    r"\b(Opus|Sonnet|Haiku|Fable|Mythos)\s+(\d+(?:\.\d+)?)\b"
     r"|\b(gpt-\d+(?:\.\d+)?)(?:-(codex|mini|nano|turbo|thinking))?\b",
     re.IGNORECASE,
 )
+_STATUSLINE_HINT_RE = re.compile(
+    r"ctx:\s*\d+%\s*used|Context\s+\d+%\s*(?:left|used)", re.IGNORECASE)
+
+
+def _pane_model_from(tail: str) -> str | None:
+    """末尾行群から実モデル名を読む。statusline（ctx 表示のある行）があれば
+    その行だけを見る。無ければ末尾全体から最初の一致を採る。"""
+    candidates = [ln for ln in tail.splitlines() if _STATUSLINE_HINT_RE.search(ln)]
+    for src in (*candidates, tail):
+        mm = _MODEL_PANE_RE.search(src)
+        if not mm:
+            continue
+        if mm.group(1):  # Claude family
+            return f"{mm.group(1).title()} {mm.group(2)}"
+        base, variant = mm.group(3), mm.group(4)
+        return f"{base}-{variant}" if variant else base
+    return None
 
 # 稼働経過時間。work 中: スピナー行の先頭尺。
 #   Claude: "(2m 24s · ↓ … tokens …)"（区切り · = U+00B7）
@@ -3045,15 +3106,7 @@ def _parse_runtime(text: str) -> dict:
     ctx_window = re.sub(r"\s+", "", w.group(1)).upper() if w else None
     # ペイン由来の実モデル (steruslineから抽出。末尾10行に限定して
     # スクロールバッファ内のコード片やテキスト中の誤マッチを避ける)
-    pane_model = None
-    mm = _MODEL_PANE_RE.search(tail_for_model)
-    if mm:
-        if mm.group(1):  # Claude family (Opus/Sonnet/Haiku)
-            pane_model = f"{mm.group(1).title()} {mm.group(2)}"
-        else:  # gpt-x[.y][-variant]
-            base = mm.group(3)
-            variant = mm.group(4)
-            pane_model = f"{base}-{variant}" if variant else base
+    pane_model = _pane_model_from(tail_for_model)
     # AskUserQuestion ウィジェットは常にペイン最下部に表示される。スクロール
     # バッファ上部の自己マッチ（過去の出力にコードや報告文として regex 自体が
     # 書かれているケース等）を避けるため、末尾 12 行に絞って検出する。
