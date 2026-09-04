@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""Persist Antigravity NDJSON while rendering useful progress in a tmux pane."""
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+
+
+def main() -> int:
+    if len(sys.argv) != 2:
+        print("usage: agentstack-gemini-stream RESULT_LOG", file=sys.stderr)
+        return 2
+    log_path = pathlib.Path(sys.argv[1])
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8") as log:
+        for raw in sys.stdin:
+            log.write(raw)
+            log.flush()
+            try:
+                event = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            kind = event.get("event")
+            if kind == "init":
+                conversation = event.get("conversation_id") or "unknown"
+                print(f"[antigravity] conversation {conversation}", flush=True)
+                continue
+            if kind == "step_update":
+                update = event.get("step_update")
+                if not isinstance(update, dict):
+                    continue
+                delta = update.get("text_delta")
+                if isinstance(delta, str) and delta:
+                    print(delta, end="", flush=True)
+                continue
+            if kind == "result":
+                result = event.get("result")
+                if not isinstance(result, dict):
+                    continue
+                status = result.get("status") or "UNKNOWN"
+                print(f"\n[antigravity] status={status}", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

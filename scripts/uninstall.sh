@@ -168,6 +168,50 @@ def remove_claude_mcp():
         argv.append("--dry-run")
     subprocess.run(argv, check=True)
 
+def remove_gemini_mcp():
+    record = data.get("gemini_mcp_config")
+    if not isinstance(record, dict):
+        return
+    raw_path = record.get("config_path")
+    server_key = record.get("server_key")
+    command = record.get("command")
+    if not all(isinstance(value, str) and value for value in (raw_path, server_key, command)):
+        print("kept Gemini MCP config: manifest ownership record is incomplete", file=sys.stderr)
+        return
+    path = safe_path(raw_path)
+    if not path.exists():
+        return
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"kept Gemini MCP config {path}: cannot parse current file ({exc})", file=sys.stderr)
+        return
+    if not isinstance(config, dict):
+        print(f"kept Gemini MCP config {path}: current config is not an object", file=sys.stderr)
+        return
+    servers = config.get("mcpServers")
+    if not isinstance(servers, dict):
+        return
+    current = servers.get(server_key)
+    expected = {"command": command, "args": []}
+    if current is None:
+        return
+    if current != expected:
+        print(f"kept modified Gemini MCP entry '{server_key}' in {path}", file=sys.stderr)
+        return
+    say("remove owned Gemini MCP entry", f"{path}:{server_key}")
+    if dry_run:
+        return
+    servers.pop(server_key, None)
+    mode = path.stat().st_mode & 0o777
+    temporary = path.with_name(path.name + f".uninstall-{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(temporary, mode or 0o600)
+    os.replace(temporary, path)
+
 for svc in data.get("services", []):
     kind = svc.get("kind")
     if kind == "launchd":
@@ -182,12 +226,6 @@ for svc in data.get("services", []):
         if pidfile:
             p = pathlib.Path(pidfile).expanduser()
             if p.exists():
-                # agentstack-mailctl writes TWO lines: the pid, then the runner it
-                # started (bin/agentstack-mailctl write_pid). int() over the whole
-                # file raises, pid falls back to 0, and the mail server keeps
-                # running after an uninstall. Parse it the way the controller
-                # does, and do not signal a pid that has been recycled into
-                # something else.
                 recorded_runner = ""
                 try:
                     lines = p.read_text(encoding="utf-8").splitlines()
@@ -215,6 +253,7 @@ for svc in data.get("services", []):
                         except ProcessLookupError:
                             pass
 
+remove_gemini_mcp()
 remove_claude_mcp()
 remove_settings_hooks()
 

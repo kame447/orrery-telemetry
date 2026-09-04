@@ -1,0 +1,45 @@
+{
+  "id": "gemini",
+  "label": "Gemini",
+  "program": "antigravity",
+  "models": [
+    "gemini-3.8-flash-high",
+    "gemini-3.8-flash-medium"
+  ],
+  "default_model": "gemini-3.8-flash-high",
+  "capabilities": {
+    "effort": true,
+    "mcp": true,
+    "resume": false,
+    "runtime": true,
+    "transcript": false,
+    "standalone": false,
+    "worktree_required": true,
+    "resources_required": true
+  },
+  "provider_key": "google",
+  "efforts": [
+    "low",
+    "medium",
+    "high"
+  ],
+  "effort_default": "high",
+  "dispatch": "adapter",
+  "adapter_script": "spawn_gemini_preregistered.sh",
+  "adapter_env": {
+    "AGENTSTACK_GEMINI_EFFORT": "{effort}",
+    "AGENTSTACK_GEMINI_RESOURCES": "{resources}",
+    "AGENTSTACK_GEMINI_TASK_FILE": "{task_file}",
+    "AGENTSTACK_GEMINI_MODEL": "{model}"
+  },
+  "models_env": "AGENTSTACK_GEMINI_MODELS",
+  "required_paths": [
+    "bin/agent-start-gemini",
+    "bin/agentstack-gemini-child-mail",
+    "bin/agentstack-gemini-stream",
+    "hooks/spawn_gemini_preregistered.sh"
+  ],
+  "runtime_commands": [
+    "agy"
+  ]
+}
