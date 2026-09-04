@@ -87,6 +87,7 @@ def test_new_provider_can_be_registered_without_editing_registry_core():
                 resources_required=False,
             ),
             provider_key="future-vendor",
+            dispatch="native",
         )
     )
 
@@ -164,15 +165,17 @@ def test_dashboard_dispatch_accepts_injected_provider_without_new_if_branch(monk
             resources_required=False,
         ),
         provider_key="future-vendor",
+        adapter_script="spawn-future.sh",
         launch_args=("--future",),
     )
     registry = ProviderRegistry([fake])
     monkeypatch.setattr(server, "PROVIDER_REGISTRY", registry)
 
-    launcher = tmp_path / "spawn_child.sh"
+    launcher = tmp_path / "spawn-future.sh"
     launcher.write_text("#!/bin/bash\n")
     launcher.chmod(0o755)
-    monkeypatch.setattr(server, "SPAWN_SCRIPT", str(launcher))
+    monkeypatch.setattr(server, "HOOKS_DIR", str(tmp_path))
+    monkeypatch.setattr(server, "SPAWN_SCRIPT", str(tmp_path / "native-spawn.sh"))
     monkeypatch.setattr(server, "RUNTIME_DIR", str(tmp_path / "runtime"))
     monkeypatch.setattr(server, "HERE", str(tmp_path))
     monkeypatch.setattr(server, "_project_key", lambda: "/project")
