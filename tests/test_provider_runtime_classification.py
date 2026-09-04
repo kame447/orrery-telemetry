@@ -32,6 +32,7 @@ def test_future_runtime_provider_does_not_need_core_name_branch(monkeypatch):
             resources_required=False,
         ),
         provider_key="future-vendor",
+        dispatch="native",
     )
     monkeypatch.setattr(server, "PROVIDER_REGISTRY", ProviderRegistry([future]))
 
@@ -58,6 +59,7 @@ def test_provider_without_runtime_capability_keeps_legacy_finished_state(monkeyp
             resources_required=False,
         ),
         provider_key="offline-vendor",
+        dispatch="native",
     )
     monkeypatch.setattr(server, "PROVIDER_REGISTRY", ProviderRegistry([offline]))
 
