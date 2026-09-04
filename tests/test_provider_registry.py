@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import copy
-
 import dashboard.server as server
 from dashboard.providers.registry import (
     ProviderCapabilities,
@@ -22,6 +20,7 @@ def test_default_registry_exposes_builtin_providers_and_capabilities(monkeypatch
     assert claude.capabilities.effort is False
     assert claude.capabilities.resume is True
     assert claude.capabilities.worktree_required is False
+    assert claude.capabilities.resources_required is False
 
     codex = registry.require("codex")
     assert codex.models == ("gpt-test-a", "gpt-test-b")
@@ -34,6 +33,7 @@ def test_default_registry_exposes_builtin_providers_and_capabilities(monkeypatch
     assert gemini.capabilities.effort is True
     assert gemini.capabilities.mcp is True
     assert gemini.capabilities.worktree_required is True
+    assert gemini.capabilities.resources_required is True
     assert gemini.capabilities.standalone is False
 
 
@@ -59,6 +59,7 @@ def test_catalog_is_generated_from_registry_not_provider_name_branches(monkeypat
             "transcript": False,
             "standalone": False,
             "worktree_required": True,
+            "resources_required": True,
         },
         "provider_key": "google",
     }
@@ -81,6 +82,7 @@ def test_new_provider_can_be_registered_without_editing_registry_core():
                 transcript=False,
                 standalone=True,
                 worktree_required=False,
+                resources_required=False,
             ),
             provider_key="future-vendor",
         )
@@ -99,6 +101,7 @@ def test_provider_validation_is_capability_driven():
         "model": "claude-sonnet-5",
         "effort": "",
         "worktree_required": False,
+        "resources_required": False,
     }
     assert registry.validate_request("codex", "gpt-5.6-sol", "high")["effort"] == "high"
     assert registry.validate_request("gemini", "gemini-3.8-flash-high", "medium") == {
@@ -106,6 +109,7 @@ def test_provider_validation_is_capability_driven():
         "model": "gemini-3.8-flash-high",
         "effort": "medium",
         "worktree_required": True,
+        "resources_required": True,
     }
 
     for args, message in [
@@ -155,6 +159,7 @@ def test_dashboard_dispatch_accepts_injected_provider_without_new_if_branch(monk
             transcript=False,
             standalone=True,
             worktree_required=False,
+            resources_required=False,
         ),
         provider_key="future-vendor",
         launch_args=("--future",),
