@@ -196,8 +196,17 @@ def run(server_path: pathlib.Path) -> int:
         _remove_state()
 
 
+def _default_server_path() -> pathlib.Path:
+    provider_entrypoint = HERE / "provider_server.py"
+    return provider_entrypoint if provider_entrypoint.is_file() else HERE / "server.py"
+
+
 def main() -> int:
-    server_path = pathlib.Path(sys.argv[1]).expanduser() if len(sys.argv) > 1 else HERE / "server.py"
+    server_path = (
+        pathlib.Path(sys.argv[1]).expanduser()
+        if len(sys.argv) > 1
+        else _default_server_path()
+    )
     return run(server_path)
 
 
