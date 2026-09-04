@@ -79,11 +79,12 @@ FILES=(
   "dashboard/providers/registry.py"
   "dashboard/service_runner.py"
   "dashboard/assets/google.svg"
+  "provider_specs/gemini.json"
 )
 
 # Validate every input before touching the installed tree. A malformed core
-# manifest or incomplete provider checkout must fail without a half-installed
-# provider runtime.
+# manifest, provider manifest, or incomplete checkout must fail without a
+# half-installed provider runtime.
 for relative in "${FILES[@]}"; do
   [[ -f "$REPO_ROOT/$relative" ]] || {
     echo "$PROG: missing source file: $REPO_ROOT/$relative" >&2
@@ -106,6 +107,18 @@ for key in ("owned_files", "owned_dirs"):
     value = data.get(key)
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise SystemExit(f"invalid core install manifest {manifest}: {key} must be a string list")
+PY
+PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_BIN" - "$REPO_ROOT" <<'PY'
+from pathlib import Path
+import sys
+
+from dashboard.providers.registry import default_provider_registry
+
+root = Path(sys.argv[1])
+registry = default_provider_registry(install_root=root)
+provider = registry.require("gemini")
+if provider.program != "antigravity" or provider.dispatch != "adapter":
+    raise SystemExit("invalid Gemini provider manifest: unexpected program/dispatch")
 PY
 
 for relative in "${FILES[@]}"; do
