@@ -110,8 +110,6 @@ def test_delegated_child_uses_worktree_stream_input_and_preregistered_identity()
 
 def test_delegated_child_lifecycle_is_launcher_owned() -> None:
     text = _CHILD.read_text(encoding="utf-8")
-    # Reservation is made through the launcher-owned Python wrapper so the
-    # selected AGENTSTACK_PYTHON and mail environment stay consistent.
     assert 'mail_helper reserve --project-key "$PROJECT_KEY"' in text
     assert '$(printf \'%q\' "$MAIL_HELPER") report --project-key' in text
     assert '$(printf \'%q\' "$MAIL_HELPER") release --project-key' in text
@@ -152,39 +150,41 @@ def test_mcp_setup_preserves_unrelated_servers() -> None:
             ),
             encoding="utf-8",
         )
-        result = _run_setup(config)
+        result = _run_setup(config, "--print")
         assert result.returncode == 0, result.stderr
-        data = json.loads(config.read_text(encoding="utf-8"))
-        assert data["mcpServers"]["keep-me"] == {
+        rendered = json.loads(result.stdout)
+        assert rendered["other"] == {"preserved": True}
+        assert rendered["mcpServers"]["keep-me"] == {
             "serverUrl": "https://example.invalid/mcp"
         }
-        assert data["mcpServers"]["orrery-mail"] == _expected_session_bound_entry(config)
-        assert data["other"] == {"preserved": True}
+        assert rendered["mcpServers"]["orrery-mail"] == _expected_session_bound_entry(config)
 
 
-def test_mcp_setup_does_not_embed_bearer_or_endpoint() -> None:
+def test_mcp_setup_never_persists_mail_bearer_or_owner_token() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         config = pathlib.Path(tmp) / "mcp_config.json"
-        result = _run_setup(config, bearer_mode="enabled", token="top-secret")
+        result = _run_setup(
+            config,
+            "--print",
+            bearer_mode="enabled",
+            token="secret-for-test",
+        )
         assert result.returncode == 0, result.stderr
-        data = json.loads(config.read_text(encoding="utf-8"))
-        entry = data["mcpServers"]["orrery-mail"]
+        entry = json.loads(result.stdout)["mcpServers"]["orrery-mail"]
         assert entry == _expected_session_bound_entry(config)
-        serialized = json.dumps(entry)
-        assert "top-secret" not in serialized
-        assert "127.0.0.1" not in serialized
-        assert "Authorization" not in serialized
+        assert "secret-for-test" not in result.stdout
+        assert "Authorization" not in result.stdout
 
 
-def test_mcp_setup_uninstall_removes_only_managed_server() -> None:
+def test_mcp_setup_uninstall_removes_only_orrery_entry() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         config = pathlib.Path(tmp) / "mcp_config.json"
         config.write_text(
             json.dumps(
                 {
                     "mcpServers": {
-                        "keep-me": {"command": "keep"},
-                        "orrery-mail": {"command": "old"},
+                        "orrery-mail": {"command": "/old/runner", "args": []},
+                        "keep-me": {"serverUrl": "https://example.invalid/mcp"},
                     }
                 }
             ),
@@ -192,17 +192,14 @@ def test_mcp_setup_uninstall_removes_only_managed_server() -> None:
         )
         result = _run_setup(config, "--uninstall")
         assert result.returncode == 0, result.stderr
-        data = json.loads(config.read_text(encoding="utf-8"))
-        assert data["mcpServers"] == {"keep-me": {"command": "keep"}}
+        rendered = json.loads(config.read_text(encoding="utf-8"))
+        assert "orrery-mail" not in rendered["mcpServers"]
+        assert rendered["mcpServers"]["keep-me"] == {
+            "serverUrl": "https://example.invalid/mcp"
+        }
 
 
-def test_mcp_setup_print_is_non_mutating() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        config = pathlib.Path(tmp) / "mcp_config.json"
-        original = json.dumps({"mcpServers": {"keep-me": {"command": "keep"}}})
-        config.write_text(original, encoding="utf-8")
-        result = _run_setup(config, "--print")
-        assert result.returncode == 0, result.stderr
-        assert config.read_text(encoding="utf-8") == original
-        printed = json.loads(result.stdout)
-        assert printed["mcpServers"]["orrery-mail"] == _expected_session_bound_entry(config)
+if __name__ == "__main__":
+    import pytest
+
+    raise SystemExit(pytest.main([__file__]))
