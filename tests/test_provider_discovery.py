@@ -5,6 +5,9 @@ import pathlib
 from dashboard.providers.registry import default_provider_registry
 
 
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
 def _touch_executable(path: pathlib.Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -17,6 +20,9 @@ def test_available_only_registry_hides_uninstalled_optional_provider(tmp_path):
 
 
 def test_available_only_registry_exposes_gemini_after_adapter_payload_exists(tmp_path):
+    spec = tmp_path / "provider_specs" / "gemini.json"
+    spec.parent.mkdir(parents=True, exist_ok=True)
+    spec.write_bytes((ROOT / "provider_specs" / "gemini.json").read_bytes())
     for relative in (
         "bin/agent-start-gemini",
         "bin/agentstack-gemini-child-mail",
