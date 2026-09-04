@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import dashboard.server as server
+import dashboard.provider_server as server
 
 
 def test_gemini_runtime_is_live_while_agy_owns_the_tmux_pane():
