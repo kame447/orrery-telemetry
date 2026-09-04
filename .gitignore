@@ -1,6 +1,9 @@
 # local config & secrets
 .env
 agentstack.toml
+# Antigravity delegated children write a per-worktree MCP binding here. It
+# contains child-specific runtime paths and must never be committed.
+.agents/mcp_config.json
 
 # agent-mail is fetched at install time, not vendored
 mcp_agent_mail/
