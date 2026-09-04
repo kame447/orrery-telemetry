@@ -7,6 +7,7 @@ unit tests/monkeypatches pointed at the same function globals.
 """
 from __future__ import annotations
 
+import pathlib
 import sys
 
 try:
@@ -18,7 +19,11 @@ except ModuleNotFoundError:  # direct `python dashboard/server.py`
     from provider_runtime import install as _install_provider_runtime
     from providers.registry import default_provider_registry
 
-_install_provider_runtime(_base, default_provider_registry())
+_INSTALL_ROOT = pathlib.Path(__file__).resolve().parent.parent
+_install_provider_runtime(
+    _base,
+    default_provider_registry(available_only=True, install_root=_INSTALL_ROOT),
+)
 
 if __name__ == "__main__":
     _base.main()
