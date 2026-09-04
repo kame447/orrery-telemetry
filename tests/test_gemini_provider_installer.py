@@ -6,6 +6,8 @@ import os
 import pathlib
 import subprocess
 
+from dashboard.providers.registry import default_provider_registry
+
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 INSTALLER = ROOT / "scripts" / "install-gemini-provider.sh"
@@ -177,6 +179,12 @@ def test_provider_installer_copies_dashboard_abstraction_adapter_and_manifest(tm
     )
     assert installed_spec["id"] == "gemini"
     assert installed_spec["program"] == "antigravity"
+
+    installed_registry = default_provider_registry(
+        available_only=True, install_root=install_dir
+    )
+    assert installed_registry.ids() == ("claude", "codex", "gemini")
+    assert installed_registry.require("gemini").program == "antigravity"
 
     assert os.access(install_dir / "hooks" / "spawn_gemini_preregistered.sh", os.X_OK)
     assert os.access(install_dir / "bin" / "agent-start-gemini", os.X_OK)
