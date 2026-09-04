@@ -1,8 +1,8 @@
 """Launch-provider registry shared by dashboard catalog and dispatch.
 
-Provider-specific facts belong here.  The dashboard core should ask this
-registry what a provider can do instead of growing ``if provider == ...``
-branches every time another CLI is added.
+Provider-specific facts belong here. The dashboard core asks this registry
+what a provider can do instead of growing ``if provider == ...`` branches each
+time another CLI is added.
 """
 from __future__ import annotations
 
@@ -35,13 +35,13 @@ class ProviderSpec:
     efforts: tuple[str, ...] = ()
     effort_default: str = ""
     # ``native`` delegates to the legacy Claude/Codex branch while it is being
-    # migrated. ``adapter`` uses the generic adapter path below. This is data,
-    # not a provider-name conditional, so a new provider needs only a spec.
+    # migrated. ``adapter`` uses the generic adapter path. This is provider
+    # metadata rather than a provider-name conditional in the dashboard core.
     dispatch: str = "adapter"
     adapter_script: str = ""
     launch_args: tuple[str, ...] = ()
-    # Adapter arguments may reference request values with ``{name}`` tokens.
-    adapter_args: tuple[str, ...] = ()
+    # Values may reference {effort}, {resources}, and {task_file}.
+    adapter_env: tuple[tuple[str, str], ...] = ()
     logo_aspect: float = 1.0
 
     def __post_init__(self) -> None:
@@ -58,6 +58,9 @@ class ProviderSpec:
             raise ValueError(f"effort metadata is not allowed for provider {self.id}")
         if self.dispatch not in {"native", "adapter"}:
             raise ValueError(f"unknown dispatch mode for provider {self.id}: {self.dispatch}")
+        for key, _value in self.adapter_env:
+            if not key or not key.replace("_", "").isalnum() or not key[0].isalpha():
+                raise ValueError(f"invalid adapter environment key for {self.id}: {key}")
 
     def catalog_item(self) -> dict:
         item = {
@@ -203,10 +206,11 @@ def default_provider_registry() -> ProviderRegistry:
                 effort_default="high",
                 dispatch="adapter",
                 adapter_script="spawn_gemini_preregistered.sh",
-                adapter_args=(
-                    "--effort", "{effort}",
-                    "--resources", "{resources}",
-                    "--task-file", "{task_file}",
+                adapter_env=(
+                    ("AGENTSTACK_GEMINI_EFFORT", "{effort}"),
+                    ("AGENTSTACK_GEMINI_RESOURCES", "{resources}"),
+                    ("AGENTSTACK_GEMINI_TASK_FILE", "{task_file}"),
+                    ("AGENTSTACK_GEMINI_MODEL", "{model}"),
                 ),
             ),
         ]
