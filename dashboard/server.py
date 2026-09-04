@@ -13,11 +13,13 @@ import sys
 try:
     from dashboard import server_core as _base
     from dashboard.provider_classification import install as _install_provider_classification
+    from dashboard.provider_launch_tracking import install as _install_provider_launch_tracking
     from dashboard.provider_runtime import install as _install_provider_runtime
     from dashboard.providers.registry import default_provider_registry
 except ModuleNotFoundError:  # direct `python dashboard/server.py`
     import server_core as _base
     from provider_classification import install as _install_provider_classification
+    from provider_launch_tracking import install as _install_provider_launch_tracking
     from provider_runtime import install as _install_provider_runtime
     from providers.registry import default_provider_registry
 
@@ -27,6 +29,7 @@ _install_provider_runtime(
     default_provider_registry(available_only=True, install_root=_INSTALL_ROOT),
 )
 _install_provider_classification(_base)
+_install_provider_launch_tracking(_base)
 
 if __name__ == "__main__":
     _base.main()
