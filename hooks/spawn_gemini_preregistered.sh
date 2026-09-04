@@ -13,6 +13,7 @@ MAIL_ENV="${AGENTSTACK_MAIL_ENV:-$HOME/.agentstack/mail/.env}"
 HTTP_BEARER_MODE="${AGENTSTACK_MAIL_HTTP_BEARER_MODE:-auto}"
 RUNTIME_DIR="${AGENTSTACK_RUNTIME_DIR:-$HOME/.agentstack/runtime}"
 MANAGED_FILE="${AGENTSTACK_MANAGED_AGENTS_FILE:-$RUNTIME_DIR/managed_agents.txt}"
+PYTHON_BIN="${AGENTSTACK_PYTHON:-python3}"
 GEMINI_BIN="${AGENTSTACK_GEMINI_BIN:-agy}"
 EFFORT="${AGENTSTACK_GEMINI_EFFORT:-high}"
 RESOURCES="${AGENTSTACK_GEMINI_RESOURCES:-}"
@@ -65,6 +66,7 @@ WORK_DIR="${2:-$PWD}"
 case "$EFFORT" in low|medium|high) ;; *) echo "$PROG: invalid effort: $EFFORT" >&2; exit 2 ;; esac
 command -v tmux >/dev/null 2>&1 || { echo "$PROG: tmux not found" >&2; exit 1; }
 command -v "$GEMINI_BIN" >/dev/null 2>&1 || { echo "$PROG: Antigravity CLI not found (expected agy)" >&2; exit 1; }
+command -v "$PYTHON_BIN" >/dev/null 2>&1 || [[ -x "$PYTHON_BIN" ]] || { echo "$PROG: selected Python is unavailable: $PYTHON_BIN" >&2; exit 1; }
 [[ -x "$MAIL_HELPER" && -x "$STREAM_HELPER" && -x "$PROXY_RUNNER" ]] || { echo "$PROG: Gemini provider helpers are not installed" >&2; exit 1; }
 
 SOURCE_REPO="$(git -C "$WORK_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
@@ -95,7 +97,7 @@ mail_helper() {
   AGENTSTACK_MCP_URL="$MCP_URL" \
   AGENTSTACK_MAIL_ENV="$MAIL_ENV" \
   AGENTSTACK_MAIL_HTTP_BEARER_MODE="$HTTP_BEARER_MODE" \
-    "$MAIL_HELPER" "$@"
+    "$PYTHON_BIN" "$MAIL_HELPER" "$@"
 }
 
 cleanup_failure() {
@@ -151,7 +153,7 @@ AGS_GEMINI_MCP_URL="$MCP_URL" \
 AGS_GEMINI_MAIL_ENV="$MAIL_ENV" \
 AGS_GEMINI_BEARER_MODE="$HTTP_BEARER_MODE" \
 AGS_GEMINI_RUNTIME_DIR="$RUNTIME_DIR" \
-python3 - <<'PY'
+"$PYTHON_BIN" - <<'PY'
 import json, os
 from pathlib import Path
 path = Path(os.environ["AGS_GEMINI_MCP_PATH"])
@@ -175,7 +177,7 @@ path.write_text(json.dumps({"mcpServers": {"orrery-mail": entry}}, indent=2) + "
 os.chmod(path, 0o600)
 PY
 
-python3 - "$TASK_FILE" "$TASK_EVENT_FILE" "$CHILD_NAME" "$PARENT_AGENT" "$RESOURCES" <<'PY'
+"$PYTHON_BIN" - "$TASK_FILE" "$TASK_EVENT_FILE" "$CHILD_NAME" "$PARENT_AGENT" "$RESOURCES" <<'PY'
 import json, os, sys
 raw_path, event_path, child, parent, resources = sys.argv[1:6]
 task = open(raw_path, encoding="utf-8").read()
@@ -206,20 +208,21 @@ export AGENTSTACK_RUNTIME_DIR=$(printf '%q' "$RUNTIME_DIR")
 export AGENTSTACK_MCP_URL=$(printf '%q' "$MCP_URL")
 export AGENTSTACK_MAIL_ENV=$(printf '%q' "$MAIL_ENV")
 export AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE")
+export AGENTSTACK_PYTHON=$(printf '%q' "$PYTHON_BIN")
 set +e
 cat $(printf '%q' "$TASK_EVENT_FILE") | \
   $(printf '%q' "$GEMINI_BIN") --input-format stream-json --output-format stream-json \
     --model $(printf '%q' "$MODEL") --effort $(printf '%q' "$EFFORT") \
     --print-timeout $(printf '%q' "$PRINT_TIMEOUT") \
     2> >(tee $(printf '%q' "$STDERR_LOG") >&2) | \
-  $(printf '%q' "$STREAM_HELPER") $(printf '%q' "$RESULT_LOG")
+  $(printf '%q' "$PYTHON_BIN") $(printf '%q' "$STREAM_HELPER") $(printf '%q' "$RESULT_LOG")
 agy_status=\${PIPESTATUS[1]}
 set -e
 AGENTSTACK_HOME=$(printf '%q' "$AGENTSTACK_HOME_DIR") \
 AGENTSTACK_MCP_URL=$(printf '%q' "$MCP_URL") \
 AGENTSTACK_MAIL_ENV=$(printf '%q' "$MAIL_ENV") \
 AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE") \
-  $(printf '%q' "$MAIL_HELPER") report --project-key $(printf '%q' "$PROJECT_KEY") \
+  $(printf '%q' "$PYTHON_BIN") $(printf '%q' "$MAIL_HELPER") report --project-key $(printf '%q' "$PROJECT_KEY") \
     --agent-name $(printf '%q' "$CHILD_NAME") --token-file $(printf '%q' "$DURABLE_TOKEN") \
     --parent $(printf '%q' "$PARENT_AGENT") --result-log $(printf '%q' "$RESULT_LOG") \
     --worktree $(printf '%q' "$WORKTREE_DIR") || true
@@ -227,14 +230,14 @@ AGENTSTACK_HOME=$(printf '%q' "$AGENTSTACK_HOME_DIR") \
 AGENTSTACK_MCP_URL=$(printf '%q' "$MCP_URL") \
 AGENTSTACK_MAIL_ENV=$(printf '%q' "$MAIL_ENV") \
 AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE") \
-  $(printf '%q' "$MAIL_HELPER") release --project-key $(printf '%q' "$PROJECT_KEY") \
+  $(printf '%q' "$PYTHON_BIN") $(printf '%q' "$MAIL_HELPER") release --project-key $(printf '%q' "$PROJECT_KEY") \
     --agent-name $(printf '%q' "$CHILD_NAME") --token-file $(printf '%q' "$DURABLE_TOKEN") \
     --paths $(printf '%q' "$RESOURCES") || true
 AGENTSTACK_HOME=$(printf '%q' "$AGENTSTACK_HOME_DIR") \
 AGENTSTACK_MCP_URL=$(printf '%q' "$MCP_URL") \
 AGENTSTACK_MAIL_ENV=$(printf '%q' "$MAIL_ENV") \
 AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE") \
-  $(printf '%q' "$MAIL_HELPER") retire --project-key $(printf '%q' "$PROJECT_KEY") \
+  $(printf '%q' "$PYTHON_BIN") $(printf '%q' "$MAIL_HELPER") retire --project-key $(printf '%q' "$PROJECT_KEY") \
     --agent-name $(printf '%q' "$CHILD_NAME") --token-file $(printf '%q' "$DURABLE_TOKEN") || true
 [[ -x $(printf '%q' "$CLEANUP_HELPER") ]] && $(printf '%q' "$CLEANUP_HELPER") || true
 rm -f $(printf '%q' "$TASK_EVENT_FILE") $(printf '%q' "$DURABLE_TOKEN") $(printf '%q' "$MCP_CONFIG") $(printf '%q' "$RUNNER_FILE")
