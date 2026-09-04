@@ -36,6 +36,13 @@ def _prune(base: Any, now: float) -> None:
         _TRACKING.pop(name, None)
 
 
+def _forget(name: str) -> None:
+    if not name:
+        return
+    with _TRACKING_LOCK:
+        _TRACKING.pop(name, None)
+
+
 def _record(base: Any, name: str, *, provider: str, model: str, effort: str | None) -> None:
     now = time.time()
     with _TRACKING_LOCK:
@@ -65,21 +72,37 @@ def install(base: Any) -> Any:
     original_status = base.spawn_launch_status
 
     def do_spawn(payload: dict) -> dict:
-        result = original_spawn(payload)
-        if not (result.get("ok") and result.get("pending")):
-            return result
-
-        provider_id = str(result.get("provider") or payload.get("provider") or "").strip().lower()
+        provider_id = str(payload.get("provider") or "").strip().lower()
         try:
             provider = base.PROVIDER_REGISTRY.require(provider_id)
         except ValueError:
-            return result
-        if provider.dispatch != "adapter":
+            provider = None
+
+        # A scientist name can be reused after a failed/retired launch. Never
+        # let metadata from an earlier adapter launch bleed into the next one.
+        requested_name = str(payload.get("name") or "").strip()
+        if requested_name:
+            _forget(requested_name)
+
+        result = original_spawn(payload)
+        child_name = str(result.get("child_name") or "").strip()
+        if provider is None:
+            if child_name:
+                _forget(child_name)
             return result
 
-        child_name = str(result.get("child_name") or "").strip()
+        if provider.dispatch != "adapter":
+            if child_name:
+                _forget(child_name)
+            return result
+
+        if not (result.get("ok") and result.get("pending")):
+            if child_name:
+                _forget(child_name)
+            return result
         if not child_name:
             return result
+
         effort = result.get("effort")
         _record(
             base,
