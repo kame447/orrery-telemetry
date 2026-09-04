@@ -132,32 +132,60 @@ fi
 mkdir -p "$RUNTIME_DIR" "$WORKTREE_ROOT"
 chmod 700 "$RUNTIME_DIR" 2>/dev/null || true
 TOKEN_FILE="$RUNTIME_DIR/gemini-preregister-$$.token"
+TASK_RAW_FILE="$RUNTIME_DIR/gemini-task-$$.txt"
 TASK_EVENT_FILE="$RUNTIME_DIR/gemini-task-$$.ndjson"
 RUNNER_FILE="$RUNTIME_DIR/gemini-runner-$$.sh"
 RESULT_LOG=""
 STDERR_LOG=""
+MCP_CONFIG=""
 CHILD_NAME=""
 WORKTREE_DIR=""
 BRANCH_NAME=""
+PREREGISTERED=false
 RESERVED=false
 WORKTREE_CREATED=false
+
+mail_helper() {
+  AGENTSTACK_HOME="$AGENTSTACK_HOME_DIR" \
+  AGENTSTACK_MCP_URL="$MCP_URL" \
+  AGENTSTACK_MAIL_ENV="$MAIL_ENV" \
+  AGENTSTACK_MAIL_HTTP_BEARER_MODE="$HTTP_BEARER_MODE" \
+    "$MAIL_HELPER" "$@"
+}
+
+remove_managed_name() {
+  [[ -n "$CHILD_NAME" && -f "$MANAGED_FILE" ]] || return 0
+  python3 - "$MANAGED_FILE" "$CHILD_NAME" <<'PY' 2>/dev/null || true
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+name = sys.argv[2]
+try:
+    lines = path.read_text(encoding="utf-8").splitlines()
+except OSError:
+    raise SystemExit(0)
+path.write_text("\n".join(line for line in lines if line != name) + "\n", encoding="utf-8")
+PY
+}
 
 cleanup_failure() {
   status=$?
   if [[ $status -ne 0 ]]; then
     if [[ "$RESERVED" == true && -n "$CHILD_NAME" && -f "$TOKEN_FILE" && -n "$RESOURCES" ]]; then
-      AGENTSTACK_HOME="$AGENTSTACK_HOME_DIR" \
-      AGENTSTACK_MCP_URL="$MCP_URL" \
-      AGENTSTACK_MAIL_ENV="$MAIL_ENV" \
-      AGENTSTACK_MAIL_HTTP_BEARER_MODE="$HTTP_BEARER_MODE" \
-        "$MAIL_HELPER" release --project-key "$PROJECT_KEY" --agent-name "$CHILD_NAME" \
-          --token-file "$TOKEN_FILE" --paths "$RESOURCES" >/dev/null 2>&1 || true
+      mail_helper release --project-key "$PROJECT_KEY" --agent-name "$CHILD_NAME" \
+        --token-file "$TOKEN_FILE" --paths "$RESOURCES" >/dev/null 2>&1 || true
+    fi
+    if [[ "$PREREGISTERED" == true && -n "$CHILD_NAME" && -f "$TOKEN_FILE" ]]; then
+      mail_helper retire --project-key "$PROJECT_KEY" --agent-name "$CHILD_NAME" \
+        --token-file "$TOKEN_FILE" >/dev/null 2>&1 || true
     fi
     if [[ "$WORKTREE_CREATED" == true && -n "$WORKTREE_DIR" ]]; then
       git -C "$SOURCE_REPO" worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1 || true
       [[ -n "$BRANCH_NAME" ]] && git -C "$SOURCE_REPO" branch -D "$BRANCH_NAME" >/dev/null 2>&1 || true
     fi
-    rm -f "$TOKEN_FILE" "$TASK_EVENT_FILE" "$RUNNER_FILE"
+    remove_managed_name
+    [[ -n "$MCP_CONFIG" ]] && rm -f "$MCP_CONFIG" 2>/dev/null || true
+    rm -f "$TOKEN_FILE" "$TASK_RAW_FILE" "$TASK_EVENT_FILE" "$RUNNER_FILE"
   fi
 }
 trap cleanup_failure EXIT
@@ -173,6 +201,7 @@ CHILD_NAME="$(
       --token-file-out "$TOKEN_FILE"
 )"
 [[ -n "$CHILD_NAME" ]] || { echo "$PROG: child preregistration returned no name" >&2; exit 1; }
+PREREGISTERED=true
 
 BRANCH_NAME="exp/$CHILD_NAME"
 WORKTREE_DIR="$WORKTREE_ROOT/$CHILD_NAME"
@@ -187,13 +216,17 @@ fi
 git -C "$SOURCE_REPO" worktree add -b "$BRANCH_NAME" "$WORKTREE_DIR" "$BASE_REV" >/dev/null
 WORKTREE_CREATED=true
 
+# This is local Git metadata, not a tracked project change. It keeps the
+# child-specific MCP binding out of `git add .` in arbitrary target projects.
+EXCLUDE_FILE="$(git -C "$WORKTREE_DIR" rev-parse --git-path info/exclude)"
+mkdir -p "$(dirname "$EXCLUDE_FILE")"
+if ! grep -qxF '.agents/mcp_config.json' "$EXCLUDE_FILE" 2>/dev/null; then
+  printf '%s\n' '.agents/mcp_config.json' >> "$EXCLUDE_FILE"
+fi
+
 if [[ -n "$RESOURCES" ]]; then
-  AGENTSTACK_HOME="$AGENTSTACK_HOME_DIR" \
-  AGENTSTACK_MCP_URL="$MCP_URL" \
-  AGENTSTACK_MAIL_ENV="$MAIL_ENV" \
-  AGENTSTACK_MAIL_HTTP_BEARER_MODE="$HTTP_BEARER_MODE" \
-    "$MAIL_HELPER" reserve --project-key "$PROJECT_KEY" --agent-name "$CHILD_NAME" \
-      --token-file "$TOKEN_FILE" --paths "$RESOURCES" --ttl "$RESOURCE_TTL"
+  mail_helper reserve --project-key "$PROJECT_KEY" --agent-name "$CHILD_NAME" \
+    --token-file "$TOKEN_FILE" --paths "$RESOURCES" --ttl "$RESOURCE_TTL"
   RESERVED=true
 fi
 
@@ -243,13 +276,15 @@ path.write_text(
 os.chmod(path, 0o600)
 PY
 
-printf '%s' "$TASK" | python3 - "$TASK_EVENT_FILE" "$CHILD_NAME" "$PARENT_NAME" "$RESOURCES" <<'PY'
+( umask 077 && printf '%s' "$TASK" > "$TASK_RAW_FILE" )
+python3 - "$TASK_RAW_FILE" "$TASK_EVENT_FILE" "$CHILD_NAME" "$PARENT_NAME" "$RESOURCES" <<'PY'
 import json
 import os
 import sys
 
-path, child, parent, resources = sys.argv[1:5]
-task = sys.stdin.read()
+raw_path, event_path, child, parent, resources = sys.argv[1:6]
+with open(raw_path, encoding="utf-8") as handle:
+    task = handle.read()
 prefix = (
     f"You are {child}, a delegated Antigravity child of {parent}. "
     "Work only in this isolated worktree. The launcher already reserved your declared resources. "
@@ -258,11 +293,12 @@ prefix = (
     f"Declared resources: {resources or '(explicitly none)'}.\n\nCanonical task:\n"
 )
 message = {"event": "user", "message": {"content": prefix + task}}
-with open(path, "w", encoding="utf-8") as handle:
+with open(event_path, "w", encoding="utf-8") as handle:
     json.dump(message, handle, ensure_ascii=False, separators=(",", ":"))
     handle.write("\n")
-os.chmod(path, 0o600)
+os.chmod(event_path, 0o600)
 PY
+rm -f "$TASK_RAW_FILE"
 
 RESULT_LOG="$RUNTIME_DIR/gemini-$CHILD_NAME.ndjson"
 STDERR_LOG="$RUNTIME_DIR/gemini-$CHILD_NAME.stderr.log"
@@ -283,6 +319,7 @@ export AGENTSTACK_RUNTIME_DIR=$(printf '%q' "$RUNTIME_DIR")
 export AGENTSTACK_MCP_URL=$(printf '%q' "$MCP_URL")
 export AGENTSTACK_MAIL_ENV=$(printf '%q' "$MAIL_ENV")
 export AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE")
+RESOURCES=$(printf '%q' "$RESOURCES")
 
 set +e
 cat $(printf '%q' "$TASK_EVENT_FILE") | \
@@ -303,15 +340,22 @@ AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE") \
     --parent $(printf '%q' "$PARENT_NAME") --result-log $(printf '%q' "$RESULT_LOG") \
     --worktree $(printf '%q' "$WORKTREE_DIR") || true
 
-if [[ -n $(printf '%q' "$RESOURCES") ]]; then
+if [[ -n "\$RESOURCES" ]]; then
   AGENTSTACK_HOME=$(printf '%q' "$AGENTSTACK_HOME_DIR") \
   AGENTSTACK_MCP_URL=$(printf '%q' "$MCP_URL") \
   AGENTSTACK_MAIL_ENV=$(printf '%q' "$MAIL_ENV") \
   AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE") \
     $(printf '%q' "$MAIL_HELPER") release --project-key $(printf '%q' "$PROJECT_KEY") \
       --agent-name $(printf '%q' "$CHILD_NAME") --token-file $(printf '%q' "$TOKEN_FILE") \
-      --paths $(printf '%q' "$RESOURCES") || true
+      --paths "\$RESOURCES" || true
 fi
+
+AGENTSTACK_HOME=$(printf '%q' "$AGENTSTACK_HOME_DIR") \
+AGENTSTACK_MCP_URL=$(printf '%q' "$MCP_URL") \
+AGENTSTACK_MAIL_ENV=$(printf '%q' "$MAIL_ENV") \
+AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE") \
+  $(printf '%q' "$MAIL_HELPER") retire --project-key $(printf '%q' "$PROJECT_KEY") \
+    --agent-name $(printf '%q' "$CHILD_NAME") --token-file $(printf '%q' "$TOKEN_FILE") || true
 
 [[ -x $(printf '%q' "$CLEANUP_HELPER") ]] && $(printf '%q' "$CLEANUP_HELPER") || true
 rm -f $(printf '%q' "$TASK_EVENT_FILE") $(printf '%q' "$TOKEN_FILE") $(printf '%q' "$MCP_CONFIG") $(printf '%q' "$RUNNER_FILE")
