@@ -25,13 +25,13 @@ def test_default_registry_exposes_builtin_providers_and_capabilities(monkeypatch
     assert claude.capabilities.resources_required is False
 
     codex = registry.require("codex")
-    assert codex.models == ("gpt-test-a", "gpt-test-b")
+    assert codex.resolved_models() == ("gpt-test-a", "gpt-test-b")
     assert codex.capabilities.effort is True
     assert codex.efforts == ("low", "medium", "high", "xhigh")
 
     gemini = registry.require("gemini")
     assert gemini.program == "antigravity"
-    assert gemini.models[0] == "gemini-3.8-flash-high"
+    assert gemini.resolved_models()[0] == "gemini-3.8-flash-high"
     assert gemini.capabilities.effort is True
     assert gemini.capabilities.mcp is True
     assert gemini.capabilities.worktree_required is True
