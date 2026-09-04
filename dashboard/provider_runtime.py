@@ -177,7 +177,12 @@ def _install_spawn(base: Any) -> None:
             normalized["worktree"] = True
 
         if provider.dispatch == "native":
-            return original(normalized)
+            # Adapter launches temporarily patch legacy globals below. Native
+            # launches must participate in the same lock or they can observe an
+            # adapter's SPAWN_SCRIPT/_SPAWN_MODELS values and launch the wrong
+            # provider under concurrency.
+            with _PATCH_LOCK:
+                return original(normalized)
 
         adapter_script = (
             os.path.join(base.HOOKS_DIR, provider.adapter_script)
