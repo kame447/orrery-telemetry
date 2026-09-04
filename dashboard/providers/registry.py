@@ -14,6 +14,12 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
+def _safe_identifier(value: str) -> bool:
+    return bool(value) and value[0].isalnum() and all(
+        char.isalnum() or char in "._-" for char in value
+    )
+
+
 @dataclass(frozen=True)
 class ProviderCapabilities:
     effort: bool = False
@@ -49,6 +55,10 @@ class ProviderSpec:
     def __post_init__(self) -> None:
         if not self.id or not self.program or not self.models:
             raise ValueError("provider id, program and models are required")
+        if not _safe_identifier(self.id):
+            raise ValueError(f"invalid provider id: {self.id}")
+        if not _safe_identifier(self.provider_key):
+            raise ValueError(f"invalid provider key: {self.provider_key}")
         if self.default_model not in self.models:
             raise ValueError(f"default model is not registered for provider {self.id}")
         if self.capabilities.effort:
@@ -60,8 +70,18 @@ class ProviderSpec:
             raise ValueError(f"effort metadata is not allowed for provider {self.id}")
         if self.dispatch not in {"native", "adapter"}:
             raise ValueError(f"unknown dispatch mode for provider {self.id}: {self.dispatch}")
-        if self.dispatch == "adapter" and not self.adapter_script:
-            raise ValueError(f"adapter script is required for provider {self.id}")
+        if self.dispatch == "adapter":
+            if not self.adapter_script:
+                raise ValueError(f"adapter script is required for provider {self.id}")
+            if (
+                self.adapter_script in {".", ".."}
+                or "/" in self.adapter_script
+                or "\\" in self.adapter_script
+                or Path(self.adapter_script).name != self.adapter_script
+            ):
+                raise ValueError(
+                    f"adapter script must be a file name for provider {self.id}: {self.adapter_script}"
+                )
         for key, _value in self.adapter_env:
             if not key or not key.replace("_", "").isalnum() or not key[0].isalpha():
                 raise ValueError(f"invalid adapter environment key for {self.id}: {key}")
