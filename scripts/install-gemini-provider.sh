@@ -44,6 +44,34 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+INSTALLED_SERVER="$INSTALL_DIR/dashboard/server.py"
+INSTALLED_CORE="$INSTALL_DIR/dashboard/server_core.py"
+if [[ ! -f "$INSTALLED_SERVER" ]]; then
+  echo "$PROG: existing dashboard/server.py not found under $INSTALL_DIR; install ORRERY core first" >&2
+  exit 1
+fi
+
+# Retrofitting a provider must not replace the installed control-plane snapshot
+# with the checkout's 5k-line server. Preserve the version the operator is
+# actually running, then put only the thin provider-aware entry point in front.
+# On repeated provider installs the entry point is already ours, so keep the
+# previously preserved core. If a later ORRERY core install replaced server.py,
+# it will no longer match this wrapper marker and the fresh core is preserved.
+if grep -q 'provider_runtime' "$INSTALLED_SERVER" 2>/dev/null && \
+   grep -q 'server_core' "$INSTALLED_SERVER" 2>/dev/null; then
+  if [[ ! -f "$INSTALLED_CORE" ]]; then
+    echo "$PROG: provider wrapper is installed but dashboard/server_core.py is missing" >&2
+    exit 1
+  fi
+  echo "$PROG: reuse preserved dashboard/server_core.py"
+else
+  echo "$PROG: preserve dashboard/server.py -> dashboard/server_core.py"
+  if [[ "$DRY_RUN" != true ]]; then
+    cp "$INSTALLED_SERVER" "$INSTALLED_CORE"
+    chmod 644 "$INSTALLED_CORE"
+  fi
+fi
+
 FILES=(
   "bin/agent-start-gemini"
   "bin/agentstack-gemini-bootstrap"
@@ -53,7 +81,6 @@ FILES=(
   "hooks/spawn_gemini_child.sh"
   "hooks/spawn_gemini_preregistered.sh"
   "dashboard/server.py"
-  "dashboard/server_core.py"
   "dashboard/provider_runtime.py"
   "dashboard/provider_classification.py"
   "dashboard/providers/registry.py"
