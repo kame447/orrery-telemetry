@@ -9,6 +9,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTALL_DIR="${AGENTSTACK_HOME:-$HOME/.agentstack}"
 DRY_RUN=false
 CONFIGURE_MCP=false
+PYTHON_BIN="${AGENTSTACK_PYTHON:-python3}"
 
 usage() {
   cat >&2 <<'EOF'
@@ -46,10 +47,19 @@ done
 
 INSTALLED_SERVER="$INSTALL_DIR/dashboard/server.py"
 INSTALLED_CORE="$INSTALL_DIR/dashboard/server_core.py"
+MANIFEST="$INSTALL_DIR/install-state.json"
 if [[ ! -f "$INSTALLED_SERVER" ]]; then
   echo "$PROG: existing dashboard/server.py not found under $INSTALL_DIR; install ORRERY core first" >&2
   exit 1
 fi
+if [[ ! -f "$MANIFEST" ]]; then
+  echo "$PROG: existing install-state.json not found under $INSTALL_DIR; install ORRERY core first" >&2
+  exit 1
+fi
+command -v "$PYTHON_BIN" >/dev/null 2>&1 || [[ -x "$PYTHON_BIN" ]] || {
+  echo "$PROG: selected Python is unavailable: $PYTHON_BIN" >&2
+  exit 1
+}
 
 # Retrofitting a provider must not replace the installed control-plane snapshot
 # with the checkout's 5k-line server. Preserve the version the operator is
@@ -106,6 +116,57 @@ for relative in "${FILES[@]}"; do
     esac
   fi
 done
+
+echo "$PROG: record provider payload ownership -> $MANIFEST"
+if [[ "$DRY_RUN" != true ]]; then
+  "$PYTHON_BIN" - "$MANIFEST" "$INSTALL_DIR" "${FILES[@]}" "dashboard/server_core.py" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+manifest = pathlib.Path(sys.argv[1]).expanduser()
+install_dir = pathlib.Path(sys.argv[2]).expanduser().resolve(strict=False)
+relative_paths = sys.argv[3:]
+try:
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"invalid core install manifest {manifest}: {exc}")
+if not isinstance(data, dict):
+    raise SystemExit(f"invalid core install manifest {manifest}: expected object")
+owned_files = data.get("owned_files")
+owned_dirs = data.get("owned_dirs")
+if not isinstance(owned_files, list) or not all(isinstance(item, str) for item in owned_files):
+    raise SystemExit(f"invalid core install manifest {manifest}: owned_files must be a string list")
+if not isinstance(owned_dirs, list) or not all(isinstance(item, str) for item in owned_dirs):
+    raise SystemExit(f"invalid core install manifest {manifest}: owned_dirs must be a string list")
+
+files = set(owned_files)
+dirs = set(owned_dirs)
+for relative in relative_paths:
+    rel = pathlib.PurePosixPath(relative)
+    if rel.is_absolute() or ".." in rel.parts:
+        raise SystemExit(f"unsafe provider payload path: {relative}")
+    path = (install_dir / pathlib.Path(*rel.parts)).resolve(strict=False)
+    try:
+        path.relative_to(install_dir)
+    except ValueError as exc:
+        raise SystemExit(f"provider payload escapes install root: {relative}") from exc
+    files.add(os.fspath(path))
+    parent = path.parent
+    while True:
+        dirs.add(os.fspath(parent))
+        if parent == install_dir:
+            break
+        parent = parent.parent
+
+data["owned_files"] = sorted(files)
+data["owned_dirs"] = sorted(dirs)
+temporary = manifest.with_name(manifest.name + ".tmp")
+temporary.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+os.replace(temporary, manifest)
+PY
+fi
 
 PROXY="$INSTALL_DIR/integrations/codex_app/plugin/scripts/run-mcp.sh"
 if [[ "$DRY_RUN" != true && ! -x "$PROXY" ]]; then
