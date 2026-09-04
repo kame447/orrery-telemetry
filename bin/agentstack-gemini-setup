@@ -1,27 +1,28 @@
 #!/usr/bin/env bash
-# agentstack-gemini-setup — idempotently register ORRERY Mail in the Google
-# Antigravity CLI global MCP configuration.
+# agentstack-gemini-setup — idempotently register the session-bound ORRERY Mail
+# stdio proxy in the Google Antigravity CLI global MCP configuration.
 #
 # Antigravity CLI reads global MCP servers from ~/.gemini/config/mcp_config.json.
 # This script owns only the "orrery-mail" key and preserves all other entries.
+# The config stores no ORRERY owner token; agentstack-gemini-mcp resolves the
+# current AGENT_NAME's mode-0600 token file at process start.
 #
 # Usage:
-#   agentstack-gemini-setup            install/update the managed server entry
-#   agentstack-gemini-setup --print    print the resulting JSON, change nothing
+#   agentstack-gemini-setup             install/update the managed server entry
+#   agentstack-gemini-setup --print     print the resulting JSON, change nothing
 #   agentstack-gemini-setup --uninstall remove only the managed server entry
 set -euo pipefail
 
 PROG="agentstack-gemini-setup"
 die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
 
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENTSTACK_HOME="${AGENTSTACK_HOME:-$HOME/.agentstack}"
 [[ -f "$AGENTSTACK_HOME/env.sh" ]] && . "$AGENTSTACK_HOME/env.sh"
 AGENTSTACK_HOME="${AGENTSTACK_HOME:-$HOME/.agentstack}"
-MCP_URL="${AGENTSTACK_MCP_URL:-http://127.0.0.1:18765/mcp}"
-MAIL_ENV="${AGENTSTACK_MAIL_ENV:-$HOME/.agentstack/mail/.env}"
-HTTP_BEARER_MODE="${AGENTSTACK_MAIL_HTTP_BEARER_MODE:-auto}"
 TARGET="${AGENTSTACK_GEMINI_MCP_CONFIG:-$HOME/.gemini/config/mcp_config.json}"
 SERVER_KEY="orrery-mail"
+MCP_COMMAND="${AGENTSTACK_GEMINI_MCP_RUNNER:-$AGENTSTACK_HOME/bin/agentstack-gemini-mcp}"
 
 mode="install"
 case "${1:-}" in
@@ -31,19 +32,8 @@ case "${1:-}" in
   *) die "unknown argument: $1 (use --print or --uninstall)" ;;
 esac
 
-case "$HTTP_BEARER_MODE" in
-  enabled|disabled|auto) ;;
-  *) die "invalid AGENTSTACK_MAIL_HTTP_BEARER_MODE: $HTTP_BEARER_MODE" ;;
-esac
-
-TOKEN="${MCP_AGENT_MAIL_TOKEN:-}"
-if [[ -z "$TOKEN" && -f "$MAIL_ENV" ]]; then
-  TOKEN="$(sed -n 's/^HTTP_BEARER_TOKEN=//p' "$MAIL_ENV" | head -n 1 | tr -d '\r\n')"
-fi
-if [[ "$HTTP_BEARER_MODE" == "disabled" ]]; then
-  TOKEN=""
-elif [[ "$HTTP_BEARER_MODE" == "enabled" && -z "$TOKEN" ]]; then
-  die "HTTP bearer mode is enabled but no ORRERY Mail bearer token is available"
+if [[ "$mode" == "install" && ! -x "$MCP_COMMAND" ]]; then
+  die "session-bound MCP runner is not installed: $MCP_COMMAND"
 fi
 
 TMP="$(mktemp -t agentstack-gemini-mcp.XXXXXX)"
@@ -52,8 +42,7 @@ trap cleanup EXIT INT TERM HUP
 
 AGS_GEMINI_SETUP_TARGET="$TARGET" \
 AGS_GEMINI_SETUP_MODE="$mode" \
-AGS_GEMINI_SETUP_URL="$MCP_URL" \
-AGS_GEMINI_SETUP_TOKEN="$TOKEN" \
+AGS_GEMINI_SETUP_COMMAND="$MCP_COMMAND" \
 AGS_GEMINI_SETUP_KEY="$SERVER_KEY" \
 python3 - > "$TMP" <<'PY'
 import json
@@ -62,8 +51,7 @@ from pathlib import Path
 
 target = Path(os.environ["AGS_GEMINI_SETUP_TARGET"]).expanduser()
 mode = os.environ["AGS_GEMINI_SETUP_MODE"]
-server_url = os.environ["AGS_GEMINI_SETUP_URL"]
-token = os.environ.get("AGS_GEMINI_SETUP_TOKEN", "")
+command = os.environ["AGS_GEMINI_SETUP_COMMAND"]
 server_key = os.environ["AGS_GEMINI_SETUP_KEY"]
 
 if target.exists():
@@ -86,10 +74,10 @@ if not isinstance(servers, dict):
 if mode == "uninstall":
     servers.pop(server_key, None)
 else:
-    entry = {"serverUrl": server_url}
-    if token:
-        entry["headers"] = {"Authorization": f"Bearer {token}"}
-    servers[server_key] = entry
+    servers[server_key] = {
+        "command": command,
+        "args": [],
+    }
 
 print(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True))
 PY
@@ -109,6 +97,6 @@ printf '\n' >> "$TARGET"
 if [[ "$mode" == "uninstall" ]]; then
   echo "$PROG: removed '$SERVER_KEY' from $TARGET"
 else
-  echo "$PROG: installed '$SERVER_KEY' into $TARGET"
+  echo "$PROG: installed session-bound '$SERVER_KEY' into $TARGET"
   echo "$PROG: restart Antigravity CLI or use /mcp to reload the server list"
 fi
