@@ -28,13 +28,14 @@ def test_rendered_dashboard_uses_capabilities_not_gemini_name_checks():
     source = (ROOT / "dashboard" / "index.html").read_bytes()
     rendered = server._render_dashboard_index(source).decode("utf-8")
     assert "a.provider&&_PROVIDER_ASPECT[a.provider]" in rendered
-    assert "google: 1" in rendered
+    assert '"google": 1' in rendered
     assert 'id="spm-resources-row"' in rendered
     assert 'id="spm-resources"' in rendered
     assert "providerCaps.resources_required" in rendered
     assert "providerCaps.worktree_required" in rendered
     assert "payload.resources=resources" in rendered
     assert "const resourcesReady=!providerCaps.resources_required" in rendered
+    assert ".value.split(',').some(item=>item.trim())" in rendered
     assert "button.disabled=spmBusy||!spmReady||!identityReady||!resourcesReady" in rendered
     assert "spmSelectedProvider==='gemini'" not in rendered
 
