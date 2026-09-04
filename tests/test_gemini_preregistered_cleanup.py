@@ -2,10 +2,22 @@
 from __future__ import annotations
 
 import pathlib
+import subprocess
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 LAUNCHER = ROOT / "hooks" / "spawn_gemini_preregistered.sh"
+
+
+def test_preregistered_launcher_parses_with_bash() -> None:
+    result = subprocess.run(
+        ["bash", "-n", str(LAUNCHER)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_preregistered_failure_cleanup_retires_identity_before_deleting_token() -> None:
