@@ -81,6 +81,24 @@ def test_manifest_cannot_override_builtin_provider_id(tmp_path):
         default_provider_registry(install_root=tmp_path)
 
 
+def test_manifest_adapter_script_cannot_escape_hooks_directory(tmp_path):
+    payload = _future_manifest()
+    payload["adapter_script"] = "../bin/evil"
+    _write_manifest(tmp_path, "future-ai", payload)
+
+    with pytest.raises(ValueError, match="adapter script must be a file name"):
+        default_provider_registry(install_root=tmp_path)
+
+
+def test_manifest_identifiers_reject_path_like_provider_keys(tmp_path):
+    payload = _future_manifest()
+    payload["provider_key"] = "../escape"
+    _write_manifest(tmp_path, "future-ai", payload)
+
+    with pytest.raises(ValueError, match="invalid provider key"):
+        default_provider_registry(install_root=tmp_path)
+
+
 def test_source_registry_discovers_gemini_from_manifest_not_registry_literal():
     root = pathlib.Path(__file__).resolve().parent.parent
     manifest = root / "provider_specs" / "gemini.json"
