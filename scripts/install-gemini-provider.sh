@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Install the experimental Google Antigravity / Gemini provider into an existing
-# ORRERY installation. This is intentionally opt-in while the main installer
-# wiring is under review.
+# Install the fork-only provider runtime and Google Antigravity / Gemini adapter
+# into an existing ORRERY installation.
 set -euo pipefail
 
 PROG="install-gemini-provider.sh"
@@ -45,8 +44,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-BIN_DIR="$INSTALL_DIR/bin"
-HOOKS_DIR="$INSTALL_DIR/hooks"
 FILES=(
   "bin/agent-start-gemini"
   "bin/agentstack-gemini-bootstrap"
@@ -54,37 +51,47 @@ FILES=(
   "bin/agentstack-gemini-child-mail"
   "bin/agentstack-gemini-stream"
   "hooks/spawn_gemini_child.sh"
+  "hooks/spawn_gemini_preregistered.sh"
+  "dashboard/server.py"
+  "dashboard/server_core.py"
+  "dashboard/provider_runtime.py"
+  "dashboard/providers/registry.py"
+  "dashboard/assets/google.svg"
 )
 
 for relative in "${FILES[@]}"; do
   src="$REPO_ROOT/$relative"
+  dst="$INSTALL_DIR/$relative"
   [[ -f "$src" ]] || { echo "$PROG: missing source file: $src" >&2; exit 1; }
-  case "$relative" in
-    bin/*) dst="$BIN_DIR/${relative#bin/}" ;;
-    hooks/*) dst="$HOOKS_DIR/${relative#hooks/}" ;;
-    *) echo "$PROG: unsupported payload path: $relative" >&2; exit 1 ;;
-  esac
-  echo "$PROG: copy $src -> $dst"
+  echo "$PROG: copy $relative -> $dst"
   if [[ "$DRY_RUN" != true ]]; then
     mkdir -p "$(dirname "$dst")"
     cp "$src" "$dst"
-    chmod +x "$dst"
+    case "$relative" in
+      bin/*|hooks/*|dashboard/server.py)
+        chmod 755 "$dst"
+        ;;
+      *)
+        chmod 644 "$dst"
+        ;;
+    esac
   fi
 done
 
 PROXY="$INSTALL_DIR/integrations/codex_app/plugin/scripts/run-mcp.sh"
 if [[ "$DRY_RUN" != true && ! -x "$PROXY" ]]; then
   echo "$PROG: warning: child MCP proxy not installed at $PROXY" >&2
-  echo "$PROG: top-level agent-start-gemini will work, but delegated Gemini children require the core child MCP proxy." >&2
+  echo "$PROG: top-level agent-start-gemini will work, but delegated provider children require the core child MCP proxy." >&2
 fi
 
 if [[ "$CONFIGURE_MCP" == true ]]; then
   if [[ "$DRY_RUN" == true ]]; then
-    echo "$PROG: would run $BIN_DIR/agentstack-gemini-setup"
+    echo "$PROG: would run $INSTALL_DIR/bin/agentstack-gemini-setup"
   else
-    AGENTSTACK_HOME="$INSTALL_DIR" "$BIN_DIR/agentstack-gemini-setup"
+    AGENTSTACK_HOME="$INSTALL_DIR" "$INSTALL_DIR/bin/agentstack-gemini-setup"
   fi
 fi
 
-echo "$PROG: Gemini provider payload installed into $INSTALL_DIR"
-echo "$PROG: authenticate once with 'agy', then launch with '$BIN_DIR/agent-start-gemini'."
+echo "$PROG: provider runtime and Gemini payload installed into $INSTALL_DIR"
+echo "$PROG: restart the ORRERY dashboard service to load the new provider registry."
+echo "$PROG: authenticate once with 'agy', then Gemini is available from the dashboard or agent-start-gemini."
