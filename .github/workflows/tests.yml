@@ -5,7 +5,26 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  provider-regressions:
+    name: provider regressions (python 3.12)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: python3 -m pip install pytest -e ./packages/agentstack_mail
+      - name: Run provider and Gemini regressions
+        run: |
+          set -euo pipefail
+          PYTHONPATH=.:packages/agentstack_mail/src python3 -m pytest -q tests/test_gemini_*.py tests/test_provider_*.py
+
   tests:
     # ORRERY is a macOS-first runtime. launchd/launchctl and the real tmux
     # binary are part of the tested contract, so Linux mixes harness failures
