@@ -43,11 +43,11 @@ def _load_client_module() -> tuple[Any, Any]:
 def _read_token(path: pathlib.Path) -> str:
     try:
         token = path.read_text(encoding="utf-8").strip()
+        mode = path.stat().st_mode & 0o777
     except OSError as exc:
         raise SystemExit(f"cannot read child token file: {path}") from exc
     if not token:
         raise SystemExit(f"child token file is empty: {path}")
-    mode = path.stat().st_mode & 0o777
     if mode & 0o077:
         raise SystemExit(f"child token file permissions are too broad: {oct(mode)}")
     return token
@@ -113,7 +113,7 @@ def _last_result(path: pathlib.Path) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("reserve", "release", "report"))
+    parser.add_argument("action", choices=("reserve", "release", "report", "retire"))
     parser.add_argument("--project-key", required=True)
     parser.add_argument("--agent-name", required=True)
     parser.add_argument("--token-file", required=True, type=pathlib.Path)
@@ -147,6 +147,14 @@ def main() -> int:
             agent_name=args.agent_name,
             registration_token=token,
             paths=_paths(args.paths),
+        )
+        return 0
+
+    if args.action == "retire":
+        client.retire_agent(
+            project_key=args.project_key,
+            agent_name=args.agent_name,
+            registration_token=token,
         )
         return 0
 
