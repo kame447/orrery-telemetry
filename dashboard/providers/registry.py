@@ -1,15 +1,17 @@
 """Launch-provider registry shared by dashboard catalog and dispatch.
 
-Provider-specific facts belong here. The dashboard core asks this registry
-what a provider can do instead of growing ``if provider == ...`` branches each
-time another CLI is added.
+Provider-specific facts belong in declarative manifests. The dashboard core asks
+this registry what a provider can do instead of growing provider-name branches.
+Claude and Codex remain built-ins because they are part of the upstream core;
+optional providers are discovered from ``provider_specs/*.json``.
 """
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import json
 import os
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 
 @dataclass(frozen=True)
@@ -169,7 +171,7 @@ class ProviderRegistry:
         }
 
 
-def _known_provider_specs() -> tuple[ProviderSpec, ...]:
+def _builtin_provider_specs() -> tuple[ProviderSpec, ...]:
     return (
         ProviderSpec(
             id="claude",
@@ -200,43 +202,122 @@ def _known_provider_specs() -> tuple[ProviderSpec, ...]:
             logo_aspect=256 / 260,
             models_env="AGENTSTACK_CODEX_MODELS",
         ),
-        ProviderSpec(
-            id="gemini",
-            label="Gemini",
-            program="antigravity",
-            models=("gemini-3.8-flash-high", "gemini-3.8-flash-medium"),
-            default_model="gemini-3.8-flash-high",
-            capabilities=ProviderCapabilities(
-                effort=True,
-                mcp=True,
-                resume=False,
-                runtime=True,
-                transcript=False,
-                standalone=False,
-                worktree_required=True,
-                resources_required=True,
-            ),
-            provider_key="google",
-            efforts=("low", "medium", "high"),
-            effort_default="high",
-            dispatch="adapter",
-            adapter_script="spawn_gemini_preregistered.sh",
-            adapter_env=(
-                ("AGENTSTACK_GEMINI_EFFORT", "{effort}"),
-                ("AGENTSTACK_GEMINI_RESOURCES", "{resources}"),
-                ("AGENTSTACK_GEMINI_TASK_FILE", "{task_file}"),
-                ("AGENTSTACK_GEMINI_MODEL", "{model}"),
-            ),
-            models_env="AGENTSTACK_GEMINI_MODELS",
-            required_paths=(
-                "bin/agent-start-gemini",
-                "bin/agentstack-gemini-child-mail",
-                "bin/agentstack-gemini-stream",
-                "hooks/spawn_gemini_preregistered.sh",
-            ),
-            runtime_commands=("agy",),
-        ),
     )
+
+
+_MANIFEST_FIELDS = frozenset(
+    {
+        "id",
+        "label",
+        "program",
+        "models",
+        "default_model",
+        "capabilities",
+        "provider_key",
+        "efforts",
+        "effort_default",
+        "dispatch",
+        "adapter_script",
+        "launch_args",
+        "adapter_env",
+        "logo_aspect",
+        "models_env",
+        "required_paths",
+        "runtime_commands",
+    }
+)
+_CAPABILITY_FIELDS = frozenset(ProviderCapabilities.__dataclass_fields__)
+
+
+def _string(value: Any, field: str, path: Path) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"provider manifest {path}: {field} must be a string")
+    return value
+
+
+def _strings(value: Any, field: str, path: Path) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"provider manifest {path}: {field} must be a string list")
+    return tuple(value)
+
+
+def _manifest_capabilities(value: Any, path: Path) -> ProviderCapabilities:
+    if not isinstance(value, dict):
+        raise ValueError(f"provider manifest {path}: capabilities must be an object")
+    unknown = set(value) - _CAPABILITY_FIELDS
+    if unknown:
+        raise ValueError(
+            f"unknown provider capability field in {path}: {sorted(unknown)[0]}"
+        )
+    if not all(isinstance(item, bool) for item in value.values()):
+        raise ValueError(f"provider manifest {path}: capabilities must be booleans")
+    return ProviderCapabilities(**value)
+
+
+def _provider_from_manifest(path: Path) -> ProviderSpec:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid provider manifest {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"provider manifest {path}: expected object")
+    unknown = set(payload) - _MANIFEST_FIELDS
+    if unknown:
+        raise ValueError(
+            f"unknown provider manifest field in {path}: {sorted(unknown)[0]}"
+        )
+
+    required = {
+        "id",
+        "label",
+        "program",
+        "models",
+        "default_model",
+        "capabilities",
+        "provider_key",
+    }
+    missing = required - set(payload)
+    if missing:
+        raise ValueError(
+            f"provider manifest {path}: missing field {sorted(missing)[0]}"
+        )
+
+    raw_env = payload.get("adapter_env", {})
+    if not isinstance(raw_env, dict) or not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in raw_env.items()
+    ):
+        raise ValueError(f"provider manifest {path}: adapter_env must be a string map")
+    logo_aspect = payload.get("logo_aspect", 1.0)
+    if isinstance(logo_aspect, bool) or not isinstance(logo_aspect, (int, float)):
+        raise ValueError(f"provider manifest {path}: logo_aspect must be numeric")
+
+    return ProviderSpec(
+        id=_string(payload["id"], "id", path).strip().lower(),
+        label=_string(payload["label"], "label", path).strip(),
+        program=_string(payload["program"], "program", path).strip(),
+        models=_strings(payload["models"], "models", path),
+        default_model=_string(payload["default_model"], "default_model", path),
+        capabilities=_manifest_capabilities(payload["capabilities"], path),
+        provider_key=_string(payload["provider_key"], "provider_key", path).strip(),
+        efforts=_strings(payload.get("efforts", []), "efforts", path),
+        effort_default=_string(payload.get("effort_default", ""), "effort_default", path),
+        dispatch=_string(payload.get("dispatch", "adapter"), "dispatch", path),
+        adapter_script=_string(payload.get("adapter_script", ""), "adapter_script", path),
+        launch_args=_strings(payload.get("launch_args", []), "launch_args", path),
+        adapter_env=tuple(raw_env.items()),
+        logo_aspect=float(logo_aspect),
+        models_env=_string(payload.get("models_env", ""), "models_env", path),
+        required_paths=_strings(payload.get("required_paths", []), "required_paths", path),
+        runtime_commands=_strings(payload.get("runtime_commands", []), "runtime_commands", path),
+    )
+
+
+def _manifest_provider_specs(root: Path) -> tuple[ProviderSpec, ...]:
+    directory = root / "provider_specs"
+    if not directory.is_dir():
+        return ()
+    return tuple(_provider_from_manifest(path) for path in sorted(directory.glob("*.json")))
 
 
 def default_provider_registry(
@@ -244,8 +325,10 @@ def default_provider_registry(
     available_only: bool = False,
     install_root: str | os.PathLike[str] | None = None,
 ) -> ProviderRegistry:
-    specs = _known_provider_specs()
-    if available_only:
-        root = Path(install_root or Path(__file__).resolve().parents[2])
-        specs = tuple(spec for spec in specs if spec.is_available(root))
-    return ProviderRegistry(specs)
+    root = Path(install_root or Path(__file__).resolve().parents[2])
+    registry = ProviderRegistry(_builtin_provider_specs())
+    for spec in _manifest_provider_specs(root):
+        if available_only and not spec.is_available(root):
+            continue
+        registry.register(spec)
+    return registry
