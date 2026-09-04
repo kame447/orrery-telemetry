@@ -16,4 +16,4 @@ def test_gemini_hooks_use_agentstack_selected_python():
         assert 'PYTHON_BIN="${AGENTSTACK_PYTHON:-python3}"' in text, hook
         assert "\npython3 -" not in text, hook
         assert '"$PYTHON_BIN" "$MAIL_HELPER"' in text, hook
-        assert '"$PYTHON_BIN" "$STREAM_HELPER"' in text, hook
+        assert '$(printf \'%q\' "$PYTHON_BIN") $(printf \'%q\' "$STREAM_HELPER")' in text, hook
