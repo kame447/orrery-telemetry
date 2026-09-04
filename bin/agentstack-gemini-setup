@@ -23,6 +23,7 @@ AGENTSTACK_HOME="${AGENTSTACK_HOME:-$HOME/.agentstack}"
 TARGET="${AGENTSTACK_GEMINI_MCP_CONFIG:-$HOME/.gemini/config/mcp_config.json}"
 SERVER_KEY="orrery-mail"
 MCP_COMMAND="${AGENTSTACK_GEMINI_MCP_RUNNER:-$AGENTSTACK_HOME/bin/agentstack-gemini-mcp}"
+PYTHON_BIN="${AGENTSTACK_PYTHON:-python3}"
 
 mode="install"
 case "${1:-}" in
@@ -35,16 +36,19 @@ esac
 if [[ "$mode" == "install" && ! -x "$MCP_COMMAND" ]]; then
   die "session-bound MCP runner is not installed: $MCP_COMMAND"
 fi
+command -v "$PYTHON_BIN" >/dev/null 2>&1 || [[ -x "$PYTHON_BIN" ]] || \
+  die "selected Python is unavailable: $PYTHON_BIN"
 
 TMP="$(mktemp -t agentstack-gemini-mcp.XXXXXX)"
-cleanup() { rm -f "$TMP"; }
+TARGET_TMP="${TARGET}.tmp.$$"
+cleanup() { rm -f "$TMP" "$TARGET_TMP"; }
 trap cleanup EXIT INT TERM HUP
 
 AGS_GEMINI_SETUP_TARGET="$TARGET" \
 AGS_GEMINI_SETUP_MODE="$mode" \
 AGS_GEMINI_SETUP_COMMAND="$MCP_COMMAND" \
 AGS_GEMINI_SETUP_KEY="$SERVER_KEY" \
-python3 - > "$TMP" <<'PY'
+"$PYTHON_BIN" - > "$TMP" <<'PY'
 import json
 import os
 from pathlib import Path
@@ -91,8 +95,9 @@ mkdir -p "$(dirname "$TARGET")"
 if [[ -f "$TARGET" ]]; then
   cp "$TARGET" "$TARGET.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || cp "$TARGET" "$TARGET.bak"
 fi
-( umask 077 && cat "$TMP" > "$TARGET" )
-printf '\n' >> "$TARGET"
+( umask 077; cat "$TMP"; printf '\n' ) > "$TARGET_TMP"
+chmod 600 "$TARGET_TMP"
+mv -f "$TARGET_TMP" "$TARGET"
 
 if [[ "$mode" == "uninstall" ]]; then
   echo "$PROG: removed '$SERVER_KEY' from $TARGET"
