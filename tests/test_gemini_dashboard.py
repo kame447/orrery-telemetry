@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pathlib
 
-import dashboard.server as server
+import dashboard.provider_server as server
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
