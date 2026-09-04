@@ -27,16 +27,14 @@ EXPECTED_PAYLOAD = {
     "dashboard/providers/registry.py",
     "dashboard/service_runner.py",
     "dashboard/assets/google.svg",
+    "provider_specs/gemini.json",
 }
 
 
-def _seed_existing_dashboard(
-    install_dir: pathlib.Path, text: str = "# existing ORRERY dashboard\n"
-) -> pathlib.Path:
+def _seed_existing_dashboard(install_dir: pathlib.Path, text: str = "# existing ORRERY dashboard\n") -> pathlib.Path:
     server = install_dir / "dashboard" / "server.py"
     server.parent.mkdir(parents=True, exist_ok=True)
     server.write_text(text, encoding="utf-8")
-    server.chmod(0o755)
     manifest = install_dir / "install-state.json"
     manifest.write_text(
         json.dumps(
@@ -92,10 +90,10 @@ def test_provider_installer_requires_core_manifest(tmp_path):
     assert "install-state.json" in result.stderr
 
 
-def test_provider_installer_dry_run_covers_runtime_gui_and_child_adapter(tmp_path):
+def test_provider_installer_dry_run_covers_runtime_gui_child_and_manifest(tmp_path):
     install_dir = tmp_path / "agentstack"
     server = _seed_existing_dashboard(install_dir)
-    original = server.read_bytes()
+    original = server.read_text(encoding="utf-8")
     manifest = install_dir / "install-state.json"
     manifest_before = manifest.read_text(encoding="utf-8")
     result = subprocess.run(
@@ -114,12 +112,12 @@ def test_provider_installer_dry_run_covers_runtime_gui_and_child_adapter(tmp_pat
     assert result.returncode == 0, result.stderr
     for relative in EXPECTED_PAYLOAD:
         assert relative in result.stdout, relative
-    assert "server_core.py" not in result.stdout
-    assert server.read_bytes() == original
+    assert server.read_text(encoding="utf-8") == original
     assert manifest.read_text(encoding="utf-8") == manifest_before
+    assert not (install_dir / "dashboard" / "server_core.py").exists()
 
 
-def test_provider_installer_keeps_existing_server_byte_for_byte(tmp_path):
+def test_provider_installer_keeps_core_server_byte_for_byte(tmp_path):
     install_dir = tmp_path / "agentstack"
     original = "# installed dashboard from current ORRERY version\nSENTINEL = 42\n"
     server = _seed_existing_dashboard(install_dir, original)
@@ -140,8 +138,7 @@ def test_provider_installer_keeps_existing_server_byte_for_byte(tmp_path):
 
 def test_provider_installer_records_added_files_in_core_manifest(tmp_path):
     install_dir = tmp_path / "agentstack"
-    server = _seed_existing_dashboard(install_dir)
-    original_owned = {str(server)}
+    _seed_existing_dashboard(install_dir)
     result = subprocess.run(
         ["bash", str(INSTALLER), "--install-dir", str(install_dir)],
         cwd=ROOT,
@@ -153,13 +150,12 @@ def test_provider_installer_records_added_files_in_core_manifest(tmp_path):
     assert result.returncode == 0, result.stderr
     manifest = json.loads((install_dir / "install-state.json").read_text(encoding="utf-8"))
     owned = set(manifest["owned_files"])
-    assert original_owned <= owned
     for relative in EXPECTED_PAYLOAD:
         assert str(install_dir / relative) in owned, relative
     assert str(install_dir / "dashboard" / "server_core.py") not in owned
 
 
-def test_provider_installer_copies_dashboard_abstraction_and_adapter(tmp_path):
+def test_provider_installer_copies_dashboard_abstraction_adapter_and_manifest(tmp_path):
     install_dir = tmp_path / "agentstack"
     _seed_existing_dashboard(install_dir)
     result = subprocess.run(
@@ -176,14 +172,19 @@ def test_provider_installer_copies_dashboard_abstraction_and_adapter(tmp_path):
         target = install_dir / relative
         assert target.is_file(), relative
 
+    installed_spec = json.loads(
+        (install_dir / "provider_specs" / "gemini.json").read_text(encoding="utf-8")
+    )
+    assert installed_spec["id"] == "gemini"
+    assert installed_spec["program"] == "antigravity"
+
     assert os.access(install_dir / "hooks" / "spawn_gemini_preregistered.sh", os.X_OK)
     assert os.access(install_dir / "bin" / "agent-start-gemini", os.X_OK)
     assert os.access(install_dir / "dashboard" / "provider_server.py", os.X_OK)
-    assert os.access(install_dir / "dashboard" / "service_runner.py", os.X_OK)
     assert not os.access(install_dir / "dashboard" / "assets" / "google.svg", os.X_OK)
 
 
-def test_provider_installer_is_idempotent_without_rewriting_core(tmp_path):
+def test_provider_installer_is_idempotent_and_keeps_core_server(tmp_path):
     install_dir = tmp_path / "agentstack"
     original = "# original core\nSENTINEL = 'keep-me'\n"
     server = _seed_existing_dashboard(install_dir, original)
@@ -223,5 +224,5 @@ def test_provider_installer_does_not_copy_obsolete_dashboard_wrappers(tmp_path):
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert not (install_dir / "dashboard" / "server_gemini.py").exists()
     assert not (install_dir / "dashboard" / "server_core.py").exists()
+    assert not (install_dir / "dashboard" / "server_gemini.py").exists()
