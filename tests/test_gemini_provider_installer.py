@@ -15,6 +15,7 @@ EXPECTED_PAYLOAD = {
     "bin/agent-start-gemini",
     "bin/agentstack-gemini-bootstrap",
     "bin/agentstack-gemini-setup",
+    "bin/agentstack-gemini-mcp",
     "bin/agentstack-gemini-child-mail",
     "bin/agentstack-gemini-stream",
     "hooks/spawn_gemini_child.sh",
