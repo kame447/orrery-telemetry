@@ -146,6 +146,7 @@ BRANCH_NAME=""
 PREREGISTERED=false
 RESERVED=false
 WORKTREE_CREATED=false
+TMUX_STARTED=false
 
 mail_helper() {
   AGENTSTACK_HOME="$AGENTSTACK_HOME_DIR" \
@@ -173,6 +174,10 @@ PY
 cleanup_failure() {
   status=$?
   if [[ $status -ne 0 ]]; then
+    if [[ "$TMUX_STARTED" == true && -n "$CHILD_NAME" ]]; then
+      tmux kill-session -t "=$CHILD_NAME" >/dev/null 2>&1 || true
+      TMUX_STARTED=false
+    fi
     if [[ "$RESERVED" == true && -n "$CHILD_NAME" && -f "$TOKEN_FILE" && -n "$RESOURCES" ]]; then
       mail_helper release --project-key "$PROJECT_KEY" --agent-name "$CHILD_NAME" \
         --token-file "$TOKEN_FILE" --paths "$RESOURCES" >/dev/null 2>&1 || true
@@ -371,6 +376,7 @@ tmux new-session -d -s "$CHILD_NAME" -c "$WORKTREE_DIR" \
   -e "AGENT_NAME=$CHILD_NAME" -e "PARENT_AGENT=$PARENT_NAME" \
   -e "AGENTSTACK_RESERVED_IDENTITY=1" \
   "/bin/bash $(printf '%q' "$RUNNER_FILE")"
+TMUX_STARTED=true
 
 mkdir -p "$(dirname "$MANAGED_FILE")"
 if ! grep -qxF "$CHILD_NAME" "$MANAGED_FILE" 2>/dev/null; then
