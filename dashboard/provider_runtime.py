@@ -13,44 +13,56 @@ import tempfile
 import threading
 from typing import Any
 
-from .providers.registry import ProviderRegistry, ProviderSpec
+try:
+    from .providers.registry import ProviderRegistry, ProviderSpec
+except ImportError:  # direct `python dashboard/server.py`
+    from providers.registry import ProviderRegistry, ProviderSpec
 
 
 _PATCH_LOCK = threading.Lock()
 
 
-def _format_adapter_args(
-    provider: ProviderSpec,
-    *,
-    effort: str,
-    resources: str,
-    task_file: str,
-) -> list[str]:
-    values = {
+def _adapter_values(
+    *, model: str, effort: str, resources: str, task_file: str
+) -> dict[str, str]:
+    return {
+        "model": model,
         "effort": effort,
         "resources": resources,
         "task_file": task_file,
     }
-    args = list(provider.launch_args)
-    for item in provider.adapter_args:
+
+
+def _format_adapter_env(
+    provider: ProviderSpec,
+    *, model: str,
+    effort: str,
+    resources: str,
+    task_file: str,
+) -> dict[str, str]:
+    values = _adapter_values(
+        model=model, effort=effort, resources=resources, task_file=task_file
+    )
+    result: dict[str, str] = {}
+    for key, template in provider.adapter_env:
         try:
-            args.append(item.format_map(values))
+            result[key] = template.format_map(values)
         except KeyError as exc:
             raise ValueError(
                 f"unknown adapter placeholder for provider {provider.id}: {exc.args[0]}"
             ) from exc
-    return args
+    return result
 
 
 def _adapter_needs_task_file(provider: ProviderSpec) -> bool:
-    return any("{task_file}" in item for item in provider.adapter_args)
+    return any("{task_file}" in template for _key, template in provider.adapter_env)
 
 
 def _write_adapter_wrapper(
     base: Any,
     provider: ProviderSpec,
     adapter_script: str,
-    adapter_args: list[str],
+    adapter_env: dict[str, str],
     task_file: str,
 ) -> str:
     os.makedirs(base.RUNTIME_DIR, mode=0o700, exist_ok=True)
@@ -60,18 +72,25 @@ def _write_adapter_wrapper(
         dir=base.RUNTIME_DIR,
         text=True,
     )
-    quoted = " ".join(shlex.quote(value) for value in [adapter_script, *adapter_args])
     cleanup_paths = [wrapper]
     if task_file:
         cleanup_paths.append(task_file)
     cleanup = " ".join(shlex.quote(path) for path in cleanup_paths)
+    env_lines = "".join(
+        f"export {key}={shlex.quote(value)}\n"
+        for key, value in adapter_env.items()
+    )
+    prefix = " ".join(
+        shlex.quote(value) for value in [adapter_script, *provider.launch_args]
+    )
     body = (
         "#!/bin/bash\n"
         "set -u\n"
-        f"{quoted} \"$@\"\n"
-        "status=$?\n"
-        f"rm -f -- {cleanup}\n"
-        "exit \"$status\"\n"
+        + env_lines
+        + f"{prefix} \"$@\"\n"
+        + "status=$?\n"
+        + f"rm -f -- {cleanup}\n"
+        + "exit \"$status\"\n"
     )
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(body)
@@ -85,11 +104,10 @@ def _install_catalog(base: Any) -> None:
     def spawn_names_payload() -> dict:
         payload = original()
         registry: ProviderRegistry = base.PROVIDER_REGISTRY
-        providers = registry.catalog()
-        payload["providers"] = providers
-        # Keep the historical top-level model keys for older dashboard clients.
-        claude = registry.require("claude") if "claude" in registry.ids() else None
-        if claude is not None:
+        payload["providers"] = registry.catalog()
+        # Backward-compatible top-level model keys for old dashboard clients.
+        if "claude" in registry.ids():
+            claude = registry.require("claude")
             payload["models"] = list(claude.models)
             payload["default_model"] = claude.default_model
         return payload
@@ -174,6 +192,7 @@ def _install_spawn(base: Any) -> None:
 
         task_file = ""
         wrapper = ""
+        handed_off = False
         try:
             if _adapter_needs_task_file(provider):
                 os.makedirs(base.RUNTIME_DIR, mode=0o700, exist_ok=True)
@@ -188,8 +207,9 @@ def _install_spawn(base: Any) -> None:
                     handle.write(str(payload.get("task") or ""))
 
             try:
-                adapter_args = _format_adapter_args(
+                adapter_env = _format_adapter_env(
                     provider,
+                    model=validated["model"],
                     effort=validated["effort"],
                     resources=resources,
                     task_file=task_file,
@@ -197,13 +217,12 @@ def _install_spawn(base: Any) -> None:
             except ValueError as exc:
                 return {"ok": False, "error": str(exc)}
             wrapper = _write_adapter_wrapper(
-                base, provider, adapter_script, adapter_args, task_file
+                base, provider, adapter_script, adapter_env, task_file
             )
 
             # Reuse the mature registration/token/contact/readiness pipeline.
-            # Present the provider as the legacy generic path only inside this
-            # critical section; provider identity/program still come from the
-            # registry-injected model entry.
+            # The generic adapter is represented temporarily through the legacy
+            # Claude slot only because server_core still owns that common path.
             translated = dict(normalized)
             translated.update(provider="claude", effort="")
             with _PATCH_LOCK:
@@ -230,17 +249,18 @@ def _install_spawn(base: Any) -> None:
                     effort=validated["effort"] or None,
                     worktree=bool(normalized.get("worktree")),
                 )
-                # The launched wrapper owns cleanup from here, including async.
-                wrapper = ""
-                task_file = ""
+                # Popen has already received the wrapper path. The wrapper now
+                # owns its own/task-file cleanup, including asynchronous settle.
+                handed_off = True
             return result
         finally:
-            for path in (wrapper, task_file):
-                if path:
-                    try:
-                        os.unlink(path)
-                    except FileNotFoundError:
-                        pass
+            if not handed_off:
+                for path in (wrapper, task_file):
+                    if path:
+                        try:
+                            os.unlink(path)
+                        except FileNotFoundError:
+                            pass
 
     base.do_spawn = do_spawn
 
@@ -272,7 +292,7 @@ def _inject_ui_capabilities(text: str, registry: ProviderRegistry) -> str:
         "a.provider&&_PROVIDER_ASPECT[a.provider]",
     )
 
-    # Extend the existing provider-aspect table from registry metadata.  The
+    # Extend the existing provider-aspect table from registry metadata. The
     # logo asset convention is /assets/<provider_key>.svg.
     match = re.search(r"const _PROVIDER_ASPECT = \{(?P<body>.*?)\n\};", text, re.S)
     if match:
@@ -294,15 +314,18 @@ def _inject_ui_capabilities(text: str, registry: ProviderRegistry) -> str:
             )
             text = text[: match.start()] + replacement + text[match.end() :]
 
-    # One generic reservation field. Its visibility/requirement is controlled
-    # by provider.capabilities.resources_required from the catalog.
+    # One generic reservation field. Visibility and forced worktree state are
+    # driven entirely by provider.capabilities from the catalog.
     isolation = """          <div class=\"spm-row full\">\n            <label class=\"spm-lab\">isolation</label>"""
     if 'id="spm-resources-row"' not in text and isolation in text:
         resource_row = """          <div class=\"spm-row full\" id=\"spm-resources-row\" style=\"display:none\">\n            <label class=\"spm-lab\" for=\"spm-resources\">resources</label>\n            <input type=\"text\" id=\"spm-resources\" placeholder=\"src/**,tests/**\" autocomplete=\"off\">\n            <div class=\"spm-hint\">Comma-separated paths reserved for providers that require resource isolation.</div>\n          </div>\n"""
         text = text.replace(isolation, resource_row + isolation, 1)
 
     provider_marker = """  spmSelectedEffort='';\n  SPM('spm-providers').querySelectorAll('.spm-provider-tab').forEach(btn=>{"""
-    if "const providerCaps=provider&&provider.capabilities||{};" not in text and provider_marker in text:
+    if (
+        "const providerCaps=provider&&provider.capabilities||{};" not in text
+        and provider_marker in text
+    ):
         provider_replacement = """  spmSelectedEffort='';\n  const providerCaps=provider&&provider.capabilities||{};\n  if(SPM('spm-resources-row'))SPM('spm-resources-row').style.display=providerCaps.resources_required?'grid':'none';\n  if(SPM('spm-worktree')){\n    if(providerCaps.worktree_required)SPM('spm-worktree').checked=true;\n    SPM('spm-worktree').disabled=!!providerCaps.worktree_required;\n    SPM('spm-wt-base').classList.toggle('on',SPM('spm-worktree').checked);\n  }\n  SPM('spm-providers').querySelectorAll('.spm-provider-tab').forEach(btn=>{"""
         text = text.replace(provider_marker, provider_replacement, 1)
 
@@ -316,7 +339,9 @@ def _inject_ui_capabilities(text: str, registry: ProviderRegistry) -> str:
 def _install_render(base: Any) -> None:
     original = base._render_dashboard_index
 
-    def _render_dashboard_index(source: bytes, language: str = "", murmur: str = "") -> bytes:
+    def _render_dashboard_index(
+        source: bytes, language: str = "", murmur: str = ""
+    ) -> bytes:
         rendered = original(source, language, murmur)
         text = rendered.decode("utf-8")
         return _inject_ui_capabilities(text, base.PROVIDER_REGISTRY).encode("utf-8")
