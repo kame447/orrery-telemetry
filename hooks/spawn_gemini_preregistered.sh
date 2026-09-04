@@ -112,6 +112,10 @@ cleanup_failure() {
       mail_helper release --project-key "$PROJECT_KEY" --agent-name "$CHILD_NAME" \
         --token-file "$DURABLE_TOKEN" --paths "$RESOURCES" >/dev/null 2>&1 || true
     fi
+    if [[ -s "$DURABLE_TOKEN" ]]; then
+      mail_helper retire --project-key "$PROJECT_KEY" --agent-name "$CHILD_NAME" \
+        --token-file "$DURABLE_TOKEN" >/dev/null 2>&1 || true
+    fi
     if [[ "$WORKTREE_CREATED" == true ]]; then
       git -C "$SOURCE_REPO" worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1 || true
       git -C "$SOURCE_REPO" branch -D "$BRANCH_NAME" >/dev/null 2>&1 || true
