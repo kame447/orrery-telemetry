@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import dashboard.server as server
+import dashboard.provider_server as server
 from dashboard.providers.registry import (
     ProviderCapabilities,
     ProviderRegistry,
