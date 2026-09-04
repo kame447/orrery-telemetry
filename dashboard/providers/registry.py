@@ -114,13 +114,18 @@ class ProviderSpec:
 class ProviderRegistry:
     def __init__(self, providers: Iterable[ProviderSpec] = ()) -> None:
         self._providers: dict[str, ProviderSpec] = {}
+        self._programs: dict[str, str] = {}
         for provider in providers:
             self.register(provider)
 
     def register(self, provider: ProviderSpec) -> None:
         if provider.id in self._providers:
             raise ValueError(f"provider already registered: {provider.id}")
+        owner = self._programs.get(provider.program)
+        if owner is not None:
+            raise ValueError(f"provider program already registered: {provider.program}")
         self._providers[provider.id] = provider
+        self._programs[provider.program] = provider.id
 
     def ids(self) -> tuple[str, ...]:
         return tuple(self._providers)
@@ -133,10 +138,8 @@ class ProviderRegistry:
             raise ValueError(f"provider not allowed: {key or provider_id}") from exc
 
     def by_program(self, program: str) -> ProviderSpec | None:
-        for provider in self._providers.values():
-            if provider.program == program:
-                return provider
-        return None
+        provider_id = self._programs.get(program)
+        return self._providers.get(provider_id) if provider_id is not None else None
 
     def catalog(self) -> list[dict]:
         return [provider.catalog_item() for provider in self._providers.values()]
