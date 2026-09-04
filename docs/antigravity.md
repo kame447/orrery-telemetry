@@ -29,7 +29,7 @@ ORRERY checkout with the opt-in helper:
 scripts/install-gemini-provider.sh
 ```
 
-To also register the normal top-level ORRERY Mail endpoint in Antigravity's
+To also register the session-bound ORRERY Mail stdio proxy in Antigravity's
 global MCP configuration:
 
 ```sh
@@ -38,7 +38,10 @@ scripts/install-gemini-provider.sh --configure-mcp
 
 The MCP setup owns only `mcpServers.orrery-mail` in
 `~/.gemini/config/mcp_config.json` and preserves other server definitions.
-Existing files are backed up before they are changed.
+Existing files are backed up before they are changed. The global entry stores
+only the local proxy command; it does not persist an ORRERY bearer token or an
+agent owner token. The core uninstall removes this entry only while it still
+matches the command installed by ORRERY, so a user-replaced entry is preserved.
 
 ## Launch a top-level Gemini session
 
@@ -63,7 +66,9 @@ export AGENTSTACK_GEMINI_EFFORT=high
 The launcher registers the session with ORRERY Mail as program
 `antigravity`, reconciles the tmux session name with the registered agent name,
 and then starts the normal interactive Antigravity TUI. Antigravity permission
-and sandbox settings remain user-owned.
+and sandbox settings remain user-owned. When the global MCP entry is enabled,
+the session-bound proxy resolves the current agent's mode-0600 owner-token file
+at process start instead of embedding that token in Antigravity configuration.
 
 ## Delegated Gemini child
 
@@ -120,9 +125,10 @@ and workspace-local servers from:
 .agents/mcp_config.json
 ```
 
-Remote servers use the `serverUrl` field. Delegated children instead use a
-workspace-local stdio server because that allows ORRERY to pass a token-file
-path to the proxy without exposing the token to the model.
+Remote servers use the `serverUrl` field. ORRERY uses local stdio entries for
+both the top-level session-bound proxy and delegated-child identity binding so
+owner-token file paths can stay local to the proxy process rather than being
+exposed to the model or stored as bearer headers in Antigravity configuration.
 
 ## Current status
 
