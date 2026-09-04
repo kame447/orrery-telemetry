@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import os
+from pathlib import Path
 from typing import Iterable
 
 
@@ -40,6 +41,7 @@ class ProviderSpec:
     adapter_env: tuple[tuple[str, str], ...] = ()
     logo_aspect: float = 1.0
     models_env: str = ""
+    required_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.id or not self.program or not self.models:
@@ -58,6 +60,10 @@ class ProviderSpec:
         for key, _value in self.adapter_env:
             if not key or not key.replace("_", "").isalnum() or not key[0].isalpha():
                 raise ValueError(f"invalid adapter environment key for {self.id}: {key}")
+        for relative in self.required_paths:
+            path = Path(relative)
+            if path.is_absolute() or ".." in path.parts:
+                raise ValueError(f"required provider path must be install-relative: {relative}")
 
     def resolved_models(self) -> tuple[str, ...]:
         if not self.models_env:
@@ -74,6 +80,10 @@ class ProviderSpec:
         if self.models_env and models != self.models:
             return models[0]
         return self.default_model
+
+    def is_available(self, install_root: str | os.PathLike[str]) -> bool:
+        root = Path(install_root)
+        return all((root / relative).is_file() for relative in self.required_paths)
 
     def catalog_item(self) -> dict:
         item = {
@@ -154,66 +164,82 @@ class ProviderRegistry:
         }
 
 
-def default_provider_registry() -> ProviderRegistry:
-    return ProviderRegistry(
-        [
-            ProviderSpec(
-                id="claude",
-                label="Claude",
-                program="claude-code",
-                models=(
-                    "claude-sonnet-5",
-                    "claude-opus-5",
-                    "claude-haiku-4-5-20251001",
-                ),
-                default_model="claude-sonnet-5",
-                capabilities=ProviderCapabilities(effort=False),
-                provider_key="anthropic",
-                dispatch="native",
+def _known_provider_specs() -> tuple[ProviderSpec, ...]:
+    return (
+        ProviderSpec(
+            id="claude",
+            label="Claude",
+            program="claude-code",
+            models=(
+                "claude-sonnet-5",
+                "claude-opus-5",
+                "claude-haiku-4-5-20251001",
             ),
-            ProviderSpec(
-                id="codex",
-                label="Codex",
-                program="codex-cli",
-                models=("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"),
-                default_model="gpt-5.6-sol",
-                capabilities=ProviderCapabilities(effort=True),
-                provider_key="openai",
-                efforts=("low", "medium", "high", "xhigh"),
-                effort_default="xhigh",
-                dispatch="native",
-                launch_args=("--codex",),
-                logo_aspect=256 / 260,
-                models_env="AGENTSTACK_CODEX_MODELS",
+            default_model="claude-sonnet-5",
+            capabilities=ProviderCapabilities(effort=False),
+            provider_key="anthropic",
+            dispatch="native",
+        ),
+        ProviderSpec(
+            id="codex",
+            label="Codex",
+            program="codex-cli",
+            models=("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"),
+            default_model="gpt-5.6-sol",
+            capabilities=ProviderCapabilities(effort=True),
+            provider_key="openai",
+            efforts=("low", "medium", "high", "xhigh"),
+            effort_default="xhigh",
+            dispatch="native",
+            launch_args=("--codex",),
+            logo_aspect=256 / 260,
+            models_env="AGENTSTACK_CODEX_MODELS",
+        ),
+        ProviderSpec(
+            id="gemini",
+            label="Gemini",
+            program="antigravity",
+            models=("gemini-3.8-flash-high", "gemini-3.8-flash-medium"),
+            default_model="gemini-3.8-flash-high",
+            capabilities=ProviderCapabilities(
+                effort=True,
+                mcp=True,
+                resume=False,
+                runtime=True,
+                transcript=False,
+                standalone=False,
+                worktree_required=True,
+                resources_required=True,
             ),
-            ProviderSpec(
-                id="gemini",
-                label="Gemini",
-                program="antigravity",
-                models=("gemini-3.8-flash-high", "gemini-3.8-flash-medium"),
-                default_model="gemini-3.8-flash-high",
-                capabilities=ProviderCapabilities(
-                    effort=True,
-                    mcp=True,
-                    resume=False,
-                    runtime=True,
-                    transcript=False,
-                    standalone=False,
-                    worktree_required=True,
-                    resources_required=True,
-                ),
-                provider_key="google",
-                efforts=("low", "medium", "high"),
-                effort_default="high",
-                dispatch="adapter",
-                adapter_script="spawn_gemini_preregistered.sh",
-                adapter_env=(
-                    ("AGENTSTACK_GEMINI_EFFORT", "{effort}"),
-                    ("AGENTSTACK_GEMINI_RESOURCES", "{resources}"),
-                    ("AGENTSTACK_GEMINI_TASK_FILE", "{task_file}"),
-                    ("AGENTSTACK_GEMINI_MODEL", "{model}"),
-                ),
-                models_env="AGENTSTACK_GEMINI_MODELS",
+            provider_key="google",
+            efforts=("low", "medium", "high"),
+            effort_default="high",
+            dispatch="adapter",
+            adapter_script="spawn_gemini_preregistered.sh",
+            adapter_env=(
+                ("AGENTSTACK_GEMINI_EFFORT", "{effort}"),
+                ("AGENTSTACK_GEMINI_RESOURCES", "{resources}"),
+                ("AGENTSTACK_GEMINI_TASK_FILE", "{task_file}"),
+                ("AGENTSTACK_GEMINI_MODEL", "{model}"),
             ),
-        ]
+            models_env="AGENTSTACK_GEMINI_MODELS",
+            required_paths=(
+                "bin/agent-start-gemini",
+                "bin/agentstack-gemini-child-mail",
+                "bin/agentstack-gemini-stream",
+                "hooks/spawn_gemini_preregistered.sh",
+            ),
+        ),
     )
+
+
+def default_provider_registry(
+    *,
+    available_only: bool = False,
+    install_root: str | os.PathLike[str] | None = None,
+) -> ProviderRegistry:
+    specs = _known_provider_specs()
+    if available_only:
+        root = Path(install_root or Path(__file__).resolve().parents[2])
+        specs = tuple(spec for spec in specs if spec.is_available(root))
+    return ProviderRegistry(specs)
