@@ -24,6 +24,8 @@ Options:
 
 The script never edits shell dotfiles and never changes Antigravity permission
 settings. MCP configuration is changed only when --configure-mcp is explicit.
+The existing dashboard/server.py is core-owned and is never replaced by this
+provider installer.
 EOF
 }
 
@@ -47,7 +49,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 INSTALLED_SERVER="$INSTALL_DIR/dashboard/server.py"
-INSTALLED_CORE="$INSTALL_DIR/dashboard/server_core.py"
 MANIFEST="$INSTALL_DIR/install-state.json"
 if [[ ! -f "$INSTALLED_SERVER" ]]; then
   echo "$PROG: existing dashboard/server.py not found under $INSTALL_DIR; install ORRERY core first" >&2
@@ -71,17 +72,18 @@ FILES=(
   "bin/agentstack-gemini-stream"
   "hooks/spawn_gemini_child.sh"
   "hooks/spawn_gemini_preregistered.sh"
-  "dashboard/server.py"
+  "dashboard/provider_server.py"
   "dashboard/provider_runtime.py"
   "dashboard/provider_classification.py"
   "dashboard/provider_launch_tracking.py"
   "dashboard/providers/registry.py"
+  "dashboard/service_runner.py"
   "dashboard/assets/google.svg"
 )
 
-# Validate every input before touching the installed dashboard. A malformed
-# core manifest or incomplete provider checkout must fail without leaving a
-# half-installed wrapper/server_core pair behind.
+# Validate every input before touching the installed tree. A malformed core
+# manifest or incomplete provider checkout must fail without a half-installed
+# provider runtime.
 for relative in "${FILES[@]}"; do
   [[ -f "$REPO_ROOT/$relative" ]] || {
     echo "$PROG: missing source file: $REPO_ROOT/$relative" >&2
@@ -106,27 +108,6 @@ for key in ("owned_files", "owned_dirs"):
         raise SystemExit(f"invalid core install manifest {manifest}: {key} must be a string list")
 PY
 
-# Retrofitting a provider must not replace the installed control-plane snapshot
-# with the checkout's 5k-line server. Preserve the version the operator is
-# actually running, then put only the thin provider-aware entry point in front.
-# On repeated provider installs the entry point is already ours, so keep the
-# previously preserved core. If a later ORRERY core install replaced server.py,
-# it will no longer match this wrapper marker and the fresh core is preserved.
-if grep -q 'provider_runtime' "$INSTALLED_SERVER" 2>/dev/null && \
-   grep -q 'server_core' "$INSTALLED_SERVER" 2>/dev/null; then
-  if [[ ! -f "$INSTALLED_CORE" ]]; then
-    echo "$PROG: provider wrapper is installed but dashboard/server_core.py is missing" >&2
-    exit 1
-  fi
-  echo "$PROG: reuse preserved dashboard/server_core.py"
-else
-  echo "$PROG: preserve dashboard/server.py -> dashboard/server_core.py"
-  if [[ "$DRY_RUN" != true ]]; then
-    cp "$INSTALLED_SERVER" "$INSTALLED_CORE"
-    chmod 644 "$INSTALLED_CORE"
-  fi
-fi
-
 for relative in "${FILES[@]}"; do
   src="$REPO_ROOT/$relative"
   dst="$INSTALL_DIR/$relative"
@@ -135,7 +116,7 @@ for relative in "${FILES[@]}"; do
     mkdir -p "$(dirname "$dst")"
     cp "$src" "$dst"
     case "$relative" in
-      bin/*|hooks/*|dashboard/server.py)
+      bin/*|hooks/*|dashboard/provider_server.py|dashboard/service_runner.py)
         chmod 755 "$dst"
         ;;
       *)
@@ -147,7 +128,7 @@ done
 
 echo "$PROG: record provider payload ownership -> $MANIFEST"
 if [[ "$DRY_RUN" != true ]]; then
-  "$PYTHON_BIN" - "$MANIFEST" "$INSTALL_DIR" "${FILES[@]}" "dashboard/server_core.py" <<'PY'
+  "$PYTHON_BIN" - "$MANIFEST" "$INSTALL_DIR" "${FILES[@]}" <<'PY'
 import json
 import os
 import pathlib
@@ -233,5 +214,5 @@ PY
 fi
 
 echo "$PROG: provider runtime and Gemini payload installed into $INSTALL_DIR"
-echo "$PROG: restart the ORRERY dashboard service to load the new provider registry."
+echo "$PROG: restart the ORRERY dashboard service to load the provider entrypoint."
 echo "$PROG: authenticate once with 'agy', then Gemini is available from the dashboard or agent-start-gemini."
