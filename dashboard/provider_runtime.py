@@ -108,8 +108,8 @@ def _install_catalog(base: Any) -> None:
         # Backward-compatible top-level model keys for old dashboard clients.
         if "claude" in registry.ids():
             claude = registry.require("claude")
-            payload["models"] = list(claude.models)
-            payload["default_model"] = claude.default_model
+            payload["models"] = list(claude.resolved_models())
+            payload["default_model"] = claude.resolved_default_model()
         return payload
 
     base.spawn_names_payload = spawn_names_payload
@@ -128,7 +128,7 @@ def _install_provider_classification(base: Any) -> None:
         registry: ProviderRegistry = base.PROVIDER_REGISTRY
         for provider_id in registry.ids():
             provider = registry.require(provider_id)
-            if any(value == model.lower() for model in provider.models):
+            if any(value == model.lower() for model in provider.resolved_models()):
                 return provider.provider_key
         return ""
 
@@ -326,13 +326,18 @@ def _inject_ui_capabilities(text: str, registry: ProviderRegistry) -> str:
         "const providerCaps=provider&&provider.capabilities||{};" not in text
         and provider_marker in text
     ):
-        provider_replacement = """  spmSelectedEffort='';\n  const providerCaps=provider&&provider.capabilities||{};\n  if(SPM('spm-resources-row'))SPM('spm-resources-row').style.display=providerCaps.resources_required?'grid':'none';\n  if(SPM('spm-worktree')){\n    if(providerCaps.worktree_required)SPM('spm-worktree').checked=true;\n    SPM('spm-worktree').disabled=!!providerCaps.worktree_required;\n    SPM('spm-wt-base').classList.toggle('on',SPM('spm-worktree').checked);\n  }\n  SPM('spm-providers').querySelectorAll('.spm-provider-tab').forEach(btn=>{"""
+        provider_replacement = """  spmSelectedEffort='';\n  const providerCaps=provider&&provider.capabilities||{};\n  if(SPM('spm-resources-row'))SPM('spm-resources-row').style.display=providerCaps.resources_required?'grid':'none';\n  if(SPM('spm-resources'))SPM('spm-resources').oninput=updateSpawnButton;\n  if(SPM('spm-worktree')){\n    if(providerCaps.worktree_required)SPM('spm-worktree').checked=true;\n    SPM('spm-worktree').disabled=!!providerCaps.worktree_required;\n    SPM('spm-wt-base').classList.toggle('on',SPM('spm-worktree').checked);\n  }\n  SPM('spm-providers').querySelectorAll('.spm-provider-tab').forEach(btn=>{"""
         text = text.replace(provider_marker, provider_replacement, 1)
 
     payload_marker = """    group:SPM('spm-group').value.trim()\n  };"""
     if "payload.resources=resources" not in text and payload_marker in text:
         payload_replacement = """    group:SPM('spm-group').value.trim()\n  };\n  const resources=(SPM('spm-resources')&&SPM('spm-resources').value||'').trim();\n  if(resources)payload.resources=resources;"""
         text = text.replace(payload_marker, payload_replacement, 1)
+
+    button_marker = """  const identityReady=!spmSelectedName||spmIdentityState==='verified';\n  button.disabled=spmBusy||!spmReady||!identityReady;"""
+    if "const resourcesReady=!providerCaps.resources_required" not in text and button_marker in text:
+        button_replacement = """  const identityReady=!spmSelectedName||spmIdentityState==='verified';\n  const selectedProvider=spmProviders.find(item=>item.id===spmSelectedProvider);\n  const providerCaps=selectedProvider&&selectedProvider.capabilities||{};\n  const resourcesReady=!providerCaps.resources_required||!!(SPM('spm-resources')&&SPM('spm-resources').value.trim());\n  button.disabled=spmBusy||!spmReady||!identityReady||!resourcesReady;"""
+        text = text.replace(button_marker, button_replacement, 1)
     return text
 
 
