@@ -7,12 +7,15 @@ on:
 
 jobs:
   tests:
-    runs-on: ubuntu-latest
+    # ORRERY is a macOS-first runtime. launchd/launchctl and the real tmux
+    # binary are part of the tested contract, so Linux mixes harness failures
+    # with product regressions.
+    runs-on: macos-latest
     strategy:
       fail-fast: false
       matrix:
-        # README が「3.10 以上」と書く以上、両端を機械で押さえる。"3.x" 単独だと
-        # 下限は誰も踏まないし、新しい Python が出た日に上限が黙って動く。
+        # This fork is still verifying its Python 3.10 compatibility work even
+        # though current upstream has moved its lower bound to 3.11.
         python-version: ["3.10", "3.12", "3.14"]
     name: tests (python ${{ matrix.python-version }})
     steps:
@@ -24,6 +27,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      # tmux is part of the launcher contract; uv provisions AgentStack Mail.
+      - name: Install tmux and uv
+        run: brew install tmux uv
       - name: Install test and package-build tools
         run: python3 -m pip install pytest build -e ./packages/agentstack_mail
       # `tests/` だけを指定していた間、integrations/codex_app/tests/ の 111 件は
