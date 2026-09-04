@@ -1,9 +1,8 @@
 """Capability-driven runtime classification for dashboard agents.
 
-The legacy classifier already handles Claude/Codex activity heuristics.  This
-adapter only resolves the fallback case where a registered provider would
-otherwise be labelled ``finished`` solely because its program name is unknown
-to the legacy core.
+The legacy classifier already handles Claude/Codex activity heuristics. This
+adapter resolves the fallback case for registered providers without treating a
+retained shell as a live agent after the provider CLI has exited.
 """
 from __future__ import annotations
 
@@ -11,7 +10,7 @@ from typing import Any
 
 
 def install(base: Any) -> Any:
-    """Teach the dashboard classifier about registry runtime capabilities."""
+    """Teach the dashboard classifier about registry runtime commands."""
     if getattr(base, "_PROVIDER_CLASSIFICATION_INSTALLED", False):
         return base
 
@@ -29,7 +28,11 @@ def install(base: Any) -> Any:
             return result
 
         provider = base.PROVIDER_REGISTRY.by_program(program)
-        if provider is not None and provider.capabilities.runtime:
+        if provider is None or not provider.capabilities.runtime:
+            return result
+
+        live_commands = {provider.program, *provider.runtime_commands}
+        if cmd in live_commands:
             return "agent"
         return result
 
