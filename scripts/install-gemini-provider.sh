@@ -61,6 +61,50 @@ command -v "$PYTHON_BIN" >/dev/null 2>&1 || [[ -x "$PYTHON_BIN" ]] || {
   exit 1
 }
 
+FILES=(
+  "bin/agent-start-gemini"
+  "bin/agentstack-gemini-bootstrap"
+  "bin/agentstack-gemini-setup"
+  "bin/agentstack-gemini-mcp"
+  "bin/agentstack-gemini-child-mail"
+  "bin/agentstack-gemini-stream"
+  "hooks/spawn_gemini_child.sh"
+  "hooks/spawn_gemini_preregistered.sh"
+  "dashboard/server.py"
+  "dashboard/provider_runtime.py"
+  "dashboard/provider_classification.py"
+  "dashboard/provider_launch_tracking.py"
+  "dashboard/providers/registry.py"
+  "dashboard/assets/google.svg"
+)
+
+# Validate every input before touching the installed dashboard. A malformed
+# core manifest or incomplete provider checkout must fail without leaving a
+# half-installed wrapper/server_core pair behind.
+for relative in "${FILES[@]}"; do
+  [[ -f "$REPO_ROOT/$relative" ]] || {
+    echo "$PROG: missing source file: $REPO_ROOT/$relative" >&2
+    exit 1
+  }
+done
+"$PYTHON_BIN" - "$MANIFEST" <<'PY'
+import json
+import pathlib
+import sys
+
+manifest = pathlib.Path(sys.argv[1]).expanduser()
+try:
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"invalid core install manifest {manifest}: {exc}")
+if not isinstance(data, dict):
+    raise SystemExit(f"invalid core install manifest {manifest}: expected object")
+for key in ("owned_files", "owned_dirs"):
+    value = data.get(key)
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise SystemExit(f"invalid core install manifest {manifest}: {key} must be a string list")
+PY
+
 # Retrofitting a provider must not replace the installed control-plane snapshot
 # with the checkout's 5k-line server. Preserve the version the operator is
 # actually running, then put only the thin provider-aware entry point in front.
@@ -82,27 +126,9 @@ else
   fi
 fi
 
-FILES=(
-  "bin/agent-start-gemini"
-  "bin/agentstack-gemini-bootstrap"
-  "bin/agentstack-gemini-setup"
-  "bin/agentstack-gemini-mcp"
-  "bin/agentstack-gemini-child-mail"
-  "bin/agentstack-gemini-stream"
-  "hooks/spawn_gemini_child.sh"
-  "hooks/spawn_gemini_preregistered.sh"
-  "dashboard/server.py"
-  "dashboard/provider_runtime.py"
-  "dashboard/provider_classification.py"
-  "dashboard/provider_launch_tracking.py"
-  "dashboard/providers/registry.py"
-  "dashboard/assets/google.svg"
-)
-
 for relative in "${FILES[@]}"; do
   src="$REPO_ROOT/$relative"
   dst="$INSTALL_DIR/$relative"
-  [[ -f "$src" ]] || { echo "$PROG: missing source file: $src" >&2; exit 1; }
   echo "$PROG: copy $relative -> $dst"
   if [[ "$DRY_RUN" != true ]]; then
     mkdir -p "$(dirname "$dst")"
