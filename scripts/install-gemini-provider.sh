@@ -10,6 +10,7 @@ INSTALL_DIR="${AGENTSTACK_HOME:-$HOME/.agentstack}"
 DRY_RUN=false
 CONFIGURE_MCP=false
 PYTHON_BIN="${AGENTSTACK_PYTHON:-python3}"
+GEMINI_MCP_CONFIG="${AGENTSTACK_GEMINI_MCP_CONFIG:-$HOME/.gemini/config/mcp_config.json}"
 
 usage() {
   cat >&2 <<'EOF'
@@ -205,7 +206,29 @@ if [[ "$CONFIGURE_MCP" == true ]]; then
   if [[ "$DRY_RUN" == true ]]; then
     echo "$PROG: would run $INSTALL_DIR/bin/agentstack-gemini-setup"
   else
-    AGENTSTACK_HOME="$INSTALL_DIR" "$INSTALL_DIR/bin/agentstack-gemini-setup"
+    AGENTSTACK_HOME="$INSTALL_DIR" \
+    AGENTSTACK_GEMINI_MCP_CONFIG="$GEMINI_MCP_CONFIG" \
+      "$INSTALL_DIR/bin/agentstack-gemini-setup"
+    "$PYTHON_BIN" - "$MANIFEST" "$GEMINI_MCP_CONFIG" \
+      "$INSTALL_DIR/bin/agentstack-gemini-mcp" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+manifest = pathlib.Path(sys.argv[1]).expanduser()
+config_path = pathlib.Path(sys.argv[2]).expanduser().resolve(strict=False)
+command = pathlib.Path(sys.argv[3]).expanduser().resolve(strict=False)
+data = json.loads(manifest.read_text(encoding="utf-8"))
+data["gemini_mcp_config"] = {
+    "config_path": os.fspath(config_path),
+    "server_key": "orrery-mail",
+    "command": os.fspath(command),
+}
+temporary = manifest.with_name(manifest.name + ".tmp")
+temporary.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+os.replace(temporary, manifest)
+PY
   fi
 fi
 
