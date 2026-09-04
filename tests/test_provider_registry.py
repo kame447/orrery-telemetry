@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pathlib
+
 import dashboard.server as server
 from dashboard.providers.registry import (
     ProviderCapabilities,
@@ -203,4 +205,7 @@ def test_dashboard_dispatch_accepts_injected_provider_without_new_if_branch(monk
 
     assert result["ok"] is True
     assert result["provider"] == "future-ai"
-    assert "--future" in launched[0]
+    wrapper = pathlib.Path(launched[0][0])
+    assert wrapper.is_file()
+    assert "--future" in wrapper.read_text(encoding="utf-8")
+    wrapper.unlink()
