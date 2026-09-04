@@ -58,6 +58,8 @@ class ProviderSpec:
             raise ValueError(f"effort metadata is not allowed for provider {self.id}")
         if self.dispatch not in {"native", "adapter"}:
             raise ValueError(f"unknown dispatch mode for provider {self.id}: {self.dispatch}")
+        if self.dispatch == "adapter" and not self.adapter_script:
+            raise ValueError(f"adapter script is required for provider {self.id}")
         for key, _value in self.adapter_env:
             if not key or not key.replace("_", "").isalnum() or not key[0].isalpha():
                 raise ValueError(f"invalid adapter environment key for {self.id}: {key}")
