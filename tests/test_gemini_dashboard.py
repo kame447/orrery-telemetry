@@ -1,4 +1,4 @@
-"""Dashboard coverage for the fork-only Google Antigravity provider."""
+"""Dashboard coverage for capability-driven Antigravity integration."""
 from __future__ import annotations
 
 import pathlib
@@ -20,17 +20,21 @@ def test_spawn_catalog_exposes_gemini_provider(monkeypatch):
     assert gemini["program"] == "antigravity"
     assert gemini["default_model"] == "gemini-3.8-flash-high"
     assert gemini["efforts"] == ["low", "medium", "high"]
+    assert gemini["capabilities"]["resources_required"] is True
+    assert gemini["capabilities"]["worktree_required"] is True
 
 
-def test_rendered_dashboard_has_google_badges_and_gemini_resources():
+def test_rendered_dashboard_uses_capabilities_not_gemini_name_checks():
     source = (ROOT / "dashboard" / "index.html").read_bytes()
     rendered = server._render_dashboard_index(source).decode("utf-8")
-    assert "a.provider==='google'" in rendered
+    assert "a.provider&&_PROVIDER_ASPECT[a.provider]" in rendered
     assert "google: 1" in rendered
-    assert "if(/gemini/.test(model))return 'google';" in rendered
+    assert 'id="spm-resources-row"' in rendered
     assert 'id="spm-resources"' in rendered
+    assert "providerCaps.resources_required" in rendered
+    assert "providerCaps.worktree_required" in rendered
     assert "payload.resources=resources" in rendered
-    assert "spmSelectedProvider==='gemini'" in rendered
+    assert "spmSelectedProvider==='gemini'" not in rendered
 
 
 def test_google_badge_asset_is_local():
@@ -71,9 +75,9 @@ def test_gemini_spawn_requires_declared_resources(monkeypatch, tmp_path):
     }
 
 
-def test_antigravity_resume_never_falls_through_to_claude(monkeypatch):
+def test_provider_resume_capability_blocks_wrong_fallback(monkeypatch):
     monkeypatch.setattr(server, "_agent_program", lambda _name: "antigravity")
     result = server.do_resume("Calm-Curie")
     assert result["ok"] is False
-    assert "Antigravity" in result["error"]
-    assert "Claude" not in result["error"]
+    assert result["error"].startswith("resume not supported for provider gemini")
+    assert "another provider" in result["error"]
