@@ -91,6 +91,7 @@ RESULT_LOG="$RUNTIME_DIR/gemini-$CHILD_NAME.ndjson"
 STDERR_LOG="$RUNTIME_DIR/gemini-$CHILD_NAME.stderr.log"
 WORKTREE_CREATED=false
 RESERVED=false
+TMUX_STARTED=false
 
 mail_helper() {
   AGENTSTACK_HOME="$AGENTSTACK_HOME_DIR" \
@@ -103,6 +104,10 @@ mail_helper() {
 cleanup_failure() {
   status=$?
   if [[ $status -ne 0 ]]; then
+    if [[ "$TMUX_STARTED" == true && -n "$CHILD_NAME" ]]; then
+      tmux kill-session -t "=$CHILD_NAME" >/dev/null 2>&1 || true
+      TMUX_STARTED=false
+    fi
     if [[ "$RESERVED" == true && -s "$DURABLE_TOKEN" ]]; then
       mail_helper release --project-key "$PROJECT_KEY" --agent-name "$CHILD_NAME" \
         --token-file "$DURABLE_TOKEN" --paths "$RESOURCES" >/dev/null 2>&1 || true
@@ -250,6 +255,7 @@ tmux new-session -d -s "$CHILD_NAME" -c "$WORKTREE_DIR" \
   -e "AGENT_NAME=$CHILD_NAME" -e "PARENT_AGENT=$PARENT_AGENT" \
   -e "AGENTSTACK_RESERVED_IDENTITY=1" \
   "/bin/bash $(printf '%q' "$RUNNER_FILE")"
+TMUX_STARTED=true
 
 mkdir -p "$(dirname "$MANAGED_FILE")"
 grep -qxF "$CHILD_NAME" "$MANAGED_FILE" 2>/dev/null || printf '%s\n' "$CHILD_NAME" >> "$MANAGED_FILE"
