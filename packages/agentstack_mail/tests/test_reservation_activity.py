@@ -124,10 +124,12 @@ def test_two_collectors_share_one_process_global_git_cap(
     real_git = shutil.which("git")
     assert real_git is not None
     slow_git = tmp_path / "slow-git"
+    # The hold has to outlast launching eight interpreters back to back, so the
+    # probes really do overlap up to the cap rather than finishing one by one.
     slow_git.write_text(
         "#!/usr/bin/env python3\n"
         "import os, sys, time\n"
-        "time.sleep(0.08)\n"
+        "time.sleep(0.6)\n"
         f"os.execv({real_git!r}, ['git', *sys.argv[1:]])\n",
         encoding="utf-8",
     )
@@ -167,7 +169,17 @@ def test_two_collectors_share_one_process_global_git_cap(
 
     results = asyncio.run(run_both())
 
-    assert state["maximum"] == app._RESERVATION_PROBE_CONCURRENCY == 8
+    # Probes run through asyncio.to_thread, i.e. the loop's default executor,
+    # whose worker count is min(32, cpu_count + 4). On a machine with fewer
+    # than four cores that pool, not the semaphore, is the tighter bound:
+    # GitHub's 3-core macOS runners observed a maximum of 7 on every run
+    # (2026-09-04), and lengthening the fake git's hold did not change it.
+    # The semaphore is still the cap the service promises; assert the bound
+    # this host can actually reach.
+    assert app._RESERVATION_PROBE_CONCURRENCY == 8
+    reachable = min(app._RESERVATION_PROBE_CONCURRENCY,
+                    min(32, (os.cpu_count() or 1) + 4))
+    assert state["maximum"] == reachable, (state["maximum"], reachable)
     assert state["active"] == 0
     assert all(result.probe_complete for batch in results for result in batch)
 

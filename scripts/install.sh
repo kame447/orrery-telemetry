@@ -30,6 +30,13 @@ MURMUR_SETTING="${AGENTSTACK_MURMUR:-}"
 # NEW AGENT launch-directory presets. Resolved below: explicit > installed env.sh > empty.
 SPAWN_DIRS_SETTING="${AGENTSTACK_SPAWN_DIRS:-}"
 SPAWN_ROOTS_SETTING="${AGENTSTACK_SPAWN_ROOTS:-}"
+# Codex child launch policy. Same lifecycle as the presets above: explicit >
+# installed env.sh > product default (approval `never`, network on, no extra
+# writable roots). Children run unattended, so the defaults avoid prompts
+# nobody is there to answer.
+CODEX_CHILD_APPROVAL_SETTING="${AGENTSTACK_CODEX_CHILD_APPROVAL:-}"
+CODEX_NETWORK_SETTING="${AGENTSTACK_CODEX_NETWORK:-}"
+CODEX_ADD_DIRS_SETTING="${AGENTSTACK_CODEX_ADD_DIRS:-}"
 # Dashboard-only settings with the same lifecycle: read at install, persisted
 # into env.sh and the service definition, inherited on re-install.
 PORTRAITS_DIR_SETTING="${AGENTSTACK_PORTRAITS_DIR:-}"
@@ -42,7 +49,7 @@ MCP_URL="${AGENTSTACK_MCP_URL:-http://127.0.0.1:18765/mcp}"
 # These match packages/agentstack_mail/pyproject.toml. A regression test keeps
 # the shell gate and package metadata in lock-step.
 PYTHON_MIN_MAJOR=3
-PYTHON_MIN_MINOR=10
+PYTHON_MIN_MINOR=11
 
 # CI may bypass one preflight category at a time when it deliberately supplies
 # a fake platform boundary. Skipping a check never supplies the dependency the
@@ -81,6 +88,14 @@ Options:
                          (absolute or ~; default: existing env.sh, else ~)
   --spawn-roots PATHS    ':'-separated roots the directory typeahead may
                          browse (default: existing env.sh, else $HOME)
+  --codex-approval MODE  Codex child --ask-for-approval: never, on-request,
+                         on-failure, untrusted (default: existing env.sh,
+                         else never)
+  --codex-network MODE   on or off: sandbox network access for Codex children
+                         (default: existing env.sh, else on)
+  --codex-add-dirs PATHS ':'-separated extra writable roots for Codex children
+                         on top of project, spawn dirs/roots, install dir,
+                         worktrees, ~/.claude and ~/.codex (default: none)
   -h, --help             Show this help
 
 --assume-yes is not --force: validation and safety errors remain fatal. It must
@@ -153,6 +168,18 @@ while [[ $# -gt 0 ]]; do
       SPAWN_ROOTS_SETTING="$2"
       shift 2
       ;;
+    --codex-approval)
+      CODEX_CHILD_APPROVAL_SETTING="$2"
+      shift 2
+      ;;
+    --codex-network)
+      CODEX_NETWORK_SETTING="$2"
+      shift 2
+      ;;
+    --codex-add-dirs)
+      CODEX_ADD_DIRS_SETTING="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -188,6 +215,19 @@ fi
 if [[ -z "$SPAWN_ROOTS_SETTING" ]]; then
   SPAWN_ROOTS_SETTING="$(agentstack_installed_env_value AGENTSTACK_SPAWN_ROOTS "$INSTALL_DIR/env.sh")"
 fi
+if [[ -z "$CODEX_CHILD_APPROVAL_SETTING" ]]; then
+  CODEX_CHILD_APPROVAL_SETTING="$(agentstack_installed_env_value AGENTSTACK_CODEX_CHILD_APPROVAL "$INSTALL_DIR/env.sh")"
+fi
+if [[ -z "$CODEX_NETWORK_SETTING" ]]; then
+  CODEX_NETWORK_SETTING="$(agentstack_installed_env_value AGENTSTACK_CODEX_NETWORK "$INSTALL_DIR/env.sh")"
+fi
+if [[ -z "$CODEX_ADD_DIRS_SETTING" ]]; then
+  CODEX_ADD_DIRS_SETTING="$(agentstack_installed_env_value AGENTSTACK_CODEX_ADD_DIRS "$INSTALL_DIR/env.sh")"
+fi
+# Product defaults are written out explicitly so env.sh, the service definition
+# and install-state.json all say what a child actually gets.
+CODEX_CHILD_APPROVAL_SETTING="${CODEX_CHILD_APPROVAL_SETTING:-never}"
+CODEX_NETWORK_SETTING="${CODEX_NETWORK_SETTING:-on}"
 if [[ -z "$PORTRAITS_DIR_SETTING" ]]; then
   PORTRAITS_DIR_SETTING="$(agentstack_installed_env_value AGENTSTACK_PORTRAITS_DIR "$INSTALL_DIR/env.sh")"
 fi
@@ -315,6 +355,21 @@ validate_spawn_paths AGENTSTACK_SPAWN_DIRS "$SPAWN_DIRS_SETTING"
 validate_spawn_paths AGENTSTACK_SPAWN_ROOTS "$SPAWN_ROOTS_SETTING"
 validate_spawn_paths AGENTSTACK_PORTRAITS_DIR "$PORTRAITS_DIR_SETTING"
 validate_spawn_paths AGENTSTACK_CUSTOM_PORTRAITS "$CUSTOM_PORTRAITS_SETTING"
+validate_spawn_paths AGENTSTACK_CODEX_ADD_DIRS "$CODEX_ADD_DIRS_SETTING"
+case "$CODEX_CHILD_APPROVAL_SETTING" in
+  never|on-request|on-failure|untrusted) ;;
+  *)
+    echo "error: --codex-approval must be never, on-request, on-failure or untrusted (got: $CODEX_CHILD_APPROVAL_SETTING)" >&2
+    exit 2
+    ;;
+esac
+case "$CODEX_NETWORK_SETTING" in
+  on|off) ;;
+  *)
+    echo "error: --codex-network must be on or off (got: $CODEX_NETWORK_SETTING)" >&2
+    exit 2
+    ;;
+esac
 
 # The two mail jobs are different things: one runs the service, the other runs
 # `agentstack-mailctl start` on a timer. Sharing a label makes the controller
@@ -502,14 +557,12 @@ select_python() {
   local seen=""
   local raw
   for raw in \
-    python3 python3.14 python3.13 python3.12 python3.11 python3.10 \
+    python3 python3.14 python3.13 python3.12 python3.11 \
     /opt/homebrew/bin/python3 /usr/local/bin/python3 /opt/local/bin/python3 \
     /opt/homebrew/bin/python3.14 /opt/homebrew/bin/python3.13 \
     /opt/homebrew/bin/python3.12 /opt/homebrew/bin/python3.11 \
-    /opt/homebrew/bin/python3.10 \
     /usr/local/bin/python3.14 /usr/local/bin/python3.13 \
-    /usr/local/bin/python3.12 /usr/local/bin/python3.11 \
-    /usr/local/bin/python3.10
+    /usr/local/bin/python3.12 /usr/local/bin/python3.11
   do
     candidate="$(resolve_python_candidate "$raw")"
     [[ -n "$candidate" ]] || continue
@@ -1543,6 +1596,9 @@ values = {
     "AGENTSTACK_MURMUR": "$MURMUR_SETTING",
     "AGENTSTACK_SPAWN_DIRS": "$SPAWN_DIRS_SETTING",
     "AGENTSTACK_SPAWN_ROOTS": "$SPAWN_ROOTS_SETTING",
+    "AGENTSTACK_CODEX_CHILD_APPROVAL": "$CODEX_CHILD_APPROVAL_SETTING",
+    "AGENTSTACK_CODEX_NETWORK": "$CODEX_NETWORK_SETTING",
+    "AGENTSTACK_CODEX_ADD_DIRS": "$CODEX_ADD_DIRS_SETTING",
     "AGENTSTACK_PORTRAITS_DIR": "$PORTRAITS_DIR_SETTING",
     "AGENTSTACK_CUSTOM_PORTRAITS": "$CUSTOM_PORTRAITS_SETTING",
     "AGENTSTACK_CODEX_MODELS": "$CODEX_MODELS_SETTING",
@@ -2268,6 +2324,9 @@ repl = {
     "__MURMUR__": "$MURMUR_SETTING",
     "__SPAWN_DIRS__": "$SPAWN_DIRS_SETTING",
     "__SPAWN_ROOTS__": "$SPAWN_ROOTS_SETTING",
+    "__CODEX_CHILD_APPROVAL__": "$CODEX_CHILD_APPROVAL_SETTING",
+    "__CODEX_NETWORK__": "$CODEX_NETWORK_SETTING",
+    "__CODEX_ADD_DIRS__": "$CODEX_ADD_DIRS_SETTING",
     "__PORTRAITS_DIR__": "$PORTRAITS_DIR_SETTING",
     "__CUSTOM_PORTRAITS__": "$CUSTOM_PORTRAITS_SETTING",
     "__CODEX_MODELS__": "$CODEX_MODELS_SETTING",
@@ -2320,6 +2379,9 @@ env = {
     "AGENTSTACK_MURMUR": "$MURMUR_SETTING",
     "AGENTSTACK_SPAWN_DIRS": "$SPAWN_DIRS_SETTING",
     "AGENTSTACK_SPAWN_ROOTS": "$SPAWN_ROOTS_SETTING",
+    "AGENTSTACK_CODEX_CHILD_APPROVAL": "$CODEX_CHILD_APPROVAL_SETTING",
+    "AGENTSTACK_CODEX_NETWORK": "$CODEX_NETWORK_SETTING",
+    "AGENTSTACK_CODEX_ADD_DIRS": "$CODEX_ADD_DIRS_SETTING",
     "AGENTSTACK_PORTRAITS_DIR": "$PORTRAITS_DIR_SETTING",
     "AGENTSTACK_CUSTOM_PORTRAITS": "$CUSTOM_PORTRAITS_SETTING",
     "AGENTSTACK_CODEX_MODELS": "$CODEX_MODELS_SETTING",
@@ -2699,6 +2761,12 @@ manifest = {
         "AGENTSTACK_MURMUR": "$MURMUR_SETTING",
         "AGENTSTACK_SPAWN_DIRS": "$SPAWN_DIRS_SETTING",
         "AGENTSTACK_SPAWN_ROOTS": "$SPAWN_ROOTS_SETTING",
+        "AGENTSTACK_CODEX_CHILD_APPROVAL": "$CODEX_CHILD_APPROVAL_SETTING",
+        "AGENTSTACK_CODEX_NETWORK": "$CODEX_NETWORK_SETTING",
+        "AGENTSTACK_CODEX_ADD_DIRS": "$CODEX_ADD_DIRS_SETTING",
+    "AGENTSTACK_CODEX_CHILD_APPROVAL": "$CODEX_CHILD_APPROVAL_SETTING",
+    "AGENTSTACK_CODEX_NETWORK": "$CODEX_NETWORK_SETTING",
+    "AGENTSTACK_CODEX_ADD_DIRS": "$CODEX_ADD_DIRS_SETTING",
         "AGENTSTACK_PORTRAITS_DIR": "$PORTRAITS_DIR_SETTING",
         "AGENTSTACK_CUSTOM_PORTRAITS": "$CUSTOM_PORTRAITS_SETTING",
         "AGENTSTACK_CODEX_MODELS": "$CODEX_MODELS_SETTING",
@@ -2768,6 +2836,9 @@ main() {
   say "project key: $PROJECT_KEY"
   say "spawn dirs: ${SPAWN_DIRS_SETTING:-(default: ~)}"
   say "spawn roots: ${SPAWN_ROOTS_SETTING:-(default: \$HOME)}"
+  say "codex child approval: $CODEX_CHILD_APPROVAL_SETTING"
+  say "codex network: $CODEX_NETWORK_SETTING"
+  say "codex add dirs: ${CODEX_ADD_DIRS_SETTING:-(none beyond project, spawn dirs/roots, install dir, worktrees, ~/.claude, ~/.codex)}"
   validate_assume_yes
   if ! run_preflight; then
     exit 1
