@@ -83,6 +83,7 @@ FILES=(
   "dashboard/server.py"
   "dashboard/provider_runtime.py"
   "dashboard/provider_classification.py"
+  "dashboard/provider_launch_tracking.py"
   "dashboard/providers/registry.py"
   "dashboard/assets/google.svg"
 )
