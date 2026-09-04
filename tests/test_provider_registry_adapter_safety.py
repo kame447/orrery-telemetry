@@ -2,7 +2,24 @@ from __future__ import annotations
 
 import pytest
 
-from dashboard.providers.registry import ProviderCapabilities, ProviderSpec
+from dashboard.providers.registry import (
+    ProviderCapabilities,
+    ProviderRegistry,
+    ProviderSpec,
+)
+
+
+def _native(provider_id: str, program: str) -> ProviderSpec:
+    return ProviderSpec(
+        id=provider_id,
+        label=provider_id,
+        program=program,
+        models=(f"{provider_id}-1",),
+        default_model=f"{provider_id}-1",
+        capabilities=ProviderCapabilities(),
+        provider_key=provider_id,
+        dispatch="native",
+    )
 
 
 def test_adapter_provider_requires_explicit_adapter_script() -> None:
@@ -25,3 +42,9 @@ def test_adapter_provider_requires_explicit_adapter_script() -> None:
             provider_key="future-vendor",
             dispatch="adapter",
         )
+
+
+def test_registry_rejects_duplicate_program_ownership() -> None:
+    registry = ProviderRegistry([_native("first", "shared-cli")])
+    with pytest.raises(ValueError, match="provider program already registered: shared-cli"):
+        registry.register(_native("second", "shared-cli"))
