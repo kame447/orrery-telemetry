@@ -29,16 +29,18 @@ def test_async_adapter_status_keeps_actual_provider_metadata(monkeypatch, tmp_pa
             resources_required=False,
         ),
         provider_key="future-vendor",
+        adapter_script="spawn-future.sh",
     )
     monkeypatch.setattr(server, "PROVIDER_REGISTRY", ProviderRegistry([future]))
 
-    launcher = tmp_path / "spawn_child.sh"
+    launcher = tmp_path / "spawn-future.sh"
     launcher.write_text("#!/bin/bash\n", encoding="utf-8")
     launcher.chmod(0o755)
     runtime = tmp_path / "runtime"
     runtime.mkdir()
 
-    monkeypatch.setattr(server, "SPAWN_SCRIPT", str(launcher))
+    monkeypatch.setattr(server, "HOOKS_DIR", str(tmp_path))
+    monkeypatch.setattr(server, "SPAWN_SCRIPT", str(tmp_path / "native-spawn.sh"))
     monkeypatch.setattr(server, "RUNTIME_DIR", str(runtime))
     monkeypatch.setattr(server, "HERE", str(tmp_path))
     monkeypatch.setattr(server, "_project_key", lambda: "/project")
