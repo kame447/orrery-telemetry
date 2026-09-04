@@ -34,15 +34,12 @@ class ProviderSpec:
     provider_key: str
     efforts: tuple[str, ...] = ()
     effort_default: str = ""
-    # ``native`` delegates to the legacy Claude/Codex branch while it is being
-    # migrated. ``adapter`` uses the generic adapter path. This is provider
-    # metadata rather than a provider-name conditional in the dashboard core.
     dispatch: str = "adapter"
     adapter_script: str = ""
     launch_args: tuple[str, ...] = ()
-    # Values may reference {effort}, {resources}, and {task_file}.
     adapter_env: tuple[tuple[str, str], ...] = ()
     logo_aspect: float = 1.0
+    models_env: str = ""
 
     def __post_init__(self) -> None:
         if not self.id or not self.program or not self.models:
@@ -62,19 +59,38 @@ class ProviderSpec:
             if not key or not key.replace("_", "").isalnum() or not key[0].isalpha():
                 raise ValueError(f"invalid adapter environment key for {self.id}: {key}")
 
+    def resolved_models(self) -> tuple[str, ...]:
+        if not self.models_env:
+            return self.models
+        values = tuple(
+            value.strip()
+            for value in os.environ.get(self.models_env, "").split(",")
+            if value.strip()
+        )
+        return values or self.models
+
+    def resolved_default_model(self) -> str:
+        models = self.resolved_models()
+        if self.models_env and models != self.models:
+            return models[0]
+        return self.default_model
+
     def catalog_item(self) -> dict:
         item = {
             "id": self.id,
             "label": self.label,
             "program": self.program,
-            "models": list(self.models),
-            "default_model": self.default_model,
+            "models": list(self.resolved_models()),
+            "default_model": self.resolved_default_model(),
             "efforts": list(self.efforts) if self.capabilities.effort else None,
-            "capabilities": asdict(self.capabilities),
-            "provider_key": self.provider_key,
         }
         if self.capabilities.effort:
             item["effort_default"] = self.effort_default
+        # Keep the historical Claude/Codex JSON shape stable. Extra providers
+        # carry capability metadata so the GUI can adapt without name checks.
+        if self.dispatch != "native" or self.provider_key not in {"anthropic", "openai"}:
+            item["capabilities"] = asdict(self.capabilities)
+            item["provider_key"] = self.provider_key
         return item
 
 
@@ -112,8 +128,9 @@ class ProviderRegistry:
         self, provider_id: str, model: str = "", effort: str = ""
     ) -> dict:
         provider = self.require(provider_id)
-        selected_model = (model or provider.default_model).strip()
-        if selected_model not in provider.models:
+        models = provider.resolved_models()
+        selected_model = (model or provider.resolved_default_model()).strip()
+        if selected_model not in models:
             raise ValueError(
                 f"model not allowed for provider {provider.id}: {selected_model}"
             )
@@ -137,24 +154,7 @@ class ProviderRegistry:
         }
 
 
-def _env_models(name: str, defaults: tuple[str, ...]) -> tuple[str, ...]:
-    values = tuple(
-        value.strip()
-        for value in os.environ.get(name, "").split(",")
-        if value.strip()
-    )
-    return values or defaults
-
-
 def default_provider_registry() -> ProviderRegistry:
-    codex_models = _env_models(
-        "AGENTSTACK_CODEX_MODELS",
-        ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"),
-    )
-    gemini_models = _env_models(
-        "AGENTSTACK_GEMINI_MODELS",
-        ("gemini-3.8-flash-high", "gemini-3.8-flash-medium"),
-    )
     return ProviderRegistry(
         [
             ProviderSpec(
@@ -175,8 +175,8 @@ def default_provider_registry() -> ProviderRegistry:
                 id="codex",
                 label="Codex",
                 program="codex-cli",
-                models=codex_models,
-                default_model=codex_models[0],
+                models=("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"),
+                default_model="gpt-5.6-sol",
                 capabilities=ProviderCapabilities(effort=True),
                 provider_key="openai",
                 efforts=("low", "medium", "high", "xhigh"),
@@ -184,13 +184,14 @@ def default_provider_registry() -> ProviderRegistry:
                 dispatch="native",
                 launch_args=("--codex",),
                 logo_aspect=256 / 260,
+                models_env="AGENTSTACK_CODEX_MODELS",
             ),
             ProviderSpec(
                 id="gemini",
                 label="Gemini",
                 program="antigravity",
-                models=gemini_models,
-                default_model=gemini_models[0],
+                models=("gemini-3.8-flash-high", "gemini-3.8-flash-medium"),
+                default_model="gemini-3.8-flash-high",
                 capabilities=ProviderCapabilities(
                     effort=True,
                     mcp=True,
@@ -212,6 +213,7 @@ def default_provider_registry() -> ProviderRegistry:
                     ("AGENTSTACK_GEMINI_TASK_FILE", "{task_file}"),
                     ("AGENTSTACK_GEMINI_MODEL", "{model}"),
                 ),
+                models_env="AGENTSTACK_GEMINI_MODELS",
             ),
         ]
     )
