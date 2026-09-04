@@ -13,6 +13,7 @@ _ROOT = pathlib.Path(__file__).resolve().parent.parent
 _LAUNCHER = _ROOT / "bin" / "agent-start-gemini"
 _BOOTSTRAP = _ROOT / "bin" / "agentstack-gemini-bootstrap"
 _SETUP = _ROOT / "bin" / "agentstack-gemini-setup"
+_MCP = _ROOT / "bin" / "agentstack-gemini-mcp"
 _CHILD = _ROOT / "hooks" / "spawn_gemini_child.sh"
 _CHILD_MAIL = _ROOT / "bin" / "agentstack-gemini-child-mail"
 _STREAM = _ROOT / "bin" / "agentstack-gemini-stream"
@@ -46,7 +47,7 @@ def _run_setup(
 
 
 def test_gemini_shell_files_parse_with_bash() -> None:
-    for path in (_LAUNCHER, _BOOTSTRAP, _SETUP, _CHILD):
+    for path in (_LAUNCHER, _BOOTSTRAP, _SETUP, _MCP, _CHILD):
         result = subprocess.run(
             ["bash", "-n", str(path)],
             cwd=_ROOT,
@@ -72,7 +73,7 @@ def test_gemini_python_helpers_compile() -> None:
 
 
 def test_gemini_entrypoints_are_executable() -> None:
-    for path in (_LAUNCHER, _BOOTSTRAP, _SETUP, _CHILD, _CHILD_MAIL, _STREAM):
+    for path in (_LAUNCHER, _BOOTSTRAP, _SETUP, _MCP, _CHILD, _CHILD_MAIL, _STREAM):
         assert path.stat().st_mode & stat.S_IXUSR, path
 
 
@@ -124,6 +125,13 @@ def test_workspace_mcp_config_is_ignored() -> None:
     assert ".agents/mcp_config.json" in ignore
 
 
+def _expected_session_bound_entry(config: pathlib.Path) -> dict:
+    return {
+        "command": str(config.parent / "agentstack-home" / "bin" / "agentstack-gemini-mcp"),
+        "args": [],
+    }
+
+
 def test_mcp_setup_preserves_unrelated_servers() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         config = pathlib.Path(tmp) / "mcp_config.json"
@@ -147,12 +155,10 @@ def test_mcp_setup_preserves_unrelated_servers() -> None:
         assert rendered["mcpServers"]["keep-me"] == {
             "serverUrl": "https://example.invalid/mcp"
         }
-        assert rendered["mcpServers"]["orrery-mail"] == {
-            "serverUrl": "http://127.0.0.1:18765/mcp"
-        }
+        assert rendered["mcpServers"]["orrery-mail"] == _expected_session_bound_entry(config)
 
 
-def test_mcp_setup_adds_bearer_header_only_when_enabled() -> None:
+def test_mcp_setup_never_persists_mail_bearer_or_owner_token() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         config = pathlib.Path(tmp) / "mcp_config.json"
         result = _run_setup(
@@ -163,10 +169,9 @@ def test_mcp_setup_adds_bearer_header_only_when_enabled() -> None:
         )
         assert result.returncode == 0, result.stderr
         entry = json.loads(result.stdout)["mcpServers"]["orrery-mail"]
-        assert entry == {
-            "serverUrl": "http://127.0.0.1:18765/mcp",
-            "headers": {"Authorization": "Bearer secret-for-test"},
-        }
+        assert entry == _expected_session_bound_entry(config)
+        assert "secret-for-test" not in result.stdout
+        assert "Authorization" not in result.stdout
 
 
 def test_mcp_setup_uninstall_removes_only_orrery_entry() -> None:
@@ -176,7 +181,7 @@ def test_mcp_setup_uninstall_removes_only_orrery_entry() -> None:
             json.dumps(
                 {
                     "mcpServers": {
-                        "orrery-mail": {"serverUrl": "http://old.invalid/mcp"},
+                        "orrery-mail": {"command": "/old/runner", "args": []},
                         "keep-me": {"serverUrl": "https://example.invalid/mcp"},
                     }
                 }
