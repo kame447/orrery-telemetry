@@ -55,6 +55,7 @@ FILES=(
   "dashboard/server.py"
   "dashboard/server_core.py"
   "dashboard/provider_runtime.py"
+  "dashboard/provider_classification.py"
   "dashboard/providers/registry.py"
   "dashboard/assets/google.svg"
 )
