@@ -42,6 +42,7 @@ class ProviderSpec:
     logo_aspect: float = 1.0
     models_env: str = ""
     required_paths: tuple[str, ...] = ()
+    runtime_commands: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.id or not self.program or not self.models:
@@ -64,6 +65,8 @@ class ProviderSpec:
             path = Path(relative)
             if path.is_absolute() or ".." in path.parts:
                 raise ValueError(f"required provider path must be install-relative: {relative}")
+        if any(not command.strip() for command in self.runtime_commands):
+            raise ValueError(f"runtime commands must be non-empty for provider {self.id}")
 
     def resolved_models(self) -> tuple[str, ...]:
         if not self.models_env:
@@ -229,6 +232,7 @@ def _known_provider_specs() -> tuple[ProviderSpec, ...]:
                 "bin/agentstack-gemini-stream",
                 "hooks/spawn_gemini_preregistered.sh",
             ),
+            runtime_commands=("agy",),
         ),
     )
 
