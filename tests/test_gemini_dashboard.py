@@ -34,6 +34,8 @@ def test_rendered_dashboard_uses_capabilities_not_gemini_name_checks():
     assert "providerCaps.resources_required" in rendered
     assert "providerCaps.worktree_required" in rendered
     assert "payload.resources=resources" in rendered
+    assert "const resourcesReady=!providerCaps.resources_required" in rendered
+    assert "button.disabled=spmBusy||!spmReady||!identityReady||!resourcesReady" in rendered
     assert "spmSelectedProvider==='gemini'" not in rendered
 
 
