@@ -6,6 +6,7 @@ adapter dispatch, UI capability hints, provider badges, and resume gating.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
@@ -56,6 +57,14 @@ def _format_adapter_env(
 
 def _adapter_needs_task_file(provider: ProviderSpec) -> bool:
     return any("{task_file}" in template for _key, template in provider.adapter_env)
+
+
+def _normalize_resources(provider: ProviderSpec, raw: str) -> str:
+    """Normalize reservation CSV and fail before launch on empty declarations."""
+    items = [item.strip() for item in (raw or "").split(",") if item.strip()]
+    if provider.capabilities.resources_required and not items:
+        raise ValueError(f"resources required for provider {provider.id}")
+    return ",".join(items)
 
 
 def _write_adapter_wrapper(
@@ -151,6 +160,9 @@ def _install_spawn(base: Any) -> None:
                 str(payload.get("model") or ""),
                 str(payload.get("effort") or ""),
             )
+            resources = _normalize_resources(
+                provider, str(payload.get("resources") or "")
+            )
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
 
@@ -160,12 +172,6 @@ def _install_spawn(base: Any) -> None:
                 "ok": False,
                 "error": f"standalone not supported for provider {provider.id}",
             }
-        resources = str(payload.get("resources") or "").strip()
-        if provider.capabilities.resources_required and not resources:
-            return {
-                "ok": False,
-                "error": f"resources required for provider {provider.id}",
-            }
 
         normalized = dict(payload)
         normalized.update(
@@ -173,6 +179,10 @@ def _install_spawn(base: Any) -> None:
             model=validated["model"],
             effort=validated["effort"],
         )
+        if resources:
+            normalized["resources"] = resources
+        else:
+            normalized.pop("resources", None)
         if provider.capabilities.worktree_required:
             normalized["worktree"] = True
 
@@ -184,11 +194,15 @@ def _install_spawn(base: Any) -> None:
             with _PATCH_LOCK:
                 return original(normalized)
 
-        adapter_script = (
-            os.path.join(base.HOOKS_DIR, provider.adapter_script)
-            if provider.adapter_script
-            else base.SPAWN_SCRIPT
-        )
+        # ProviderSpec validates adapter_script for adapter dispatch. Do not
+        # silently fall back to the legacy Claude launcher if a malformed spec
+        # somehow crosses that boundary.
+        if not provider.adapter_script:
+            return {
+                "ok": False,
+                "error": f"spawn adapter is not configured for provider {provider.id}",
+            }
+        adapter_script = os.path.join(base.HOOKS_DIR, provider.adapter_script)
         if not os.path.exists(adapter_script):
             return {
                 "ok": False,
@@ -298,7 +312,9 @@ def _inject_ui_capabilities(text: str, registry: ProviderRegistry) -> str:
     )
 
     # Extend the existing provider-aspect table from registry metadata. The
-    # logo asset convention is /assets/<provider_key>.svg.
+    # logo asset convention is /assets/<provider_key>.svg. Keys are JSON-quoted
+    # because vendor identifiers commonly contain hyphens and are not always
+    # valid bare JavaScript identifiers.
     match = re.search(r"const _PROVIDER_ASPECT = \{(?P<body>.*?)\n\};", text, re.S)
     if match:
         body = match.group("body")
@@ -306,9 +322,9 @@ def _inject_ui_capabilities(text: str, registry: ProviderRegistry) -> str:
         for provider_id in registry.ids():
             provider = registry.require(provider_id)
             key = provider.provider_key
-            if re.search(rf"\b{re.escape(key)}\s*:", body):
+            if re.search(rf"(?:^|\n)\s*(?:{re.escape(json.dumps(key))}|{re.escape(key)})\s*:", body):
                 continue
-            additions.append(f"  {key}: {provider.logo_aspect:g},")
+            additions.append(f"  {json.dumps(key)}: {provider.logo_aspect:g},")
         if additions:
             replacement = (
                 "const _PROVIDER_ASPECT = {"
@@ -341,7 +357,7 @@ def _inject_ui_capabilities(text: str, registry: ProviderRegistry) -> str:
 
     button_marker = """  const identityReady=!spmSelectedName||spmIdentityState==='verified';\n  button.disabled=spmBusy||!spmReady||!identityReady;"""
     if "const resourcesReady=!providerCaps.resources_required" not in text and button_marker in text:
-        button_replacement = """  const identityReady=!spmSelectedName||spmIdentityState==='verified';\n  const selectedProvider=spmProviders.find(item=>item.id===spmSelectedProvider);\n  const providerCaps=selectedProvider&&selectedProvider.capabilities||{};\n  const resourcesReady=!providerCaps.resources_required||!!(SPM('spm-resources')&&SPM('spm-resources').value.trim());\n  button.disabled=spmBusy||!spmReady||!identityReady||!resourcesReady;"""
+        button_replacement = """  const identityReady=!spmSelectedName||spmIdentityState==='verified';\n  const selectedProvider=spmProviders.find(item=>item.id===spmSelectedProvider);\n  const providerCaps=selectedProvider&&selectedProvider.capabilities||{};\n  const resourcesReady=!providerCaps.resources_required||!!(SPM('spm-resources')&&SPM('spm-resources').value.split(',').some(item=>item.trim()));\n  button.disabled=spmBusy||!spmReady||!identityReady||!resourcesReady;"""
         text = text.replace(button_marker, button_replacement, 1)
     return text
 
