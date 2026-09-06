@@ -477,7 +477,7 @@ def _tmux(args: list[str]) -> str:
 
 
 def tmux_state() -> dict:
-    """セッション名 -> {created, activity, attached, cmd, title} を返す。"""
+    """セッション名 -> {created, activity, attached, cmd, pane_pid, title} を返す。"""
     sessions: dict[str, dict] = {}
 
     fmt = SEP.join([
@@ -499,6 +499,7 @@ def tmux_state() -> dict:
             "attached": False,
             "client_tty": None,
             "cmd": "",
+            "pane_pid": 0,
             "title": "",
         }
 
@@ -508,18 +509,28 @@ def tmux_state() -> dict:
             "#{session_name}",
             "#{window_active}#{pane_active}",
             "#{pane_current_command}",
+            "#{pane_pid}",
             "#{pane_title}",
         ]
     )
     for line in _tmux(["list-panes", "-a", "-F", fmt]).splitlines():
-        parts = line.split(SEP, 3)
+        parts = line.split(SEP, 4)
         if len(parts) < 4:
             continue
-        name, flags, cmd, title = parts
+        # Real tmux expands the new pane_pid field.  Older demo/test adapters
+        # ignore the requested format and still emit the historical four-field
+        # row (name, flags, cmd, title); keep accepting that shape so adding
+        # process-tree liveness does not break the dashboard's fake tmux layer.
+        if len(parts) >= 5:
+            name, flags, cmd, pane_pid, title = parts
+        else:
+            name, flags, cmd, title = parts
+            pane_pid = "0"
         if flags != "11":  # active window + active pane
             continue
         if name in sessions:
             sessions[name]["cmd"] = cmd
+            sessions[name]["pane_pid"] = _to_int(pane_pid)
             sessions[name]["title"] = title
 
     fmt = SEP.join(["#{client_session}", "#{client_tty}"])
@@ -541,6 +552,111 @@ def _to_int(s: str) -> int:
         return int(s)
     except (ValueError, TypeError):
         return 0
+
+
+_SHELL_PROCS = {"zsh", "bash", "sh", "fish", "csh", "tcsh", "dash"}
+
+
+def _process_tree_snapshot() -> tuple[dict[int, str], dict[int, list[int]]] | None:
+    """Return one host process snapshot as (command_by_pid, children_by_ppid).
+
+    Codex children are intentionally launched through a shell wrapper, so
+    tmux's pane_current_command can remain `zsh` while the TUI lives below it.
+    A process snapshot is the missing signal that distinguishes that state from
+    the shell-only husk left after Codex exits. Failure is reported as None so
+    callers can fail safe and preserve the previous "assume live" behavior.
+    """
+    if sys.platform == "win32":
+        return None
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,ppid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+
+    commands: dict[int, str] = {}
+    children: dict[int, list[int]] = {}
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) != 3:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        commands[pid] = parts[2]
+        children.setdefault(ppid, []).append(pid)
+    return (commands, children) if commands else None
+
+
+def _is_codex_process_command(command: str) -> bool:
+    """Match the executable (or Node entrypoint), not incidental `codex` text."""
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        argv = command.split()
+    if not argv:
+        return False
+
+    executable = os.path.basename(argv[0]).lower()
+    if executable == "codex" or executable.startswith("codex-"):
+        return True
+    if executable not in {"node", "nodejs"}:
+        return False
+
+    # npm / app-bundled Codex commonly appears as `node /.../codex ...`.
+    # Only inspect Node's first non-option entrypoint; prompts or later argv
+    # mentioning the word "codex" must not turn an unrelated process live.
+    for arg in argv[1:]:
+        if arg.startswith("-"):
+            continue
+        entrypoint = os.path.basename(arg).lower()
+        return (
+            entrypoint in {"codex", "codex.js"}
+            or entrypoint.startswith("codex-")
+        )
+    return False
+
+
+def _codex_process_alive(
+    pane_pid: object,
+    process_tree: tuple[dict[int, str], dict[int, list[int]]] | None,
+) -> bool | None:
+    """Whether a pane root or one of its descendants is an actual Codex CLI.
+
+    None means the host process tree could not be measured. In that case the
+    dashboard must not guess that a live agent is dead; callers retain the old
+    registration-based fallback. False is therefore meaningful evidence: the
+    pane exists, the snapshot contains it, and no Codex process remains below it.
+    """
+    try:
+        root = int(pane_pid or 0)
+    except (TypeError, ValueError):
+        return None
+    if root <= 0 or process_tree is None:
+        return None
+    commands, children = process_tree
+    if root not in commands:
+        return None
+
+    stack = [root]
+    seen: set[int] = set()
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        if _is_codex_process_command(commands.get(pid, "")):
+            return True
+        stack.extend(children.get(pid, ()))
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -732,7 +848,8 @@ _VERSION_CMD_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 
 def classify(name: str, cmd: str, title: str, in_mail: bool,
-             program: str | None = None) -> str:
+             program: str | None = None,
+             codex_alive: bool | None = None) -> str:
     if name in INFRA_NAMES:
         return "infra"
     if name in WARMUP_NAMES:
@@ -743,13 +860,17 @@ def classify(name: str, cmd: str, title: str, in_mail: bool,
     # ProOpus / ProSonnet / SeminarBot がいずれも "2.1.259"）。node / claude
     # のどちらにも一致しないため、glyph の無い待機中に finished へ落ちていた。
     claude = cmd in ("node", "claude") or bool(_VERSION_CMD_RE.match(cmd or "")) or glyph
-    # Codex は pane_current_command が zsh で報告されることが多く (REPL の node
-    # が zsh の子プロセスのため)、glyph が消える待機中に "finished" 誤判定して
-    # しまう。agent-mail に program=codex-cli で登録され、かつ tmux session が
-    # 生きているなら「Codex 起動中」とみなす。終了時は tmux session が消えて
-    # build_agents の 2nd pass で gone/retired として扱われる。
-    if not claude and program and program.startswith("codex") and in_mail:
-        claude = True
+    # Codex は zsh wrapper の子で動くため pane_current_command だけでは
+    # live TUI と終了後の shell husk を区別できない。process tree を測れた場合は
+    # その結果を権威にする。測れない環境だけ従来どおり registration + tmux を
+    # fail-safe fallback とし、観測失敗を理由に生きた agent を finished にしない。
+    if program and program.startswith("codex") and in_mail:
+        if codex_alive is True:
+            claude = True
+        elif codex_alive is False:
+            claude = False
+        elif not claude:
+            claude = True
     # ※ 「program=claude-code で登録済み＋tmux 生存なら agent」という Codex 式の
     # fallback は入れない。Claude は REPL が終了すると pane が zsh に戻るので、
     # その規則だと「登録は残るが REPL は死んだ」= finished を表現できなくなる
@@ -769,6 +890,14 @@ def classify(name: str, cmd: str, title: str, in_mail: bool,
 def build_agents() -> list[dict]:
     sessions = tmux_state()
     mail_agents, mail_instr = agentmail_state()
+    codex_process_tree = (
+        _process_tree_snapshot()
+        if any(
+            (entry.get("program") or "").startswith("codex")
+            for entry in mail_agents.values()
+        )
+        else None
+    )
     codex_apps = _codex_app_runtimes()
     now = int(time.time())
     didx = _deliverables_index()  # {agent: [...]}（60秒キャッシュ）
@@ -777,8 +906,16 @@ def build_agents() -> list[dict]:
     rows = []
     for name, s in sessions.items():
         m = mail_agents.get(name)
-        cat = classify(name, s["cmd"], s["title"], m is not None,
-                       program=(m or {}).get("program"))
+        program = (m or {}).get("program") or ""
+        codex_alive = (
+            _codex_process_alive(s.get("pane_pid"), codex_process_tree)
+            if program.startswith("codex")
+            else None
+        )
+        cat = classify(
+            name, s["cmd"], s["title"], m is not None,
+            program=program, codex_alive=codex_alive,
+        )
         title = s["title"].strip()
         # ペインタイトルがコマンド名そのものや空ならライブ表示としては無意味
         live = ""
@@ -787,14 +924,17 @@ def build_agents() -> list[dict]:
         running = s["cmd"] in ("node", "claude") or (
             bool(title) and _is_activity_glyph(title[:1])
         )
+        if program.startswith("codex") and codex_alive is not None:
+            # A measured Codex process tree overrides stale pane title/cmd
+            # heuristics in both directions: live wrapper=True, shell husk=False.
+            running = codex_alive
         if name == "mail-watcher":
             watcher_health = mail_watcher_health()
             running = bool(watcher_health.get("watcher_running"))
             if not live and watcher_health.get("watcher_mode"):
                 live = f"watcher: {watcher_health['watcher_mode']}"
-        # Codex は zsh が pane_current_command として報告されるので、上の
-        # cmd チェック + glyph チェックだけでは待機中に running=False になる。
-        # category と整合させるため、cat=="agent" なら running も True に。
+        # If process-tree measurement was unavailable, preserve the previous
+        # fail-safe category fallback for wrapped Codex sessions.
         if not running and cat == "agent":
             running = True
         last_active = max(
@@ -1384,22 +1524,32 @@ def graph_payload(days: float, show_all: bool) -> dict:
 
     mx = max((n["last_active"] for n in nodes if n["last_active"]), default=0)
     win = days * 86400
-    sessions = tmux_state()  # name -> {attached, cmd, title, activity, ...}
+    sessions = tmux_state()  # name -> {attached, cmd, pane_pid, title, activity, ...}
     codex_apps = _codex_app_runtimes()
+    programs = {n["name"]: (n.get("program") or "") for n in nodes}
+    codex_process_tree = (
+        _process_tree_snapshot()
+        if any(program.startswith("codex") for program in programs.values())
+        else None
+    )
     if show_all:
         keep = {n["name"] for n in nodes}
     else:
         # running_set: claude/node プロセスが alive な tmux session のみ。
         # zsh husk (session 残存だが claude 非稼働) は除外する。
-        programs = {n["name"]: (n.get("program") or "") for n in nodes}
         running_set: set[str] = set()
         for nm, s in sessions.items():
             t = (s.get("title") or "").strip()
-            if (
-                s["cmd"] in ("node", "claude")
-                or (t and _is_activity_glyph(t[:1]))
-                or programs.get(nm, "").startswith("codex")
-            ):
+            program = programs.get(nm, "")
+            running = s["cmd"] in ("node", "claude") or (
+                bool(t) and _is_activity_glyph(t[:1])
+            )
+            if program.startswith("codex"):
+                codex_alive = _codex_process_alive(
+                    s.get("pane_pid"), codex_process_tree,
+                )
+                running = True if codex_alive is None else codex_alive
+            if running:
                 running_set.add(nm)
         retired_names = {n["name"] for n in nodes if n.get("retired")}
         for nm, rec in codex_apps.items():
@@ -1426,10 +1576,12 @@ def graph_payload(days: float, show_all: bool) -> dict:
         running = s["cmd"] in ("node", "claude") or (
             bool(t) and _is_activity_glyph(t[:1])
         )
-        # Codex は cmd=zsh で報告されるため、program=codex-cli 登録で tmux
-        # session が live なら running 扱い (build_agents と同じ判定)
-        if not running and program and program.startswith("codex"):
-            running = True
+        # Keep the graph and deck on the same Codex liveness authority.
+        if program and program.startswith("codex"):
+            codex_alive = _codex_process_alive(
+                s.get("pane_pid"), codex_process_tree,
+            )
+            running = True if codex_alive is None else codex_alive
         live_txt = ""
         if t and t not in (s.get("cmd", ""), name) and not t.startswith("/"):
             live_txt = t
@@ -4406,18 +4558,22 @@ def do_exit(session: str) -> dict:
     if target.get("attached"):
         actions.append("warn-attached")
 
-    # pane で動いているプロセスを確認
-    # Claude Code は Python プロセス → "Python" / シェルゾンビは "zsh"/"bash" 等
-    _SHELL_PROCS = {"zsh", "bash", "sh", "fish", "csh", "tcsh", "dash"}
+    # build_agents() has already distinguished a live wrapped Codex from a
+    # shell-only husk. pane_current_command is used only to choose the command
+    # appropriate for a target that is already classified as finished.
     pane_cmd_r = subprocess.run(
         ["tmux", "display-message", "-t", session, "-p", "#{pane_current_command}"],
         capture_output=True, text=True,
     )
     pane_cmd = pane_cmd_r.stdout.strip().lower()
 
-    if pane_cmd in _SHELL_PROCS:
-        # Claude はすでに終了してシェルだけ残っているゾンビ状態。
-        # /exit はシェルに効かないので shell の exit コマンドで tmux session を閉じる。
+    # pane_current_command alone cannot tell a shell husk from a live wrapped
+    # CLI. Codex children are launched through zsh, so tmux can report `zsh`
+    # while the Codex TUI is still alive. build_agents() already classifies
+    # registered live Codex sessions as category=agent; keep that classification
+    # authoritative here too. Only a shell pane classified as finished is a
+    # shell-only husk that should receive the shell's `exit`.
+    if pane_cmd in _SHELL_PROCS and target["category"] == "finished":
         r = subprocess.run(
             ["tmux", "send-keys", "-t", session, "exit", "Enter"],
             capture_output=True, text=True,
