@@ -224,6 +224,24 @@ def _provider_runtime_for_session(base: Any, session: str) -> dict[str, Any] | N
     return observation
 
 
+def _fresh_provider_runtime_for_session(base: Any, session: str) -> dict[str, Any] | None:
+    """Measure the provider runtime again immediately before a destructive exit."""
+    pane_pid = _active_pane_pids(base).get(session)
+    if pane_pid is None:
+        return None
+    observation = _runtime_process_for_pane(
+        pane_pid,
+        _process_tree_snapshot(),
+        base.PROVIDER_REGISTRY,
+    )
+    if not isinstance(observation, dict):
+        return None
+    program = base._agent_program(session)
+    if not program or observation.get("program") != program:
+        return None
+    return observation
+
+
 def install(base: Any) -> Any:
     """Teach the dashboard about registry runtimes and provider-aware exit."""
     if getattr(base, "_PROVIDER_CLASSIFICATION_INSTALLED", False):
@@ -356,6 +374,17 @@ def install(base: Any) -> Any:
         if not base._has_session(session):
             return {"ok": False, "error": f"tmux session '{session}' not found"}
 
+        # The card/graph can be up to one cache interval old. Re-measure the
+        # pane and process tree before sending /exit or a signal so a recycled
+        # PID or changed foreground runtime is never acted on from stale state.
+        fresh_observation = _fresh_provider_runtime_for_session(base, session)
+        if fresh_observation is None:
+            return {
+                "ok": False,
+                "error": "provider runtime changed before exit; refresh and retry",
+            }
+        observation = fresh_observation
+
         actions: list[str] = []
         if target.get("attached"):
             actions.append("warn-attached")
@@ -395,18 +424,19 @@ def install(base: Any) -> Any:
 
         # Headless Antigravity consumes stream-json from a pipe, so typing
         # `/exit` into the tmux tty cannot reach its stdin. Signal only the
-        # measured provider runtime PID; keeping the bash runner alive lets it
-        # report the interruption, release reservations, retire the identity,
-        # and remove its temporary credentials/config after the pipeline ends.
+        # freshly measured provider runtime PID; keeping the bash runner alive
+        # lets it report the interruption, release reservations, retire the
+        # identity, and remove temporary credentials/config after the pipeline.
         try:
             runtime_pid = int(observation["pid"])
             os.kill(runtime_pid, signal.SIGINT)
         except (KeyError, TypeError, ValueError):
             return {"ok": False, "error": "provider runtime pid is unavailable"}
         except ProcessLookupError:
-            # The runtime ended between measurement and the click. Re-run the
-            # legacy path so an already-finished shell husk can still be closed.
-            return original_exit(session)
+            return {
+                "ok": False,
+                "error": "provider runtime exited before interrupt; refresh and retry",
+            }
         except PermissionError as exc:
             return {"ok": False, "error": f"cannot interrupt provider runtime: {exc}"}
         except OSError as exc:
