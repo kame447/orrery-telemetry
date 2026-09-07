@@ -148,6 +148,11 @@ def _mock_live_provider(monkeypatch, *, headless: bool) -> dict:
         ],
     )
     monkeypatch.setattr(server, "_has_session", lambda _name: True)
+    monkeypatch.setattr(
+        provider_classification,
+        "_fresh_provider_runtime_for_session",
+        lambda _base, _session: dict(observation),
+    )
     return observation
 
 
@@ -167,6 +172,51 @@ def test_headless_gemini_exit_interrupts_only_runtime_pid(monkeypatch):
     assert "interrupt-sent" in result["actions"]
     assert "provider-headless:gemini" in result["actions"]
     assert kills == [(202, signal.SIGINT)]
+
+
+def test_headless_exit_uses_fresh_runtime_pid_not_cached_pid(monkeypatch):
+    observation = _mock_live_provider(monkeypatch, headless=True)
+    assert observation["pid"] == 202
+    fresh = dict(observation, pid=303)
+    monkeypatch.setattr(
+        provider_classification,
+        "_fresh_provider_runtime_for_session",
+        lambda _base, _session: fresh,
+    )
+
+    kills: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(
+        provider_classification.os,
+        "kill",
+        lambda pid, sig: kills.append((pid, sig)),
+    )
+
+    result = server.do_exit("GeminiCurie")
+
+    assert result["ok"] is True
+    assert kills == [(303, signal.SIGINT)]
+
+
+def test_provider_exit_refuses_when_fresh_runtime_disappears(monkeypatch):
+    _mock_live_provider(monkeypatch, headless=True)
+    monkeypatch.setattr(
+        provider_classification,
+        "_fresh_provider_runtime_for_session",
+        lambda _base, _session: None,
+    )
+
+    kills: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(
+        provider_classification.os,
+        "kill",
+        lambda pid, sig: kills.append((pid, sig)),
+    )
+
+    result = server.do_exit("GeminiCurie")
+
+    assert result["ok"] is False
+    assert "refresh and retry" in result["error"]
+    assert kills == []
 
 
 def test_wrapped_interactive_gemini_exit_types_slash_exit(monkeypatch):
