@@ -68,18 +68,23 @@ def main() -> int:
 
     status = str(final_result.get("status") or "UNKNOWN").upper()
     response = str(final_result.get("response") or "").strip()
+    denied = _denied_action_names(final_result.get("denied_actions"))
     if status != "SUCCESS":
         print(
             f"[antigravity] headless run failed with status={status}",
             file=sys.stderr,
         )
         return 1
-    if not response:
-        denied = _denied_action_names(final_result.get("denied_actions"))
-        suffix = f"; denied actions: {', '.join(denied)}" if denied else ""
+    if denied:
         print(
-            "[antigravity] incomplete headless run: SUCCESS with no textual response"
-            + suffix,
+            "[antigravity] incomplete headless run: required actions were denied: "
+            + ", ".join(denied),
+            file=sys.stderr,
+        )
+        return 1
+    if not response:
+        print(
+            "[antigravity] incomplete headless run: SUCCESS with no textual response",
             file=sys.stderr,
         )
         return 1
