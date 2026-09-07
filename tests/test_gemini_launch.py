@@ -117,7 +117,9 @@ def test_delegated_child_lifecycle_is_launcher_owned() -> None:
     assert 'rm -f $(printf \'%q\' "$TASK_EVENT_FILE") $(printf \'%q\' "$TOKEN_FILE")' in text
     helper = _CHILD_MAIL.read_text(encoding="utf-8")
     assert 'registration_token=token' in helper
-    assert 'subject=f"Gemini child complete: {args.agent_name}"' in helper
+    assert 'subject_state = "complete" if status == "SUCCESS" else "incomplete"' in helper
+    assert 'subject=f"Gemini child {subject_state}: {args.agent_name}"' in helper
+    assert 'importance="normal" if status == "SUCCESS" else "high"' in helper
     assert 'path.stat().st_mode & 0o777' in helper
     assert 'if mode & 0o077:' in helper
 
