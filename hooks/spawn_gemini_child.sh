@@ -140,6 +140,8 @@ RUNNER_FILE="$RUNTIME_DIR/gemini-runner-$$.sh"
 RESULT_LOG=""
 STDERR_LOG=""
 MCP_CONFIG=""
+EXCLUDE_FILE=""
+EXCLUDE_ADDED=false
 CHILD_NAME=""
 WORKTREE_DIR=""
 BRANCH_NAME=""
@@ -171,6 +173,28 @@ path.write_text("\n".join(line for line in lines if line != name) + "\n", encodi
 PY
 }
 
+remove_transient_exclude() {
+  [[ "$EXCLUDE_ADDED" == true && -n "$EXCLUDE_FILE" ]] || return 0
+  "$PYTHON_BIN" - "$EXCLUDE_FILE" <<'PY' 2>/dev/null || true
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+try:
+    lines = path.read_text(encoding="utf-8").splitlines()
+except OSError:
+    raise SystemExit(0)
+removed = False
+kept = []
+for line in lines:
+    if not removed and line == ".agents/mcp_config.json":
+        removed = True
+        continue
+    kept.append(line)
+path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+PY
+  EXCLUDE_ADDED=false
+}
+
 cleanup_failure() {
   status=$?
   if [[ $status -ne 0 ]]; then
@@ -186,6 +210,7 @@ cleanup_failure() {
       mail_helper retire --project-key "$PROJECT_KEY" --agent-name "$CHILD_NAME" \
         --token-file "$TOKEN_FILE" >/dev/null 2>&1 || true
     fi
+    remove_transient_exclude
     if [[ "$WORKTREE_CREATED" == true && -n "$WORKTREE_DIR" ]]; then
       git -C "$SOURCE_REPO" worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1 || true
       [[ -n "$BRANCH_NAME" ]] && git -C "$SOURCE_REPO" branch -D "$BRANCH_NAME" >/dev/null 2>&1 || true
@@ -225,10 +250,12 @@ WORKTREE_CREATED=true
 
 # This is local Git metadata, not a tracked project change. It keeps the
 # child-specific MCP binding out of `git add .` in arbitrary target projects.
+# Record ownership so only the exclusion added by this launcher is removed.
 EXCLUDE_FILE="$(git -C "$WORKTREE_DIR" rev-parse --git-path info/exclude)"
 mkdir -p "$(dirname "$EXCLUDE_FILE")"
 if ! grep -qxF '.agents/mcp_config.json' "$EXCLUDE_FILE" 2>/dev/null; then
   printf '%s\n' '.agents/mcp_config.json' >> "$EXCLUDE_FILE"
+  EXCLUDE_ADDED=true
 fi
 
 if [[ -n "$RESOURCES" ]]; then
@@ -380,7 +407,7 @@ AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE") \
   $(printf '%q' "$PYTHON_BIN") $(printf '%q' "$MAIL_HELPER") report --project-key $(printf '%q' "$PROJECT_KEY") \
     --agent-name $(printf '%q' "$CHILD_NAME") --token-file $(printf '%q' "$TOKEN_FILE") \
     --parent $(printf '%q' "$PARENT_NAME") --result-log $(printf '%q' "$RESULT_LOG") \
-    --worktree $(printf '%q' "$WORKTREE_DIR") || true
+    --worktree $(printf '%q' "$WORKTREE_DIR") --runner-status "\$child_status" || true
 
 if [[ -n "\$RESOURCES" ]]; then
   AGENTSTACK_HOME=$(printf '%q' "$AGENTSTACK_HOME_DIR") \
@@ -400,6 +427,25 @@ AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE") \
     --agent-name $(printf '%q' "$CHILD_NAME") --token-file $(printf '%q' "$TOKEN_FILE") || true
 
 [[ -x $(printf '%q' "$CLEANUP_HELPER") ]] && $(printf '%q' "$CLEANUP_HELPER") || true
+if [[ $(printf '%q' "$EXCLUDE_ADDED") == true ]]; then
+  $(printf '%q' "$PYTHON_BIN") - $(printf '%q' "$EXCLUDE_FILE") <<'PYEXCLUDE' 2>/dev/null || true
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+try:
+    lines = path.read_text(encoding="utf-8").splitlines()
+except OSError:
+    raise SystemExit(0)
+removed = False
+kept = []
+for line in lines:
+    if not removed and line == ".agents/mcp_config.json":
+        removed = True
+        continue
+    kept.append(line)
+path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+PYEXCLUDE
+fi
 rm -f $(printf '%q' "$TASK_EVENT_FILE") $(printf '%q' "$TOKEN_FILE") $(printf '%q' "$MCP_CONFIG") $(printf '%q' "$RUNNER_FILE")
 echo "[antigravity] child finished; worktree retained at $(printf '%q' "$WORKTREE_DIR")"
 exit "\$child_status"
