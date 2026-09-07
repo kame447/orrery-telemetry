@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -55,15 +56,32 @@ def test_stream_rejects_success_without_textual_response() -> None:
                 "result": {
                     "status": "SUCCESS",
                     "response": "",
-                    "denied_actions": [
-                        {"action": "read_file", "display_name": "ListDir"}
-                    ],
+                    "denied_actions": [],
                 },
             }
         ]
     )
     assert result.returncode != 0
     assert "no textual response" in result.stderr
+
+
+def test_stream_rejects_success_when_required_action_was_denied() -> None:
+    result = _run_stream(
+        [
+            {
+                "event": "result",
+                "result": {
+                    "status": "SUCCESS",
+                    "response": "I could not inspect the requested file.",
+                    "denied_actions": [
+                        {"action": "read_file", "display_name": "ReadFile"}
+                    ],
+                },
+            }
+        ]
+    )
+    assert result.returncode != 0
+    assert "required actions were denied" in result.stderr
     assert "read_file" in result.stderr
 
 
@@ -89,21 +107,48 @@ def test_child_prompts_anchor_resources_to_the_worktree() -> None:
         assert "If a declared resource is absent from this worktree" in text
 
 
-def test_child_runners_propagate_stream_validation_failure() -> None:
+def test_child_runners_propagate_stream_validation_failure_to_parent_report() -> None:
     for path in (CHILD, PREREGISTERED):
         text = path.read_text(encoding="utf-8")
         assert 'pipeline_status=("\\${PIPESTATUS[@]}")' in text
         assert 'stream_status="\\${pipeline_status[2]:-1}"' in text
         assert 'child_status="\\$agy_status"' in text
         assert 'child_status="\\$stream_status"' in text
+        assert '--runner-status "\\$child_status"' in text
         assert 'exit "\\$child_status"' in text
 
 
-def test_child_mail_marks_empty_success_as_incomplete() -> None:
+def test_child_launchers_remove_only_the_exclude_entry_they_added() -> None:
+    for path in (CHILD, PREREGISTERED):
+        text = path.read_text(encoding="utf-8")
+        assert "EXCLUDE_ADDED=false" in text
+        assert "EXCLUDE_ADDED=true" in text
+        assert 'line == ".agents/mcp_config.json"' in text
+        assert "remove_transient_exclude" in text
+
+
+def test_child_mail_rejects_resource_paths_that_escape_the_project() -> None:
+    namespace = runpy.run_path(str(CHILD_MAIL))
+    parse_paths = namespace["_paths"]
+
+    assert parse_paths("src/**,tests/**") == ["src/**", "tests/**"]
+    for raw in ("../secret", "src/../../secret", "/tmp/secret", "~/.ssh"):
+        try:
+            parse_paths(raw)
+        except SystemExit as exc:
+            assert "project-relative" in str(exc)
+        else:
+            raise AssertionError(f"unsafe resource path was accepted: {raw!r}")
+
+
+def test_child_mail_marks_incomplete_results_for_parent() -> None:
     text = CHILD_MAIL.read_text(encoding="utf-8")
     assert 'if status == "SUCCESS" and not response:' in text
+    assert 'if denied:' in text
+    assert "Antigravity denied required actions" in text
+    assert "args.runner_status not in (None, 0)" in text
     assert 'status = "INCOMPLETE"' in text
-    assert "headless run produced no textual response" in text
+    assert 'subject_state = "complete" if status == "SUCCESS" else "incomplete"' in text
 
 
 if __name__ == "__main__":
