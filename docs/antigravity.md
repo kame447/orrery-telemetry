@@ -1,0 +1,174 @@
+# Google Antigravity / Gemini provider
+
+ORRERY can launch Google Antigravity CLI (`agy`) as a third agent provider next
+to Claude Code and Codex.
+
+This integration uses the user's existing Antigravity authentication. It does
+not set `GEMINI_API_KEY`, change the model provider, or enable
+`--dangerously-skip-permissions`.
+
+## Prerequisites
+
+1. Install and authenticate Antigravity CLI.
+2. Confirm `agy` is on `PATH`.
+3. Confirm the normal ORRERY installation and ORRERY Mail are working.
+
+Useful checks:
+
+```sh
+agy --version
+agy models
+```
+
+## Install the provider payload
+
+While the Gemini integration is experimental, install it into an existing
+ORRERY checkout with the opt-in helper:
+
+```sh
+scripts/install-gemini-provider.sh
+```
+
+To also register the session-bound ORRERY Mail stdio proxy in Antigravity's
+global MCP configuration:
+
+```sh
+scripts/install-gemini-provider.sh --configure-mcp
+```
+
+The MCP setup owns only `mcpServers.orrery-mail` in
+`~/.gemini/config/mcp_config.json` and preserves other server definitions.
+An existing empty or whitespace-only config is treated as an uninitialized
+configuration; malformed non-empty JSON is rejected without overwrite.
+Existing files are backed up before they are changed. The global entry stores
+only the local proxy command; it does not persist an ORRERY bearer token or an
+agent owner token. The core uninstall removes this entry only while it still
+matches the command installed by ORRERY, so a user-replaced entry is preserved.
+
+## Launch a top-level Gemini session
+
+```sh
+~/.agentstack/bin/agent-start-gemini /path/to/project
+```
+
+Defaults:
+
+- binary: `agy`
+- model: `gemini-3.8-flash-high`
+- reasoning effort: `high`
+
+Override them with environment variables:
+
+```sh
+export AGENTSTACK_GEMINI_BIN=agy
+export AGENTSTACK_GEMINI_MODEL=gemini-3.8-flash-high
+export AGENTSTACK_GEMINI_EFFORT=high
+```
+
+The launcher registers the session with ORRERY Mail as program
+`antigravity`, reconciles the tmux session name with the registered agent name,
+and then starts the normal interactive Antigravity TUI. Antigravity permission
+and sandbox settings remain user-owned. When the global MCP entry is enabled,
+the session-bound proxy resolves the current agent's mode-0600 owner-token file
+at process start instead of embedding that token in Antigravity configuration.
+
+## Delegated Gemini child
+
+Use the dedicated child launcher:
+
+```sh
+~/.agentstack/hooks/spawn_gemini_child.sh \
+  --resources "src/**,tests/**" \
+  "Implement the requested change and run the relevant tests." \
+  /path/to/project
+```
+
+Delegated Gemini children deliberately differ from the interactive top-level
+launcher:
+
+- a child is pre-registered with its own ORRERY Mail owner token;
+- the token stays in a mode-0600 file and is never placed in argv or a prompt;
+- a dedicated git worktree and `exp/<agent-name>` branch are created;
+- declared resources are reserved before Antigravity starts;
+- project-relative declared resources are presented to the model as absolute
+  paths rooted in that child's worktree, so the task does not need to rediscover
+  the original checkout;
+- `.agents/mcp_config.json` points `orrery-mail` at the existing local stdio
+  proxy, which injects the child's identity without revealing its token;
+- the task is sent to `agy` over streaming stdin rather than a process argument;
+- Antigravity runs in headless stream mode inside tmux;
+- the launcher sends the final textual result to the parent through ORRERY Mail
+  and releases reservations even if the model itself never calls MCP;
+- a nominal `SUCCESS` result with no textual response is treated as incomplete
+  rather than silently reported as a successful child result;
+- the worktree is retained after completion so the parent can review or merge
+  the child's branch.
+
+The provider-aware dashboard follows the actual child process below the tmux
+shell wrapper. A wrapped child is considered running only when the measured
+provider runtime and the ORRERY Mail program identity agree (for Gemini,
+`agy` plus `program=antigravity`). While that headless runtime is alive, its
+card has the normal `EXIT` control. `EXIT` sends SIGINT only to the measured
+`agy` process, leaving the launcher-owned bash runner alive so it can perform
+its result reporting, reservation release, retirement, and credential/config
+cleanup. Interactive top-level Gemini sessions continue to use the normal
+interactive `/exit` path. Once a delegated child is no longer running and is
+shown as finished/gone/retired, the running-only `EXIT` control is intentionally
+absent.
+
+The child launcher does not auto-approve Antigravity permissions and does not
+broaden the user's global permission rules. Tasks are instructed to stay inside
+the isolated worktree and not search the source checkout, `$HOME`, or parent
+directories for declared resources. In headless mode, operations that still
+require approval but are not pre-authorized by the user's Antigravity permission
+rules may be soft-denied. Configure only the specific commands/MCP tools that
+you intend to allow.
+
+### Worktree cleanup
+
+After reviewing/merging the child branch:
+
+```sh
+git -C /path/to/project worktree remove /tmp/cc-worktrees/<agent-name>
+git -C /path/to/project branch -D exp/<agent-name>
+```
+
+## MCP details
+
+Antigravity reads global MCP servers from:
+
+```text
+~/.gemini/config/mcp_config.json
+```
+
+and workspace-local servers from:
+
+```text
+.agents/mcp_config.json
+```
+
+Remote servers use the `serverUrl` field. ORRERY uses local stdio entries for
+both the top-level session-bound proxy and delegated-child identity binding so
+owner-token file paths can stay local to the proxy process rather than being
+exposed to the model or stored as bearer headers in Antigravity configuration.
+
+The shared narrow proxy still uses the historical `codex:` external-ID
+namespace internally for direct bindings. Provider identity is carried
+separately in the `program` field (`antigravity` for Gemini), so the namespace
+prefix does not mean the Gemini session is registered as Codex.
+
+## Current status
+
+The provider is implemented on `feat/gemini-provider`. Top-level macOS launch,
+ORRERY Mail registration, dashboard display, and Antigravity MCP access have
+been exercised successfully. The first delegated-child macOS run successfully
+exercised preregistration, worktree creation, reservation and the child-bound
+MCP proxy, but exposed both an out-of-worktree resource lookup and a dashboard
+liveness gap for the bash-wrapped headless runtime. Resource paths are now
+anchored to the child worktree, empty nominal-success responses are rejected,
+and the dashboard follows the provider process below its shell wrapper and
+routes headless `EXIT` to that runtime only. These fixes pass provider/Gemini
+regression coverage. A repeated real Antigravity child run is still required to
+validate the repaired resource lookup and the live dashboard `EXIT` lifecycle
+on macOS. The queued macOS CI matrix also remains before the feature is treated
+as complete.
