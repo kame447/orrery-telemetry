@@ -90,7 +90,26 @@ def _paths(value: str) -> list[str]:
     paths = [item.strip() for item in value.split(",") if item.strip()]
     if not paths:
         raise SystemExit("at least one reservation path is required")
+    for item in paths:
+        path = pathlib.Path(item)
+        if item.startswith("~") or path.is_absolute() or ".." in path.parts:
+            raise SystemExit(
+                f"reservation path must stay project-relative: {item}"
+            )
     return paths
+
+
+def _denied_action_names(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    names: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        action = item.get("action") or item.get("display_name")
+        if isinstance(action, str) and action:
+            names.append(action)
+    return names
 
 
 def _last_result(path: pathlib.Path) -> dict[str, Any]:
@@ -111,6 +130,10 @@ def _last_result(path: pathlib.Path) -> dict[str, Any]:
     return result or {"status": "UNKNOWN", "response": ""}
 
 
+def _append_notice(response: str, notice: str) -> str:
+    return f"{response}\n\n{notice}" if response else notice
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("action", choices=("reserve", "release", "report", "retire"))
@@ -122,6 +145,7 @@ def main() -> int:
     parser.add_argument("--parent", default="")
     parser.add_argument("--result-log", type=pathlib.Path)
     parser.add_argument("--worktree", default="")
+    parser.add_argument("--runner-status", type=int)
     args = parser.parse_args()
 
     token = _read_token(args.token_file)
@@ -165,12 +189,29 @@ def main() -> int:
     result = _last_result(args.result_log)
     status = str(result.get("status") or "UNKNOWN").upper()
     response = str(result.get("response") or "").strip()
+    denied = _denied_action_names(result.get("denied_actions"))
+
+    if denied:
+        if status == "SUCCESS":
+            status = "INCOMPLETE"
+        response = _append_notice(
+            response,
+            "Antigravity denied required actions: " + ", ".join(denied),
+        )
     if status == "SUCCESS" and not response:
         status = "INCOMPLETE"
         response = (
             "Antigravity headless run produced no textual response. "
-            "Inspect the result and stderr logs; a required tool may have been denied."
+            "Inspect the result and stderr logs."
         )
+    if args.runner_status not in (None, 0):
+        if status == "SUCCESS":
+            status = "INCOMPLETE"
+        response = _append_notice(
+            response,
+            f"ORRERY launcher observed non-zero child status {args.runner_status}.",
+        )
+
     if len(response) > 12_000:
         response = response[:12_000] + "\n\n[truncated by launcher]"
     body = (
@@ -178,12 +219,13 @@ def main() -> int:
         f"Worktree: `{args.worktree or 'unknown'}`\n\n"
         f"{response or '(no textual response)'}"
     )
+    subject_state = "complete" if status == "SUCCESS" else "incomplete"
     client.send_message(
         project_key=args.project_key,
         agent_name=args.agent_name,
         registration_token=token,
         to=[args.parent],
-        subject=f"Gemini child complete: {args.agent_name}",
+        subject=f"Gemini child {subject_state}: {args.agent_name}",
         body_md=body,
         importance="normal" if status == "SUCCESS" else "high",
         ack_required=False,
