@@ -7,6 +7,7 @@ import pathlib
 import subprocess
 
 from dashboard.providers.registry import default_provider_registry
+from gemini_installer_fixture import seed_existing_dashboard
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -33,23 +34,11 @@ EXPECTED_PAYLOAD = {
 }
 
 
-def _seed_existing_dashboard(install_dir: pathlib.Path, text: str = "# existing ORRERY dashboard\n") -> pathlib.Path:
-    server = install_dir / "dashboard" / "server.py"
-    server.parent.mkdir(parents=True, exist_ok=True)
-    server.write_text(text, encoding="utf-8")
-    manifest = install_dir / "install-state.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "owned_files": [str(server)],
-                "owned_dirs": [str(server.parent), str(install_dir)],
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    return server
+def _seed_existing_dashboard(
+    install_dir: pathlib.Path,
+    text: str = "# existing ORRERY dashboard\n",
+) -> pathlib.Path:
+    return seed_existing_dashboard(install_dir, text)
 
 
 def test_provider_installer_is_shell_parseable():
@@ -121,8 +110,11 @@ def test_provider_installer_dry_run_covers_runtime_gui_child_and_manifest(tmp_pa
 
 def test_provider_installer_keeps_core_server_byte_for_byte(tmp_path):
     install_dir = tmp_path / "agentstack"
-    original = "# installed dashboard from current ORRERY version\nSENTINEL = 42\n"
-    server = _seed_existing_dashboard(install_dir, original)
+    server = _seed_existing_dashboard(
+        install_dir,
+        "# installed dashboard from current ORRERY version\nSENTINEL = 42\n",
+    )
+    original = server.read_text(encoding="utf-8")
 
     result = subprocess.run(
         ["bash", str(INSTALLER), "--install-dir", str(install_dir)],
@@ -194,8 +186,11 @@ def test_provider_installer_copies_dashboard_abstraction_adapter_and_manifest(tm
 
 def test_provider_installer_is_idempotent_and_keeps_core_server(tmp_path):
     install_dir = tmp_path / "agentstack"
-    original = "# original core\nSENTINEL = 'keep-me'\n"
-    server = _seed_existing_dashboard(install_dir, original)
+    server = _seed_existing_dashboard(
+        install_dir,
+        "# original core\nSENTINEL = 'keep-me'\n",
+    )
+    original = server.read_text(encoding="utf-8")
     first = subprocess.run(
         ["bash", str(INSTALLER), "--install-dir", str(install_dir)],
         cwd=ROOT,
