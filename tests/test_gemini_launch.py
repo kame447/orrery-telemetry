@@ -15,6 +15,7 @@ _BOOTSTRAP = _ROOT / "bin" / "agentstack-gemini-bootstrap"
 _SETUP = _ROOT / "bin" / "agentstack-gemini-setup"
 _MCP = _ROOT / "bin" / "agentstack-gemini-mcp"
 _CHILD = _ROOT / "hooks" / "spawn_gemini_child.sh"
+_PREREG_CHILD = _ROOT / "hooks" / "spawn_gemini_preregistered.sh"
 _CHILD_MAIL = _ROOT / "bin" / "agentstack-gemini-child-mail"
 _STREAM = _ROOT / "bin" / "agentstack-gemini-stream"
 
@@ -48,7 +49,7 @@ def _run_setup(
 
 
 def test_gemini_shell_files_parse_with_bash() -> None:
-    for path in (_LAUNCHER, _BOOTSTRAP, _SETUP, _MCP, _CHILD):
+    for path in (_LAUNCHER, _BOOTSTRAP, _SETUP, _MCP, _CHILD, _PREREG_CHILD):
         result = subprocess.run(
             ["bash", "-n", str(path)],
             cwd=_ROOT,
@@ -74,7 +75,16 @@ def test_gemini_python_helpers_compile() -> None:
 
 
 def test_gemini_entrypoints_are_executable() -> None:
-    for path in (_LAUNCHER, _BOOTSTRAP, _SETUP, _MCP, _CHILD, _CHILD_MAIL, _STREAM):
+    for path in (
+        _LAUNCHER,
+        _BOOTSTRAP,
+        _SETUP,
+        _MCP,
+        _CHILD,
+        _PREREG_CHILD,
+        _CHILD_MAIL,
+        _STREAM,
+    ):
         assert path.stat().st_mode & stat.S_IXUSR, path
 
 
@@ -118,10 +128,22 @@ def test_delegated_child_uses_worktree_stream_input_and_preregistered_identity()
     assert '--input-format stream-json --output-format stream-json' in text
     assert 'cat $(printf \'%q\' "$TASK_EVENT_FILE")' in text
     assert "--dangerously-skip-permissions" not in text
-    assert '"AGENTSTACK_PROXY_TOKEN_FILE": os.environ["AGS_GEMINI_TOKEN_FILE"]' in text
-    assert '"AGENTSTACK_PROXY_PROGRAM": "antigravity"' in text
-    assert '"command": os.environ["AGS_GEMINI_PROXY_RUNNER"]' in text
+    assert 'MCP_WRAPPER="$AGENTSTACK_HOME_DIR/bin/agentstack-gemini-mcp"' in text
+    assert '"command": os.environ["AGS_GEMINI_MCP_COMMAND"]' in text
     assert '"orrery-mail"' in text
+    assert "AGENTSTACK_PROXY_TOKEN_FILE" not in text
+    assert "AGS_GEMINI_TOKEN_FILE" not in text
+    assert "AGS_GEMINI_PROXY_RUNNER" not in text
+
+
+def test_both_child_routes_hide_owner_token_path_from_workspace_mcp_config() -> None:
+    for path in (_CHILD, _PREREG_CHILD):
+        text = path.read_text(encoding="utf-8")
+        assert 'MCP_WRAPPER="$AGENTSTACK_HOME_DIR/bin/agentstack-gemini-mcp"' in text
+        assert 'AGS_GEMINI_MCP_COMMAND="$MCP_WRAPPER"' in text
+        assert '"command": os.environ["AGS_GEMINI_MCP_COMMAND"]' in text
+        assert "AGENTSTACK_PROXY_TOKEN_FILE" not in text
+        assert "AGS_GEMINI_TOKEN_FILE" not in text
 
 
 def test_delegated_child_lifecycle_is_launcher_owned() -> None:
