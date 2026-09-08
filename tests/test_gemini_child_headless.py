@@ -118,13 +118,16 @@ def test_child_runners_propagate_stream_validation_failure_to_parent_report() ->
         assert 'exit "\\$child_status"' in text
 
 
-def test_child_launchers_remove_only_the_exclude_entry_they_added() -> None:
+def test_child_launchers_keep_mcp_config_out_of_git_without_shared_exclude_mutation() -> None:
     for path in (CHILD, PREREGISTERED):
         text = path.read_text(encoding="utf-8")
-        assert "EXCLUDE_ADDED=false" in text
-        assert "EXCLUDE_ADDED=true" in text
-        assert 'line == ".agents/mcp_config.json"' in text
-        assert "remove_transient_exclude" in text
+        assert "GIT_EXCLUDES_FILE" in text
+        assert "core.excludesFile" in text
+        assert "GIT_CONFIG_COUNT" in text
+        assert ".agents/mcp_config.json" in text
+        assert "rev-parse --git-path info/exclude" not in text
+        assert "EXCLUDE_ADDED" not in text
+        assert "remove_transient_exclude" not in text
 
 
 def test_child_mail_rejects_resource_paths_that_escape_the_project() -> None:
