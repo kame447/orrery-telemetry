@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Session-bound ORRERY Mail stdio MCP entrypoint for top-level Antigravity.
+# Session-bound ORRERY Mail stdio MCP entrypoint for Antigravity.
 #
 # Antigravity starts this command as an MCP subprocess. It inherits AGENT_NAME
-# and AGENTSTACK_PROJECT_KEY from agent-start-gemini; this wrapper resolves the
+# and AGENTSTACK_PROJECT_KEY from the Gemini launcher; this wrapper resolves the
 # corresponding mode-0600 owner-token file and delegates to the existing narrow
 # ORRERY Mail proxy. The token itself never enters argv, environment, or config.
 set -euo pipefail
@@ -21,7 +21,7 @@ RUNTIME_DIR="${AGENTSTACK_RUNTIME_DIR:-$HOME/.agentstack/runtime}"
 PROXY_RUNNER="${AGENTSTACK_MCP_PROXY:-$AGENTSTACK_HOME_DIR/integrations/codex_app/plugin/scripts/run-mcp.sh}"
 
 [[ -n "$AGENT_NAME_VALUE" ]] || {
-  echo "agentstack-gemini-mcp: AGENT_NAME is unavailable; launch through agent-start-gemini" >&2
+  echo "agentstack-gemini-mcp: AGENT_NAME is unavailable; launch through an ORRERY Gemini launcher" >&2
   exit 1
 }
 [[ -n "$PROJECT_KEY" ]] || {
