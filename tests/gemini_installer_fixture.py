@@ -31,9 +31,35 @@ def spawn_names_payload(*args, **kwargs): pass
 def tmux_state(*args, **kwargs): pass
 '''
 
+_CORE_REQUIRED_FILES = (
+    "bin/lib/agentstack-register.sh",
+    "hooks/project-context.sh",
+)
+_CORE_REQUIRED_EXECUTABLES = (
+    "bin/agentstack-preregister-child",
+    "hooks/cleanup-child-agent.sh",
+    "integrations/codex_app/plugin/scripts/run-mcp.sh",
+)
+
 
 def compatible_dashboard_source(prefix: str = "# existing ORRERY dashboard\n") -> str:
     return prefix.rstrip("\n") + "\n" + _COMPATIBLE_DASHBOARD_STUB.lstrip("\n")
+
+
+def seed_core_runtime_dependencies(install_dir: pathlib.Path) -> list[pathlib.Path]:
+    seeded: list[pathlib.Path] = []
+    for relative in _CORE_REQUIRED_FILES:
+        path = install_dir / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# core fixture\n", encoding="utf-8")
+        seeded.append(path)
+    for relative in _CORE_REQUIRED_EXECUTABLES:
+        path = install_dir / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+        seeded.append(path)
+    return seeded
 
 
 def seed_existing_dashboard(
@@ -43,12 +69,19 @@ def seed_existing_dashboard(
     server = install_dir / "dashboard" / "server.py"
     server.parent.mkdir(parents=True, exist_ok=True)
     server.write_text(compatible_dashboard_source(prefix), encoding="utf-8")
+    core_files = seed_core_runtime_dependencies(install_dir)
     manifest = install_dir / "install-state.json"
     manifest.write_text(
         json.dumps(
             {
-                "owned_files": [str(server)],
-                "owned_dirs": [str(server.parent), str(install_dir)],
+                "owned_files": [str(server), *(str(path) for path in core_files)],
+                "owned_dirs": sorted(
+                    {
+                        str(install_dir),
+                        str(server.parent),
+                        *(str(path.parent) for path in core_files),
+                    }
+                ),
             },
             indent=2,
         )
