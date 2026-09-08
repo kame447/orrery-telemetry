@@ -187,6 +187,18 @@ cleanup_failure() {
       mail_helper retire --project-key "$PROJECT_KEY" --agent-name "$CHILD_NAME" \
         --token-file "$TOKEN_FILE" >/dev/null 2>&1 || true
     fi
+    # agentstack-preregister-child also persists a stable per-agent token for
+    # session-bound MCP. On a failure before the child runner takes ownership,
+    # run the normal core cleanup path so that durable token/state does not
+    # survive an aborted launch.
+    if [[ "$PREREGISTERED" == true && -n "$CHILD_NAME" && -x "$CLEANUP_HELPER" ]]; then
+      AGENTSTACK_PROJECT_KEY="$PROJECT_KEY" \
+      AGENTSTACK_MCP_URL="$MCP_URL" \
+      AGENTSTACK_MAIL_ENV="$MAIL_ENV" \
+      AGENTSTACK_MAIL_HTTP_BEARER_MODE="$HTTP_BEARER_MODE" \
+      AGENTSTACK_RUNTIME_DIR="$RUNTIME_DIR" \
+        "$CLEANUP_HELPER" "$CHILD_NAME" >/dev/null 2>&1 || true
+    fi
     if [[ "$WORKTREE_CREATED" == true && -n "$WORKTREE_DIR" ]]; then
       git -C "$SOURCE_REPO" worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1 || true
       [[ -n "$BRANCH_NAME" ]] && git -C "$SOURCE_REPO" branch -D "$BRANCH_NAME" >/dev/null 2>&1 || true
