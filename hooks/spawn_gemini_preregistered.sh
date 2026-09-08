@@ -29,7 +29,7 @@ WORK_DIR=""
 
 MAIL_HELPER="$AGENTSTACK_HOME_DIR/bin/agentstack-gemini-child-mail"
 STREAM_HELPER="$AGENTSTACK_HOME_DIR/bin/agentstack-gemini-stream"
-PROXY_RUNNER="${AGENTSTACK_MCP_PROXY:-$AGENTSTACK_HOME_DIR/integrations/codex_app/plugin/scripts/run-mcp.sh}"
+MCP_WRAPPER="$AGENTSTACK_HOME_DIR/bin/agentstack-gemini-mcp"
 CLEANUP_HELPER="$HOOKS_DIR/cleanup-child-agent.sh"
 
 usage() {
@@ -67,7 +67,7 @@ case "$EFFORT" in low|medium|high) ;; *) echo "$PROG: invalid effort: $EFFORT" >
 command -v tmux >/dev/null 2>&1 || { echo "$PROG: tmux not found" >&2; exit 1; }
 command -v "$GEMINI_BIN" >/dev/null 2>&1 || { echo "$PROG: Antigravity CLI not found (expected agy)" >&2; exit 1; }
 command -v "$PYTHON_BIN" >/dev/null 2>&1 || [[ -x "$PYTHON_BIN" ]] || { echo "$PROG: selected Python is unavailable" >&2; exit 1; }
-[[ -x "$MAIL_HELPER" && -x "$STREAM_HELPER" && -x "$PROXY_RUNNER" ]] || { echo "$PROG: Gemini provider helpers are not installed" >&2; exit 1; }
+[[ -x "$MAIL_HELPER" && -x "$STREAM_HELPER" && -x "$MCP_WRAPPER" ]] || { echo "$PROG: Gemini provider helpers are not installed" >&2; exit 1; }
 
 SOURCE_REPO="$(git -C "$WORK_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
 [[ -n "$SOURCE_REPO" ]] || { echo "$PROG: Gemini dashboard launch requires a git repository" >&2; exit 1; }
@@ -127,7 +127,8 @@ cleanup_failure() {
 trap cleanup_failure EXIT
 
 # Consume the one-shot token into the stable per-agent runtime path expected by
-# the MCP proxy. The token never appears in argv or the generated config.
+# the MCP wrapper. The token value and token-file path are not embedded in the
+# workspace MCP config.
 ( umask 077 && cat "$CHILD_TOKEN_FILE" > "$DURABLE_TOKEN" )
 chmod 600 "$DURABLE_TOKEN"
 rm -f "$CHILD_TOKEN_FILE"
@@ -157,33 +158,14 @@ fi
 mkdir -p "$WORKTREE_DIR/.agents"
 MCP_CONFIG="$WORKTREE_DIR/.agents/mcp_config.json"
 AGS_GEMINI_MCP_PATH="$MCP_CONFIG" \
-AGS_GEMINI_PROXY_RUNNER="$PROXY_RUNNER" \
-AGS_GEMINI_CHILD_NAME="$CHILD_NAME" \
-AGS_GEMINI_TOKEN_FILE="$DURABLE_TOKEN" \
-AGS_GEMINI_PROJECT_KEY="$PROJECT_KEY" \
-AGS_GEMINI_MCP_URL="$MCP_URL" \
-AGS_GEMINI_MAIL_ENV="$MAIL_ENV" \
-AGS_GEMINI_BEARER_MODE="$HTTP_BEARER_MODE" \
-AGS_GEMINI_RUNTIME_DIR="$RUNTIME_DIR" \
+AGS_GEMINI_MCP_COMMAND="$MCP_WRAPPER" \
 "$PYTHON_BIN" - <<'PY'
 import json, os
 from pathlib import Path
 path = Path(os.environ["AGS_GEMINI_MCP_PATH"])
 entry = {
-    "command": os.environ["AGS_GEMINI_PROXY_RUNNER"],
+    "command": os.environ["AGS_GEMINI_MCP_COMMAND"],
     "args": [],
-    "env": {
-        "AGENTSTACK_PROXY_AGENT_NAME": os.environ["AGS_GEMINI_CHILD_NAME"],
-        "AGENTSTACK_PROXY_TOKEN_FILE": os.environ["AGS_GEMINI_TOKEN_FILE"],
-        "AGENTSTACK_PROXY_PROGRAM": "antigravity",
-        "AGENTSTACK_PROJECT_KEY": os.environ["AGS_GEMINI_PROJECT_KEY"],
-        "AGENTSTACK_MCP_URL": os.environ["AGS_GEMINI_MCP_URL"],
-        "AGENTSTACK_MAIL_ENV": os.environ["AGS_GEMINI_MAIL_ENV"],
-        "AGENTSTACK_MAIL_HTTP_BEARER_MODE": os.environ["AGS_GEMINI_BEARER_MODE"],
-        "AGENTSTACK_RUNTIME_DIR": os.environ["AGS_GEMINI_RUNTIME_DIR"],
-        "AGENTSTACK_CODEX_APP_RUNTIME_DIR": os.path.join(
-            os.environ["AGS_GEMINI_RUNTIME_DIR"], "gemini-proxy-" + os.environ["AGS_GEMINI_CHILD_NAME"]),
-    },
 }
 path.write_text(json.dumps({"mcpServers": {"orrery-mail": entry}}, indent=2) + "\n", encoding="utf-8")
 os.chmod(path, 0o600)
