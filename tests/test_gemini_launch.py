@@ -89,6 +89,22 @@ def test_launcher_uses_current_antigravity_cli_contract() -> None:
     assert "--dangerously-skip-permissions" not in text
 
 
+def test_top_level_launcher_preserves_shell_after_interactive_exit() -> None:
+    text = _LAUNCHER.read_text(encoding="utf-8")
+    in_tmux = text.split(
+        "# Already inside a real tmux pane:", 1
+    )[1].split("\nfi\n\nGEMINI_CMD=", 1)[0]
+    assert 'GEMINI_CMD="$(build_gemini_cmd)"' in in_tmux
+    assert 'eval "$GEMINI_CMD"' in in_tmux
+    assert 'eval "exec ' not in in_tmux
+
+    # The launcher-created top-level tmux path must also leave a login shell
+    # after the Antigravity REPL exits. In both paths the observable lifecycle
+    # is therefore live agy -> shell husk (`finished`), not an implicit child-
+    # style cleanup/session teardown.
+    assert '; exec \\\"\\$SHELL\\\" -l"' in text
+
+
 def test_bootstrap_registers_antigravity_runtime_and_model() -> None:
     text = _BOOTSTRAP.read_text(encoding="utf-8")
     assert 'ags_register_session "$PROJECT_KEY" "antigravity" "$GEMINI_MODEL" "agy"' in text
