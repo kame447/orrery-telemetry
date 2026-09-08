@@ -1,0 +1,33 @@
+name: cleanup stale branches
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - .github/workflows/cleanup-stale-branches.yml
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Delete explicitly approved stale branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          branches=(
+            'fix/ci-deduplicate-runs'
+            'fix/dashboard-exit-codex-wrapper'
+            'fix/python310-compatibility'
+            'sync/upstream-master-20260909'
+            'upstream/master-4161a3b'
+          )
+          for branch in "${branches[@]}"; do
+            if git ls-remote --exit-code --heads origin "refs/heads/$branch" >/dev/null 2>&1; then
+              git push origin --delete -- "$branch"
+            fi
+          done
