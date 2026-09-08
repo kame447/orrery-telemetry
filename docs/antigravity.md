@@ -72,6 +72,15 @@ and sandbox settings remain user-owned. When the global MCP entry is enabled,
 the session-bound proxy resolves the current agent's mode-0600 owner-token file
 at process start instead of embedding that token in Antigravity configuration.
 
+Top-level lifecycle follows the dashboard's observation model rather than
+forcing a synthetic state transition. The launcher deliberately leaves the
+human-interactive shell alive after `agy` exits, including when it was invoked
+from an already-existing tmux pane. The dashboard can therefore observe that
+the provider process is gone while the tmux shell remains and classify the
+session as `finished`. This differs intentionally from delegated children,
+whose launcher-owned command chain ends after cleanup and lets their tmux
+session disappear.
+
 ## Delegated Gemini child
 
 Use the dedicated child launcher:
@@ -101,6 +110,11 @@ launcher:
   and releases reservations even if the model itself never calls MCP;
 - a nominal `SUCCESS` result with no textual response is treated as incomplete
   rather than silently reported as a successful child result;
+- after result reporting, the runner releases reservations, soft-retires the
+  child identity, removes transient credential/config state, and exits as the
+  sole tmux command; the tmux session then disappears naturally, so the
+  dashboard observes `gone` / `retired` instead of a persistent `finished`
+  shell husk;
 - the worktree is retained after completion so the parent can review or merge
   the child's branch.
 
@@ -115,6 +129,12 @@ cleanup. Interactive top-level Gemini sessions continue to use the normal
 interactive `/exit` path. Once a delegated child is no longer running and is
 shown as finished/gone/retired, the running-only `EXIT` control is intentionally
 absent.
+
+The dashboard does not manufacture `finished` or `gone` as provider-specific
+workflow states. It reports what remains measurable: a stopped `agy` with a
+surviving shell is `finished`; a completed child whose cleanup chain has ended
+and whose tmux session has disappeared is `gone` (or `retired` after the
+launcher soft-retires its ORRERY Mail identity).
 
 The child launcher does not auto-approve Antigravity permissions and does not
 broaden the user's global permission rules. Tasks are instructed to stay inside
@@ -167,8 +187,9 @@ MCP proxy, but exposed both an out-of-worktree resource lookup and a dashboard
 liveness gap for the bash-wrapped headless runtime. Resource paths are now
 anchored to the child worktree, empty nominal-success responses are rejected,
 and the dashboard follows the provider process below its shell wrapper and
-routes headless `EXIT` to that runtime only. These fixes pass provider/Gemini
-regression coverage. A repeated real Antigravity child run is still required to
-validate the repaired resource lookup and the live dashboard `EXIT` lifecycle
-on macOS. The queued macOS CI matrix also remains before the feature is treated
-as complete.
+routes headless `EXIT` to that runtime only. The top-level launcher now also
+preserves its interactive shell consistently whether it creates a tmux session
+or is invoked from an existing one, while delegated child runners clean up and
+terminate their own tmux sessions. These fixes have regression coverage. A
+repeated real Antigravity child run is still required to validate the repaired
+resource lookup and the live dashboard `EXIT` lifecycle on macOS.
