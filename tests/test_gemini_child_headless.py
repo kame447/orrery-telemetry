@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import runpy
 import subprocess
@@ -124,10 +125,56 @@ def test_child_launchers_keep_mcp_config_out_of_git_without_shared_exclude_mutat
         assert "GIT_EXCLUDES_FILE" in text
         assert "core.excludesFile" in text
         assert "GIT_CONFIG_COUNT" in text
+        assert "git_excludes_file=$(printf '%q'" in text
+        assert 'GIT_CONFIG_VALUE_\\${git_config_count}=\\$git_excludes_file' in text
         assert ".agents/mcp_config.json" in text
         assert "rev-parse --git-path info/exclude" not in text
         assert "EXCLUDE_ADDED" not in text
         assert "remove_transient_exclude" not in text
+
+
+def test_process_local_git_excludes_hide_mcp_config_without_mutating_repo(tmp_path) -> None:
+    repo = tmp_path / "repo with spaces"
+    repo.mkdir()
+    init = subprocess.run(
+        ["git", "init", str(repo)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert init.returncode == 0, init.stderr
+
+    mcp = repo / ".agents" / "mcp_config.json"
+    mcp.parent.mkdir()
+    mcp.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+    (repo / "visible.txt").write_text("visible\n", encoding="utf-8")
+
+    shared_exclude = repo / ".git" / "info" / "exclude"
+    shared_before = shared_exclude.read_bytes()
+    local_exclude = tmp_path / "runtime with spaces" / "gemini excludes"
+    local_exclude.parent.mkdir()
+    local_exclude.write_text(".agents/mcp_config.json\n", encoding="utf-8")
+
+    env = dict(os.environ)
+    for key in list(env):
+        if key == "GIT_CONFIG_COUNT" or key.startswith("GIT_CONFIG_KEY_") or key.startswith("GIT_CONFIG_VALUE_"):
+            env.pop(key, None)
+    env.update(
+        GIT_CONFIG_COUNT="1",
+        GIT_CONFIG_KEY_0="core.excludesFile",
+        GIT_CONFIG_VALUE_0=str(local_exclude),
+    )
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--short", "--untracked-files=all"],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert status.returncode == 0, status.stderr
+    assert "visible.txt" in status.stdout
+    assert ".agents/mcp_config.json" not in status.stdout
+    assert shared_exclude.read_bytes() == shared_before
 
 
 def test_child_mail_rejects_resource_paths_that_escape_the_project() -> None:
