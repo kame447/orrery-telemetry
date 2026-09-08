@@ -83,8 +83,8 @@ FILES=(
 )
 
 # Validate every input before touching the installed tree. A malformed core
-# manifest, provider manifest, or incomplete checkout must fail without a
-# half-installed provider runtime.
+# manifest, incompatible dashboard core, provider manifest, or incomplete
+# checkout must fail without a half-installed provider runtime.
 for relative in "${FILES[@]}"; do
   [[ -f "$REPO_ROOT/$relative" ]] || {
     echo "$PROG: missing source file: $REPO_ROOT/$relative" >&2
@@ -107,6 +107,70 @@ for key in ("owned_files", "owned_dirs"):
     value = data.get(key)
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise SystemExit(f"invalid core install manifest {manifest}: {key} must be a string list")
+PY
+"$PYTHON_BIN" - "$INSTALLED_SERVER" <<'PY'
+import ast
+import pathlib
+import sys
+
+server = pathlib.Path(sys.argv[1]).expanduser()
+try:
+    source = server.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(server))
+except (OSError, SyntaxError) as exc:
+    raise SystemExit(f"incompatible ORRERY core dashboard {server}: {exc}")
+
+names = set()
+
+def add_target(target):
+    if isinstance(target, ast.Name):
+        names.add(target.id)
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        for item in target.elts:
+            add_target(item)
+
+for node in tree.body:
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        names.add(node.name)
+    elif isinstance(node, ast.Assign):
+        for target in node.targets:
+            add_target(target)
+    elif isinstance(node, ast.AnnAssign):
+        add_target(node.target)
+    elif isinstance(node, (ast.Import, ast.ImportFrom)):
+        for alias in node.names:
+            names.add(alias.asname or alias.name.split(".", 1)[0])
+
+required = {
+    "HOOKS_DIR",
+    "RUNTIME_DIR",
+    "SEP",
+    "SPAWN_SCRIPT",
+    "_SPAWN_MODELS",
+    "_agent_program",
+    "_has_session",
+    "_provider_of",
+    "_render_dashboard_index",
+    "_tmux",
+    "_valid",
+    "build_agents",
+    "classify",
+    "do_exit",
+    "do_resume",
+    "do_spawn",
+    "graph_payload",
+    "spawn_launch_status",
+    "spawn_names_payload",
+    "tmux_state",
+}
+missing = sorted(required - names)
+if missing:
+    joined = ", ".join(missing)
+    raise SystemExit(
+        "incompatible ORRERY core dashboard: provider extension requires "
+        f"missing symbol(s): {joined}. Update/reinstall ORRERY core before "
+        "installing the Gemini provider."
+    )
 PY
 PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_BIN" - "$REPO_ROOT" <<'PY'
 from pathlib import Path
