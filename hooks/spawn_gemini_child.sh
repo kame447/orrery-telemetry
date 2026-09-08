@@ -140,8 +140,7 @@ RUNNER_FILE="$RUNTIME_DIR/gemini-runner-$$.sh"
 RESULT_LOG=""
 STDERR_LOG=""
 MCP_CONFIG=""
-EXCLUDE_FILE=""
-EXCLUDE_ADDED=false
+GIT_EXCLUDES_FILE=""
 CHILD_NAME=""
 WORKTREE_DIR=""
 BRANCH_NAME=""
@@ -173,28 +172,6 @@ path.write_text("\n".join(line for line in lines if line != name) + "\n", encodi
 PY
 }
 
-remove_transient_exclude() {
-  [[ "$EXCLUDE_ADDED" == true && -n "$EXCLUDE_FILE" ]] || return 0
-  "$PYTHON_BIN" - "$EXCLUDE_FILE" <<'PY' 2>/dev/null || true
-from pathlib import Path
-import sys
-path = Path(sys.argv[1])
-try:
-    lines = path.read_text(encoding="utf-8").splitlines()
-except OSError:
-    raise SystemExit(0)
-removed = False
-kept = []
-for line in lines:
-    if not removed and line == ".agents/mcp_config.json":
-        removed = True
-        continue
-    kept.append(line)
-path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
-PY
-  EXCLUDE_ADDED=false
-}
-
 cleanup_failure() {
   status=$?
   if [[ $status -ne 0 ]]; then
@@ -210,13 +187,13 @@ cleanup_failure() {
       mail_helper retire --project-key "$PROJECT_KEY" --agent-name "$CHILD_NAME" \
         --token-file "$TOKEN_FILE" >/dev/null 2>&1 || true
     fi
-    remove_transient_exclude
     if [[ "$WORKTREE_CREATED" == true && -n "$WORKTREE_DIR" ]]; then
       git -C "$SOURCE_REPO" worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1 || true
       [[ -n "$BRANCH_NAME" ]] && git -C "$SOURCE_REPO" branch -D "$BRANCH_NAME" >/dev/null 2>&1 || true
     fi
     remove_managed_name
     [[ -n "$MCP_CONFIG" ]] && rm -f "$MCP_CONFIG" 2>/dev/null || true
+    [[ -n "$GIT_EXCLUDES_FILE" ]] && rm -f "$GIT_EXCLUDES_FILE" 2>/dev/null || true
     rm -f "$TOKEN_FILE" "$TASK_RAW_FILE" "$TASK_EVENT_FILE" "$RUNNER_FILE"
   fi
 }
@@ -248,15 +225,12 @@ fi
 git -C "$SOURCE_REPO" worktree add -b "$BRANCH_NAME" "$WORKTREE_DIR" "$BASE_REV" >/dev/null
 WORKTREE_CREATED=true
 
-# This is local Git metadata, not a tracked project change. It keeps the
-# child-specific MCP binding out of `git add .` in arbitrary target projects.
-# Record ownership so only the exclusion added by this launcher is removed.
-EXCLUDE_FILE="$(git -C "$WORKTREE_DIR" rev-parse --git-path info/exclude)"
-mkdir -p "$(dirname "$EXCLUDE_FILE")"
-if ! grep -qxF '.agents/mcp_config.json' "$EXCLUDE_FILE" 2>/dev/null; then
-  printf '%s\n' '.agents/mcp_config.json' >> "$EXCLUDE_FILE"
-  EXCLUDE_ADDED=true
-fi
+# Linked worktrees share .git/info/exclude. Mutating that shared file and then
+# removing the rule on child exit races when two Gemini children overlap. Keep
+# this ignore rule in a child-owned file instead and inject it only into Git
+# processes descended from the Antigravity runner via GIT_CONFIG_COUNT.
+GIT_EXCLUDES_FILE="$RUNTIME_DIR/gemini-git-excludes-$CHILD_NAME"
+( umask 077 && printf '%s\n' '.agents/mcp_config.json' > "$GIT_EXCLUDES_FILE" )
 
 if [[ -n "$RESOURCES" ]]; then
   mail_helper reserve --project-key "$PROJECT_KEY" --agent-name "$CHILD_NAME" \
@@ -383,6 +357,17 @@ export AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE")
 export AGENTSTACK_PYTHON=$(printf '%q' "$PYTHON_BIN")
 RESOURCES=$(printf '%q' "$RESOURCES")
 
+# Add a process-local Git exclude without touching the repository's shared
+# .git/info/exclude. Preserve any GIT_CONFIG_COUNT entries inherited by the
+# caller and append this child-specific core.excludesFile override.
+git_config_count="\${GIT_CONFIG_COUNT:-0}"
+case "\$git_config_count" in
+  ''|*[!0-9]*) git_config_count=0 ;;
+esac
+export "GIT_CONFIG_KEY_\${git_config_count}=core.excludesFile"
+export "GIT_CONFIG_VALUE_\${git_config_count}=$(printf '%q' "$GIT_EXCLUDES_FILE")"
+export GIT_CONFIG_COUNT="\$((git_config_count + 1))"
+
 set +e
 cat $(printf '%q' "$TASK_EVENT_FILE") | \
   $(printf '%q' "$GEMINI_BIN") --input-format stream-json --output-format stream-json \
@@ -427,26 +412,8 @@ AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE") \
     --agent-name $(printf '%q' "$CHILD_NAME") --token-file $(printf '%q' "$TOKEN_FILE") || true
 
 [[ -x $(printf '%q' "$CLEANUP_HELPER") ]] && $(printf '%q' "$CLEANUP_HELPER") || true
-if [[ $(printf '%q' "$EXCLUDE_ADDED") == true ]]; then
-  $(printf '%q' "$PYTHON_BIN") - $(printf '%q' "$EXCLUDE_FILE") <<'PYEXCLUDE' 2>/dev/null || true
-from pathlib import Path
-import sys
-path = Path(sys.argv[1])
-try:
-    lines = path.read_text(encoding="utf-8").splitlines()
-except OSError:
-    raise SystemExit(0)
-removed = False
-kept = []
-for line in lines:
-    if not removed and line == ".agents/mcp_config.json":
-        removed = True
-        continue
-    kept.append(line)
-path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
-PYEXCLUDE
-fi
-rm -f $(printf '%q' "$TASK_EVENT_FILE") $(printf '%q' "$TOKEN_FILE") $(printf '%q' "$MCP_CONFIG") $(printf '%q' "$RUNNER_FILE")
+rm -f $(printf '%q' "$TASK_EVENT_FILE") $(printf '%q' "$TOKEN_FILE") $(printf '%q' "$MCP_CONFIG") \
+  $(printf '%q' "$GIT_EXCLUDES_FILE") $(printf '%q' "$RUNNER_FILE")
 echo "[antigravity] child finished; worktree retained at $(printf '%q' "$WORKTREE_DIR")"
 exit "\$child_status"
 EOF
