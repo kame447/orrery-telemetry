@@ -102,7 +102,7 @@ def test_top_level_launcher_preserves_shell_after_interactive_exit() -> None:
     # after the Antigravity REPL exits. In both paths the observable lifecycle
     # is therefore live agy -> shell husk (`finished`), not an implicit child-
     # style cleanup/session teardown.
-    assert '; exec \\\"\\$SHELL\\\" -l"' in text
+    assert '; exec \\"\\$SHELL\\" -l"' in text
 
 
 def test_bootstrap_registers_antigravity_runtime_and_model() -> None:
