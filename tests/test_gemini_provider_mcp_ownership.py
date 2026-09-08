@@ -5,6 +5,8 @@ import os
 import pathlib
 import subprocess
 
+from gemini_installer_fixture import seed_existing_dashboard
+
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 INSTALLER = ROOT / "scripts" / "install-gemini-provider.sh"
@@ -12,21 +14,7 @@ INSTALLER = ROOT / "scripts" / "install-gemini-provider.sh"
 
 def test_configure_mcp_records_exact_owned_entry_for_uninstall(tmp_path):
     install_dir = tmp_path / "agentstack"
-    dashboard = install_dir / "dashboard"
-    dashboard.mkdir(parents=True)
-    server = dashboard / "server.py"
-    server.write_text("# installed core\n", encoding="utf-8")
-    (install_dir / "install-state.json").write_text(
-        json.dumps(
-            {
-                "owned_files": [str(server)],
-                "owned_dirs": [str(install_dir), str(dashboard)],
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+    seed_existing_dashboard(install_dir, "# installed core\n")
     config = tmp_path / "gemini" / "mcp_config.json"
     env = {
         **os.environ,
