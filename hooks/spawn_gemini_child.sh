@@ -356,6 +356,7 @@ export AGENTSTACK_MAIL_ENV=$(printf '%q' "$MAIL_ENV")
 export AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE")
 export AGENTSTACK_PYTHON=$(printf '%q' "$PYTHON_BIN")
 RESOURCES=$(printf '%q' "$RESOURCES")
+git_excludes_file=$(printf '%q' "$GIT_EXCLUDES_FILE")
 
 # Add a process-local Git exclude without touching the repository's shared
 # .git/info/exclude. Preserve any GIT_CONFIG_COUNT entries inherited by the
@@ -365,7 +366,7 @@ case "\$git_config_count" in
   ''|*[!0-9]*) git_config_count=0 ;;
 esac
 export "GIT_CONFIG_KEY_\${git_config_count}=core.excludesFile"
-export "GIT_CONFIG_VALUE_\${git_config_count}=$(printf '%q' "$GIT_EXCLUDES_FILE")"
+export "GIT_CONFIG_VALUE_\${git_config_count}=\$git_excludes_file"
 export GIT_CONFIG_COUNT="\$((git_config_count + 1))"
 
 set +e
