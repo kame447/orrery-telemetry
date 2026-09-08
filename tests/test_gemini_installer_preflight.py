@@ -5,6 +5,11 @@ import os
 import pathlib
 import subprocess
 
+from gemini_installer_fixture import (
+    seed_core_runtime_dependencies,
+    seed_existing_dashboard,
+)
+
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 INSTALLER = ROOT / "scripts" / "install-gemini-provider.sh"
@@ -17,6 +22,7 @@ def test_invalid_core_manifest_fails_before_provider_installer_mutates_dashboard
     server = dashboard / "server.py"
     original = "# current installed dashboard\nSENTINEL = 'untouched'\n"
     server.write_text(original, encoding="utf-8")
+    seed_core_runtime_dependencies(install_dir)
     (install_dir / "install-state.json").write_text("{not-json\n", encoding="utf-8")
 
     result = subprocess.run(
@@ -42,6 +48,7 @@ def test_incompatible_dashboard_core_fails_before_copying_provider_payload(tmp_p
     server = dashboard / "server.py"
     original = "# syntactically valid but too old for provider overlays\nPORT = 8770\n"
     server.write_text(original, encoding="utf-8")
+    seed_core_runtime_dependencies(install_dir)
     (install_dir / "install-state.json").write_text(
         json.dumps({"owned_files": [], "owned_dirs": []}) + "\n",
         encoding="utf-8",
@@ -60,5 +67,32 @@ def test_incompatible_dashboard_core_fails_before_copying_provider_payload(tmp_p
     assert "incompatible ORRERY core dashboard" in result.stderr
     assert "Update/reinstall ORRERY core" in result.stderr
     assert server.read_text(encoding="utf-8") == original
+    assert not (install_dir / "bin" / "agent-start-gemini").exists()
+    assert not (install_dir / "dashboard" / "provider_server.py").exists()
+
+
+def test_missing_core_runtime_dependency_fails_before_copying_provider_payload(tmp_path):
+    install_dir = tmp_path / "agentstack"
+    server = seed_existing_dashboard(install_dir)
+    original = server.read_text(encoding="utf-8")
+    missing = install_dir / "integrations" / "codex_app" / "plugin" / "scripts" / "run-mcp.sh"
+    missing.unlink()
+    manifest_before = (install_dir / "install-state.json").read_text(encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", str(INSTALLER), "--install-dir", str(install_dir)],
+        cwd=ROOT,
+        env={**os.environ, "HOME": str(tmp_path)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "incomplete ORRERY core" in result.stderr
+    assert "run-mcp.sh" in result.stderr
+    assert "update/reinstall ORRERY core" in result.stderr
+    assert server.read_text(encoding="utf-8") == original
+    assert (install_dir / "install-state.json").read_text(encoding="utf-8") == manifest_before
     assert not (install_dir / "bin" / "agent-start-gemini").exists()
     assert not (install_dir / "dashboard" / "provider_server.py").exists()
