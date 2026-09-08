@@ -63,6 +63,32 @@ command -v "$PYTHON_BIN" >/dev/null 2>&1 || [[ -x "$PYTHON_BIN" ]] || {
   exit 1
 }
 
+# The optional provider is an extension of a complete ORRERY core install. Do
+# not copy a payload that can launch a top-level TUI but leaves delegated child
+# identity, cleanup, or MCP binding broken. These are core-owned dependencies;
+# the Gemini installer validates them but never replaces them.
+CORE_REQUIRED_FILES=(
+  "bin/lib/agentstack-register.sh"
+  "hooks/project-context.sh"
+)
+CORE_REQUIRED_EXECUTABLES=(
+  "bin/agentstack-preregister-child"
+  "hooks/cleanup-child-agent.sh"
+  "integrations/codex_app/plugin/scripts/run-mcp.sh"
+)
+for relative in "${CORE_REQUIRED_FILES[@]}"; do
+  [[ -f "$INSTALL_DIR/$relative" ]] || {
+    echo "$PROG: incomplete ORRERY core: required file missing: $INSTALL_DIR/$relative; update/reinstall ORRERY core before installing the Gemini provider" >&2
+    exit 1
+  }
+done
+for relative in "${CORE_REQUIRED_EXECUTABLES[@]}"; do
+  [[ -x "$INSTALL_DIR/$relative" ]] || {
+    echo "$PROG: incomplete ORRERY core: required executable missing: $INSTALL_DIR/$relative; update/reinstall ORRERY core before installing the Gemini provider" >&2
+    exit 1
+  }
+done
+
 FILES=(
   "bin/agent-start-gemini"
   "bin/agentstack-gemini-bootstrap"
@@ -252,12 +278,6 @@ temporary = manifest.with_name(manifest.name + ".tmp")
 temporary.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 os.replace(temporary, manifest)
 PY
-fi
-
-PROXY="$INSTALL_DIR/integrations/codex_app/plugin/scripts/run-mcp.sh"
-if [[ "$DRY_RUN" != true && ! -x "$PROXY" ]]; then
-  echo "$PROG: warning: child MCP proxy not installed at $PROXY" >&2
-  echo "$PROG: top-level agent-start-gemini will work, but delegated provider children require the core child MCP proxy." >&2
 fi
 
 if [[ "$CONFIGURE_MCP" == true ]]; then
