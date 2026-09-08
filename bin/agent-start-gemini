@@ -48,13 +48,18 @@ build_gemini_cmd() {
   printf '%s' "$out"
 }
 
-# Already inside a real tmux pane: register and run in place.
+# Already inside a real tmux pane: register and run in place. Do not `exec`
+# Antigravity here: this is the human-interactive top-level path, so when the
+# REPL exits the invoking shell must remain. The dashboard can then observe the
+# real shell husk as `finished`, matching the normal top-level lifecycle.
 if [[ -n "${TMUX:-}" ]]; then
   cd "$DIR"
   export AGENTSTACK_GEMINI_MODEL="$GEMINI_MODEL"
   # shellcheck disable=SC1090
   source "$BOOTSTRAP" "$DIR"
-  eval "exec $(build_gemini_cmd)"
+  GEMINI_CMD="$(build_gemini_cmd)"
+  eval "$GEMINI_CMD"
+  exit $?
 fi
 
 GEMINI_CMD="$(build_gemini_cmd)"
