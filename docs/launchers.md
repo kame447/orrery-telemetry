@@ -1,6 +1,6 @@
 # Launcher と identity
 
-> English version: planned.
+> English version: [launchers.en.md](launchers.en.md)
 
 [前: インストール](install.md) · [README に戻る](../README.md) · [次: 委任と child agent](delegation.md)
 
@@ -29,7 +29,7 @@ agent-start
 
 tmux 外から起動すると、新しい named session を作って現在の terminal tab を置き換えます。tmux 内からは current session を rename し、その場で CLI を `exec` します。
 
-session 名を agent-mail identity と一致させることで、次の照合が一意になります。
+session 名を ORRERY Mail identity と一致させることで、次の照合が一意になります。
 
 - dashboard の click-to-jump
 - inbox signal の配送先
@@ -48,7 +48,7 @@ top-level launcher の新規 identity は要求時 `Adjective-Scientist`（ハ�
 - scientist suffix が portrait key
 - ASCII alphabetic の scientist だけを候補にする
 
-134語は agent-mail の正典 `SIMPLE_ADJECTIVES` Round 3 と逐語同期しています。strict agent-mail deployment は正典で生成名を検証するため、AgentStack 側だけへ独自語を追加してはいけません。
+134語は ORRERY Mail の正典 `SIMPLE_ADJECTIVES` Round 3 と逐語同期しています。strict ORRERY Mail deployment は正典で生成名を検証するため、ORRERY Telemetry 側だけへ独自語を追加してはいけません。
 
 launcher、dashboard catalog、suggestion API、child preregistration は同じ adjective / scientist source を共有します。命名 source を重複させないことで、portrait、登録名、server-side validation の drift を防ぎます。
 
@@ -68,16 +68,16 @@ dashboard spawn は scientist rail の空き判定後、`/api/suggest-name` で�
 
 ## Identity 登録
 
-launcher は CLI を起動する前に agent-mail へ identity を登録します。
+launcher は CLI を起動する前に ORRERY Mail へ identity を登録します。
 
 1. stale な `AGENT_NAME`、`PARENT_AGENT`、token、reserved marker を削除
 2. candidate name を生成
-3. agent-mail health を確認
+3. ORRERY Mail health を確認
 4. project key、program、model、task metadata で登録
 5. 要求名と返された canonical name を比較。不一致なら top-level は明示して tmux session を返却名へ rename、reserved identity は停止
 6. managed agent list と clipboard を更新
 
-`AGENTSTACK_PROJECT_KEY` が未設定、または agent-mail が到達不能でも CLI 自体は preselected name で起動します。ただし mail、reservation、project-scoped dashboard 機能は使えません。
+`AGENTSTACK_PROJECT_KEY` が未設定、または ORRERY Mail が到達不能でも CLI 自体は preselected name で起動します。ただし mail、reservation、project-scoped dashboard 機能は使えません。
 
 Claude Code hook は session 内登録も記録します。Codex は Claude Code の hook system を持たないため、`agentstack-codex-bootstrap` が起動前の登録と tmux rename を担当します。
 
@@ -139,7 +139,7 @@ API key が環境にあると OAuth を上書きすることがあるため、Co
 
 ## Mail watcher と REPL 注入
 
-mail watcher は agent-mail signal を見つけると、対応する tmux session の Claude / Codex REPL へ通知文を注入します。
+mail watcher は ORRERY Mail signal を見つけると、対応する tmux session の Claude / Codex REPL へ通知文を注入します。
 
 text と submit は別操作です。
 
@@ -164,13 +164,13 @@ install 前から開いていた Claude Code session は追加された skill �
 
 `/delegate` は child を起動するだけの shortcut ではありません。
 
-AgentStack の委譲は、必ず先頭の slash を付けて `/delegate ...` と入力します。`delegate ...` は通常の prompt であり、この skill の呼び出しではありません。Claude が組み込み subagent / Agent tool で処理した場合、成果物ができても AgentStack の identity、reservation、専用 tmux session、dashboard telemetry には載りません。AgentStack で監視する child を作る目的では、組み込み Agent tool を `/delegate` の代わりに使わないでください。
+ORRERY Telemetry の委譲は、必ず先頭の slash を付けて `/delegate ...` と入力します。`delegate ...` は通常の prompt であり、この skill の呼び出しではありません。Claude が組み込み subagent / Agent tool で処理した場合、成果物ができても ORRERY Telemetry の identity、reservation、専用 tmux session、dashboard telemetry には載りません。ORRERY Telemetry で監視する child を作る目的では、組み込み Agent tool を `/delegate` の代わりに使わないでください。
 
 | 項目 | 内容 |
 | --- | --- |
 | トリガー | child への委譲、subagent 起動、並列作業を依頼されたとき |
 | 基本形 | `/delegate "<task>" [--dir <path>] [--codex] [--model <model>] [--worktree] [--worktree-base <rev>]` |
-| 必須前提 | 親の agent-mail identity と正本 project key。編集 task では対象 resource 宣言と reservation |
+| 必須前提 | 親の ORRERY Mail identity と正本 project key。編集 task では対象 resource 宣言と reservation |
 | 任意前提 | `--worktree` には git repository、dashboard annotation には dashboard service |
 
 親 agent は task を渡して終了せず、scope と risk の決定、reservation、monitoring、成果物の検証に責任を持ちます。`--codex` で Codex child、`--model` で許可済み model、`--dir` で child の cwd を選びます。
@@ -181,10 +181,10 @@ model の世代名は `spawn_child.sh` の model catalog が正本です。Claud
 2. `agentstack-preregister-child` で child-owned token と canonical name を作る
 3. file reservation、contact、mode `0600` の正本 task file を準備する
 4. `spawn_child.sh --embed-task --task-file` で Claude / Codex、model、worktree を起動する（task mail は送らない）
-5. agent-mail の完了報告と `monitor_child_agent.sh` を読み、自分で成果物を検証する
+5. ORRERY Mail の完了報告と `monitor_child_agent.sh` を読み、自分で成果物を検証する
 6. reservation を release してから親の結果として報告する
 
-worktree child の cwd は `/tmp/cc-worktrees/<name>` に変わりますが、agent-mail project は変わりません。task には必ず `AGENTSTACK_PROJECT_KEY` / `PROJECT_KEY` を正本として明記します。`--worktree-base <rev>` を使うと複数 child の baseline を固定できます。
+worktree child の cwd は `/tmp/cc-worktrees/<name>` に変わりますが、ORRERY Mail project は変わりません。task には必ず `AGENTSTACK_PROJECT_KEY` / `PROJECT_KEY` を正本として明記します。`--worktree-base <rev>` を使うと複数 child の baseline を固定できます。
 
 monitor の danger command 検知は既定では passive です。`AGENTSTACK_MONITOR_DANGER_CHECK=1` で有効にすると一致時に soft stop します。出力が変わらない stasis の反復時は設定にかかわらず soft stop、`C-c`、process group freeze、session kill の順に段階化します。exit code の意味は skill 本文を参照してください。
 

@@ -8,7 +8,7 @@ holding a stale process. So this asks the other question — put two agents in
 the system, have them find each other, exchange messages, take a lock, and
 check that the dashboard can see all of it.
 
-Nothing here uses a private path. It talks to the same agent-mail endpoint the
+Nothing here uses a private path. It talks to the same ORRERY Mail endpoint the
 hooks use and reads the same HTTP API the browser reads, because a self-test
 that runs somewhere the product does not is a test of the self-test.
 """
@@ -370,7 +370,7 @@ def reservations(mail: AgentMail, project_key: str, pair: list[str], report: Rep
 
 
 def dashboard_sees(url: str, pair: list[str], report: Reporter) -> None:
-    """Does the dashboard read the database agent-mail just wrote to?
+    """Does the dashboard read the database ORRERY Mail just wrote to?
 
     Ask the graph, not the deck. The deck (`/api/agents`) is built from tmux
     sessions and shows agents that have one; these two were registered over
@@ -410,9 +410,9 @@ def dashboard_sees(url: str, pair: list[str], report: Reporter) -> None:
     if missing:
         raise Fail(
             f"the dashboard graph does not contain {', '.join(missing)} — it is "
-            "probably reading a different database than agent-mail writes to"
+            "probably reading a different database than ORRERY Mail writes to"
         )
-    report.ok("the dashboard reads the same database agent-mail wrote to")
+    report.ok("the dashboard reads the same database ORRERY Mail wrote to")
 
     edges = graph.get("edges") or []
     linked = any(
@@ -485,8 +485,8 @@ def main() -> int:
         mail = AgentMail(mcp_url, read_token(env))
         health = mail.call("health_check", {})
         if not isinstance(health, dict) or health.get("status") not in ("ok", "healthy"):
-            raise Fail(f"agent-mail at {mcp_url} is not healthy: {health!r}")
-        report.ok(f"agent-mail answered at {mcp_url}")
+            raise Fail(f"ORRERY Mail at {mcp_url} is not healthy: {health!r}")
+        report.ok(f"ORRERY Mail answered at {mcp_url}")
 
         mail.call("ensure_project", {"human_key": project_key})
         pair = register_pair(mail, project_key, report)

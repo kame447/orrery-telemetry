@@ -1,4 +1,4 @@
-"""Console entry point for the isolated AgentStack Mail HTTP server."""
+"""Console entry point for the isolated ORRERY Mail HTTP server."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ _GRACEFUL_SHUTDOWN_SECONDS = 8.0
 def _normalized_path(raw_path: str) -> str:
     path = raw_path.strip()
     if not path:
-        raise RuntimeError("AgentStack Mail HTTP path must not be empty")
+        raise RuntimeError("ORRERY Mail HTTP path must not be empty")
     return path if path.startswith("/") else f"/{path}"
 
 
@@ -34,7 +34,7 @@ def _is_loopback_host(raw_host: str) -> bool:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agentstack-mail",
-        description="Run the loopback-only AgentStack Mail MCP server.",
+        description="Run the loopback-only ORRERY Mail MCP server.",
     )
     parser.add_argument("--host", metavar="HOST", help="loopback bind host")
     parser.add_argument("--port", metavar="PORT", type=int, help="HTTP listen port")
@@ -65,14 +65,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
     if not _is_loopback_host(host):
         raise RuntimeError(
-            "the first AgentStack Mail HTTP entry point is loopback-only; "
+            "the first ORRERY Mail HTTP entry point is loopback-only; "
             "use --host or set AGENTSTACK_MAIL_HTTP_HOST to 127.0.0.1, ::1, "
             "or localhost"
         )
     if settings.http.bearer_token or settings.http.jwt_enabled:
         raise RuntimeError(
             "HTTP bearer/JWT authentication is not wired into the first "
-            "AgentStack Mail entry point; refusing to start with auth configured"
+            "ORRERY Mail entry point; refusing to start with auth configured"
         )
 
     canonical_path = _normalized_path(path)

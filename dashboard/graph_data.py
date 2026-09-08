@@ -83,7 +83,7 @@ def _default_mail_db() -> str:
 
 
 DB_PATH = _env_path("AGENTSTACK_MAIL_DB") or _default_mail_db()
-# agent-mail project human_key。未設定なら PROJECT_ID fallback で degrade する。
+# ORRERY Mail project human_key。未設定なら PROJECT_ID fallback で degrade する。
 PROJECT_HUMAN_KEY = (
     os.environ.get("AGENTSTACK_PROJECT_KEY", "").strip()
     or _env_path("AGENTSTACK_VAULT", "")
@@ -182,9 +182,9 @@ def _to_epoch(
     field: str = "timestamp",
     diagnostics: _TimestampDiagnostics | None = None,
 ) -> int | None:
-    """Normalize agent-mail timestamps to whole UTC epoch seconds.
+    """Normalize ORRERY Mail timestamps to whole UTC epoch seconds.
 
-    Rust agent-mail stores numeric timestamps as Unix microseconds.  Legacy
+    Rust ORRERY Mail stores numeric timestamps as Unix microseconds.  Legacy
     Python builds store ISO text.  Invalid non-empty values stay distinct from
     the real Unix epoch: callers receive ``None`` and diagnostics record the
     field instead of silently turning corruption into a plausible zero.

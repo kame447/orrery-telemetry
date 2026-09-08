@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agentstack.example/schemas/binding-record-v1.json",
-  "title": "Codex App to agent-mail binding record v1",
+  "title": "Codex App to ORRERY Mail binding record v1",
   "type": "object",
   "additionalProperties": false,
   "required": [

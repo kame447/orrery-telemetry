@@ -1,7 +1,7 @@
-"""Owner credentials follow the live name-scoped agent-mail schema.
+"""Owner credentials follow the live name-scoped ORRERY Mail schema.
 
 The Bridge proxy resolves each agent's owner token out-of-band. Stock
-agent-mail builds disagree on whether inbox, whois, acknowledgement, and
+ORRERY Mail builds disagree on whether inbox, whois, acknowledgement, and
 reservation tools accept ``registration_token``. The client must obey the
 schema advertised by the server that actually answers.
 """

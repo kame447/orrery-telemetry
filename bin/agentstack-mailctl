@@ -1,5 +1,5 @@
 #!/bin/bash
-# Minimal lifecycle controller for the supervised AgentStack Mail runner.
+# Minimal lifecycle controller for the supervised ORRERY Mail runner.
 #
 # The runner owns crash recovery.  This controller owns operator actions and
 # refuses to signal a PID unless its controller-written marker names the exact
@@ -30,8 +30,8 @@ fi
 RUNTIME_DIR="${AGENTSTACK_MAIL_RUNTIME_DIR:-$MAIL_SERVICE_ROOT/runtime}"
 # An explicit `stop` has to outlive the command: the installed autostart trigger
 # calls `start` every few minutes, so without a recorded intent it would simply
-# undo the operator's stop at the next sweep. Measured: stop → "AgentStack Mail
-# stopped" → next sweep → "AgentStack Mail started (pid ...)".
+# undo the operator's stop at the next sweep. Measured: stop → "ORRERY Mail
+# stopped" → next sweep → "ORRERY Mail started (pid ...)".
 STOPPED_MARKER="${AGENTSTACK_MAIL_STOPPED_MARKER:-$RUNTIME_DIR/agentstack-mail.stopped}"
 # Set by the autostart unit. A sweep must never override intent, and must stay
 # quiet when there is nothing to do (it runs ~105k times a year).
@@ -45,7 +45,7 @@ usage() {
   cat <<'EOF'
 Usage: agentstack-mailctl {start|status|stop|restart}
 
-Controls the AgentStack Mail supervised-background service recorded by the
+Controls the ORRERY Mail supervised-background service recorded by the
 installed env.sh. status exits 0 only for a managed, healthy service; a cleanly
 stopped service exits 3.
 EOF
@@ -53,7 +53,7 @@ EOF
 
 validate_config() {
   [[ -n "$MAIL_ENV" ]] || die "AGENTSTACK_MAIL_ENV is not configured"
-  [[ -n "$MAIL_RUNNER" ]] || die "the rendered AgentStack Mail runner is not configured"
+  [[ -n "$MAIL_RUNNER" ]] || die "the rendered ORRERY Mail runner is not configured"
   [[ "$MCP_URL" == http://* || "$MCP_URL" == https://* ]] || \
     die "AGENTSTACK_MCP_URL must be an HTTP(S) URL"
   command -v "$PYTHON_BIN" >/dev/null 2>&1 || \
@@ -415,7 +415,7 @@ start_service() {
     if launchd_supervises_mail; then
       rm -f "$LAUNCHD_PLIST_MEMO"
       if wait_for_health; then
-        say "AgentStack Mail started by launchd (label $MAIL_LAUNCHD_LABEL)"
+        say "ORRERY Mail started by launchd (label $MAIL_LAUNCHD_LABEL)"
         return 0
       fi
       die "launchd job $MAIL_LAUNCHD_LABEL was restored but the endpoint is not healthy"
@@ -432,12 +432,12 @@ start_service() {
   fi
   if [[ "$launchd_now" == "ours" ]]; then
     if endpoint_port_open && health_ok; then
-      [[ "$SWEEP" == "1" ]] || say "AgentStack Mail already running under launchd (label $MAIL_LAUNCHD_LABEL)"
+      [[ "$SWEEP" == "1" ]] || say "ORRERY Mail already running under launchd (label $MAIL_LAUNCHD_LABEL)"
       return 0
     fi
     launchctl kickstart "$(launchd_service_target)" >/dev/null 2>&1 || true
     if wait_for_health; then
-      say "AgentStack Mail started by launchd (label $MAIL_LAUNCHD_LABEL)"
+      say "ORRERY Mail started by launchd (label $MAIL_LAUNCHD_LABEL)"
       return 0
     fi
     die "launchd job $MAIL_LAUNCHD_LABEL did not bring the endpoint up"
@@ -450,8 +450,8 @@ start_service() {
   if pid_running "$pid"; then
     pid_is_managed_runner "$pid" || \
       die "pidfile points to a process other than the rendered runner (pid $pid)"
-    health_ok || die "managed runner pid $pid is alive but AgentStack Mail health is failing"
-    [[ "$SWEEP" == "1" ]] || say "AgentStack Mail already running (pid $pid, endpoint $MCP_URL)"
+    health_ok || die "managed runner pid $pid is alive but ORRERY Mail health is failing"
+    [[ "$SWEEP" == "1" ]] || say "ORRERY Mail already running (pid $pid, endpoint $MCP_URL)"
     return
   fi
   if [[ -n "$pid" ]]; then
@@ -463,7 +463,7 @@ start_service() {
       ;;
     ours)
       if wait_for_health; then
-        say "AgentStack Mail started by launchd (label $MAIL_LAUNCHD_LABEL)"
+        say "ORRERY Mail started by launchd (label $MAIL_LAUNCHD_LABEL)"
         return 0
       fi
       die "launchd job $MAIL_LAUNCHD_LABEL became loaded but the endpoint is not healthy"
@@ -471,9 +471,9 @@ start_service() {
   esac
   if endpoint_port_open; then
     if health_ok; then
-      die "a healthy AgentStack Mail endpoint exists without this controller's pidfile"
+      die "a healthy ORRERY Mail endpoint exists without this controller's pidfile"
     fi
-    die "the configured AgentStack Mail port is owned by another or unhealthy listener"
+    die "the configured ORRERY Mail port is owned by another or unhealthy listener"
   fi
   # Re-check at the last moment. The state read at the top of this function was
   # taken before the health probes, and a login or a manual load can arrive in
@@ -491,7 +491,7 @@ start_service() {
       ;;
     ours)
       if wait_for_health; then
-        say "AgentStack Mail started by launchd (label $MAIL_LAUNCHD_LABEL)"
+        say "ORRERY Mail started by launchd (label $MAIL_LAUNCHD_LABEL)"
         return 0
       fi
       die "launchd job $MAIL_LAUNCHD_LABEL became loaded but the endpoint is not healthy"
@@ -506,9 +506,9 @@ start_service() {
       wait_for_stop "$pid" || true
     fi
     rm -f "$PIDFILE"
-    die "AgentStack Mail did not become healthy; inspect $LOGFILE"
+    die "ORRERY Mail did not become healthy; inspect $LOGFILE"
   fi
-  say "AgentStack Mail started (pid $pid, endpoint $MCP_URL)"
+  say "ORRERY Mail started (pid $pid, endpoint $MCP_URL)"
 }
 
 stop_service() {
@@ -553,7 +553,7 @@ stop_service() {
       waited=$((waited + 1))
     done
     rm -f "$PIDFILE"
-    say "AgentStack Mail stopped (launchd job $MAIL_LAUNCHD_LABEL booted out)"
+    say "ORRERY Mail stopped (launchd job $MAIL_LAUNCHD_LABEL booted out)"
     return
   fi
   if ! pid_running "$pid"; then
@@ -567,7 +567,7 @@ stop_service() {
       die "the endpoint is still occupied without a live managed pid; refusing to stop an unknown process"
     fi
     rm -f "$PIDFILE"
-    say "AgentStack Mail already stopped"
+    say "ORRERY Mail already stopped"
     return
   fi
   pid_is_managed_runner "$pid" || \
@@ -581,7 +581,7 @@ stop_service() {
       die "managed runner stopped but the configured endpoint remains occupied"
   fi
   rm -f "$PIDFILE"
-  say "AgentStack Mail stopped"
+  say "ORRERY Mail stopped"
 }
 
 status_service() {
@@ -591,7 +591,7 @@ status_service() {
     pid_is_managed_runner "$pid" || \
       die "pidfile points to a foreign process (pid $pid)"
     health_ok || die "managed runner pid $pid is alive but health is failing"
-    say "AgentStack Mail running (pid $pid, endpoint $MCP_URL)"
+    say "ORRERY Mail running (pid $pid, endpoint $MCP_URL)"
     return 0
   fi
   if endpoint_port_open; then
@@ -599,12 +599,12 @@ status_service() {
       local launchd_pid
       launchd_pid="$(launchd_service_pid)"
       health_ok || die "launchd job $MAIL_LAUNCHD_LABEL owns the endpoint but health is failing"
-      say "AgentStack Mail running under launchd (label $MAIL_LAUNCHD_LABEL${launchd_pid:+, pid $launchd_pid}, endpoint $MCP_URL)"
+      say "ORRERY Mail running under launchd (label $MAIL_LAUNCHD_LABEL${launchd_pid:+, pid $launchd_pid}, endpoint $MCP_URL)"
       return 0
     fi
     die "endpoint is occupied without a live managed pid"
   fi
-  say "AgentStack Mail stopped"
+  say "ORRERY Mail stopped"
   return 3
 }
 
@@ -642,7 +642,7 @@ case "$command" in
       launchctl kickstart -k "$(launchd_service_target)" >/dev/null 2>&1 || \
         die "launchd could not restart $MAIL_LAUNCHD_LABEL"
       wait_for_health || die "launchd restarted $MAIL_LAUNCHD_LABEL but the endpoint is not healthy"
-      say "AgentStack Mail restarted by launchd (label $MAIL_LAUNCHD_LABEL)"
+      say "ORRERY Mail restarted by launchd (label $MAIL_LAUNCHD_LABEL)"
     else
       stop_service
       start_service

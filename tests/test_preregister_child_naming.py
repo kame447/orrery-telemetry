@@ -24,7 +24,7 @@ _ROOT = pathlib.Path(__file__).resolve().parent.parent
 _HELPER = _ROOT / "bin" / "agentstack-preregister-child"
 
 # Stands in for bin/lib/agentstack-register.sh so the test exercises the
-# helper's real control flow without touching a live agent-mail server.
+# helper's real control flow without touching a live ORRERY Mail server.
 _FAKE_LIB = r"""
 ags_mail_load_token() { :; }
 ags_pick_available_agent_name() { echo "PICKER_CALLED" >&2; printf 'Picked-Curie\n'; }
@@ -56,6 +56,7 @@ ags_extract_agent_name() { python3 -c 'import json,sys; print(json.load(sys.stdi
 ags_extract_registration_token() { printf '\n'; }
 ags_store_registration_token() { :; }
 ags_apply_contact_policy() { :; }
+ags_record_name_substitution() { :; }
 """
 
 

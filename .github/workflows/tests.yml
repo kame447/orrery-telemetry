@@ -11,14 +11,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  portable-startup:
+    # These regressions cover portable components, not a full Windows install.
+    runs-on: windows-latest
+    name: portable startup (Windows)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install pytest -e ./packages/agentstack_mail
+      - name: Check checkout bytes, long Mail paths, and dashboard HTTP startup
+        env:
+          PYTHONPATH: .
+          PYTHONUTF8: "1"
+        run: python -m pytest -q tests/windows/ tests/test_mail_fixture_line_endings.py tests/test_dashboard_startup.py tests/test_codex_app_runtime_provider.py
+
   tests:
-    runs-on: ubuntu-latest
+    # 対応 OS は macOS（README「対応環境」）。ubuntu で回すと launchd / launchctl /
+    # mailctl の rehearsal が環境不在で落ち、対応外の失敗と本物の回帰が混ざる。
+    # 2026-09-03 の公開まで ubuntu で 22 run 連続赤だったのはこれ。
+    runs-on: macos-latest
     strategy:
       fail-fast: false
       matrix:
-        # README が「3.10 以上」と書く以上、両端を機械で押さえる。"3.x" 単独だと
+        # README が「3.11 以上」と書く以上、両端を機械で押さえる。"3.x" 単独だと
         # 下限は誰も踏まないし、新しい Python が出た日に上限が黙って動く。
-        python-version: ["3.10", "3.12", "3.14"]
+        # 3.10 は 2026-09-04 に対応から外した（import は通るが mail のテストが 38 件落ちる）。
+        python-version: ["3.11", "3.12", "3.14"]
     name: tests (python ${{ matrix.python-version }})
     steps:
       - uses: actions/checkout@v4
@@ -29,6 +49,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      # tmux: agents run inside it and tests exercise the real binary.
+      # uv: the installer provisions ORRERY Mail with it and fails preflight without it.
+      - name: Install tmux and uv
+        run: brew install tmux uv
       - name: Install test and package-build tools
         run: python3 -m pip install pytest build -e ./packages/agentstack_mail
       # `tests/` だけを指定していた間、integrations/codex_app/tests/ の 111 件は
@@ -37,7 +61,9 @@ jobs:
       - name: Run tests (pytest — `python3 file.py` 直実行は pytest 形式のテストを 0 件実行で緑にしてしまう)
         run: |
           set -euo pipefail
-          PYTHONPATH=.:packages/agentstack_mail/src python3 -m pytest -q tests/ integrations/ packages/agentstack_mail/tests/
+          # tests/windows/ is the community Windows lane; its conftest already skips collection off win32,
+          # and --ignore keeps that explicit here.
+          PYTHONPATH=.:packages/agentstack_mail/src python3 -m pytest -q tests/ --ignore=tests/windows integrations/ packages/agentstack_mail/tests/
       - name: Build and inspect agentstack-mail distribution
         run: |
           set -euo pipefail

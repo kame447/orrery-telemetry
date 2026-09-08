@@ -1,4 +1,4 @@
-# AgentStack mail extraction
+# ORRERY Mail extraction
 
 ORRERY Mail is the public installer's coordination service. It
 is developed inside this repository as a logically isolated package;
@@ -56,7 +56,7 @@ published. Their bodies remain internal only until the differential train can
 prove that pruning them does not break macro or storage dependencies.
 
 Because no roster resource is published, tool descriptions direct callers to
-the identity assigned by the AgentStack runtime or returned by
+the identity assigned by the ORRERY Telemetry runtime or returned by
 `register_agent`/`macro_start_session`. `list_contacts` returns known links,
 `whois` verifies a known identity, and broadcast delivery does not require a
 roster response. Tool filtering cannot reduce the public surface: a profile
@@ -127,7 +127,10 @@ Freezing those paths into the unit instead would silently keep starting the
 previous render after a re-install. Each invocation is one-shot on purpose (`KeepAlive` false / `Type=oneshot`): the
 controller hands the server to `nohup` and exits, so a restart-always unit would
 respawn the *controller* in a loop instead of supervising the server. Repetition
-comes from `StartInterval` on launchd and from the timer on systemd. `start` is
+comes from `StartInterval` on launchd and from the timer on systemd. The systemd
+unit also sets `KillMode=process`: without it the default control-group cleanup
+kills the freshly started server the moment the oneshot controller exits (seen
+on WSL2). `start` is
 idempotent — it reports "already running" and exits 0 when the owned PID is alive
 and healthy — so re-running it costs nothing, and it stays silent when there is
 nothing to do. Its output goes to `agentstack-mail-autostart.log` (launchd
@@ -138,8 +141,8 @@ own log.
 `runtime/agentstack-mail.stopped`, and the sweep leaves a deliberately stopped
 server alone until an explicit `start` or `restart` releases the hold. Without
 that record the trigger would quietly undo an operator's stop at the next
-firing — measured before the fix: `stop` reported "AgentStack Mail stopped", and
-the following sweep reported "AgentStack Mail started".
+firing — measured before the fix: `stop` reported "ORRERY Mail stopped", and
+the following sweep reported "ORRERY Mail started".
 
 If neither launchd nor systemd is available, the installer says so explicitly
 rather than skipping quietly, because a missing autostart is invisible until the
@@ -159,6 +162,21 @@ automatically; a stale PID whose port is held by an unhealthy or foreign listene
 is refused with a message rather than fought over — the sweep will retry, but it
 will not evict a listener it does not own. Immediate recovery is
 `agentstack-mailctl start`.
+
+### The watcher is a service too
+
+Delivery into tmux is done by `hooks/watch_agent_mail_signals.sh`, a separate
+long-running process from the Mail server. Since 2026-09-07 the installer
+registers it as `org.agentstack.mail-watcher` (launchd, `KeepAlive`) or
+`org.agentstack.mail-watcher.service` (systemd user unit, `Restart=always`),
+logging to `~/.agentstack/runtime/mail-watcher.log`. Before that, only
+`agent-start` and the Codex bootstrap started it, as a detached tmux session, so
+a host whose agents were all spawned from the dashboard accumulated signals and
+delivered none (observed on WSL2 after `wsl --shutdown`). The watcher holds a
+single-instance lock, so the `agent-start` tmux fallback now stands down when
+the service already runs; the installer also retires a leftover `mail-watcher`
+tmux session when it registers the unit. `/api/mail-watcher-health` reports
+`watcher_mode` as `launchd`, `systemd-user` or `pidfile`.
 
 ## Manual migration from upstream
 
@@ -201,7 +219,7 @@ rollback.
 
 ## Notification layout compatibility
 
-AgentStack Mail writes one signal per message at
+ORRERY Mail writes one signal per message at
 `signals/projects/<project>/agents/<agent>/<message-id>.signal`. The bundled
 `hooks/watch_agent_mail_signals.sh` recursively discovers that layout, extracts
 the nested `message` metadata, injects the notification, and removes only the

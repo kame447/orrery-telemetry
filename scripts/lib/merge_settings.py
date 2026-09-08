@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safely merge claude-agent-stack hooks and permissions into Claude settings."""
+"""Safely merge ORRERY Telemetry hooks and permissions into Claude settings."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ class MergeError(RuntimeError):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Safely merge or remove claude-agent-stack settings entries.",
+        description="Safely merge or remove ORRERY Telemetry settings entries.",
     )
     parser.add_argument("--settings", required=True, help="Claude settings.json path")
     parser.add_argument("--template", help="settings.template.json path")

@@ -1,6 +1,6 @@
 # 委任と child agent
 
-> English version: planned.
+> English version: [delegation.en.md](delegation.en.md)
 
 [前: Launcher と identity](launchers.md) · [README に戻る](../README.md) · [次: Hooks](hooks.md)
 
@@ -20,10 +20,10 @@ Claude Code にも Codex Desktop にも、最初から subagent の仕組みが�
 | | 組み込み subagent | child agent（このスタック） |
 |---|---|---|
 | 作り方 | 親が `Agent` / `Task` ツールを呼ぶ | `/delegate`（内部で `spawn_child.sh`） |
-| identity | 無し。呼び出しごとの内部 ID（`a1798ced…` のような16進） | agent-mail に登録された名前（`Teal-Darwin` のような形容詞＋科学者名） |
+| identity | 無し。呼び出しごとの内部 ID（`a1798ced…` のような16進） | ORRERY Mail に登録された名前（`Teal-Darwin` のような形容詞＋科学者名） |
 | プロセス | 親と同じプロセス | 独立した tmux session（＋任意で端末ウィンドウ） |
 | dashboard | **現れない**（ノードとしても存在しない） | ノードとして立ち、親との間に線が引かれる |
-| 連絡 | 親からの引数と、返ってくる最終テキストだけ | agent-mail。親以外の agent とも双方向にやり取りできる |
+| 連絡 | 親からの引数と、返ってくる最終テキストだけ | ORRERY Mail。親以外の agent とも双方向にやり取りできる |
 | 寿命 | その1回の呼び出しの間だけ | 明示的に終えるまで。次の仕事を追加で投げられる |
 | 中断からの復帰 | 不可 | tmux session が残り、dashboard の jump / resume で戻れる |
 | ファイル調停 | 無し | file reservation で他 agent と衝突を避けられる |
@@ -32,7 +32,7 @@ Claude Code にも Codex Desktop にも、最初から subagent の仕組みが�
 
 ## 見分け方
 
-いちばん確実なのは **dashboard を見ること**です。組み込み subagent は agent-mail に登録しないので、ノードとして現れません。線が無いのではなく、**存在しません**。
+いちばん確実なのは **dashboard を見ること**です。組み込み subagent は ORRERY Mail に登録しないので、ノードとして現れません。線が無いのではなく、**存在しません**。
 
 しりとりのような疎通確認をしたとき、次のどれかに当てはまるなら組み込み subagent です。
 
@@ -45,11 +45,11 @@ Claude Code にも Codex Desktop にも、最初から subagent の仕組みが�
 
 ## なぜ黙って入れ替わるのか
 
-`/delegate` は agent-mail の MCP ツールを使います。**そのツールが無いとき、親は自分の判断で組み込み subagent に切り替えて仕事を終わらせます。** 仕事は完了し、報告も返るので、人間の側からは成功にしか見えません。
+`/delegate` は ORRERY Mail の MCP ツールを使います。**そのツールが無いとき、親は自分の判断で組み込み subagent に切り替えて仕事を終わらせます。** 仕事は完了し、報告も返るので、人間の側からは成功にしか見えません。
 
 このスタックでは、その振る舞いを次の3段構えで潰しています。
 
-1. **install が agent-mail を MCP サーバーとして登録する。** 以前は登録手順がどこにも書かれておらず、ユーザーが登録済みであることを暗黙の前提にしていました
+1. **install が ORRERY Mail を MCP サーバーとして登録する。** 以前は登録手順がどこにも書かれておらず、ユーザーが登録済みであることを暗黙の前提にしていました
 2. **`agentstack-doctor` が登録の欠落・不一致を報告する。** 修復コマンドも表示します
 3. **管理下の指示（`claude/CLAUDE.md` / `codex/AGENTS.md`）が、委任は `/delegate` だけで行うこと、ツールが無いときは代替せず報告して止まることを明示する**
 

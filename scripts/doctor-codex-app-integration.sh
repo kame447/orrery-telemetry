@@ -215,7 +215,7 @@ SNAPSHOT_PATH="${AGENTSTACK_CODEX_APP_SNAPSHOT:-}"
 PYTHON_BIN="${AGENTSTACK_PYTHON:-python3}"
 if [[ "$CLEANUP_ORPHANS" == true ]]; then
   if [[ -z "${AGENTSTACK_MCP_URL:-}" || -z "$RUNTIME_DIR" || -z "$SNAPSHOT_PATH" ]]; then
-    fail "cleanup requires agent-mail URL, runtime dir, and snapshot path"
+    fail "cleanup requires ORRERY Mail URL, runtime dir, and snapshot path"
   else
     HTTP_BEARER_MODE="${AGENTSTACK_MAIL_HTTP_BEARER_MODE:-auto}"
     if [[ "$HTTP_BEARER_MODE" == "disabled" ]]; then

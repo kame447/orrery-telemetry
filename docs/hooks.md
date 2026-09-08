@@ -1,6 +1,6 @@
 # Hooks と運用 helper
 
-> English version: planned.
+> English version: [hooks.en.md](hooks.en.md)
 
 [前: 委任と child agent](delegation.md) · [README に戻る](../README.md) · [次: Codex App 統合](codex-app.md)
 
@@ -15,7 +15,7 @@ installer が `settings.template.json` を `~/.claude/settings.json` へ merge �
 | Event / matcher | 実行ファイル | 発火タイミング | 主な動作 |
 | --- | --- | --- | --- |
 | `SessionStart` | [`set-ghostty-title.sh`](../hooks/set-ghostty-title.sh) | startup / resume / `/clear` / compact の直後 | 既知の identity を pane metadata、tmux session、terminal title 用 clipboard、managed agent list へ反映 |
-| `SessionStart` | [`session-start-reminder.sh`](../hooks/session-start-reminder.sh) | 同上。title helper の後 | agent-mail health と既存 identity を確認し、同名再登録または登録手順と `fetch_inbox` を session context へ出力 |
+| `SessionStart` | [`session-start-reminder.sh`](../hooks/session-start-reminder.sh) | 同上。title helper の後 | ORRERY Mail health と既存 identity を確認し、同名再登録または登録手順と `fetch_inbox` を session context へ出力 |
 | `PreToolUse` / `Edit|Write` | [`check-file-reservation.sh`](../hooks/check-file-reservation.sh) | Claude Code が file edit を実行する直前 | protected root 内の既存 exact path reservation を renew-only で確認。0件は1回だけ再確認し、なお0件なら exit 2 で block |
 | `PreToolUse` / `Edit|Write|Bash` | [`check-agent-registered.sh`](../hooks/check-agent-registered.sh) | edit、write、shell command の直前 | 現在の Claude session が `register_agent` 済みか session flag で検査。未登録なら exit 2 で block |
 | `PreToolUse` / reservation tools | [`invalidate-release-debounce.sh`](../hooks/invalidate-release-debounce.sh) | file reservation の取得・renew 直前 | 同じ agent/path に対する古い release worker の token を無効化し、新しい reservation が直後に消される競合を防止 |
@@ -41,7 +41,7 @@ file と tool argument の境界を変えません。旧 Keychain service は既
 ### `session-start-reminder.sh`
 
 - **発火:** すべての `SessionStart` source。startup だけでなく resume、`/clear`、compact 後にも走ります。
-- **動作:** identity を `AGENT_NAME` → pane metadata → exact tmux session の順で解決し、agent-mail の liveness を確認します。owner token と project key があれば shell 側で同じ identity を再登録し、成功後は `fetch_inbox` から始めるよう案内します。
+- **動作:** identity を `AGENT_NAME` → pane metadata → exact tmux session の順で解決し、ORRERY Mail の liveness を確認します。owner token と project key があれば shell 側で同じ identity を再登録し、成功後は `fetch_inbox` から始めるよう案内します。
 - **再登録できない場合:** 解決済みの同名を `register_agent` に渡す手順を表示します。別名生成へ分岐しません。child 専用 MCP proxy が認証を注入している場合は、model に token file を読ませません。
 
 ### `check-file-reservation.sh`
@@ -118,16 +118,16 @@ service が応答しているなら登録は可能なので、既定は**要求�
 
 | 実行ファイル | 呼び出し元 / 起動タイミング | 主な動作 |
 | --- | --- | --- |
-| [`record-session-index.py`](../hooks/record-session-index.py) | `mark-agent-registered.sh` が PostToolUse payload を渡して**同期**起動 | agent-mail ID と Claude `session_id`、transcript、cwd、`project_key`、`registered_by` の exact mapping を atomic write。他人を登録した呼び出しは記録しない |
+| [`record-session-index.py`](../hooks/record-session-index.py) | `mark-agent-registered.sh` が PostToolUse payload を渡して**同期**起動 | ORRERY Mail ID と Claude `session_id`、transcript、cwd、`project_key`、`registered_by` の exact mapping を atomic write。他人を登録した呼び出しは記録しない |
 | [`resolve-agent-name.sh`](../hooks/resolve-agent-name.sh) | identity が必要な reminder、reservation、cleanup helper が source | env → exact tmux session → session index（caller が `AGENTSTACK_SESSION_ID` を渡した場合）の順で identity を解決 |
 | [`spawn_child.sh`](../hooks/spawn_child.sh) | `/delegate` または dashboard の NEW AGENT が child 起動時に明示実行 | identity、token、task mail、reservation、tmux、Claude / Codex、worktree、readiness を一つの launch transaction にまとめる |
 | [`cleanup-child-agent.sh`](../hooks/cleanup-child-agent.sh) | `spawn_child.sh` が起動した child の REPL command が終了した直後 | reservation release、remote identity retire、managed list / state / credential / MCP config の削除を best-effort 実行 |
 | [`monitor_child_agent.sh`](../hooks/monitor_child_agent.sh) | `/delegate` の親が監視頻度ごとに一回ずつ実行 | tmux pane を採取し、完了、session 消失、permission prompt、stasis、任意の danger pattern を判定して exit code で返す |
-| [`watch_agent_mail_signals.sh`](../hooks/watch_agent_mail_signals.sh) | launcher の登録処理が dedicated `mail-watcher` tmux service として起動 | agent-mail signal を監視し、対象と完全一致する agent tmux session へ通知文と `C-m` を注入 |
+| [`watch_agent_mail_signals.sh`](../hooks/watch_agent_mail_signals.sh) | launcher の登録処理が dedicated `mail-watcher` tmux service として起動 | ORRERY Mail signal を監視し、対象と完全一致する agent tmux session へ通知文と `C-m` を注入 |
 
 ### `record-session-index.py`
 
-PostToolUse payload から agent-mail の数値 ID、canonical name、Claude `session_id`、transcript path、cwd を取り出し、`$AGENTSTACK_RUNTIME_DIR/session_index/<agent_id>.json` へ一時 file + `os.replace` で書きます。record は `schema_version: 2` と `binding_kind: "self"` を持ちます。**呼び出し元が別の agent を登録した場合（親による child 登録）は record を書きません** — この index は dashboard の resume と guard の identity 解決の両方に読まれるので、読む側で除外するのではなく、書かない方が誤用の余地が残りません。dashboard はこの exact mapping を session resume に優先し、古い session だけ heuristic へ fallback します。入力不備や I/O failure は registration を妨げない quiet no-op です。
+PostToolUse payload から ORRERY Mail の数値 ID、canonical name、Claude `session_id`、transcript path、cwd を取り出し、`$AGENTSTACK_RUNTIME_DIR/session_index/<agent_id>.json` へ一時 file + `os.replace` で書きます。record は `schema_version: 2` と `binding_kind: "self"` を持ちます。**呼び出し元が別の agent を登録した場合（親による child 登録）は record を書きません** — この index は dashboard の resume と guard の identity 解決の両方に読まれるので、読む側で除外するのではなく、書かない方が誤用の余地が残りません。dashboard はこの exact mapping を session resume に優先し、古い session だけ heuristic へ fallback します。入力不備や I/O failure は registration を妨げない quiet no-op です。
 
 ### `resolve-agent-name.sh`
 
@@ -157,7 +157,7 @@ dangerous command pattern の検査は `AGENTSTACK_MONITOR_DANGER_CHECK=1` の�
 
 ## Codex との違い
 
-Codex CLI には Claude Code の `SessionStart` / `PreToolUse` / `PostToolUse` hook system がなく、`mark-agent-registered.sh` も走りません。`agent-start-codex` は bootstrap で identity 登録と tmux rename を済ませ、予約済み child/resume と reregister は応答名不一致で停止します。一方、direct spawn は警告後に応答名を採用し、raw MCP 登録は自動検出されません。これらは別 follow-up であり、mail service の `passthrough` 設定を省略できる根拠にはなりません。managed `~/.codex/AGENTS.md` は reservation の reserve / renew / release を指示します。mail watcher と agent-mail registry は Claude / Codex 共通なので、通知と reservation conflict は相互に見えます。
+Codex CLI には Claude Code の `SessionStart` / `PreToolUse` / `PostToolUse` hook system がなく、`mark-agent-registered.sh` も走りません。`agent-start-codex` は bootstrap で identity 登録と tmux rename を済ませ、予約済み child/resume と reregister は応答名不一致で停止します。一方、direct spawn は警告後に応答名を採用し、raw MCP 登録は自動検出されません。これらは別 follow-up であり、mail service の `passthrough` 設定を省略できる根拠にはなりません。managed `~/.codex/AGENTS.md` は reservation の reserve / renew / release を指示します。mail watcher と ORRERY Mail registry は Claude / Codex 共通なので、通知と reservation conflict は相互に見えます。
 
 Codex Desktop はさらに別の plugin hook / Bridge lifecycle を使います。詳しくは [Codex App 統合](codex-app.md)を参照してください。
 

@@ -9,7 +9,7 @@ usage() {
   cat <<'EOF'
 Usage: doctor.sh [--install-dir PATH] [--report]
 
-Checks the core claude-agent-stack install footprint without modifying files.
+Checks the core ORRERY Telemetry install footprint without modifying files.
 
   --report   Also print a paste-ready environment report for a bug report.
              Every failure this project has had came from an environment
@@ -65,11 +65,11 @@ check_cmd() {
 
 PYTHON_BIN="${AGENTSTACK_PYTHON:-$(command -v python3 2>/dev/null || true)}"
 if [[ -x "$PYTHON_BIN" ]] && \
-   "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)' >/dev/null 2>&1
+   "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1
 then
-  echo "ok: Python 3.10+ ($PYTHON_BIN)"
+  echo "ok: Python 3.11+ ($PYTHON_BIN)"
 else
-  echo "missing: Python 3.10+ interpreter" >&2
+  echo "missing: Python 3.11+ interpreter" >&2
   status=1
 fi
 check_cmd tmux
@@ -93,16 +93,16 @@ fi
 
 MAIL_DB_PATH="${AGENTSTACK_MAIL_DB:-}"
 if [[ -n "$MAIL_DB_PATH" && -f "$MAIL_DB_PATH" ]]; then
-  echo "ok: agent-mail database $MAIL_DB_PATH"
+  echo "ok: ORRERY Mail database $MAIL_DB_PATH"
 else
   echo "missing: AGENTSTACK_MAIL_DB does not point to an existing file: ${MAIL_DB_PATH:-<unset>}" >&2
   status=1
 fi
 
 if [[ "${AGENTSTACK_MAIL_HTTP_BEARER_MODE:-}" == "disabled" ]]; then
-  echo "ok: AgentStack Mail transport uses owner tokens without a legacy HTTP bearer"
+  echo "ok: ORRERY Mail transport uses owner tokens without a legacy HTTP bearer"
 else
-  echo "missing: AgentStack Mail requires AGENTSTACK_MAIL_HTTP_BEARER_MODE=disabled" >&2
+  echo "missing: ORRERY Mail requires AGENTSTACK_MAIL_HTTP_BEARER_MODE=disabled" >&2
   status=1
 fi
   NATIVE_MAIL_HEALTH="$("$PYTHON_BIN" - \
@@ -156,9 +156,9 @@ print(actual)
 PY
 )"
   if [[ -n "$NATIVE_MAIL_HEALTH" ]]; then
-    echo "ok: AgentStack Mail health serving $NATIVE_MAIL_HEALTH"
+    echo "ok: ORRERY Mail health serving $NATIVE_MAIL_HEALTH"
   else
-    echo "missing: AgentStack Mail health does not serve the configured native database at ${AGENTSTACK_MCP_URL:-<unset>}" >&2
+    echo "missing: ORRERY Mail health does not serve the configured native database at ${AGENTSTACK_MCP_URL:-<unset>}" >&2
     status=1
   fi
 
@@ -170,7 +170,7 @@ import json
 import pathlib
 import sys
 
-sys.path.insert(0, sys.argv[4])
+sys.path.insert(0, sys.argv[3])
 try:
     from mcp_endpoint import same_endpoint
 except ImportError:
@@ -210,7 +210,7 @@ elif [[ "$CLAUDE_MCP_STATE" == "unavailable" ]]; then
   status=1
 else
   echo "warn: Claude MCP orrery-mail is not registered for $MCP_URL in $CLAUDE_JSON" >&2
-  echo "      /delegate cannot use agent-mail until this fixed-name entry exists." >&2
+  echo "      /delegate cannot use ORRERY Mail until this fixed-name entry exists." >&2
   MCP_MERGE_HELPER="$INSTALL_DIR/bin/agentstack-merge-claude-mcp"
   printf '      preview: %q %q --dry-run --config %q --mcp-url %q --mail-env %q --backup-dir %q\n' \
     "$PYTHON_BIN" "$MCP_MERGE_HELPER" "$CLAUDE_JSON" "$MCP_URL" "$MAIL_ENV" \
@@ -256,7 +256,7 @@ try:
     healthy = (
         response.status == 200
         and isinstance(payload, dict)
-        and payload.get("name") == "claude-agent-stack"
+        and payload.get("name") in ("orrery-telemetry", "claude-agent-stack")
         and payload.get("api") == 1
     )
 except (OSError, ValueError, TypeError):
@@ -274,7 +274,7 @@ report_dashboard_service() {
     endpoint_serving=1
     echo "ok: dashboard endpoint serving (http://127.0.0.1:$port/api/version)"
   else
-    echo "warn: dashboard endpoint is not serving a claude-agent-stack API at http://127.0.0.1:$port/api/version"
+    echo "warn: dashboard endpoint is not serving an ORRERY Telemetry API at http://127.0.0.1:$port/api/version"
     status=1
   fi
   record="$("$python_bin" - "$MANIFEST" <<'PY' 2>/dev/null || true
@@ -352,7 +352,7 @@ if [[ -f "$MANIFEST" ]]; then
   report_dashboard_service
 fi
 
-# Without the proxy a spawned child still works, but its agent-mail connection
+# Without the proxy a spawned child still works, but its ORRERY Mail connection
 # is not authenticated as itself: the child has to read its own token instead.
 # That degradation is silent at spawn time, so surface it here.
 CHILD_MCP_PROXY="$INSTALL_DIR/integrations/codex_app/plugin/scripts/run-mcp.sh"
@@ -361,11 +361,11 @@ if [[ -x "$CHILD_MCP_PROXY" ]]; then
     echo "ok: child MCP proxy installed"
   else
     echo "warn: child MCP proxy runner present but its source tree is missing;" \
-         "spawned children will fall back to the shared agent-mail endpoint"
+         "spawned children will fall back to the shared ORRERY Mail endpoint"
   fi
 else
   echo "warn: child MCP proxy missing ($CHILD_MCP_PROXY);" \
-       "spawned children fall back to the shared agent-mail endpoint and must" \
+       "spawned children fall back to the shared ORRERY Mail endpoint and must" \
        "read their own token. Re-run scripts/install.sh to install it."
 fi
 
@@ -540,7 +540,7 @@ if [[ "$REPORT" == "1" ]]; then
   report_tool claude
   report_tool codex
   echo
-  echo '## agent-mail'
+  echo '## ORRERY Mail'
   echo
   ags_mail_dir="${AGENTSTACK_MAIL_DIR:-$HOME/.agentstack/mail-service}"
   printf -- '- directory: %s\n' "$ags_mail_dir"

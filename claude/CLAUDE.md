@@ -1,4 +1,4 @@
-This machine runs **claude-agent-stack**: Claude Code and Codex agents
+This machine runs **ORRERY Telemetry**: Claude Code and Codex agents
 coordinate over ORRERY Mail and share file reservations. Follow these
 rules before doing project work.
 
@@ -12,7 +12,7 @@ First calls:
    resolved `name` (`$AGENT_NAME`, or the name printed by the SessionStart
    reminder) and pass `CHILD_REGISTRATION_TOKEN` as `registration_token` when it
    is available.
-3. Tokens: **if your agent-mail MCP server runs through the local proxy, you
+3. Tokens: **if your ORRERY Mail MCP server runs through the local proxy, you
    never touch a token.** Spawned children are configured that way, and the
    SessionStart reminder says so ("この接続はローカル MCP proxy 経由で既に認証済み
    です"). The proxy holds your token and authenticates every call, so do not
@@ -82,7 +82,7 @@ Details and exceptions for the first calls:
   Delegated children also use
   `${AGENTSTACK_RUNTIME_DIR:-$HOME/.agentstack/runtime}/child-agents/<name>.json`.
   `agentstack-reregister` reads both locations. It is acceptable for stack
-  helpers to use these token files. Do not read agent-mail's `storage.sqlite3`
+  helpers to use these token files. Do not read ORRERY Mail's `storage.sqlite3`
   directly; the DB is outside the recovery boundary and ad hoc DB reads risk
   stale paths, token leakage, and identity splits.
 - If `CHILD_REGISTRATION_TOKEN` is present but re-registration still fails,
@@ -125,7 +125,7 @@ touch with `file_reservation_paths` or `macro_file_reservation_cycle` using
 - Reserve several paths in one call when a change spans files. Renew long
   edits with `renew_file_reservations`; release what you reserved but did not
   edit with `release_file_reservations`.
-- If a path is already reserved by another agent, coordinate over agent-mail
+- If a path is already reserved by another agent, coordinate over ORRERY Mail
   instead of waiting or editing around it.
 
 ## Messaging Other Agents
@@ -179,19 +179,19 @@ The installed skill sources live under `__AGENTSTACK_HOME__/skills`.
 
 ## Canonical Coordination Paths Are Fail-Closed
 
-- If a documented AgentStack tool, helper, transport, or workflow is missing or
+- If a documented ORRERY Telemetry tool, helper, transport, or workflow is missing or
   fails, follow only the recovery steps explicitly documented above. If those
   steps do not restore the canonical path, report the exact failure and stop
   the affected coordination action. Do not invent a substitute merely to make
   the task appear successful.
-- In particular, do not replace `fetch_inbox` or another agent-mail tool with
+- In particular, do not replace `fetch_inbox` or another ORRERY Mail tool with
   direct reads of mailbox directories, message files, or `storage.sqlite3`;
   ad hoc `find` loops; `while true` polling; direct database queries; raw tmux
   prompt injection; or a newly written watcher. These bypass authentication,
   read/ack semantics, wake delivery, and the configured project identity.
 - Delegation is one instance of this general rule. When the user asks to create,
   spawn, or delegate to a child, use `/delegate`. Do not substitute Claude
-  Code's built-in Agent or Task tool: those children have no AgentStack
+  Code's built-in Agent or Task tool: those children have no ORRERY Telemetry
   identity, inbox, reservation, dedicated tmux session, or dashboard telemetry.
   If `/delegate` cannot see the `mcp__orrery-mail__*` tools, report that the
   fixed-name MCP server is unavailable and stop the delegation attempt. Do not

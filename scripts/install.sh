@@ -30,6 +30,20 @@ MURMUR_SETTING="${AGENTSTACK_MURMUR:-}"
 # NEW AGENT launch-directory presets. Resolved below: explicit > installed env.sh > empty.
 SPAWN_DIRS_SETTING="${AGENTSTACK_SPAWN_DIRS:-}"
 SPAWN_ROOTS_SETTING="${AGENTSTACK_SPAWN_ROOTS:-}"
+# Codex child launch policy. Same lifecycle as the presets above: explicit >
+# installed env.sh > product default (approval `never`, network on, no extra
+# writable roots). Children run unattended, so the defaults avoid prompts
+# nobody is there to answer.
+CODEX_CHILD_APPROVAL_SETTING="${AGENTSTACK_CODEX_CHILD_APPROVAL:-}"
+CODEX_NETWORK_SETTING="${AGENTSTACK_CODEX_NETWORK:-}"
+CODEX_ADD_DIRS_SETTING="${AGENTSTACK_CODEX_ADD_DIRS:-}"
+# Where the Codex CLI lives. The dashboard runs under launchd / systemd with
+# the minimal AGENTSTACK_PATH, which does not contain the per-user Node
+# prefixes (nvm, nodebrew, ~/.npm-global) that `npm install -g` uses, so a
+# NEW AGENT Codex spawn failed with "Codex CLI not found" while the same
+# command worked from a shell (2026-09-08). Resolve it here, in the operator's
+# shell, and persist it: explicit > installed env.sh > `command -v codex`.
+CODEX_BIN_SETTING="${AGENTSTACK_CODEX_BIN:-}"
 # Dashboard-only settings with the same lifecycle: read at install, persisted
 # into env.sh and the service definition, inherited on re-install.
 PORTRAITS_DIR_SETTING="${AGENTSTACK_PORTRAITS_DIR:-}"
@@ -42,7 +56,7 @@ MCP_URL="${AGENTSTACK_MCP_URL:-http://127.0.0.1:18765/mcp}"
 # These match packages/agentstack_mail/pyproject.toml. A regression test keeps
 # the shell gate and package metadata in lock-step.
 PYTHON_MIN_MAJOR=3
-PYTHON_MIN_MINOR=10
+PYTHON_MIN_MINOR=11
 
 # CI may bypass one preflight category at a time when it deliberately supplies
 # a fake platform boundary. Skipping a check never supplies the dependency the
@@ -81,12 +95,23 @@ Options:
                          (absolute or ~; default: existing env.sh, else ~)
   --spawn-roots PATHS    ':'-separated roots the directory typeahead may
                          browse (default: existing env.sh, else $HOME)
+  --codex-approval MODE  Codex child --ask-for-approval: never, on-request,
+                         on-failure, untrusted (default: existing env.sh,
+                         else never)
+  --codex-network MODE   on or off: sandbox network access for Codex children
+                         (default: existing env.sh, else on)
+  --codex-bin PATH       Codex CLI executable used by the dashboard and child
+                         launchers (default: existing env.sh, else `codex` on
+                         this shell's PATH; empty when not installed)
+  --codex-add-dirs PATHS ':'-separated extra writable roots for Codex children
+                         on top of project, spawn dirs/roots, install dir,
+                         worktrees, ~/.claude and ~/.codex (default: none)
   -h, --help             Show this help
 
 --assume-yes is not --force: validation and safety errors remain fatal. It must
 be selected explicitly by the user; an agent or automation must not add it on
 the user's behalf. AGENTSTACK_ASSUME_YES=1 provides the same explicit opt-in.
-The bundled AgentStack Mail service uses port 18765 by default.
+The bundled ORRERY Mail service uses port 18765 by default.
 EOF
 }
 
@@ -153,6 +178,22 @@ while [[ $# -gt 0 ]]; do
       SPAWN_ROOTS_SETTING="$2"
       shift 2
       ;;
+    --codex-approval)
+      CODEX_CHILD_APPROVAL_SETTING="$2"
+      shift 2
+      ;;
+    --codex-network)
+      CODEX_NETWORK_SETTING="$2"
+      shift 2
+      ;;
+    --codex-add-dirs)
+      CODEX_ADD_DIRS_SETTING="$2"
+      shift 2
+      ;;
+    --codex-bin)
+      CODEX_BIN_SETTING="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -188,6 +229,32 @@ fi
 if [[ -z "$SPAWN_ROOTS_SETTING" ]]; then
   SPAWN_ROOTS_SETTING="$(agentstack_installed_env_value AGENTSTACK_SPAWN_ROOTS "$INSTALL_DIR/env.sh")"
 fi
+if [[ -z "$CODEX_CHILD_APPROVAL_SETTING" ]]; then
+  CODEX_CHILD_APPROVAL_SETTING="$(agentstack_installed_env_value AGENTSTACK_CODEX_CHILD_APPROVAL "$INSTALL_DIR/env.sh")"
+fi
+if [[ -z "$CODEX_NETWORK_SETTING" ]]; then
+  CODEX_NETWORK_SETTING="$(agentstack_installed_env_value AGENTSTACK_CODEX_NETWORK "$INSTALL_DIR/env.sh")"
+fi
+if [[ -z "$CODEX_ADD_DIRS_SETTING" ]]; then
+  CODEX_ADD_DIRS_SETTING="$(agentstack_installed_env_value AGENTSTACK_CODEX_ADD_DIRS "$INSTALL_DIR/env.sh")"
+fi
+if [[ -z "$CODEX_BIN_SETTING" ]]; then
+  CODEX_BIN_SETTING="$(agentstack_installed_env_value AGENTSTACK_CODEX_BIN "$INSTALL_DIR/env.sh")"
+  if [[ -n "$CODEX_BIN_SETTING" && ! -x "$CODEX_BIN_SETTING" ]]; then
+    # A stale path from an earlier install (Node upgraded, prefix moved) must
+    # not pin the dashboard to a binary that no longer exists. An explicit
+    # --codex-bin that does not exist is rejected below instead.
+    echo "note: installed AGENTSTACK_CODEX_BIN=$CODEX_BIN_SETTING is not executable; resolving codex again" >&2
+    CODEX_BIN_SETTING=""
+  fi
+  if [[ -z "$CODEX_BIN_SETTING" ]]; then
+    CODEX_BIN_SETTING="$(command -v codex 2>/dev/null || true)"
+  fi
+fi
+# Product defaults are written out explicitly so env.sh, the service definition
+# and install-state.json all say what a child actually gets.
+CODEX_CHILD_APPROVAL_SETTING="${CODEX_CHILD_APPROVAL_SETTING:-never}"
+CODEX_NETWORK_SETTING="${CODEX_NETWORK_SETTING:-on}"
 if [[ -z "$PORTRAITS_DIR_SETTING" ]]; then
   PORTRAITS_DIR_SETTING="$(agentstack_installed_env_value AGENTSTACK_PORTRAITS_DIR "$INSTALL_DIR/env.sh")"
 fi
@@ -229,7 +296,7 @@ AGENT_MAIL_PIDFILE=""
 AGENT_MAIL_LOG=""
 AGENT_MAIL_SERVICE_KIND=""
 AGENT_MAIL_SERVICE_PATH=""
-# Login-time autostart for AgentStack Mail. `agentstack-mailctl start` daemonizes
+# Login-time autostart for ORRERY Mail. `agentstack-mailctl start` daemonizes
 # with nohup, which does not survive a reboot: the dashboard has had a launchd /
 # systemd unit since day one, mail never did. A machine that reboots therefore
 # came back with a dashboard and no mail server.
@@ -250,6 +317,14 @@ AGENT_MAIL_AUTOSTART_KIND=""
 AGENT_MAIL_AUTOSTART_PATH=""
 # systemd needs a second file (service + timer); launchd does it in one plist.
 AGENT_MAIL_AUTOSTART_SERVICE_PATH=""
+# The Mail watcher turns signal files into tmux prompt injections. Until
+# 2026-09-07 only `agent-start` and the Codex bootstrap started it (a detached
+# tmux session), so a host whose agents were all spawned from the dashboard had
+# signals piling up and nothing delivering them (WSL2 after `wsl --shutdown`:
+# watcher_running=false, six signals stuck, agents never notified).
+MAIL_WATCHER_LABEL="$LABEL_PREFIX.mail-watcher"
+AGENT_MAIL_WATCHER_KIND=""
+AGENT_MAIL_WATCHER_PATH=""
 NATIVE_MAIL_EXISTING=false
 PROVISION_NATIVE_MAIL=false
 NATIVE_MAIL_STATE_ROOT="${AGENTSTACK_MAIL_STATE_ROOT:-$HOME/.agentstack/mail}"
@@ -267,7 +342,7 @@ NATIVE_MAIL_ENV="${AGENTSTACK_MAIL_SERVICE_ENV:-$NATIVE_MAIL_SERVICE_ROOT/render
 NATIVE_MAIL_RUNNER="$(dirname "$NATIVE_MAIL_ENV")/run-agentstack-mail.sh"
 NATIVE_MAIL_PIDFILE="$NATIVE_MAIL_SERVICE_ROOT/runtime/agentstack-mail.pid"
 NATIVE_MAIL_LOG="$NATIVE_MAIL_SERVICE_ROOT/runtime/agentstack-mail.log"
-AGENT_MAIL_NAME_CAPABILITY_JSON='{"status":"unknown","evidence":"not-inspected","enforcement_mode":"unknown","mail_dir":"","detail":"installer has not inspected agent-mail naming source","warning":"requested-name handling is unknown"}'
+AGENT_MAIL_NAME_CAPABILITY_JSON='{"status":"unknown","evidence":"not-inspected","enforcement_mode":"unknown","mail_dir":"","detail":"installer has not inspected ORRERY Mail naming source","warning":"requested-name handling is unknown"}'
 PREFLIGHT_OS=""
 PREFLIGHT_ERRORS=()
 PYTHON_SELECTION_ERROR=""
@@ -315,6 +390,25 @@ validate_spawn_paths AGENTSTACK_SPAWN_DIRS "$SPAWN_DIRS_SETTING"
 validate_spawn_paths AGENTSTACK_SPAWN_ROOTS "$SPAWN_ROOTS_SETTING"
 validate_spawn_paths AGENTSTACK_PORTRAITS_DIR "$PORTRAITS_DIR_SETTING"
 validate_spawn_paths AGENTSTACK_CUSTOM_PORTRAITS "$CUSTOM_PORTRAITS_SETTING"
+validate_spawn_paths AGENTSTACK_CODEX_ADD_DIRS "$CODEX_ADD_DIRS_SETTING"
+case "$CODEX_CHILD_APPROVAL_SETTING" in
+  never|on-request|on-failure|untrusted) ;;
+  *)
+    echo "error: --codex-approval must be never, on-request, on-failure or untrusted (got: $CODEX_CHILD_APPROVAL_SETTING)" >&2
+    exit 2
+    ;;
+esac
+case "$CODEX_NETWORK_SETTING" in
+  on|off) ;;
+  *)
+    echo "error: --codex-network must be on or off (got: $CODEX_NETWORK_SETTING)" >&2
+    exit 2
+    ;;
+esac
+if [[ -n "$CODEX_BIN_SETTING" && ! -x "$CODEX_BIN_SETTING" ]]; then
+  echo "error: --codex-bin must point at an executable (got: $CODEX_BIN_SETTING)" >&2
+  exit 2
+fi
 
 # The two mail jobs are different things: one runs the service, the other runs
 # `agentstack-mailctl start` on a timer. Sharing a label makes the controller
@@ -502,14 +596,12 @@ select_python() {
   local seen=""
   local raw
   for raw in \
-    python3 python3.14 python3.13 python3.12 python3.11 python3.10 \
+    python3 python3.14 python3.13 python3.12 python3.11 \
     /opt/homebrew/bin/python3 /usr/local/bin/python3 /opt/local/bin/python3 \
     /opt/homebrew/bin/python3.14 /opt/homebrew/bin/python3.13 \
     /opt/homebrew/bin/python3.12 /opt/homebrew/bin/python3.11 \
-    /opt/homebrew/bin/python3.10 \
     /usr/local/bin/python3.14 /usr/local/bin/python3.13 \
-    /usr/local/bin/python3.12 /usr/local/bin/python3.11 \
-    /usr/local/bin/python3.10
+    /usr/local/bin/python3.12 /usr/local/bin/python3.11
   do
     candidate="$(resolve_python_candidate "$raw")"
     [[ -n "$candidate" ]] || continue
@@ -619,7 +711,7 @@ mcp_endpoint_listening() {
 
 preflight_agent_mail_port() {
   if [[ "$PREFLIGHT_SKIP_PORT" == "1" ]]; then
-    say "preflight: agent-mail port check skipped by AGENTSTACK_PREFLIGHT_SKIP_PORT=1"
+    say "preflight: ORRERY Mail port check skipped by AGENTSTACK_PREFLIGHT_SKIP_PORT=1"
     return
   fi
   # Port probing needs the selected interpreter. Its own actionable Python
@@ -628,14 +720,14 @@ preflight_agent_mail_port() {
 
   local parts host port
   parts="$(mcp_endpoint_parts 2>/dev/null)" || {
-    preflight_error "AGENTSTACK_MCP_URL '$MCP_URL' is invalid. Set it to an http(s) endpoint (default: AgentStack Mail on http://127.0.0.1:18765/mcp)."
+    preflight_error "AGENTSTACK_MCP_URL '$MCP_URL' is invalid. Set it to an http(s) endpoint (default: ORRERY Mail on http://127.0.0.1:18765/mcp)."
     return
   }
   IFS='|' read -r host port <<< "$parts"
   case "$host" in
     127.0.0.1|localhost|::1) ;;
     *)
-      say "preflight: remote agent-mail endpoint $host:$port (local port check not applicable)"
+      say "preflight: remote ORRERY Mail endpoint $host:$port (local port check not applicable)"
       return
       ;;
   esac
@@ -644,23 +736,23 @@ preflight_agent_mail_port() {
   probe_err="$(mcp_endpoint_probe 2>&1 >/dev/null)"
   probe_state=$?
   if [[ "$probe_state" == "1" ]]; then
-    say "preflight: agent-mail port $port is available"
+    say "preflight: ORRERY Mail port $port is available"
     return
   fi
   if [[ "$probe_state" != "0" ]]; then
     # Undetermined is not free. Everything downstream — reuse an existing
     # service or start our own — branches on this answer, so guessing "free"
     # here is how an installer ends up fighting a service it never saw.
-    preflight_error "could not determine whether agent-mail port $port is in use${probe_err:+ (${probe_err##*: })}. Loopback connections from this shell are failing, which commonly happens over SSH on macOS; run the installer from a local terminal on the target machine, or set AGENTSTACK_PREFLIGHT_SKIP_PORT=1 if you have verified the port yourself."
+    preflight_error "could not determine whether ORRERY Mail port $port is in use${probe_err:+ (${probe_err##*: })}. Loopback connections from this shell are failing, which commonly happens over SSH on macOS; run the installer from a local terminal on the target machine, or set AGENTSTACK_PREFLIGHT_SKIP_PORT=1 if you have verified the port yourself."
     return
   fi
   if [[ -f "$MANIFEST" ]]; then
-    say "preflight: existing AgentStack install detected; occupied agent-mail port $port will be verified for reuse"
+    say "preflight: existing ORRERY Telemetry install detected; occupied ORRERY Mail port $port will be verified for reuse"
   else
-    # A user may intentionally share an already-running agent-mail across
+    # A user may intentionally share an already-running ORRERY Mail across
     # projects. Do not guess ownership from a listening socket: the existing
     # resolver verifies its health response/database before the first write.
-    say "preflight: agent-mail port $port is occupied; installer will verify that it is a reusable agent-mail service"
+    say "preflight: ORRERY Mail port $port is occupied; installer will verify that it is a reusable ORRERY Mail service"
   fi
 }
 
@@ -816,33 +908,33 @@ PY
       elif [[ "$RETIRE_LEGACY_MAIL" == true ]]; then
         die "legacy mail service '$LEGACY_MAIL_DETECTED_LABELS' was retired, but $MCP_URL is still occupied; stop the remaining listener and re-run"
       else
-        die "legacy mail service '$LEGACY_MAIL_DETECTED_LABELS' is holding $MCP_URL; re-run with --retire-legacy-mail to retire it before the AgentStack Mail reuse check"
+        die "legacy mail service '$LEGACY_MAIL_DETECTED_LABELS' is holding $MCP_URL; re-run with --retire-legacy-mail to retire it before the ORRERY Mail reuse check"
       fi
     else
-      say "existing AgentStack Mail listener detected at $MCP_URL"
+      say "existing ORRERY Mail listener detected at $MCP_URL"
       database_url="$(probe_agent_mail_database_url || true)"
       [[ -n "$database_url" ]] || \
-        die "$MCP_URL is listening but did not answer an AgentStack Mail health check"
+        die "$MCP_URL is listening but did not answer an ORRERY Mail health check"
       resolved_db="$(database_url_to_path "$database_url" "" || true)"
       [[ -n "$resolved_db" ]] || \
-        die "AgentStack Mail health returned an unsupported database URL: $database_url"
+        die "ORRERY Mail health returned an unsupported database URL: $database_url"
       resolved_db="$(normalize_path "$resolved_db")"
       [[ "$resolved_db" == "$expected_db" ]] || \
-        die "AgentStack Mail at $MCP_URL uses '$resolved_db', expected isolated database '$expected_db'"
-      [[ -f "$resolved_db" ]] || die "AgentStack Mail database does not exist: $resolved_db"
+        die "ORRERY Mail at $MCP_URL uses '$resolved_db', expected isolated database '$expected_db'"
+      [[ -f "$resolved_db" ]] || die "ORRERY Mail database does not exist: $resolved_db"
       NATIVE_MAIL_EXISTING=true
       EXISTING_AGENT_MAIL_SERVER=true
       adopt_running_native_mail_render
-      say "existing AgentStack Mail database: $resolved_db"
+      say "existing ORRERY Mail database: $resolved_db"
       return
     fi
   fi
 
   PROVISION_NATIVE_MAIL=true
   if [[ -f "$expected_db" && -d "$NATIVE_MAIL_STATE_ROOT/archive" ]]; then
-    say "no native listener found; installer will start existing AgentStack Mail state at $NATIVE_MAIL_STATE_ROOT"
+    say "no native listener found; installer will start existing ORRERY Mail state at $NATIVE_MAIL_STATE_ROOT"
   else
-    say "no native listener or state found; installer will provision AgentStack Mail at $MCP_URL"
+    say "no native listener or state found; installer will provision ORRERY Mail at $MCP_URL"
   fi
 }
 
@@ -893,7 +985,7 @@ adopt_running_native_mail_render() {
   NATIVE_MAIL_ENV="$candidate"
   NATIVE_MAIL_RUNNER="$(dirname "$candidate")/run-agentstack-mail.sh"
   MAIL_ENV="$NATIVE_MAIL_ENV"
-  say "adopted the running AgentStack Mail service env: $NATIVE_MAIL_ENV"
+  say "adopted the running ORRERY Mail service env: $NATIVE_MAIL_ENV"
 } # end adopt_running_native_mail_render
 
 check_dependencies() {
@@ -916,7 +1008,7 @@ check_agent_mail_provisioning_dependencies() {
   fi
   if ! command -v uv >/dev/null 2>&1; then
     PREFLIGHT_ERRORS=()
-    preflight_error "uv is required to provision AgentStack Mail. Install it from https://docs.astral.sh/uv/getting-started/installation/ and re-run install.sh."
+    preflight_error "uv is required to provision ORRERY Mail. Install it from https://docs.astral.sh/uv/getting-started/installation/ and re-run install.sh."
     preflight_finish
     return 1
   fi
@@ -939,9 +1031,9 @@ validate_repo_assets() {
   [[ -f "$SCRIPT_DIR/lib/mcp_endpoint.py" ]] || die "missing scripts/lib/mcp_endpoint.py"
   [[ -f "$SCRIPT_DIR/selftest.py" ]] || die "missing scripts/selftest.py"
   [[ -f "$NATIVE_MAIL_PACKAGE_SOURCE/pyproject.toml" ]] || \
-    die "missing AgentStack Mail package: $NATIVE_MAIL_PACKAGE_SOURCE"
+    die "missing ORRERY Mail package: $NATIVE_MAIL_PACKAGE_SOURCE"
   [[ -f "$REPO_ROOT/bin/agentstack-mailctl" ]] || \
-    die "missing AgentStack Mail lifecycle controller: $REPO_ROOT/bin/agentstack-mailctl"
+    die "missing ORRERY Mail lifecycle controller: $REPO_ROOT/bin/agentstack-mailctl"
 }
 
 port_in_use() {
@@ -1169,7 +1261,7 @@ copy_tree() {
 
 # The child MCP proxy that spawn_child.sh points each child at. It lives under
 # integrations/codex_app because the Codex App bridge introduced it, but a
-# spawned child's authenticated agent-mail connection is a CORE feature: without
+# spawned child's authenticated ORRERY Mail connection is a CORE feature: without
 # this, hooks/spawn_child.sh silently falls back to the shared endpoint and the
 # child must read its own token instead of the proxy injecting it.
 #
@@ -1180,7 +1272,7 @@ install_child_mcp_proxy() {
   local source_dir="$REPO_ROOT/integrations/codex_app"
   local dest_dir="$INSTALL_DIR/integrations/codex_app"
   if [[ ! -f "$source_dir/plugin/scripts/run-mcp.sh" ]]; then
-    warn "child MCP proxy not found in the repo; spawned children will fall back to the shared agent-mail endpoint"
+    warn "child MCP proxy not found in the repo; spawned children will fall back to the shared ORRERY Mail endpoint"
     return 0
   fi
   plan "install child MCP proxy -> $dest_dir"
@@ -1335,7 +1427,7 @@ confirm_safe_merge() {
     warn "non-interactive shell; skipping Tier1 user-settings merge"
     return 1
   fi
-  printf 'Apply this claude-agent-stack settings merge to %s? Type yes to continue: ' "$CLAUDE_SETTINGS" >&2
+  printf 'Apply this ORRERY Telemetry settings merge to %s? Type yes to continue: ' "$CLAUDE_SETTINGS" >&2
   local reply
   read -r reply
   [[ "$reply" == "yes" ]]
@@ -1453,7 +1545,7 @@ confirm_managed_setup() {
     warn "non-interactive shell; skipping $label managed setup"
     return 1
   fi
-  printf 'Apply this claude-agent-stack %s managed setup? Type yes to continue: ' "$label" >&2
+  printf 'Apply this ORRERY Telemetry %s managed setup? Type yes to continue: ' "$label" >&2
   local reply
   read -r reply
   [[ "$reply" == "yes" ]]
@@ -1543,6 +1635,10 @@ values = {
     "AGENTSTACK_MURMUR": "$MURMUR_SETTING",
     "AGENTSTACK_SPAWN_DIRS": "$SPAWN_DIRS_SETTING",
     "AGENTSTACK_SPAWN_ROOTS": "$SPAWN_ROOTS_SETTING",
+    "AGENTSTACK_CODEX_CHILD_APPROVAL": "$CODEX_CHILD_APPROVAL_SETTING",
+    "AGENTSTACK_CODEX_NETWORK": "$CODEX_NETWORK_SETTING",
+    "AGENTSTACK_CODEX_ADD_DIRS": "$CODEX_ADD_DIRS_SETTING",
+    "AGENTSTACK_CODEX_BIN": "$CODEX_BIN_SETTING",
     "AGENTSTACK_PORTRAITS_DIR": "$PORTRAITS_DIR_SETTING",
     "AGENTSTACK_CUSTOM_PORTRAITS": "$CUSTOM_PORTRAITS_SETTING",
     "AGENTSTACK_CODEX_MODELS": "$CODEX_MODELS_SETTING",
@@ -1563,7 +1659,7 @@ values.update({
     "AGENTSTACK_MAIL_STATE_ROOT": "$NATIVE_MAIL_STATE_ROOT",
     "AGENTSTACK_MAIL_HTTP_BEARER_MODE": "$MAIL_HTTP_BEARER_MODE",
 })
-lines = ["# Generated by claude-agent-stack install.sh", "# Do not put secrets in this file.", ""]
+lines = ["# Generated by ORRERY Telemetry install.sh", "# Do not put secrets in this file.", ""]
 for key, value in values.items():
     lines.append(f"export {key}={shlex.quote(value)}")
 path.write_text("\\n".join(lines) + "\\n", encoding="utf-8")
@@ -1588,17 +1684,17 @@ native_mail_binaries_ready() {
 
 ensure_native_mail_candidate() {
   if native_mail_binaries_ready; then
-    plan "reuse immutable AgentStack Mail candidate venv $NATIVE_MAIL_VENV"
+    plan "reuse immutable ORRERY Mail candidate venv $NATIVE_MAIL_VENV"
     return
   fi
   if [[ -e "$NATIVE_MAIL_VENV" ]]; then
-    die "AgentStack Mail candidate venv exists but is incomplete: $NATIVE_MAIL_VENV"
+    die "ORRERY Mail candidate venv exists but is incomplete: $NATIVE_MAIL_VENV"
   fi
   if [[ -n "$NATIVE_MAIL_VENV_EXPLICIT" ]]; then
-    die "AGENTSTACK_MAIL_SERVICE_VENV does not contain the required AgentStack Mail executables: $NATIVE_MAIL_VENV"
+    die "AGENTSTACK_MAIL_SERVICE_VENV does not contain the required ORRERY Mail executables: $NATIVE_MAIL_VENV"
   fi
-  plan "create immutable AgentStack Mail candidate venv $NATIVE_MAIL_VENV"
-  plan "install bundled AgentStack Mail package from $NATIVE_MAIL_PACKAGE_SOURCE"
+  plan "create immutable ORRERY Mail candidate venv $NATIVE_MAIL_VENV"
+  plan "install bundled ORRERY Mail package from $NATIVE_MAIL_PACKAGE_SOURCE"
   if [[ "$DRY_RUN" == true ]]; then
     return
   fi
@@ -1607,29 +1703,29 @@ ensure_native_mail_candidate() {
     local dirty_package
     dirty_package="$(git -C "$REPO_ROOT" status --porcelain --untracked-files=all -- packages/agentstack_mail)"
     [[ -z "$dirty_package" ]] || \
-      die "bundled AgentStack Mail package is dirty; build a candidate from an exact clean commit"
+      die "bundled ORRERY Mail package is dirty; build a candidate from an exact clean commit"
   fi
   local uv_bin
   uv_bin="$(command -v uv 2>/dev/null || true)"
-  [[ -n "$uv_bin" ]] || die "uv is required to install AgentStack Mail"
+  [[ -n "$uv_bin" ]] || die "uv is required to install ORRERY Mail"
   mkdir -p "$(dirname "$NATIVE_MAIL_VENV")"
   if ! "$uv_bin" venv --python "$PYTHON_BIN" "$NATIVE_MAIL_VENV"; then
-    die "failed to create AgentStack Mail candidate venv: $NATIVE_MAIL_VENV"
+    die "failed to create ORRERY Mail candidate venv: $NATIVE_MAIL_VENV"
   fi
   if ! "$uv_bin" pip install --python "$NATIVE_MAIL_VENV/bin/python" \
     "$NATIVE_MAIL_PACKAGE_SOURCE"; then
-    die "failed to install bundled AgentStack Mail into $NATIVE_MAIL_VENV"
+    die "failed to install bundled ORRERY Mail into $NATIVE_MAIL_VENV"
   fi
   native_mail_binaries_ready || \
-    die "AgentStack Mail installation completed without the required executables"
+    die "ORRERY Mail installation completed without the required executables"
 }
 
 write_native_mail_env() {
   local parts host port path
   parts="$(mcp_local_server_parts)" || \
-    die "AgentStack Mail requires a local HTTP endpoint: $MCP_URL"
+    die "ORRERY Mail requires a local HTTP endpoint: $MCP_URL"
   IFS='|' read -r host port path <<< "$parts"
-  plan "render namespaced AgentStack Mail service env $NATIVE_MAIL_ENV"
+  plan "render namespaced ORRERY Mail service env $NATIVE_MAIL_ENV"
   if [[ "$DRY_RUN" == true ]]; then
     return
   fi
@@ -1667,8 +1763,8 @@ initialize_native_mail_state() {
     return
   fi
   [[ ! -e "$NATIVE_MAIL_STATE_ROOT" ]] || \
-    die "AgentStack Mail state root is partial; refusing initialization: $NATIVE_MAIL_STATE_ROOT"
-  plan "initialize empty AgentStack Mail state at $NATIVE_MAIL_STATE_ROOT"
+    die "ORRERY Mail state root is partial; refusing initialization: $NATIVE_MAIL_STATE_ROOT"
+  plan "initialize empty ORRERY Mail state at $NATIVE_MAIL_STATE_ROOT"
   if [[ "$DRY_RUN" == true ]]; then
     return
   fi
@@ -1683,17 +1779,17 @@ initialize_native_mail_state() {
   if ! mcp_endpoint_listening; then
     kill "$bootstrap_pid" 2>/dev/null || true
     wait "$bootstrap_pid" 2>/dev/null || true
-    die "AgentStack Mail bootstrap did not become reachable; inspect $NATIVE_MAIL_LOG"
+    die "ORRERY Mail bootstrap did not become reachable; inspect $NATIVE_MAIL_LOG"
   fi
   probe_agent_mail_database_url >/dev/null || {
     kill "$bootstrap_pid" 2>/dev/null || true
     wait "$bootstrap_pid" 2>/dev/null || true
-    die "AgentStack Mail bootstrap did not return health"
+    die "ORRERY Mail bootstrap did not return health"
   }
   kill "$bootstrap_pid" 2>/dev/null || true
   wait "$bootstrap_pid" 2>/dev/null || true
   [[ -f "$MAIL_DB" && -d "$NATIVE_MAIL_STATE_ROOT/archive" ]] || \
-    die "AgentStack Mail bootstrap did not create its canonical database/archive"
+    die "ORRERY Mail bootstrap did not create its canonical database/archive"
 }
 
 render_native_mail_runner() {
@@ -1744,7 +1840,7 @@ PY
 
 start_native_mail() {
   local database_url resolved_db
-  plan "start AgentStack Mail with agentstack-mailctl at $MCP_URL"
+  plan "start ORRERY Mail with agentstack-mailctl at $MCP_URL"
   if [[ "$DRY_RUN" == true ]]; then
     return
   fi
@@ -1767,21 +1863,21 @@ start_native_mail() {
   resolved_db="$(database_url_to_path "$database_url" "" || true)"
   [[ -n "$resolved_db" ]] || {
     stop_new_agent_mail
-    die "AgentStack Mail health did not report a local SQLite database"
+    die "ORRERY Mail health did not report a local SQLite database"
   }
   resolved_db="$(normalize_path "$resolved_db")"
   if [[ "$resolved_db" != "$MAIL_DB" ]]; then
     stop_new_agent_mail
-    die "AgentStack Mail started on '$resolved_db', expected isolated database '$MAIL_DB'"
+    die "ORRERY Mail started on '$resolved_db', expected isolated database '$MAIL_DB'"
   fi
   EXISTING_AGENT_MAIL_SERVER=true
-  say "AgentStack Mail ready at $MCP_URL (database: $MAIL_DB)"
+  say "ORRERY Mail ready at $MCP_URL (database: $MAIL_DB)"
 }
 
 ensure_native_agentstack_mail() {
-  AGENT_MAIL_NAME_CAPABILITY_JSON='{"status":"honored","evidence":"agentstack-cutover-profile","enforcement_mode":"passthrough","mail_dir":"","detail":"AgentStack Mail service env requires passthrough","warning":""}'
+  AGENT_MAIL_NAME_CAPABILITY_JSON='{"status":"honored","evidence":"agentstack-cutover-profile","enforcement_mode":"passthrough","mail_dir":"","detail":"ORRERY Mail service env requires passthrough","warning":""}'
   if [[ "$NATIVE_MAIL_EXISTING" == true ]]; then
-    plan "reuse existing AgentStack Mail service at $MCP_URL"
+    plan "reuse existing ORRERY Mail service at $MCP_URL"
     return
   fi
   ensure_native_mail_candidate
@@ -1817,7 +1913,7 @@ render_mail_autostart_unit() {
   local autostart_log="$NATIVE_MAIL_SERVICE_ROOT/runtime/agentstack-mail-autostart.log"
   if [[ "$kind" == "launchd" ]]; then
     AGENT_MAIL_AUTOSTART_PATH="$HOME/Library/LaunchAgents/$MAIL_AUTOSTART_LABEL.plist"
-    plan "render launchd plist $AGENT_MAIL_AUTOSTART_PATH (AgentStack Mail autostart)"
+    plan "render launchd plist $AGENT_MAIL_AUTOSTART_PATH (ORRERY Mail autostart)"
     [[ "$DRY_RUN" == true ]] && return 0
     mkdir -p "$HOME/Library/LaunchAgents"
     # The env goes through argv, not a pipe: the `<<'PY'` heredoc already owns
@@ -1864,7 +1960,7 @@ PY
 
   AGENT_MAIL_AUTOSTART_PATH="$HOME/.config/systemd/user/$MAIL_AUTOSTART_LABEL.timer"
   AGENT_MAIL_AUTOSTART_SERVICE_PATH="$HOME/.config/systemd/user/$MAIL_AUTOSTART_LABEL.service"
-  plan "render systemd user units $AGENT_MAIL_AUTOSTART_SERVICE_PATH and $AGENT_MAIL_AUTOSTART_PATH (AgentStack Mail autostart)"
+  plan "render systemd user units $AGENT_MAIL_AUTOSTART_SERVICE_PATH and $AGENT_MAIL_AUTOSTART_PATH (ORRERY Mail autostart)"
   [[ "$DRY_RUN" == true ]] && return 0
   mkdir -p "$HOME/.config/systemd/user"
   {
@@ -1872,10 +1968,14 @@ PY
     # already ordered by systemd's own Wants completion, and ordering against
     # default.target as well is a cycle, which systemd resolves by dropping a
     # job. The dashboard unit uses network.target for the same reason.
-    printf '[Unit]\nDescription=AgentStack Mail autostart\nAfter=network.target\n\n'
+    printf '[Unit]\nDescription=ORRERY Mail autostart\nAfter=network.target\n\n'
     # No RemainAfterExit: the timer re-runs this unit, and a unit left "active"
     # after exiting would never be started again.
-    printf '[Service]\nType=oneshot\n'
+    # KillMode=process: mailctl hands the server to nohup and exits, and the
+    # default control-group KillMode then kills the server the moment the
+    # oneshot finishes (seen on WSL2 Ubuntu 26.04: health ok, then "Shutting
+    # down" in the same second). Only the controller is the unit's process.
+    printf '[Service]\nType=oneshot\nKillMode=process\n'
     # systemd splits unquoted values on whitespace, so a HOME or install dir
     # containing a space would silently truncate every Environment= value and
     # the ExecStart path. Quote them the way systemd expects.
@@ -1907,7 +2007,7 @@ PY_UNIT
   # login-only trigger cannot (a runner killed mid-session stays dead until the
   # next login). launchd gets the same behaviour from StartInterval.
   {
-    printf '[Unit]\nDescription=AgentStack Mail autostart timer\n\n'
+    printf '[Unit]\nDescription=ORRERY Mail autostart timer\n\n'
     # No Persistent=: it only affects OnCalendar timers, and implying that a
     # missed monotonic firing is caught up after resume is simply wrong.
     printf '[Timer]\nOnBootSec=1min\nOnUnitActiveSec=5min\nAccuracySec=30s\n'
@@ -2118,14 +2218,14 @@ enable_mail_autostart() {
   # and dies if the service env is missing, and a unit that fails only at boot is
   # worse than no unit at all — nothing reports it until mail is silently absent.
   if [[ "$DRY_RUN" != true && ! -f "$MAIL_ENV" ]]; then
-    warn "AgentStack Mail service env is missing ($MAIL_ENV); skipping the login trigger because it would fail at boot. Stop the mail server and re-run install.sh to render one, then mail will restart automatically."
+    warn "ORRERY Mail service env is missing ($MAIL_ENV); skipping the login trigger because it would fail at boot. Stop the mail server and re-run install.sh to render one, then mail will restart automatically."
     return 0
   fi
 
   if [[ -z "$kind" ]]; then
     # Say it out loud. A missing autostart is invisible until the machine
     # reboots, which is exactly how this gap survived on the maintainer's Mac.
-    warn "no supported service manager found; AgentStack Mail will NOT restart after a reboot. Start it manually with: $BIN_DIR/agentstack-mailctl start"
+    warn "no supported service manager found; ORRERY Mail will NOT restart after a reboot. Start it manually with: $BIN_DIR/agentstack-mailctl start"
     return 0
   fi
 
@@ -2181,7 +2281,7 @@ enable_mail_autostart() {
       then
         AGENT_MAIL_AUTOSTART_KIND="launchd"
         [[ -n "$previous" ]] && rm -f "$previous"
-        say "AgentStack Mail will restart at login ($MAIL_AUTOSTART_LABEL)"
+        say "ORRERY Mail will restart at login ($MAIL_AUTOSTART_LABEL)"
         return 0
       fi
     fi
@@ -2192,7 +2292,7 @@ enable_mail_autostart() {
       mv "$previous" "$AGENT_MAIL_AUTOSTART_PATH"
       if launchctl enable "$launchd_target" 2>/dev/null && \
          launchctl bootstrap "gui/$(id -u)" "$AGENT_MAIL_AUTOSTART_PATH" 2>/dev/null; then
-        warn "kept the previous AgentStack Mail login trigger; the new one could not be registered"
+        warn "kept the previous ORRERY Mail login trigger; the new one could not be registered"
         AGENT_MAIL_AUTOSTART_KIND="launchd"
         return 0
       fi
@@ -2211,7 +2311,7 @@ enable_mail_autostart() {
       AGENT_MAIL_AUTOSTART_KIND="systemd-user"
       [[ -n "$previous" ]] && rm -f "$previous"
       [[ -n "$previous_service" ]] && rm -f "$previous_service"
-      say "AgentStack Mail will restart at login ($MAIL_AUTOSTART_LABEL.timer)"
+      say "ORRERY Mail will restart at login ($MAIL_AUTOSTART_LABEL.timer)"
       return 0
     fi
     systemctl --user disable "$MAIL_AUTOSTART_LABEL.timer" 2>/dev/null || true
@@ -2223,7 +2323,7 @@ enable_mail_autostart() {
       if [[ -f "$HOME/.config/systemd/user/$MAIL_AUTOSTART_LABEL.service" ]] && \
          systemctl --user daemon-reload 2>/dev/null && \
          systemctl --user enable --now "$MAIL_AUTOSTART_LABEL.timer" 2>/dev/null; then
-        warn "kept the previous AgentStack Mail login trigger; the new one could not be registered"
+        warn "kept the previous ORRERY Mail login trigger; the new one could not be registered"
         AGENT_MAIL_AUTOSTART_KIND="systemd-user"
         return 0
       fi
@@ -2235,8 +2335,207 @@ enable_mail_autostart() {
 
   rm -f "${previous:-/nonexistent}" "${previous_service:-/nonexistent}" 2>/dev/null || true
   AGENT_MAIL_AUTOSTART_PATH=""
-  warn "could not register the AgentStack Mail autostart unit; mail will NOT restart after a reboot. Start it manually with: $BIN_DIR/agentstack-mailctl start"
+  warn "could not register the ORRERY Mail autostart unit; mail will NOT restart after a reboot. Start it manually with: $BIN_DIR/agentstack-mailctl start"
 }
+
+# --- ORRERY Mail watcher service ---------------------------------------------
+# Unlike the mail autostart (a controller that exits), the watcher is the
+# long-running process itself, so its unit is KeepAlive / Restart=always. It
+# holds a single-instance lock (hooks/watch_agent_mail_signals.sh acquire_lock):
+# a second copy exits 0 as a duplicate, which is why agent-start now checks the
+# lock before starting its tmux fallback.
+mail_watcher_environment() {
+  cat <<ENVLIST
+PATH=$PATH_VALUE
+AGENTSTACK_MAIL_HOME=$MAIL_HOME
+AGENTSTACK_SIGNALS_DIR=$SIGNALS_DIR
+AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR
+ENVLIST
+} # end mail_watcher_environment
+
+render_mail_watcher_unit() {
+  local kind="$1"
+  local watcher_script="$HOOKS_DIR/watch_agent_mail_signals.sh"
+  local watcher_log="$RUNTIME_DIR/mail-watcher.log"
+  if [[ "$kind" == "launchd" ]]; then
+    AGENT_MAIL_WATCHER_PATH="$HOME/Library/LaunchAgents/$MAIL_WATCHER_LABEL.plist"
+    plan "render launchd plist $AGENT_MAIL_WATCHER_PATH (ORRERY Mail watcher)"
+    [[ "$DRY_RUN" == true ]] && return 0
+    mkdir -p "$HOME/Library/LaunchAgents"
+    "$PYTHON_BIN" - \
+      "$AGENT_MAIL_WATCHER_PATH" "$MAIL_WATCHER_LABEL" \
+      "$watcher_script" "$watcher_log" \
+      "$(mail_watcher_environment)" <<'PY'
+import pathlib
+import plistlib
+import sys
+
+dst, label, script, logfile, env_blob = sys.argv[1:6]
+env = {}
+for line in env_blob.splitlines():
+    if "=" in line:
+        key, value = line.split("=", 1)
+        env[key] = value
+
+plist = {
+    "Label": label,
+    "ProgramArguments": ["/bin/bash", script],
+    "RunAtLoad": True,
+    # The watcher is the service: keep it alive and let ThrottleInterval pace
+    # a crash loop instead of hammering tmux.
+    "KeepAlive": True,
+    "ThrottleInterval": 5,
+    "StandardOutPath": logfile,
+    "StandardErrorPath": logfile,
+    "EnvironmentVariables": env,
+}
+path = pathlib.Path(dst)
+tmp = path.with_suffix(path.suffix + ".tmp")
+tmp.write_bytes(plistlib.dumps(plist))
+tmp.replace(path)
+PY
+    return 0
+  fi
+
+  AGENT_MAIL_WATCHER_PATH="$HOME/.config/systemd/user/$MAIL_WATCHER_LABEL.service"
+  plan "render systemd user unit $AGENT_MAIL_WATCHER_PATH (ORRERY Mail watcher)"
+  [[ "$DRY_RUN" == true ]] && return 0
+  mkdir -p "$HOME/.config/systemd/user"
+  {
+    printf '[Unit]\nDescription=ORRERY Mail watcher\nAfter=network.target\n\n'
+    printf '[Service]\nType=simple\n'
+    "$PYTHON_BIN" - "$watcher_script" "$(mail_watcher_environment)" <<'PY_UNIT'
+import sys
+
+script, env_blob = sys.argv[1:3]
+
+
+def quote(value):
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+for line in env_blob.splitlines():
+    if "=" in line:
+        key, value = line.split("=", 1)
+        print(f"Environment={key}={quote(value)}")
+print(f"ExecStart=/bin/bash {quote(script)}")
+PY_UNIT
+    printf 'Restart=always\nRestartSec=5\n'
+    printf 'StandardOutput=append:%s\nStandardError=append:%s\n\n' \
+      "$watcher_log" "$watcher_log"
+    printf '[Install]\nWantedBy=default.target\n'
+  } > "$AGENT_MAIL_WATCHER_PATH.tmp"
+  mv "$AGENT_MAIL_WATCHER_PATH.tmp" "$AGENT_MAIL_WATCHER_PATH"
+} # end render_mail_watcher_unit
+
+# A watcher left behind by agent-start (tmux session `mail-watcher`) holds the
+# single-instance lock; the managed unit would then exit as a duplicate on
+# every restart until that session dies. Retire it before registering.
+stop_tmux_mail_watcher() {
+  local watcher_session="${AGENTSTACK_MAIL_WATCHER_SESSION:-mail-watcher}"
+  command -v tmux >/dev/null 2>&1 || return 0
+  if tmux has-session -t "$watcher_session" 2>/dev/null; then
+    tmux kill-session -t "$watcher_session" 2>/dev/null || true
+    say "stopped the tmux mail-watcher session; the service unit takes over"
+  fi
+} # end stop_tmux_mail_watcher
+
+enable_mail_watcher() {
+  local kind=""
+  case "$(uname -s)" in
+    Darwin) command -v launchctl >/dev/null 2>&1 && kind="launchd" ;;
+    Linux)  command -v systemctl >/dev/null 2>&1 && kind="systemd-user" ;;
+  esac
+  if [[ -z "$kind" ]]; then
+    warn "no supported service manager found; the ORRERY Mail watcher will only run while an agent started with $BIN_DIR/agent-start keeps its tmux session alive"
+    return 0
+  fi
+
+  if [[ "$kind" == "launchd" ]]; then
+    AGENT_MAIL_WATCHER_PATH="$HOME/Library/LaunchAgents/$MAIL_WATCHER_LABEL.plist"
+  else
+    AGENT_MAIL_WATCHER_PATH="$HOME/.config/systemd/user/$MAIL_WATCHER_LABEL.service"
+  fi
+  local previous=""
+  if [[ "$DRY_RUN" != true && -f "$AGENT_MAIL_WATCHER_PATH" ]]; then
+    previous="$AGENT_MAIL_WATCHER_PATH.prev"
+    rm -f "$previous"
+    cp "$AGENT_MAIL_WATCHER_PATH" "$previous"
+  fi
+
+  render_mail_watcher_unit "$kind"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    if [[ "$kind" == "launchd" ]]; then
+      say "DRY-RUN would run: launchctl bootstrap gui/$(id -u) $AGENT_MAIL_WATCHER_PATH"
+    else
+      say "DRY-RUN would run: systemctl --user enable --now $MAIL_WATCHER_LABEL.service"
+    fi
+    AGENT_MAIL_WATCHER_KIND="$kind"
+    return 0
+  fi
+
+  stop_tmux_mail_watcher
+
+  if [[ "$kind" == "launchd" ]]; then
+    local launchd_target="gui/$(id -u)/$MAIL_WATCHER_LABEL"
+    if launchctl enable "$launchd_target"; then
+      launchctl bootout "$launchd_target" 2>/dev/null || true
+      if wait_for_launchd_unload "$launchd_target" && \
+         launchctl bootstrap "gui/$(id -u)" "$AGENT_MAIL_WATCHER_PATH"
+      then
+        # RunAtLoad does not fire when the bootstrap comes from a non-GUI
+        # context (an ssh session on the Air: loaded, runs = 0, never started).
+        # kickstart is idempotent for a job that is already running.
+        launchctl kickstart "$launchd_target" 2>/dev/null || true
+        AGENT_MAIL_WATCHER_KIND="launchd"
+        [[ -n "$previous" ]] && rm -f "$previous"
+        say "ORRERY Mail watcher runs under launchd ($MAIL_WATCHER_LABEL)"
+        return 0
+      fi
+    fi
+    launchctl bootout "$launchd_target" 2>/dev/null || true
+    wait_for_launchd_unload "$launchd_target" || true
+    rm -f "$AGENT_MAIL_WATCHER_PATH"
+    if [[ -n "$previous" ]]; then
+      mv "$previous" "$AGENT_MAIL_WATCHER_PATH"
+      if launchctl enable "$launchd_target" 2>/dev/null && \
+         launchctl bootstrap "gui/$(id -u)" "$AGENT_MAIL_WATCHER_PATH" 2>/dev/null; then
+        warn "kept the previous ORRERY Mail watcher unit; the new one could not be registered"
+        AGENT_MAIL_WATCHER_KIND="launchd"
+        return 0
+      fi
+    fi
+  else
+    # `enable --now` leaves an already-running service on the old unit file;
+    # restart so the rendered one is what actually runs.
+    if systemctl --user daemon-reload && \
+       systemctl --user enable --now "$MAIL_WATCHER_LABEL.service" && \
+       systemctl --user restart "$MAIL_WATCHER_LABEL.service"
+    then
+      AGENT_MAIL_WATCHER_KIND="systemd-user"
+      [[ -n "$previous" ]] && rm -f "$previous"
+      say "ORRERY Mail watcher runs under systemd ($MAIL_WATCHER_LABEL.service)"
+      return 0
+    fi
+    systemctl --user disable --now "$MAIL_WATCHER_LABEL.service" 2>/dev/null || true
+    rm -f "$AGENT_MAIL_WATCHER_PATH"
+    if [[ -n "$previous" ]]; then
+      mv "$previous" "$AGENT_MAIL_WATCHER_PATH"
+      if systemctl --user daemon-reload 2>/dev/null && \
+         systemctl --user enable --now "$MAIL_WATCHER_LABEL.service" 2>/dev/null; then
+        warn "kept the previous ORRERY Mail watcher unit; the new one could not be registered"
+        AGENT_MAIL_WATCHER_KIND="systemd-user"
+        return 0
+      fi
+    fi
+    systemctl --user daemon-reload 2>/dev/null || true
+  fi
+
+  rm -f "${previous:-/nonexistent}" 2>/dev/null || true
+  AGENT_MAIL_WATCHER_PATH=""
+  warn "could not register the ORRERY Mail watcher unit; agents spawned from the dashboard will not receive Mail notifications until an agent started with $BIN_DIR/agent-start brings the watcher up"
+} # end enable_mail_watcher
 
 render_launchd_plist() {
   local plist="$HOME/Library/LaunchAgents/$LABEL.plist"
@@ -2268,6 +2567,10 @@ repl = {
     "__MURMUR__": "$MURMUR_SETTING",
     "__SPAWN_DIRS__": "$SPAWN_DIRS_SETTING",
     "__SPAWN_ROOTS__": "$SPAWN_ROOTS_SETTING",
+    "__CODEX_CHILD_APPROVAL__": "$CODEX_CHILD_APPROVAL_SETTING",
+    "__CODEX_NETWORK__": "$CODEX_NETWORK_SETTING",
+    "__CODEX_ADD_DIRS__": "$CODEX_ADD_DIRS_SETTING",
+    "__CODEX_BIN__": "$CODEX_BIN_SETTING",
     "__PORTRAITS_DIR__": "$PORTRAITS_DIR_SETTING",
     "__CUSTOM_PORTRAITS__": "$CUSTOM_PORTRAITS_SETTING",
     "__CODEX_MODELS__": "$CODEX_MODELS_SETTING",
@@ -2320,6 +2623,10 @@ env = {
     "AGENTSTACK_MURMUR": "$MURMUR_SETTING",
     "AGENTSTACK_SPAWN_DIRS": "$SPAWN_DIRS_SETTING",
     "AGENTSTACK_SPAWN_ROOTS": "$SPAWN_ROOTS_SETTING",
+    "AGENTSTACK_CODEX_CHILD_APPROVAL": "$CODEX_CHILD_APPROVAL_SETTING",
+    "AGENTSTACK_CODEX_NETWORK": "$CODEX_NETWORK_SETTING",
+    "AGENTSTACK_CODEX_ADD_DIRS": "$CODEX_ADD_DIRS_SETTING",
+    "AGENTSTACK_CODEX_BIN": "$CODEX_BIN_SETTING",
     "AGENTSTACK_PORTRAITS_DIR": "$PORTRAITS_DIR_SETTING",
     "AGENTSTACK_CUSTOM_PORTRAITS": "$CUSTOM_PORTRAITS_SETTING",
     "AGENTSTACK_CODEX_MODELS": "$CODEX_MODELS_SETTING",
@@ -2338,7 +2645,7 @@ def esc(v):
     return str(v).replace("\\\\", "\\\\\\\\").replace('"', '\\"')
 lines = [
     "[Unit]",
-    "Description=claude-agent-stack dashboard",
+    "Description=ORRERY Telemetry dashboard",
     "After=network.target",
     "",
     "[Service]",
@@ -2562,7 +2869,9 @@ write_manifest() {
   "$PYTHON_BIN" - "$tmp" "$service_kind" "$service_path" \
     "$mail_service_kind" "$mail_service_path" "$AGENT_MAIL_NAME_CAPABILITY_JSON" \
     "${AGENT_MAIL_AUTOSTART_KIND:-}" "${AGENT_MAIL_AUTOSTART_PATH:-}" \
-    "$MAIL_AUTOSTART_LABEL" "${AGENT_MAIL_AUTOSTART_SERVICE_PATH:-}" <<PY
+    "$MAIL_AUTOSTART_LABEL" "${AGENT_MAIL_AUTOSTART_SERVICE_PATH:-}" \
+    "${AGENT_MAIL_WATCHER_KIND:-}" "${AGENT_MAIL_WATCHER_PATH:-}" \
+    "$MAIL_WATCHER_LABEL" <<PY
 import json
 import os
 import pathlib
@@ -2579,6 +2888,9 @@ mail_autostart_kind = sys.argv[7]
 mail_autostart_path = sys.argv[8]
 mail_autostart_label = sys.argv[9]
 mail_autostart_service_path = sys.argv[10]
+mail_watcher_kind = sys.argv[11]
+mail_watcher_path = sys.argv[12]
+mail_watcher_label = sys.argv[13]
 install_dir = pathlib.Path("$INSTALL_DIR")
 claude_skills_dir = pathlib.Path("$CLAUDE_SKILLS_DIR")
 owned_files = []
@@ -2603,6 +2915,8 @@ if mail_autostart_path:
     owned_files.append(mail_autostart_path)
 if mail_autostart_service_path:
     owned_files.append(mail_autostart_service_path)
+if mail_watcher_path:
+    owned_files.append(mail_watcher_path)
 for raw in ("$NATIVE_MAIL_ENV", "$NATIVE_MAIL_RUNNER"):
     path = pathlib.Path(raw)
     if path.is_file() or path.is_symlink():
@@ -2662,7 +2976,7 @@ elif service_kind == "systemd-user":
 elif service_kind == "nohup":
     services.append({"kind": "nohup", "pidfile": service_path})
 if mail_service_kind == "nohup" and mail_service_path:
-    services.append({"kind": "nohup", "pidfile": mail_service_path, "role": "agent-mail"})
+    services.append({"kind": "nohup", "pidfile": mail_service_path, "role": "ORRERY Mail"})
 # Recorded so uninstall.sh tears the autostart unit down through the same
 # services loop it already uses for the dashboard.
 if mail_autostart_kind == "launchd" and mail_autostart_path:
@@ -2672,6 +2986,12 @@ elif mail_autostart_kind == "systemd-user" and mail_autostart_path:
     # The timer is the enabled unit; the service it triggers is a plain file.
     services.append({"kind": "systemd-user", "unit": f"{mail_autostart_label}.timer",
                      "path": mail_autostart_path, "role": "agent-mail-autostart"})
+if mail_watcher_kind == "launchd" and mail_watcher_path:
+    services.append({"kind": "launchd", "label": mail_watcher_label,
+                     "path": mail_watcher_path, "role": "mail-watcher"})
+elif mail_watcher_kind == "systemd-user" and mail_watcher_path:
+    services.append({"kind": "systemd-user", "unit": f"{mail_watcher_label}.service",
+                     "path": mail_watcher_path, "role": "mail-watcher"})
 manifest = {
     "schema_version": 1,
     "tool": "claude-agent-stack",
@@ -2699,6 +3019,14 @@ manifest = {
         "AGENTSTACK_MURMUR": "$MURMUR_SETTING",
         "AGENTSTACK_SPAWN_DIRS": "$SPAWN_DIRS_SETTING",
         "AGENTSTACK_SPAWN_ROOTS": "$SPAWN_ROOTS_SETTING",
+        "AGENTSTACK_CODEX_CHILD_APPROVAL": "$CODEX_CHILD_APPROVAL_SETTING",
+        "AGENTSTACK_CODEX_NETWORK": "$CODEX_NETWORK_SETTING",
+        "AGENTSTACK_CODEX_ADD_DIRS": "$CODEX_ADD_DIRS_SETTING",
+    "AGENTSTACK_CODEX_BIN": "$CODEX_BIN_SETTING",
+    "AGENTSTACK_CODEX_CHILD_APPROVAL": "$CODEX_CHILD_APPROVAL_SETTING",
+    "AGENTSTACK_CODEX_NETWORK": "$CODEX_NETWORK_SETTING",
+    "AGENTSTACK_CODEX_ADD_DIRS": "$CODEX_ADD_DIRS_SETTING",
+    "AGENTSTACK_CODEX_BIN": "$CODEX_BIN_SETTING",
         "AGENTSTACK_PORTRAITS_DIR": "$PORTRAITS_DIR_SETTING",
         "AGENTSTACK_CUSTOM_PORTRAITS": "$CUSTOM_PORTRAITS_SETTING",
         "AGENTSTACK_CODEX_MODELS": "$CODEX_MODELS_SETTING",
@@ -2762,12 +3090,16 @@ PY
 }
 
 main() {
-  say "claude-agent-stack core installer"
+  say "ORRERY Telemetry core installer"
   say "tier: $TIER"
   say "install dir: $INSTALL_DIR"
   say "project key: $PROJECT_KEY"
   say "spawn dirs: ${SPAWN_DIRS_SETTING:-(default: ~)}"
   say "spawn roots: ${SPAWN_ROOTS_SETTING:-(default: \$HOME)}"
+  say "codex child approval: $CODEX_CHILD_APPROVAL_SETTING"
+  say "codex network: $CODEX_NETWORK_SETTING"
+  say "codex bin: ${CODEX_BIN_SETTING:-(not found on PATH; Codex spawns will fail until --codex-bin is set)}"
+  say "codex add dirs: ${CODEX_ADD_DIRS_SETTING:-(none beyond project, spawn dirs/roots, install dir, worktrees, ~/.claude, ~/.codex)}"
   validate_assume_yes
   if ! run_preflight; then
     exit 1
@@ -2782,7 +3114,7 @@ main() {
   check_port
   # A legacy listener can answer health_check but report its database relative
   # to its own working directory. Honor the explicit retirement choice before
-  # treating that listener as a reusable AgentStack Mail service.
+  # treating that listener as a reusable ORRERY Mail service.
   retire_legacy_mail_services
   resolve_native_mail_connection
   if ! check_agent_mail_provisioning_dependencies; then
@@ -2801,7 +3133,7 @@ main() {
   install_claude_skill_links
   render_installed_templates
   ensure_native_agentstack_mail
-  say "AgentStack Mail requested-name handling: honored (passthrough)"
+  say "ORRERY Mail requested-name handling: honored (passthrough)"
   write_env_file
   # After write_env_file: the unit runs `agentstack-mailctl start`, which reads
   # env.sh. Registering it earlier would fire RunAtLoad against a config that
@@ -2810,6 +3142,7 @@ main() {
   # is precisely the case for every existing user re-running install.sh to
   # update, and they need the autostart most.
   enable_mail_autostart
+  enable_mail_watcher
   safe_merge_claude_mcp
   safe_merge_settings
   safe_managed_doc_setups

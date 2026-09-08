@@ -72,7 +72,7 @@ def test_urgent_only_is_reachable():
 
 
 def test_an_unknown_importance_is_treated_as_normal():
-    """agent-mail takes importance as free text, so unknown words arrive.
+    """ORRERY Mail takes importance as free text, so unknown words arrive.
 
     Dropping what we do not recognise would silently stop delivery, which is
     the failure this whole filter is supposed to avoid causing.

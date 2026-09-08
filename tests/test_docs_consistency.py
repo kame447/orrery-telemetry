@@ -1,7 +1,7 @@
 """Facts that user docs state about the implementation, checked against it.
 
 Each check exists because a reader found the docs contradicting the code
-(2026-09-03 first-look review): the agent-mail port in AGENTS.md, the number
+(2026-09-03 first-look review): the ORRERY Mail port in AGENTS.md, the number
 of approval prompts in install.md, the hook count and guide list in the
 English README.
 """
@@ -74,9 +74,10 @@ def test_hook_count_matches_the_settings_template() -> None:
 
 
 def test_english_readme_lists_every_guide_the_japanese_readme_lists() -> None:
-    pattern = re.compile(r"^\| \[[^\]]+\]\((docs/[\w-]+\.md)\) \|", re.M)
-    ja = pattern.findall(_read("README.md"))
-    en = pattern.findall(_read("README.en.md"))
+    ja_pattern = re.compile(r"^\| \[[^\]]+\]\((docs/[\w-]+\.md)\) \|", re.M)
+    en_pattern = re.compile(r"^\| \[[^\]]+\]\((docs/[\w-]+(?:\.en)?\.md)\) \|", re.M)
+    ja = ja_pattern.findall(_read("README.md"))
+    en = [path.replace(".en.md", ".md") for path in en_pattern.findall(_read("README.en.md"))]
     assert ja, "no guide table in README.md"
     assert set(ja) == set(en), sorted(set(ja) ^ set(en))
 

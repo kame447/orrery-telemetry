@@ -1,7 +1,7 @@
 """The session-start hook must not call a healthy mail server dead.
 
 Reported by a tester on 2026-08-17 and reproduced on the maintainer's machine:
-the hook probed ``<base>/health/liveness``, a route AgentStack Mail does not
+the hook probed ``<base>/health/liveness``, a route ORRERY Mail does not
 serve -- it answers on its MCP path and the configured aliases and nothing else.
 ``curl -sf`` fails on any non-2xx, so the probe failed on every healthy install.
 

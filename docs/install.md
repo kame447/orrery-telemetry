@@ -1,6 +1,6 @@
 # インストール
 
-> English version: planned.
+> English version: [install.en.md](install.en.md)
 
 [README に戻る](../README.md) · [次: Launcher と identity](launchers.md)
 
@@ -12,7 +12,7 @@
 
 必須:
 
-- Python 3.10 以上（`python3`）。全 suite を実測済みなのは 3.10 / 3.12 / 3.13 / 3.14 です。上限は設けていません（CI が 3.10・3.12・3.14 を毎回回すので、新しい Python で壊れた場合はそこで落ちます）
+- Python 3.11 以上（`python3`）。全 suite を実測済みなのは 3.12 / 3.13 / 3.14 です。上限は設けていません（CI が 3.11・3.12・3.14 を毎回回すので、新しい Python で壊れた場合はそこで落ちます）
 - `tmux`
 - `git`
 - `uv`（同梱の ORRERY Mail 用の Python 環境を作るために使います）
@@ -20,14 +20,14 @@
 
 任意:
 
-- `fswatch`: mail watcher。なければ 2 秒間隔の polling に fallback します（通知は届きます）
+- `fswatch`: mail watcher。なければ 2 秒間隔の polling に fallback します（通知は届きます）。watcher 自体は installer が launchd / systemd の service として登録するので、agent をどこから起動しても通知が届きます
 - `fzf`: 引数なし launcher の directory picker。なければカレントディレクトリを使います
 - Ghostty: click-to-jump と window title。iTerm2、Terminal.app、`none` へ fallback。ただし既存ウィンドウの前面化は Ghostty のみで、iTerm2 と Terminal.app では jump のたびに新しいウィンドウが開きます
 - Obsidian: `/log` の vault / Daily Note 統合と、vault 内 Output item を開く link。`/log` の Obsidian モードは `AGENTSTACK_OBSIDIAN_APP` を設定して初めて有効になります（installer は設定しません）。未設定なら `/log` はローカルの `logs/` に書き、dashboard は generic project log を非リンク項目として表示します
 
-macOS では launchd の `gui/$UID` domain への実際の bootstrap 成否で常駐経路を選びます。画面スリープ中や SSH 専用環境などで bootstrap できない場合は、dashboard server の終了を検知して再起動する supervised background mode に自動で切り替えます。Linux では systemd user service、利用できなければ同じ supervised background mode を使う実装ですが、実 Linux ホストでは未検証です（CI は `systemctl` をスタブにした unit 生成テストのみ）。WSL2 も未検証で、設計上は localhost dashboard が使え、Ghostty の click-to-jump は使えない想定です。Windows native は対象外です。
+macOS では launchd の `gui/$UID` domain への実際の bootstrap 成否で常駐経路を選びます。画面スリープ中や SSH 専用環境などで bootstrap できない場合は、dashboard server の終了を検知して再起動する supervised background mode に自動で切り替えます。Linux では systemd user service、利用できなければ同じ supervised background mode を使う実装ですが、素の Linux ホストでは未検証です（CI は `systemctl` をスタブにした unit 生成テストのみ）。WSL2（Ubuntu 26.04 / WSL 2.7）では install、Mail、dashboard、`agent-start`、`/delegate` の子、dashboard からの jump（Windows Terminal のタブで attach / resume）まで実機で確認しています。最後のシェルを閉じると VM ごと止まる点は [troubleshooting](troubleshooting.md) の WSL2 節を参照してください。Windows native は対象外です。
 
-`AGENTSTACK_PYTHON` を指定した場合も Python 3.10 以上か検証します。未指定時は PATH 上の `python3` を検査し、不適格なら version 付き command や `/opt/homebrew/bin/python3`、`/usr/local/bin/python3` も探索します。互換 interpreter がなければ、サービス file を生成する前に検査した version と path を示して停止します。
+`AGENTSTACK_PYTHON` を指定した場合も Python 3.11 以上か検証します。未指定時は PATH 上の `python3` を検査し、不適格なら version 付き command や `/opt/homebrew/bin/python3`、`/usr/local/bin/python3` も探索します。互換 interpreter がなければ、サービス file を生成する前に検査した version と path を示して停止します。
 
 ## インストール
 
@@ -78,7 +78,50 @@ agent-start /path/to/your-project
 agent-start-codex /path/to/your-project
 ```
 
-`agent-start` は agent-mail の identity と同名の tmux session を作ります。dashboard の jump、mail 通知、token 復旧はこの名前で結びつきます。起動した Claude Code では `/delegate` のように先頭の slash を付けて skill を呼びます。初回の child 起動は [Skills と file reservation](launchers.md#skills2件と-file-reservation) を参照してください。
+`agent-start` は ORRERY Mail の identity と同名の tmux session を作ります。dashboard の jump、mail 通知、token 復旧はこの名前で結びつきます。起動した Claude Code では `/delegate` のように先頭の slash を付けて skill を呼びます。初回の child 起動は [Skills と file reservation](launchers.md#skills2件と-file-reservation) を参照してください。
+
+## Windows（WSL2）で入れる
+
+Windows では WSL2 の Ubuntu の中に入れます。Ubuntu の中は Linux なので、上の手順がそのまま使えます。以下は Windows 11 + Ubuntu 26.04 / WSL 2.7 で通した順番です。
+
+1. **WSL2 と Ubuntu を入れる**（PowerShell、初回のみ）。
+   ```powershell
+   wsl --update
+   wsl --install -d Ubuntu
+   ```
+   最後にユーザー名とパスワードを聞かれます。`Wsl/Service/E_UNEXPECTED` のようなエラーで止まるときは、先に `wsl --update` を通してから `wsl --install` をやり直します。
+2. **Ubuntu の中に入る。** 以後のコマンドはすべて Ubuntu のプロンプト（`user@PC:~$`）で打ちます。PowerShell のプロンプト（`PS C:\...>`）で打つと `&&` の時点で失敗します。
+   ```powershell
+   wsl -d Ubuntu
+   ```
+3. **前提を入れる**（Ubuntu の中）。
+   ```bash
+   sudo apt update && sudo apt install -y git tmux python3 curl fswatch
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   ```
+   `fswatch` は任意です。無くても mail watcher は 2 秒間隔の polling で通知を届けます。
+4. **clone して installer を走らせる**（Ubuntu の中）。project は WSL 側のパス（`~/work/...`）にしてください。`/mnt/c` 配下は遅く、権限の扱いも違います。
+   ```bash
+   git clone https://github.com/gyroid-eth/orrery-telemetry.git
+   cd orrery-telemetry
+   ./scripts/install.sh --project-key ~/work/your-project
+   ```
+   途中の質問は上の 3 つと同じで、どれも Ubuntu の home の中を変えるだけです。質問ごとに `yes` と打って Enter を 1 回ずつ押します（Remote Desktop 越しだとキーが連打扱いになることがあるので、1 回押して表示を待ちます）。最後に `dashboard healthy: http://127.0.0.1:8770/api/agents` が出れば完了です。
+5. **dashboard を開く。** Windows のブラウザで `http://127.0.0.1:8770/` を開きます。WSL2 の localhost は Windows 側に転送されるので、そのまま届きます。
+6. **Claude Code か Codex CLI を Ubuntu の中に入れてログインする。** Windows 側に入れたものは使えません（agent は Ubuntu の tmux の中で動きます）。
+   ```bash
+   # Claude Code（native installer。~/.local/bin に入る）
+   curl -fsSL https://claude.ai/install.sh | bash
+   # Codex CLI（Node.js が要る。global install は home の下にして sudo を避ける）
+   sudo apt install -y nodejs npm
+   npm config set prefix ~/.npm-global
+   echo 'export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
+   npm install -g @openai/codex
+   ```
+   ログインは `claude`（起動後に `/login`）と `codex login` です。表示された URL を Windows 側のブラウザで開いて認可します。
+7. **agent を起動する**（Ubuntu の中）。上の「最初の agent を起動する」と同じコマンドを打ちます。dashboard の jump は Windows Terminal（`wt.exe`、Windows 11 なら標準搭載）の新しいタブを開いて tmux に attach します。Windows Terminal が無い場合は Microsoft Store から入れてください。
+
+**閉じてはいけない窓。** Ubuntu の窓を全部閉じると WSL2 は VM ごと止まり、Mail と dashboard も消えます。常駐させたいときは [troubleshooting の WSL2 節](troubleshooting.md#wsl2-では最後のシェルを閉じると-service-が消える) の `loginctl enable-linger` と `.wslconfig` の `vmIdleTimeout=-1` を設定してください。
 
 ## 非対話で入れる（`--assume-yes`）
 
@@ -88,7 +131,7 @@ CI や script から入れる場合、既定のままだと 4 つの承認（Cla
 ./scripts/install.sh --project-key /absolute/path/to/your-project --assume-yes
 ```
 
-`--assume-yes`（短縮 `-y`、環境変数 `AGENTSTACK_ASSUME_YES=1` も同じ）は approval の事前付与であり、`--force` ではありません。Python 3.10 未満、dashboard port の競合、既存 agent-mail DB の複数候補・不存在・稼働 server との不一致、自動 setup の失敗は従来どおり停止します。自動承認した項目は `assume-yes:` 行として個別に出力されます。agent や自動化が「便利だから」とユーザーの明示選択なしにこの option を付けてはいけません。command-line の指定は環境変数より優先され、生成する `env.sh` には残しません。
+`--assume-yes`（短縮 `-y`、環境変数 `AGENTSTACK_ASSUME_YES=1` も同じ）は approval の事前付与であり、`--force` ではありません。Python 3.11 未満、dashboard port の競合、既存 ORRERY Mail DB の複数候補・不存在・稼働 server との不一致、自動 setup の失敗は従来どおり停止します。自動承認した項目は `assume-yes:` 行として個別に出力されます。agent や自動化が「便利だから」とユーザーの明示選択なしにこの option を付けてはいけません。command-line の指定は環境変数より優先され、生成する `env.sh` には残しません。
 
 ## Install tier と option
 
@@ -109,6 +152,9 @@ CI や script から入れる場合、既定のままだと 4 つの承認（Cla
 --terminal MODE         auto | ghostty | iterm | terminal | none
 --spawn-dirs PATHS      NEW AGENT の launch directory preset（`:` 区切り）
 --spawn-roots PATHS     directory typeahead が閲覧できる root（`:` 区切り）
+--codex-approval MODE   Codex child の `--ask-for-approval`（never | on-request | on-failure | untrusted、既定 never）
+--codex-network MODE    Codex child の sandbox network（on | off、既定 on）
+--codex-add-dirs PATHS  Codex child に追加で書込を許す root（`:` 区切り）
 --retire-legacy-mail    付録参照（以前の MCP Agent Mail を退役させる）
 -y, --assume-yes        approval prompts only; validation errors remain fatal
 ```
@@ -120,7 +166,7 @@ CI や script から入れる場合、既定のままだと 4 つの承認（Cla
 Tier 1 の merge は `scripts/lib/merge_settings.py` による JSON parser ベースです。
 
 - 既存の hooks、permissions、その他の user settings を保持
-- AgentStack が追加する値だけを重複なしで追記
+- ORRERY Telemetry が追加する値だけを重複なしで追記
 - merge 前の settings backup を `~/.agentstack/backups` に保存
 - 追加した entry と変更結果を manifest に記録
 - managed block は marker 間だけを idempotent に更新
@@ -137,13 +183,13 @@ permissions の `deny` は、**不可逆で復旧手段がない操作だけ**�
 ~/.claude/skills/log      -> ~/.agentstack/skills/log
 ```
 
-同じ AgentStack payload を指す symlink がすでにある場合は再利用し、manifest に所有登録します。この link は payload と一緒に無効になるため、uninstall では削除対象です。同名の file、directory、または別 target の symlink がある場合は warning を出して保持し、所有登録しません。uninstall は manifest の path と実際の symlink target を照合し、所有登録された、AgentStack payload を指す symlink だけを削除します。利用者が file や directory に置き換えた path、または retarget した symlink は残します。
+同じ ORRERY Telemetry payload を指す symlink がすでにある場合は再利用し、manifest に所有登録します。この link は payload と一緒に無効になるため、uninstall では削除対象です。同名の file、directory、または別 target の symlink がある場合は warning を出して保持し、所有登録しません。uninstall は manifest の path と実際の symlink target を照合し、所有登録された、ORRERY Telemetry payload を指す symlink だけを削除します。利用者が file や directory に置き換えた path、または retarget した symlink は残します。
 
-旧 installer が `skillsDirectories` に `~/.agentstack/skills` を追加していた環境では、Tier 1 の settings merge を承認した再インストール時にその旧 AgentStack entry だけを削除します。同じ配列の他の user value と、それ以外の settings は保持します。
+旧 installer が `skillsDirectories` に `~/.agentstack/skills` を追加していた環境では、Tier 1 の settings merge を承認した再インストール時にその旧 ORRERY Telemetry entry だけを削除します。同じ配列の他の user value と、それ以外の settings は保持します。
 
 installer は shell dotfile を変更しません。project 内では、Tier 1 の preview 後に承認した場合だけ `CLAUDE.md` の managed marker 間を更新し、それ以外の file は変更しません。Claude Code user settings の既定位置は `~/.claude/settings.json` で、`AGENTSTACK_CLAUDE_SETTINGS` で変更できます。
 
-## Claude Code から agent-mail を使えるようにする
+## Claude Code から ORRERY Mail を使えるようにする
 
 `/delegate` skill は `mcp__orrery-mail__*` tool を許可し、Claude Code の user-scope MCP server 名も **`orrery-mail` 固定**です。
 
@@ -186,7 +232,7 @@ Tier 1 が preview / merge に使う helper は単独でも実行できます。
 ~/.agentstack/bin/agentstack-claude-setup --print
 ```
 
-`--print` は placeholder を解決した block と対象を表示するだけで変更しません。引数なしでは既存 file を backup し、marker 間の AgentStack block だけを install / update します。
+`--print` は placeholder を解決した block と対象を表示するだけで変更しません。引数なしでは既存 file を backup し、marker 間の ORRERY Telemetry block だけを install / update します。
 
 ```bash
 ~/.agentstack/bin/agentstack-codex-setup
@@ -256,9 +302,9 @@ git pull
 
 installer は payload と `VERSION` を更新し、service を再登録して、managed merge を再び preview します。同梱 ORRERY Mail の candidate と state を検証して再利用します。`--project-key` は前回の値を引き継ぎます。
 
-**in-place upgrade 中も agent-mail server は稼働させたまま**にしてください。稼働 listener から解決した実 DB path は filesystem の候補探索より優先されます。agent-mail を先に止めると候補探索へフォールバックし、複数の DB がある環境では誤選択を避けるため installer が停止します。
+**in-place upgrade 中も ORRERY Mail server は稼働させたまま**にしてください。稼働 listener から解決した実 DB path は filesystem の候補探索より優先されます。ORRERY Mail を先に止めると候補探索へフォールバックし、複数の DB がある環境では誤選択を避けるため installer が停止します。
 
-dashboard port を現在の AgentStack launchd job または supervised-background pidfile 配下のプロセスが保持している場合、installer は所有者を照合してその dashboard を新しい payload で置換します。同じ port を無関係なプロセスが保持している場合は、従来どおり停止します。
+dashboard port を現在の ORRERY Telemetry launchd job または supervised-background pidfile 配下のプロセスが保持している場合、installer は所有者を照合してその dashboard を新しい payload で置換します。同じ port を無関係なプロセスが保持している場合は、従来どおり停止します。
 
 service の environment は install 時に plist / unit へ書き込まれます。`~/.agentstack/env.sh` を変更しただけでは既存 service に反映されないため、installer を再実行するか service definition も更新してください。
 
@@ -272,7 +318,7 @@ service の environment は install 時に plist / unit へ書き込まれます
 uninstaller は `install-state.json` に記録された file、service、settings 変更だけを対象にします。
 
 - merge した Claude settings entry を構造的に除去
-- AgentStack 所有 file を削除
+- ORRERY Telemetry 所有 file を削除
 - 空になった所有 directory だけを削除
 - ORRERY Mail state / DB と runtime directory（annotation、token、session state / log）は既定で保持
 

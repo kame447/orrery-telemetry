@@ -115,7 +115,7 @@ patterns = [
     (re.compile(r"(?i)\bsk-[A-Za-z0-9_-]{12,}"), "API token"),
     (
         re.compile(r"(?m)^(?:MCP_AGENT_MAIL_TOKEN|HTTP_BEARER_TOKEN)=[^$<{\s][^\s]*$"),
-        "embedded agent-mail token",
+        "embedded ORRERY Mail token",
     ),
 ]
 for path in files:

@@ -1,14 +1,14 @@
 # Codex App 統合
 
-> English version: planned.
+> English version: [codex-app.en.md](codex-app.en.md)
 
 [前: Hooks](hooks.md) · [README に戻る](../README.md) · [次: Dashboard](dashboard.md)
 
-Codex App 統合は、**Codex Desktop で動く root task / subagent** を agent-mail の identity と結び、lifecycle、inbox、file reservation、dashboard telemetry を tmux 外の runtime にも広げる任意機能です。通常の `agent-start-codex` は Codex CLI を tmux で起動するための launcher であり、この Bridge とは別経路です。
+Codex App 統合は、**Codex Desktop で動く root task / subagent** を ORRERY Mail の identity と結び、lifecycle、inbox、file reservation、dashboard telemetry を tmux 外の runtime にも広げる任意機能です。通常の `agent-start-codex` は Codex CLI を tmux で起動するための launcher であり、この Bridge とは別経路です。
 
 | 利用状況 | この統合 |
 | --- | --- |
-| Codex Desktop の task / subagent を agent-mail と連携したい | 対象。導入してください |
+| Codex Desktop の task / subagent を ORRERY Mail と連携したい | 対象。導入してください |
 | Codex Desktop の待機 task を inbox 到着時に再開したい | 対象。cold wake を利用できます |
 | `agent-start-codex` で Codex CLI だけを使う | 不要。基本 installer の launcher と child MCP proxy だけで足ります |
 | Claude Code と dashboard だけを使う | 不要 |
@@ -16,10 +16,10 @@ Codex App 統合は、**Codex Desktop で動く root task / subagent** を agent
 ## できること
 
 - Codex Desktop の `SessionStart`、`SubagentStart`、`UserPromptSubmit`、`PostToolUse`、`Stop`、`SubagentStop` を Bridge へ送り、root / subagent ごとの runtime state を維持
-- server が確定した agent-mail 名を runtime binding に保存し、再起動後も同じ identity と owner token で再登録
+- server が確定した ORRERY Mail 名を runtime binding に保存し、再起動後も同じ identity と owner token で再登録
 - session に固定された MCP proxy から inbox、message、acknowledgement、file reservation、sanitized runtime status を利用
 - active turn では `PostToolUse` 後に pending mail の件数を追加 context として通知
-- waiting / dormant の root task では agent-mail signal を検知し、`codex exec resume` で bounded cold wake
+- waiting / dormant の root task では ORRERY Mail signal を検知し、`codex exec resume` で bounded cold wake
 - sanitized snapshot を dashboard provider へ渡し、Codex App runtime の状態と `open` action を表示
 
 Bridge は `Codex Desktop` originator を持つ実在 transcript と一致した session だけを受け入れます。Codex CLI の transcript、transcript のない row、別 surface の hook payload は意図的に無視します。
@@ -30,7 +30,7 @@ Bridge は `Codex Desktop` originator を持つ実在 transcript と一致した
 Codex Desktop plugin hook
         │ lifecycle metadata only
         ▼
-private Unix socket ──► Bridge daemon ──► agent-mail
+private Unix socket ──► Bridge daemon ──► ORRERY Mail
         │                    │                 │
         │                    ├─ binding/token  └─ inbox signal
         │                    ├─ snapshot              │
@@ -102,7 +102,7 @@ launchd の可否はログイン情報から推測せず、`gui/$UID` への boo
 | `--no-plugin` | marketplace は構築するが Codex plugin を登録しない |
 | `--wake-limit COUNT` | root task ごとの cold wake 上限回数 / 時 |
 | `--stale-after SECONDS` | waiting runtime を dormant にする閾値。300〜604800秒 |
-| `--retry-max-attempts N` | agent-mail 登録 retry の最大 call 数 |
+| `--retry-max-attempts N` | ORRERY Mail 登録 retry の最大 call 数 |
 | `--retry-max-age SECONDS` | 登録 retry を保持する最長時間 |
 | `--retry-max-backoff SECONDS` | 登録 retry の backoff 上限 |
 | `--skip-git-check` | review 済み non-git workspace でだけ trust check を明示解除 |
@@ -139,7 +139,7 @@ launchd / supervised background の log はどちらも既定で次にありま�
 
 `SessionStart` / `SubagentStart` hook は、現在の `session_id` と必要なら `agent_id` を使って最初に `agentstack.bootstrap` を呼ぶよう additional context を渡します。最初の bootstrap が MCP process を一つの Bridge binding に固定し、その後の tool call では project key、agent 名、owner token を agent から受け取りません。
 
-proxy の公開 tool は次の8個です。
+proxy の公開 tool は次の9個です。
 
 - `bootstrap`
 - `fetch_inbox`
@@ -149,6 +149,9 @@ proxy の公開 tool は次の8個です。
 - `renew_reservations`
 - `release_reservations`
 - `runtime_status`
+- `whois`（宛先名の確認用。名前は大文字小文字を区別します）
+
+tool call が失敗したとき、proxy は Mail server のエラー 1 行目をそのまま返します（token に見える文字列は `[redacted]` に置き換え、600 文字で切ります）。以前は固定文 "ORRERY Mail tool call failed" だけを返していたため、宛先名の綴り違いのような検証エラーでも child は理由を知れず、直さずに諦めていました。
 
 root task は `session_id` だけを渡します。subagent は同じ `session_id` と自分の `agent_id` を渡し、Bridge が記録した parent lineage と一致しない binding は拒否されます。
 
@@ -197,7 +200,7 @@ wake prompt に入るのは message ID、sender、subject だけです。message
 - owner token は private identity store に分離し、agent や dashboard snapshot へ公開しない
 - hook event と dashboard snapshot は field allowlist で検証
 - cold wake は固定 instruction と bounded metadata だけを渡し、stdout / stderr 診断は token pattern を redaction
-- headless wake が一時的に approve するのは上記8個の session-bound proxy tool だけで、shell、sandbox、他 MCP、global approval policy は変更しない
+- headless wake が一時的に approve するのは上記9個の session-bound proxy tool だけで、shell、sandbox、他 MCP、global approval policy は変更しない
 
 `--skip-git-check` は untrusted directory を一般に許可する option ではありません。git 管理外であることを確認済みの workspace に限定し、通常は trusted repository 内で task を開始してください。
 

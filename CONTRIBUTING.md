@@ -50,7 +50,7 @@ done:
 - `claude/CLAUDE.md`
 - `codex/AGENTS.md`
 
-Facts that drift silently — the default agent-mail port, the number of
+Facts that drift silently — the default ORRERY Mail port, the number of
 approval prompts, the number of Claude event hooks, the guide list — are
 checked against the implementation by `tests/test_docs_consistency.py`.
 Extend that test when you add such a fact instead of relying on review.
@@ -84,15 +84,53 @@ for t in tests/test_*.py; do python3 "$t"; done
 `local`/`declare`. When feasible, also exercise the actual code path on
 `/bin/bash` (3.2), not just a newer bash.
 
+## Windows contributions (community lane)
+
+Native Windows is not a supported platform; WSL2 is the Windows path the
+maintainer verifies. Windows-native work is still welcome, on one condition:
+**it must not be able to change how the macOS install behaves.** The layout
+below makes that a property of the tree rather than of each review.
+
+- **Placement.** Windows-only scripts go in `scripts/windows/`, Windows-only
+  tests in `tests/windows/` (collected only on `win32`, see its `conftest.py`),
+  Windows-only guides as `docs/windows-*.md`. Do not add Windows files next to
+  the macOS ones.
+- **Shared code.** A change to a shared module (for example `storage.py` or
+  `dashboard/server.py`) is acceptable only when the non-Windows path is
+  unchanged and the Windows branch is guarded by `sys.platform == "win32"` and
+  covered by a test in `tests/windows/`. Say so in the PR description.
+- **Off limits without prior discussion in an issue:** `scripts/install.sh`,
+  the hooks, launchers, `docs/install.md`, and the README support table. The
+  support table stays as it is; a Windows guide may be linked from it in one
+  sentence at most.
+- **Docs.** Start every `docs/windows-*.md` with a line that says it is
+  community-maintained and experimental, and list what was actually run
+  (Windows build, Python, shell). Do not write "supported".
+- **CI.** The `portable startup (Windows)` job runs `tests/windows/` plus the
+  portable startup tests. The macOS matrix ignores `tests/windows/`, so a red
+  Windows job never blocks a macOS fix and a macOS change never has to know
+  about Windows.
+- **Review.** The maintainer reviews Windows PRs for the boundary above, not
+  for Windows correctness; the contributor's own validation log in the PR is
+  the evidence. Keep one concern per PR (see #7 for the shape that merges
+  quickly).
+
 ## License of contributions
 
-AgentStack-authored work in this repository is under the
+Work written for ORRERY Telemetry in this repository ("AgentStack" in file names is the former project name) is under the
 [PolyForm Perimeter License 1.0.1](LICENSE). It is source-available, not open
 source in the OSI sense: you may use, modify, and redistribute the software
 for any purpose except providing others with a product that competes with it.
 The OpenAI/Anthropic Rider belongs only to copied or derived AgentMail
 components; see [the third-party boundary](docs/third-party.md).
 
-By submitting new AgentStack-authored work you agree that it is licensed under
+By submitting new work written for ORRERY Telemetry you agree that it is licensed under
 the PolyForm terms. Changes to derived AgentMail components must retain the
 upstream copyright and full upstream license, including its rider.
+
+By submitting a contribution you keep your copyright, but you grant the
+maintainer a perpetual, worldwide, non-exclusive, royalty-free licence to use,
+reproduce, modify, distribute, sublicense and relicense the contribution under
+any terms, including commercial ones. You confirm that you have the right to
+grant this licence. Small fixes are welcome without further paperwork; this
+paragraph is the whole agreement.

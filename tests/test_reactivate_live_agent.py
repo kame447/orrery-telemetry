@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""A live agent that agent-mail has retired.
+"""A live agent that ORRERY Mail has retired.
 
-agent-mail retires an agent after 24 hours without activity. For a session
+ORRERY Mail retires an agent after 24 hours without activity. For a session
 that ended, that is housekeeping. For a long-lived one that was simply idle —
 a commander, a monitor — it is not: the agent is still running, still holding
 a conversation, and now **inbound mail to it is silently refused** while its
@@ -12,7 +12,7 @@ Resume does not fix it. Resume restores a session that ended; pointed at a
 live one it just attaches, and no re-registration happens. The only recovery
 was to kill the conversation and resume from the transcript.
 
-The dashboard is the one component that can see both sides: agent-mail does
+The dashboard is the one component that can see both sides: ORRERY Mail does
 not know tmux is alive, and this does. So it reports the contradiction and
 offers a one-step repair — and does not repair anything on its own, because
 quietly correcting state is how a broken thing goes on looking fine.

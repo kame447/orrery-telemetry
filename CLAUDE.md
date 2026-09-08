@@ -16,7 +16,7 @@ silently do not work. Hand the terminal back so the user can answer, or pass
 `--assume-yes` **only because they told you to**, never to get a clean run.
 
 **Never invent a value to get past an error.** The installer stops when it
-cannot determine which database agent-mail uses, whether the port is free, or
+cannot determine which database ORRERY Mail uses, whether the port is free, or
 whether the interpreter is new enough. Those stops are the product working.
 Setting `AGENTSTACK_MAIL_DB` to a plausible-looking path will point the
 dashboard at a database that does not exist.

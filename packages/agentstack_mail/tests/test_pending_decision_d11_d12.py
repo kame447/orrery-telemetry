@@ -5,7 +5,7 @@ the measured behavior for this release; they do not claim that best-effort
 notification can provide exactly-once delivery across an external tmux side
 effect.
 
-D11 runs the frozen, authenticated live source and AgentStack Mail Core in
+D11 runs the frozen, authenticated live source and ORRERY Mail Core in
 secret-free subprocesses with worker-owned database, archive, and signal roots.
 The injected barriers alter scheduling only; production retirement, reservation,
 send, persistence, and notification code remains unchanged.

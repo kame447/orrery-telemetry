@@ -1,7 +1,7 @@
 """Codex App Bridge daemon for P1 identity and runtime telemetry.
 
 The socket handler validates and queues events before replying, keeping the
-synchronous Codex hook independent of agent-mail latency. A worker owns binding
+synchronous Codex hook independent of ORRERY Mail latency. A worker owns binding
 registration, credential persistence, retry spooling, and atomic snapshots.
 """
 
@@ -1065,7 +1065,7 @@ def _cleanup_failure(
 
 
 def _provisional_agent_name(external_id: str) -> str:
-    """Create a local-only display name until agent-mail assigns the identity."""
+    """Create a local-only display name until ORRERY Mail assigns the identity."""
 
     digest = hashlib.sha256(external_id.encode("utf-8")).hexdigest()[:12]
     return f"Pending-{digest}"

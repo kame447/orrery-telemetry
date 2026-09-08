@@ -1,7 +1,7 @@
 """Narrow, session-bound MCP proxy surface for Codex App agents.
 
 This module deliberately implements a small stdio JSON-RPC server instead of a
-generic agent-mail passthrough. The first successful ``bootstrap`` fixes the
+generic ORRERY Mail passthrough. The first successful ``bootstrap`` fixes the
 process to one Bridge-observed external ID. Project, agent name, and owner token
 are then resolved from the private identity store for every allowlisted call.
 """
@@ -319,6 +319,29 @@ class AgentStackProxy:
             file_reservation_ids=ids or None,
         )
 
+    def whois(
+        self,
+        session_id: str,
+        *,
+        name: str,
+        agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Look up another agent's profile, e.g. to confirm a recipient name.
+
+        Without this the child had no way to check a spelling before
+        `send_message`, and the server's "unknown recipient" was the first and
+        last thing it heard. The argument is `name`, not `agent_name`: the
+        latter is reserved for the caller's own identity and rejected by
+        `_dispatch` after bootstrap.
+        """
+        binding, owner_token = self._resolve(session_id, agent_id)
+        target = _agent_names([name], "name", required=True)[0]
+        return self.agent_mail.whois(
+            project_key=binding["project_key"],
+            agent_name=target,
+            registration_token=owner_token,
+        )
+
     def runtime_status(
         self, session_id: str, agent_id: str | None = None
     ) -> dict[str, Any]:
@@ -512,6 +535,7 @@ def _dispatch(
         "renew_reservations": proxy.renew_reservations,
         "release_reservations": proxy.release_reservations,
         "runtime_status": proxy.runtime_status,
+        "whois": proxy.whois,
     }
     handler = handlers.get(name)
     if handler is None:
@@ -564,7 +588,7 @@ def _dispatch(
                     f"this process serves {pinned['agent_name']!r}"
                 )
             call_arguments["session_id"] = proxy.bound_session_id
-    # Agents are told (by CLAUDE.md / AGENTS.md and by habit) to call agent-mail
+    # Agents are told (by CLAUDE.md / AGENTS.md and by habit) to call ORRERY Mail
     # with project_key and agent_name. The proxy takes those from its binding
     # instead, but rejecting the arguments outright turns documented usage into
     # "unexpected keyword argument" on a child's very first call. Accept them
@@ -724,7 +748,7 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "send_message",
-        "description": "Send an agent-mail message as this bound agent.",
+        "description": "Send an ORRERY Mail message as this bound agent.",
         "inputSchema": _schema(
             {
                 "to": {"type": "array", "items": {"type": "string"}, "minItems": 1},
@@ -803,6 +827,17 @@ TOOL_DEFINITIONS = [
             "and parent lineage. Takes no caller-supplied identity."
         ),
         "inputSchema": _schema({}, []),
+    },
+    {
+        "name": "whois",
+        "description": (
+            "Look up one agent's profile by exact name, e.g. to confirm a "
+            "recipient before send_message. Names are case-sensitive."
+        ),
+        "inputSchema": _schema(
+            {"name": {"type": "string", "minLength": 1, "maxLength": 128}},
+            ["name"],
+        ),
     },
 ]
 

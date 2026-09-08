@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AgentStack Mail must come back after a reboot.
+"""ORRERY Mail must come back after a reboot.
 
 `agentstack-mailctl start` hands the server to `nohup` and exits, so nothing
 re-launched it at login. The dashboard has had a launchd plist / systemd user
@@ -84,10 +84,10 @@ def test_macos_install_plans_a_launchd_autostart_for_mail():
         r = _dry_run(pathlib.Path(td), "Darwin")
     assert r.returncode == 0, r.stdout + r.stderr
     assert f"{LABEL_PREFIX}.mail.plist" in r.stdout, (
-        "the installer did not plan a launchd autostart unit for AgentStack Mail; "
+        "the installer did not plan a launchd autostart unit for ORRERY Mail; "
         "without it `mailctl start`'s nohup process is lost at reboot\n" + r.stdout
     )
-    assert "AgentStack Mail autostart" in r.stdout, r.stdout
+    assert "ORRERY Mail autostart" in r.stdout, r.stdout
     assert f"launchctl bootstrap" in r.stdout, r.stdout
 
 
@@ -194,6 +194,11 @@ def test_systemd_unit_is_one_shot_and_calls_mailctl():
     assert "Type=oneshot" in text, text
     assert "RemainAfterExit" not in text, (
         "a oneshot left active after exiting is never re-run by its timer"
+    )
+    assert re.search(r"^KillMode=process$", text, re.M), (
+        "mailctl leaves the server behind under nohup; with the default "
+        "control-group KillMode systemd kills it as soon as the oneshot exits "
+        "(observed on WSL2: health ok, then shutdown in the same second)"
     )
     assert re.search(r"^ExecStart=.*agentstack-mailctl\"? start$", text, re.M), text
     assert "After=default.target" not in text, (
@@ -662,8 +667,8 @@ def _mailctl_env(tmp: pathlib.Path) -> dict:
 def test_the_sweep_leaves_a_deliberately_stopped_server_alone():
     """Reported by review with a live end-to-end run:
 
-        STOP_RESULT 0 AgentStack Mail stopped
-        SIMULATED_SWEEP_START 0 AgentStack Mail started (pid 39426, ...)
+        STOP_RESULT 0 ORRERY Mail stopped
+        SIMULATED_SWEEP_START 0 ORRERY Mail started (pid 39426, ...)
 
     A trigger that runs `start` every five minutes silently undoes an operator's
     `stop`. The controller now records the intent and the sweep honours it.
@@ -696,7 +701,7 @@ def test_the_sweep_leaves_a_deliberately_stopped_server_alone():
 def test_the_sweep_is_quiet_when_there_is_nothing_to_do():
     """It runs ~105k times a year; a line each time is a log that eats itself."""
     source = MAILCTL.read_text(encoding="utf-8")
-    assert 'SWEEP" == "1" ]] || say "AgentStack Mail already running' in source, (
+    assert 'SWEEP" == "1" ]] || say "ORRERY Mail already running' in source, (
         "the 'already running' line is not suppressed for the periodic sweep"
     )
 

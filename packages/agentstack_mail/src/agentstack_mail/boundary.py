@@ -1,4 +1,4 @@
-"""Fail-closed FastMCP publication boundary for AgentStack Mail.
+"""Fail-closed FastMCP publication boundary for ORRERY Mail.
 
 The derived tool bodies live in :mod:`agentstack_mail.app`, but only the
 versioned compatibility surface is publishable.  Keeping the publication
@@ -26,7 +26,7 @@ def _assert_uvicorn_signal_contract() -> None:
     actual = getattr(uvicorn, "__version__", "unknown")
     if actual != _EXPECTED_UVICORN_VERSION:
         raise RuntimeError(
-            "AgentStack Mail requires Uvicorn "
+            "ORRERY Mail requires Uvicorn "
             f"{_EXPECTED_UVICORN_VERSION}, found {actual}; the SIGTERM re-raise "
             "suppression is pinned because it depends on that version's "
             "internal signal-capture behavior"
@@ -143,7 +143,7 @@ class CompatibilityFastMCP(FastMCP):
         registry = getattr(manager, "_tools", None)
         if not isinstance(registry, Mapping):
             raise RuntimeError(
-                "AgentStack Mail cannot inspect the FastMCP tool registry; "
+                "ORRERY Mail cannot inspect the FastMCP tool registry; "
                 "refusing to construct a server without an exact boundary check"
             )
 
@@ -154,7 +154,7 @@ class CompatibilityFastMCP(FastMCP):
         recorded_extra = self._agentstack_published_tools - COMPATIBILITY_TOOLS
         if missing or extra or recorded_missing or recorded_extra:
             raise RuntimeError(
-                "AgentStack Mail tool boundary mismatch: "
+                "ORRERY Mail tool boundary mismatch: "
                 f"missing={sorted(missing)}, extra={sorted(extra)}, "
                 f"recorded_missing={sorted(recorded_missing)}, "
                 f"recorded_extra={sorted(recorded_extra)}"

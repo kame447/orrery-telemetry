@@ -1305,7 +1305,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Run hermetic coexistence/migration/rollback/fault gates against "
-            "the authenticated frozen live authority and AgentStack Mail Core."
+            "the authenticated frozen live authority and ORRERY Mail Core."
         )
     )
     parser.add_argument(

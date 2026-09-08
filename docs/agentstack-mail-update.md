@@ -1,4 +1,4 @@
-# Updating a live AgentStack Mail service
+# Updating a live ORRERY Mail service
 
 The one-time authority handoff from the third-party server is history and its
 runbook is not published. This document covers every deployment after it:

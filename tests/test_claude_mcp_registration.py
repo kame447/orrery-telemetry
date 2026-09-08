@@ -1,4 +1,4 @@
-"""Regression coverage for Claude Code's fixed-name agent-mail registration."""
+"""Regression coverage for Claude Code's fixed-name ORRERY Mail registration."""
 
 from __future__ import annotations
 
@@ -272,7 +272,7 @@ def test_doctor_warns_and_prints_safe_registration_commands(tmp_path):
     )
 
     assert "Claude MCP orrery-mail is not registered" in result.stderr
-    assert "/delegate cannot use agent-mail" in result.stderr
+    assert "/delegate cannot use ORRERY Mail" in result.stderr
     assert "agentstack-merge-claude-mcp" in result.stderr
     assert "--dry-run" in result.stderr
 
@@ -300,7 +300,7 @@ def _mail_env(token: str, tmp_path: pathlib.Path) -> pathlib.Path:
 def test_an_entry_already_reaching_the_server_is_left_alone(tmp_path):
     """`/api` and `/mcp` are the same door; rewriting one to the other is churn.
 
-    agent-mail mounts its MCP app at both paths regardless of the configured
+    ORRERY Mail mounts its MCP app at both paths regardless of the configured
     base, so an existing `/api/` entry already works. The installer's job is to
     make delegation reachable, not to restyle a URL — and the live machine this
     came from had been running happily on `/api/` the whole time.

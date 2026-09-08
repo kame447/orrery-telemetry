@@ -3,7 +3,7 @@
     "candidate_venv": "/home/alice/.agentstack/mail-service/candidates/868ba0ac97553adb45d31abd6dde8b5ee3291b3c/venv",
     "provider": "agentstack",
     "requested_name_honoring": {
-      "detail": "AgentStack Mail service env requires passthrough",
+      "detail": "ORRERY Mail service env requires passthrough",
       "enforcement_mode": "passthrough",
       "evidence": "agentstack-cutover-profile",
       "mail_dir": "",
@@ -70,6 +70,9 @@
     "AGENTSTACK_SKILLS_DIR": "/home/alice/.agentstack/skills",
     "AGENTSTACK_SPAWN_DIRS": "",
     "AGENTSTACK_SPAWN_ROOTS": "",
+    "AGENTSTACK_CODEX_CHILD_APPROVAL": "never",
+    "AGENTSTACK_CODEX_NETWORK": "on",
+    "AGENTSTACK_CODEX_ADD_DIRS": "",
     "AGENTSTACK_TERMINAL": "auto"
   },
   "install_dir": "/home/alice/.agentstack",
@@ -118,7 +121,8 @@
     "/home/alice/.agentstack/runtime/claude-mcp-merge-result.json",
     "/home/alice/.claude/skills/delegate",
     "/home/alice/.claude/skills/log",
-    "/home/alice/.config/systemd/user/org.agentstack.agentdashboard.service"
+    "/home/alice/.config/systemd/user/org.agentstack.agentdashboard.service",
+    "/home/alice/.config/systemd/user/org.agentstack.mail-watcher.service"
   ],
   "purge_paths": [
     "/home/alice/.agentstack/mail-service",
@@ -146,6 +150,12 @@
       "path": "/home/alice/.config/systemd/user/org.agentstack.mail.timer",
       "role": "agent-mail-autostart",
       "unit": "org.agentstack.mail.timer"
+    },
+    {
+      "kind": "systemd-user",
+      "path": "/home/alice/.config/systemd/user/org.agentstack.mail-watcher.service",
+      "role": "mail-watcher",
+      "unit": "org.agentstack.mail-watcher.service"
     }
   ],
   "settings_backups": [

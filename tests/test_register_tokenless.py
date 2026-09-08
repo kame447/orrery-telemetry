@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression: the tokenless agent-mail transport must not kill the launchers.
+"""Regression: the tokenless ORRERY Mail transport must not kill the launchers.
 
 Background
 ----------

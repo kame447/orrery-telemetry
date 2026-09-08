@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AgentStack · Agent Telemetry</title>
+<title>ORRERY · Agent Telemetry</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,400&family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
@@ -1045,7 +1045,7 @@
     pointer-events:none}
   .node .annot-lab{fill:var(--bone);font-family:"Chakra Petch",sans-serif;
     font-size:7.5px;font-weight:600;letter-spacing:.3px;pointer-events:none}
-  /* The name agent-mail granted is not the one we asked for. The agent works;
+  /* The name ORRERY Mail granted is not the one we asked for. The agent works;
      only its identity is wrong, so this marks the label rather than the node. */
   .node .nlab-subst{fill:var(--amber);text-decoration:underline dotted}
   .node.finished .annot-pill,.node.gone .annot-pill{stroke:var(--bone-dim);opacity:.62}
@@ -2001,7 +2001,7 @@
   .tm-hist .hempty{margin:auto;color:var(--bone-dim);letter-spacing:3px;
     font-family:"Chakra Petch",sans-serif}
 
-  /* AgentStack telemetry surface: low-saturation glass and restrained amber. */
+  /* ORRERY telemetry surface: low-saturation glass and restrained amber. */
   :root{
     --bg:#0b0d11;--panel:#111419;--panel-2:#161a21;--elev:#1c212a;
     --ink:#ece5d6;--ink-dim:#9a9384;--ink-faint:#5f5c52;
@@ -2411,8 +2411,8 @@
 
 <header>
   <div class="brand">
-    <b>AGENTSTACK <i>·</i> TELEMETRY</b>
-    <span>tmux × mcp-agent-mail</span>
+    <b>ORRERY <i>·</i> TELEMETRY</b>
+    <span>tmux × ORRERY Mail</span>
   </div>
   <div class="viewtog">
     <button id="v-deck" class="on" onclick="setView('deck')">▤ Deck</button>
@@ -28152,7 +28152,7 @@ OFF = legacy snapshot+comet mode">
   },
   "rules_digest": "df26f9d872ccd641021665fa8c09a5b071e42251b9bc7a4e272cccc6ebecebfb",
   "schema_version": 1,
-  "source_digest": "06cf54e909cb8d93de3caebf89d56a3bec6ab56fa30188a9a1582750a4df32f5"
+  "source_digest": "845f64c13791fdcc3cbbc5b1d62af8878d2d01647807dcc3772c6510869f4888"
 }
 </script>
 <script>
@@ -30188,7 +30188,7 @@ function updateSelBar(){
   eBtn.disabled=exitable.length===0||bulkBusy;
   rBtn.disabled=resumable.length===0||bulkBusy;
   if(pBtn){
-    // gmap に居る → /api/graph 上で agent-mail registered なので history を持ち得る。
+    // gmap に居る → /api/graph 上で ORRERY Mail registered なので history を持ち得る。
     // 1 体だけだと detail-panel の sparkline で見られるので disable。
     let mailReg=0;
     for(const nm of selectedSet){ if(gmap.has(nm)) mailReg++; }
@@ -30302,7 +30302,7 @@ function bay(a,i){
   if(a.model) chips.push(`<span class="chip" title="${esc(a.model_raw||a.model)}">${esc(a.model)}</span>`);
   if(a.ctx_window) chips.push(`<span class="chip win" title="context window">◷ ${esc(a.ctx_window)}</span>`);
   if(+a.deliv>0) chips.push(`<span class="chip dv" title="output logs: ${+a.deliv}">¶ ${+a.deliv}</span>`);
-  if(a.mail_linked) chips.push(`<span class="chip att" title="tmux session name matches an agent-mail identity">◉ LINKED</span>`);
+  if(a.mail_linked) chips.push(`<span class="chip att" title="tmux session name matches an ORRERY Mail identity">◉ LINKED</span>`);
   if(a.attached) chips.push(`<span class="chip att" title="a terminal client is attached to this tmux session">◉ ATTACHED</span>`);
   // 'agent' は section header(ACTIVE AGENTS) と冗長なので省略
   if(a.category==='finished')
@@ -30385,7 +30385,7 @@ function bay(a,i){
           <span class="nm">${esc(a.name)}</span>
         </div>
         ${a.requested_name
-          ? `<div class="subst-note" title="agent-mail registered a different identity than the one requested">↯ asked for ${esc(a.requested_name)}</div>`
+          ? `<div class="subst-note" title="ORRERY Mail registered a different identity than the one requested">↯ asked for ${esc(a.requested_name)}</div>`
           : ''}
         <div class="chips">${chips.join('')}</div>
       </div>
@@ -30862,7 +30862,7 @@ function buildEls(){
     const tx=svgEl('text',{x:0,y:NR+16,'text-anchor':'middle'});
     tx.textContent=name;
     if(g.requested_name){
-      // agent-mail が要求とは別の名前で登録した。エージェント自体は動き続ける
+      // ORRERY Mail が要求とは別の名前で登録した。エージェント自体は動き続ける
       // ので、言わなければ誰も気づかない（唯一の痕跡が「肖像が出ない」で、
       // それは不具合ではなく地味なノードにしか見えない）。名指しで出す。
       tx.setAttribute('class','nlab-subst');
@@ -31023,7 +31023,7 @@ function renderDrawerError(msg){
   const notConfigured=/AGENTSTACK_(?:PROJECT_KEY|VAULT).*not configured/i.test(msg);
   document.getElementById('ed-list').innerHTML=notConfigured
     ? `<div class="ed-config"><b>NOT CONFIGURED</b>`+
-      `<span>Set AGENTSTACK_PROJECT_KEY to enable agent-mail thread history.</span></div>`
+      `<span>Set AGENTSTACK_PROJECT_KEY to enable ORRERY Mail thread history.</span></div>`
     : `<div class="ed-empty">✕ ${esc(msg)}</div>`;
 }
 function fmtEdgeTs(m){
@@ -31633,7 +31633,7 @@ function setView(v){
 })();
 addEventListener('resize',()=>{if(view==='net'){simHot=60;runSim();}});
 
-/* ════════════════ MAIL COMET (agent-mail 通信の可視化) ════════════════
+/* ════════════════ MAIL COMET (ORRERY Mail 通信の可視化) ════════════════
    /api/messages-since を 4 秒ポーリング。新しい message ごとに
    sender→recipient の edge 上に "信号 packet" を飛ばし、中間点で
    subject + 本文先頭を一瞬だけ表示する。reduced-motion を尊重。
@@ -34044,10 +34044,12 @@ function normalizeSpawnProviders(catalog){
 const SPM_MODEL_TONES=Object.freeze({
   'gpt-5.6-sol':'deepest reasoning · hard problems',
   'gpt-5.6-terra':'everyday implementation',
-  'gpt-5.6-luna':'fast & light'
+  'gpt-5.6-luna':'fast & light',
+  'gpt-6-astra':'most capable · demanding work'
 });
 const SPM_EFFORT_HINTS=Object.freeze({
-  low:'routine',medium:'standard',high:'complex',xhigh:'hardest · default'
+  low:'routine',medium:'standard',high:'complex',xhigh:'hardest · default',
+  max:'astra only · beyond xhigh',ultra:'astra only · maximum'
 });
 
 function spawnModelTone(providerId,modelId){
@@ -34176,6 +34178,14 @@ async function loadSpawnCatalog(seq){
     const response=await fetch('/api/spawn-names',{cache:'no-store'});
     const catalog=await response.json();
     if(seq!==spmLoadSeq)return;
+    if(response.ok&&catalog&&typeof catalog.unavailable==='string'){
+      spmReady=false;
+      SPM('spm-agent-strip').textContent='scientist roster unavailable';
+      SPM('spm-models').textContent='engine catalog unavailable';
+      updateSpawnButton();
+      setSpawnStat(catalog.unavailable,'err');
+      return;
+    }
     if(!response.ok||!catalog||!Array.isArray(catalog.names)||
        !Array.isArray(catalog.adjectives)||!Array.isArray(catalog.dirs))
       throw new Error((catalog&&catalog.error)||'invalid picker response');

@@ -275,6 +275,13 @@ def _provider_of(raw: str | None) -> str:
         return ""
     m = _MN_FAMILY_RE.search(canon)
     if not m:
+        # A program name stored where a model should be ("claude-code",
+        # "codex") still names the vendor; better a logo than a blank LED.
+        low = canon.lower()
+        if "claude" in low or "anthropic" in low:
+            return "anthropic"
+        if "codex" in low or "openai" in low:
+            return "openai"
         return ""
     return _MN_PROVIDER.get(m.group("family"), "")
 
@@ -477,7 +484,7 @@ def _tmux(args: list[str]) -> str:
 
 
 def tmux_state() -> dict:
-    """セッション名 -> {created, activity, attached, cmd, title} を返す。"""
+    """セッション名 -> {created, activity, attached, cmd, pane_pid, title} を返す。"""
     sessions: dict[str, dict] = {}
 
     fmt = SEP.join([
@@ -499,6 +506,7 @@ def tmux_state() -> dict:
             "attached": False,
             "client_tty": None,
             "cmd": "",
+            "pane_pid": 0,
             "title": "",
         }
 
@@ -508,18 +516,26 @@ def tmux_state() -> dict:
             "#{session_name}",
             "#{window_active}#{pane_active}",
             "#{pane_current_command}",
+            "#{pane_pid}",
             "#{pane_title}",
         ]
     )
     for line in _tmux(["list-panes", "-a", "-F", fmt]).splitlines():
-        parts = line.split(SEP, 3)
-        if len(parts) < 4:
+        parts = line.split(SEP, 4)
+        if len(parts) == 5:
+            name, flags, cmd, pane_pid, title = parts
+        elif len(parts) == 4:
+            # demo / older fake tmux adapters may still emit the historical
+            # four-field row even when a fifth format field was requested.
+            name, flags, cmd, title = parts
+            pane_pid = ""
+        else:
             continue
-        name, flags, cmd, title = parts
         if flags != "11":  # active window + active pane
             continue
         if name in sessions:
             sessions[name]["cmd"] = cmd
+            sessions[name]["pane_pid"] = _to_int(pane_pid)
             sessions[name]["title"] = title
 
     fmt = SEP.join(["#{client_session}", "#{client_tty}"])
@@ -543,8 +559,134 @@ def _to_int(s: str) -> int:
         return 0
 
 
+_PROCESS_TREE_TTL = 4.5
+_PROCESS_TREE_CACHE: dict[str, object] = {"ts": 0.0, "tree": None}
+_PROCESS_TREE_LOCK = threading.Lock()
+
+
+def _parse_process_tree(
+    output: str,
+) -> tuple[dict[int, str], dict[int, list[int]]] | None:
+    """Parse one `ps -axo pid,ppid,comm` snapshot."""
+    names: dict[int, str] = {}
+    children: dict[int, list[int]] = {}
+    for line in output.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) != 3:
+            continue
+        try:
+            pid = int(parts[0])
+            ppid = int(parts[1])
+        except ValueError:
+            continue
+        names[pid] = os.path.basename(parts[2]).lower()
+        children.setdefault(ppid, []).append(pid)
+    return (names, children) if names else None
+
+
+def _process_tree_snapshot() -> tuple[dict[int, str], dict[int, list[int]]] | None:
+    """Return one cached host process tree, or None when it cannot be measured.
+
+    Dashboard polling happens every five seconds. Keep this on the same 4.5s
+    cadence as pane runtime reads so Deck / Network / EXIT share one `ps`
+    snapshot instead of spawning `ps` once per session or per consumer.
+    """
+    with _PROCESS_TREE_LOCK:
+        now = time.monotonic()
+        cached_at = float(_PROCESS_TREE_CACHE.get("ts") or 0.0)
+        if cached_at and now - cached_at < _PROCESS_TREE_TTL:
+            return _PROCESS_TREE_CACHE.get("tree")  # type: ignore[return-value]
+
+        tree = None
+        if sys.platform != "win32":
+            try:
+                result = subprocess.run(
+                    ["ps", "-axo", "pid=,ppid=,comm="],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                )
+                if result.returncode == 0:
+                    tree = _parse_process_tree(result.stdout)
+            except (OSError, subprocess.SubprocessError):
+                tree = None
+
+        _PROCESS_TREE_CACHE.update(ts=now, tree=tree)
+        return tree
+
+
+def _is_codex_process_name(name: str) -> bool:
+    executable = os.path.basename(name or "").lower()
+    return executable == "codex" or executable.startswith("codex-")
+
+
+def _is_claude_process_name(name: str) -> bool:
+    # Native Claude Code installs run as `claude`, or as a binary named by its
+    # version ("2.1.263") on 2.1.26x; the npm install runs under `node`.
+    executable = os.path.basename(name or "").lower()
+    return (
+        executable == "claude"
+        or executable == "node"
+        or bool(_VERSION_CMD_RE.match(executable))
+    )
+
+
+def _is_agent_process_name(name: str, program: str | None) -> bool:
+    """Is this process the agent that `program` registered as?
+
+    Codex and Claude both sit behind a shell wrapper (`zsh > node > codex`,
+    `zsh > claude` on macOS), so the pane leader's name says nothing about
+    whether the agent is alive. The process tree does. #19 measured Codex
+    this way; Claude is measured the same way so DECK / NETWORK / EXIT stop
+    depending on whether the title happens to carry a glyph.
+    """
+    if (program or "").startswith("codex"):
+        return _is_codex_process_name(name)
+    if (program or "").startswith("claude"):
+        return _is_claude_process_name(name)
+    return False
+
+
+def _agent_process_alive(
+    pane_pid: object,
+    process_tree: tuple[dict[int, str], dict[int, list[int]]] | None,
+    program: str | None,
+) -> bool | None:
+    """Return True/False when measured, None when liveness is unknowable."""
+    if not (program or "").startswith(("codex", "claude")):
+        return None
+    try:
+        root = int(pane_pid or 0)
+    except (TypeError, ValueError):
+        return None
+    if root <= 0 or process_tree is None:
+        return None
+    names, children = process_tree
+    if root not in names:
+        return None
+
+    stack = [root]
+    seen: set[int] = set()
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        if _is_agent_process_name(names.get(pid, ""), program):
+            return True
+        stack.extend(children.get(pid, ()))
+    return False
+
+
+def _codex_process_alive(
+    pane_pid: object,
+    process_tree: tuple[dict[int, str], dict[int, list[int]]] | None,
+) -> bool | None:
+    return _agent_process_alive(pane_pid, process_tree, "codex-cli")
+
+
 # --------------------------------------------------------------------------- #
-# agent-mail SQLite (read-only)
+# ORRERY Mail SQLite (read-only)
 # --------------------------------------------------------------------------- #
 class _ClosingConnection(sqlite3.Connection):
     """sqlite connection whose context manager also releases the file handle.
@@ -575,10 +717,10 @@ _RETIRED_AT_CACHE: dict[str, bool] = {}
 
 
 def _has_retired_at() -> bool:
-    """Does this agent-mail's `agents` table have a `retired_at` column?
+    """Does this ORRERY Mail's `agents` table have a `retired_at` column?
 
     The dashboard reads a database it does not own, at whatever version the
-    operator installed. A tester running a forty-day-old agent-mail has no such
+    operator installed. A tester running a forty-day-old ORRERY Mail has no such
     column, and every query naming it raised `OperationalError: no such column:
     a.retired_at` — which took out the whole card, and (before the descriptor
     fix) leaked the connection on the way out.
@@ -620,9 +762,9 @@ def _retired_at_select(alias: str = "a") -> str:
 
 
 def _retired_names(project_key: str) -> set[str]:
-    """agent-mail が retired と見なしている名前。列が無い版では空集合。
+    """ORRERY Mail が retired と見なしている名前。列が無い版では空集合。
 
-    agent-mail は 24 時間無活動で agent を retire する。終了した session を
+    ORRERY Mail は 24 時間無活動で agent を retire する。終了した session を
     片付けるぶんには妥当だが、**生きたまま idle だった常駐 agent** も巻き込む。
     そして retired agent は送信も自分の inbox 読取も素通りし、受信だけが黙って
     拒否されるので、当人も人間も気づけない。他 agent のメールが bounce して
@@ -727,29 +869,46 @@ def _iso_to_epoch(s: str | None) -> int:
 # 合成
 # --------------------------------------------------------------------------- #
 PENDING_RE = re.compile(r"^pending-\d+$")
+# Claude Code native binary の pane_current_command（例 "2.1.259"）
+_VERSION_CMD_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 
 def classify(name: str, cmd: str, title: str, in_mail: bool,
-             program: str | None = None) -> str:
+             program: str | None = None,
+             agent_alive: bool | None = None) -> str:
     if name in INFRA_NAMES:
         return "infra"
     if name in WARMUP_NAMES:
         return "warmup"
     glyph = bool(title) and _is_activity_glyph(title[0])
-    claude = cmd in ("node", "claude") or glyph
-    # Codex は pane_current_command が zsh で報告されることが多く (REPL の node
-    # が zsh の子プロセスのため)、glyph が消える待機中に "finished" 誤判定して
-    # しまう。agent-mail に program=codex-cli で登録され、かつ tmux session が
-    # 生きているなら「Codex 起動中」とみなす。終了時は tmux session が消えて
-    # build_agents の 2nd pass で gone/retired として扱われる。
-    if not claude and program and program.startswith("codex") and in_mail:
+    # Claude Code 2.1.26x の native バイナリは pane_current_command を
+    # "2.1.259" のようなバージョン文字列で報告する（2026-09-05 Pro 実測:
+    # ProOpus / ProSonnet / SeminarBot がいずれも "2.1.259"）。node / claude
+    # のどちらにも一致しないため、glyph の無い待機中に finished へ落ちていた。
+    claude = cmd in ("node", "claude") or bool(_VERSION_CMD_RE.match(cmd or "")) or glyph
+    # Codex and Claude both sit behind a shell wrapper, so pane_current_command
+    # alone cannot distinguish a live TUI from the shell-only husk left after
+    # exit. A measured process tree (any registered program) is authoritative.
+    # If measurement is unavailable, fall back to the cmd + glyph reading
+    # above, and for Codex to the historical registration + tmux rule rather
+    # than turning a possibly-live agent into FINISHED.
+    if in_mail and agent_alive is True:
         claude = True
+    elif in_mail and agent_alive is False:
+        claude = False
+    elif program and program.startswith("codex") and in_mail and not claude:
+        claude = True
+    # ※ 「program=claude-code で登録済み＋tmux 生存なら agent」という Codex 式の
+    # fallback は入れない。Claude は REPL が終了すると pane が zsh に戻るので、
+    # その規則だと「登録は残るが REPL は死んだ」= finished を表現できなくなる
+    # （dashboard-demo の Calm-Turing がまさにその状態で、PR #6 の fallback で
+    # 崩れた）。真因はバージョン文字列の cmd なので、上の判定だけで足りる。
     if PENDING_RE.match(name):
         return "unnamed" if claude else "idle"
     if claude:
         return "agent"
     if in_mail:
-        # agent-mail に登録が残るが claude プロセスが生きていない
+        # ORRERY Mail に登録が残るが claude プロセスが生きていない
         # = exit 済みでセッションだけ残骸として残っている
         return "finished"
     return "idle"
@@ -758,6 +917,9 @@ def classify(name: str, cmd: str, title: str, in_mail: bool,
 def build_agents() -> list[dict]:
     sessions = tmux_state()
     mail_agents, mail_instr = agentmail_state()
+    # One `ps` snapshot per refresh (4.5s TTL) shared by every registered
+    # agent, Codex and Claude alike.
+    process_tree = _process_tree_snapshot() if mail_agents else None
     codex_apps = _codex_app_runtimes()
     now = int(time.time())
     didx = _deliverables_index()  # {agent: [...]}（60秒キャッシュ）
@@ -766,8 +928,16 @@ def build_agents() -> list[dict]:
     rows = []
     for name, s in sessions.items():
         m = mail_agents.get(name)
-        cat = classify(name, s["cmd"], s["title"], m is not None,
-                       program=(m or {}).get("program"))
+        program = (m or {}).get("program") or ""
+        agent_alive = (
+            _agent_process_alive(s.get("pane_pid"), process_tree, program)
+            if m is not None
+            else None
+        )
+        cat = classify(
+            name, s["cmd"], s["title"], m is not None,
+            program=program, agent_alive=agent_alive,
+        )
         title = s["title"].strip()
         # ペインタイトルがコマンド名そのものや空ならライブ表示としては無意味
         live = ""
@@ -776,14 +946,15 @@ def build_agents() -> list[dict]:
         running = s["cmd"] in ("node", "claude") or (
             bool(title) and _is_activity_glyph(title[:1])
         )
+        if agent_alive is not None:
+            running = agent_alive
         if name == "mail-watcher":
             watcher_health = mail_watcher_health()
             running = bool(watcher_health.get("watcher_running"))
             if not live and watcher_health.get("watcher_mode"):
                 live = f"watcher: {watcher_health['watcher_mode']}"
-        # Codex は zsh が pane_current_command として報告されるので、上の
-        # cmd チェック + glyph チェックだけでは待機中に running=False になる。
-        # category と整合させるため、cat=="agent" なら running も True に。
+        # If process-tree measurement was unavailable, classify() preserves
+        # the historical fail-safe category; keep running in sync with it.
         if not running and cat == "agent":
             running = True
         last_active = max(
@@ -797,13 +968,14 @@ def build_agents() -> list[dict]:
             if running
             else {}
         )
+        pane_model = _pane_model_for(rt.get("pane_model"), (m or {}).get("program"))
         rows.append(
             {
                 "name": name,
                 "category": cat,
                 "running": running,
                 "attached": s["attached"],
-                # Exact same-name presence in agent-mail is the identity link.
+                # Exact same-name presence in ORRERY Mail is the identity link.
                 # tmux client attachment is a separate UI/safety signal and
                 # must never imply that registration succeeded.
                 "mail_linked": m is not None,
@@ -813,20 +985,21 @@ def build_agents() -> list[dict]:
                 # having a conversation, and silently changing its state is
                 # how "it looked fine" happens.
                 "retired_but_alive": name in retired_names,
-                # The name we asked agent-mail for, when it granted a different
+                # The name we asked ORRERY Mail for, when it granted a different
                 # one. Empty for everybody else.
                 "requested_name": substitutions.get(name, ""),
                 "cmd": s["cmd"],
                 "live": live,
                 # pane のステータスバー由来を優先（warm pool claim で DB
                 # の model が実 model と乖離するケースを救う）。
-                "model": _display_model(rt.get("pane_model")) or
+                "model": _display_model(pane_model) or
                          (m or {}).get("model", ""),
-                "model_raw": rt.get("pane_model") or (m or {}).get("model_raw", ""),
+                "model_raw": pane_model or (m or {}).get("model_raw", ""),
                 "provider": _provider_of(
-                    rt.get("pane_model")
+                    pane_model
                     or (m or {}).get("model_raw")
-                    or (m or {}).get("model")),
+                    or (m or {}).get("model")
+                    or (m or {}).get("program")),
                 "ctx_window": rt.get("ctx_window") or _ctx_window(
                     (m or {}).get("model_raw") or (m or {}).get("model")),
                 "ctx_used": rt.get("ctx_used"),
@@ -843,7 +1016,7 @@ def build_agents() -> list[dict]:
                 "surface": "tmux",
             }
         )
-    # 2nd pass: tmux 不在の agent-mail 登録 (retired / gone) も rows に含める。
+    # 2nd pass: tmux 不在の ORRERY Mail 登録 (retired / gone) も rows に含める。
     # これが無いと kill 直後の retired agent が deck の showAll でも見えず、
     # 検索・resume の起点が失われる (2026-05-20 ユーザー報告)。
     seen = {r["name"] for r in rows}
@@ -961,7 +1134,7 @@ def _rel(epoch: int, now: int) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Graph (親子 + agent-mail 通信網)
+# Graph (親子 + ORRERY Mail 通信網)
 # --------------------------------------------------------------------------- #
 _CODEX_APP_PROVIDER = CodexAppRuntimeProvider()
 _CAPP_CACHE: dict = {"ts": 0.0, "map": {}}
@@ -1235,7 +1408,7 @@ def _annotations() -> dict:
 #   $AGENTSTACK_RUNTIME_DIR/name-substitutions.json =
 #       {registered_name: {"requested": str, "ts": str}}
 #
-#   agent-mail does not always register the name it was asked for; which names
+#   ORRERY Mail does not always register the name it was asked for; which names
 #   it honours depends on its version. The agent then runs fine under a name
 #   nobody else can address it by, and the only trace is a missing portrait —
 #   a face is easy to read as a style choice, not as a fault. So the fact is
@@ -1375,20 +1548,30 @@ def graph_payload(days: float, show_all: bool) -> dict:
     win = days * 86400
     sessions = tmux_state()  # name -> {attached, cmd, title, activity, ...}
     codex_apps = _codex_app_runtimes()
+    programs = {n["name"]: (n.get("program") or "") for n in nodes}
+    process_tree = (
+        _process_tree_snapshot()
+        if any(program.startswith(("codex", "claude")) for program in programs.values())
+        else None
+    )
     if show_all:
         keep = {n["name"] for n in nodes}
     else:
         # running_set: claude/node プロセスが alive な tmux session のみ。
         # zsh husk (session 残存だが claude 非稼働) は除外する。
-        programs = {n["name"]: (n.get("program") or "") for n in nodes}
         running_set: set[str] = set()
         for nm, s in sessions.items():
             t = (s.get("title") or "").strip()
-            if (
-                s["cmd"] in ("node", "claude")
-                or (t and _is_activity_glyph(t[:1]))
-                or programs.get(nm, "").startswith("codex")
-            ):
+            running = s["cmd"] in ("node", "claude") or bool(
+                t and _is_activity_glyph(t[:1])
+            )
+            program = programs.get(nm, "")
+            agent_alive = _agent_process_alive(s.get("pane_pid"), process_tree, program)
+            if agent_alive is not None:
+                running = agent_alive
+            elif program.startswith("codex") and not running:
+                running = True
+            if running:
                 running_set.add(nm)
         retired_names = {n["name"] for n in nodes if n.get("retired")}
         for nm, rec in codex_apps.items():
@@ -1415,19 +1598,20 @@ def graph_payload(days: float, show_all: bool) -> dict:
         running = s["cmd"] in ("node", "claude") or (
             bool(t) and _is_activity_glyph(t[:1])
         )
-        # Codex は cmd=zsh で報告されるため、program=codex-cli 登録で tmux
-        # session が live なら running 扱い (build_agents と同じ判定)
-        if not running and program and program.startswith("codex"):
+        agent_alive = _agent_process_alive(s.get("pane_pid"), process_tree, program)
+        if agent_alive is not None:
+            running = agent_alive
+        elif program and program.startswith("codex") and not running:
             running = True
         live_txt = ""
         if t and t not in (s.get("cmd", ""), name) and not t.startswith("/"):
             live_txt = t
         # 生存シグナル sig: tmux session_activity の新しさ＝実際に作業して
-        # いるかの近似。agent-mail のメッセージ数(act)は作業量と無関係なので
+        # いるかの近似。ORRERY Mail のメッセージ数(act)は作業量と無関係なので
         # 脈拍駆動には使わない（CalmKepler レビュー P1 指摘）
         delta = max(0, now_real - int(s.get("activity") or 0))
         sig = max(0.0, min(1.0, 1.0 - delta / 480.0))
-        # graph ノードは全て agent-mail 登録済。present だが claude 非稼働
+        # graph ノードは全て ORRERY Mail 登録済。present だが claude 非稼働
         # = exit 済でセッションだけ残った husk → idle ではなく finished
         # HP(ctx 残量) + 動作状態は running のみ取得（capture-pane 抑制）
         rt = (
@@ -1466,9 +1650,10 @@ def graph_payload(days: float, show_all: bool) -> dict:
          "ctx_window": lv.get("ctx_window") or _ctx_window(n.get("model")),
          # モデル: pane 由来を優先 (warm pool claim で DB が乖離するケース)
          #   display 形式に揃える (build_agents と同じ正規化)
-         "model": _display_model(lv.get("pane_model")) or n.get("model"),
+         "model": _display_model(_pane_model_for(lv.get("pane_model"), n.get("program"))) or n.get("model"),
          # provider: family ベースで anthropic / openai 等を判定（logo 用）
-         "provider": _provider_of(lv.get("pane_model") or n.get("model"))}
+         "provider": _provider_of(_pane_model_for(lv.get("pane_model"), n.get("program"))
+                                  or n.get("model") or n.get("program"))}
         for n in nodes
         if n["name"] in keep
     ]
@@ -1562,8 +1747,28 @@ def _mac_app_exists(app_name: str) -> bool:
     )
 
 
+def _is_wsl() -> bool:
+    """True inside a WSL distro (kernel string carries 'microsoft')."""
+    if sys.platform != "linux":
+        return False
+    try:
+        with open("/proc/version", encoding="utf-8", errors="replace") as fh:
+            return "microsoft" in fh.read().lower()
+    except OSError:
+        return False
+
+
+def _wsl_distro() -> str:
+    return os.environ.get("WSL_DISTRO_NAME", "").strip()
+
+
 def _auto_terminal() -> str:
     if sys.platform != "darwin":
+        # WSL2: Windows Terminal is reachable through interop as wt.exe, and a
+        # new tab running `wsl.exe -d <distro> --exec tmux attach` is the
+        # click-to-jump equivalent of a Ghostty window (2026-09-07).
+        if _is_wsl() and _wsl_distro() and shutil.which("wt.exe"):
+            return "wt"
         return "none"
     if _mac_app_exists("Ghostty.app") or shutil.which("ghostty"):
         return "ghostty"
@@ -1579,7 +1784,7 @@ def _auto_terminal() -> str:
 def _terminal_adapter() -> str:
     if TERMINAL_SETTING in ("", "auto"):
         return _auto_terminal()
-    if TERMINAL_SETTING in ("ghostty", "iterm", "terminal", "none"):
+    if TERMINAL_SETTING in ("ghostty", "iterm", "terminal", "wt", "none"):
         return TERMINAL_SETTING
     return "none"
 
@@ -1587,7 +1792,7 @@ def _terminal_adapter() -> str:
 def _terminal_unsupported() -> dict:
     return {
         "ok": False,
-        "error": "terminal jump unsupported; set AGENTSTACK_TERMINAL=ghostty, iterm, terminal, or none",
+        "error": "terminal jump unsupported; set AGENTSTACK_TERMINAL=ghostty, iterm, terminal, wt (WSL2), or none",
     }
 
 
@@ -1610,6 +1815,29 @@ def _shell_join(argv: list[str]) -> str:
     return " ".join(_zsh_safe_quote(a) for a in argv)
 
 
+def _write_wt_launcher(tmux_args: list[str], title: str) -> str:
+    """One-shot launcher script for the wt adapter (see there).
+
+    Lives under the runtime dir, named after the session so a re-launch
+    overwrites rather than accumulates; removes itself once tmux has exec'd.
+    """
+    d = os.path.join(RUNTIME_DIR, "wt-launch")
+    os.makedirs(d, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", title) or "session"
+    path = os.path.join(d, f"{safe}.sh")
+    body = (
+        "#!/bin/bash\n"
+        f"rm -f {shlex.quote(path)}\n"
+        f"exec env -u TMUX -u TMUX_PANE {shlex.join(tmux_args)}\n"
+    )
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    os.chmod(tmp, 0o700)
+    os.replace(tmp, path)
+    return path
+
+
 def _open_terminal_tmux(tmux_args: list[str], title: str) -> dict:
     adapter = _terminal_adapter()
     if adapter == "none":
@@ -1621,6 +1849,21 @@ def _open_terminal_tmux(tmux_args: list[str], title: str) -> dict:
                 "open", "-na", "Ghostty.app", "--args",
                 f"--title={title}", "-e",
             ] + tmux_args
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
+        elif adapter == "wt":
+            # Windows Terminal, new tab in the current window (-w 0), running
+            # the tmux command back inside this distro. The argv is written to
+            # a launcher script first: wt.exe's own CLI splits on `;` and the
+            # WSL interop re-quotes every argument, so a resume line such as
+            # `export A=..; exec claude --resume ..` came apart in transit
+            # ("The system cannot find the file specified", 2026-09-07). The
+            # script path has no spaces or quotes, so nothing on the Windows
+            # side has anything to reinterpret.
+            script = _write_wt_launcher(tmux_args, title)
+            cmd = [
+                "wt.exe", "-w", "0", "new-tab", "--title", title,
+                "wsl.exe", "-d", _wsl_distro(), "--exec", "bash", script,
+            ]
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
         else:
             shell_cmd = _shell_join(
@@ -1728,7 +1971,7 @@ def _claim_transcript(path: str, name: str, score: int, *, exact: bool) -> bool:
 
 
 def _agent_window(name: str) -> tuple[int, int]:
-    """agent-mail DB から (inception_epoch, last_active_epoch)。不明は 0。"""
+    """ORRERY Mail DB から (inception_epoch, last_active_epoch)。不明は 0。"""
     if not os.path.exists(DB_PATH):
         return (0, 0)
     con = None
@@ -1767,7 +2010,7 @@ SESSION_INDEX_DIR = os.path.join(RUNTIME_DIR, "session_index")
 
 
 def _agent_id_for_name(name: str) -> int | None:
-    """agent-mail DB から name の最新 agent id を返す(無ければ None)。
+    """ORRERY Mail DB から name の最新 agent id を返す(無ければ None)。
 
     UNIQUE(project_id, name) なので 1 プロジェクト内では name→id は一意。
     プロジェクトをまたぐ同名は last_active 最新を採る。"""
@@ -1793,7 +2036,7 @@ def _indexed_transcript(name: str) -> str | None:
     """精密マップ(record-session-index.py が登録時に書く id→sessionId/
     transcript)から該当 transcript を引く。
 
-    name→agent-mail id→`~/.agentstack/runtime/session_index/<id>.json` の
+    name→ORRERY Mail id→`~/.agentstack/runtime/session_index/<id>.json` の
     transcript_path を返す。これは selfref スコア+活動期間窓のヒューリス
     ティックと違い、登録時に焼いた exact な対応なので同名使い回し・
     last_active 固着のどちらにも左右されない。マップが無い(本フック導入前
@@ -1835,7 +2078,7 @@ def _transcript_path(session: str) -> str | None:
 
     1) 稼働中: tmux ペインの cwd → projects ディレクトリ配下で自己参照
        最多の jsonl を選ぶ。
-    2) 終了済み(tmux ペイン無し): agent-mail の活動期間(inception〜
+    2) 終了済み(tmux ペイン無し): ORRERY Mail の活動期間(inception〜
        last_active)で全 projects の jsonl を mtime 絞り込みし、自己参照
        最多の jsonl を選ぶ。データは DB/ディスクに残るので閲覧可能。
 
@@ -1884,7 +2127,7 @@ def _transcript_path(session: str) -> str | None:
     # 2) cwd で特定できない(終了済み / resume で cwd 不一致 等):
     #    全 projects 横断 + 活動期間 mtime 絞り込みで自己参照最多。
     #    窓内で 0 件なら全件にフォールバックする。last_active_ts が登録時
-    #    から進まない(=登録だけして以後 agent-mail を叩かず resume だけ
+    #    から進まない(=登録だけして以後 ORRERY Mail を叩かず resume だけ
     #    された)エージェントは活動期間窓が狭すぎ実ファイル(mtime が窓の
     #    上限より新しい)を取りこぼすため(NobleHubble 事例)。窓優先で同名
     #    使い回しは正しく区別しつつ、窓ミス時だけ全件で救済する。
@@ -1915,6 +2158,20 @@ def _transcript_path(session: str) -> str | None:
 ABS_CLAUDE = os.path.expanduser("~/.local/bin/claude")
 
 
+def _login_shell() -> str:
+    """Shell for `<shell> -lic <inner>` tmux launches.
+
+    zsh when installed (macOS default), otherwise bash: a stock Ubuntu / WSL2
+    has no zsh, and a hard-coded "zsh" made every resume fail there with
+    nothing in the pane. AGENTSTACK_CHILD_SHELL overrides, matching
+    spawn_child.sh.
+    """
+    override = os.environ.get("AGENTSTACK_CHILD_SHELL", "")
+    if override and os.access(override, os.X_OK):
+        return override
+    return shutil.which("zsh") or shutil.which("bash") or "bash"
+
+
 def _transcript_cwd(path: str) -> str | None:
     """transcript JSONL から元の cwd を抽出（各イベントに `cwd` フィールド）。"""
     try:
@@ -1936,7 +2193,7 @@ def _transcript_cwd(path: str) -> str | None:
 
 
 def _agent_program(session: str) -> str:
-    """agent-mail から program 文字列を引く（codex 判定用）。
+    """ORRERY Mail から program 文字列を引く（codex 判定用）。
 
     register_agent の program は警告系で書き換わらず安定。空なら "" を返す。
     codex は "codex" / "codex-cli" の双方があるため startswith("codex") で判定。"""
@@ -2016,7 +2273,7 @@ def do_resume(session: str) -> dict:
     # 誤爆する(2026-06-02 調査)。dashboard が tmux 内から再起動された場合に備え剥がす。
     launch = _open_terminal_tmux(
         ["tmux", "new-session", "-A", "-s", session, "-c", cwd,
-         "zsh", "-lic", inner],
+         _login_shell(), "-lic", inner],
         title=session,
     )
     if launch.get("ok"):
@@ -2047,12 +2304,56 @@ def _codex_meta(path: str) -> tuple[str | None, str | None]:
         return None, None
 
 
+def _codex_child_add_dirs(extra: list[str] | None = None) -> list[str]:
+    """Writable roots for a Codex agent launched by the product.
+
+    Mirrors codex_child_add_dirs in hooks/spawn_child.sh: project, NEW AGENT
+    presets and typeahead roots, install dir, worktree base, ~/.claude,
+    ~/.codex, then AGENTSTACK_CODEX_ADD_DIRS. Missing directories are dropped
+    and duplicates collapse on realpath (macOS /tmp -> /private/tmp)."""
+    raw: list[str] = [PROJECT_KEY or VAULT]
+    raw += os.environ.get("AGENTSTACK_SPAWN_DIRS", "").split(":")
+    raw += os.environ.get("AGENTSTACK_SPAWN_ROOTS", "").split(":")
+    raw += [os.environ.get("AGENTSTACK_HOME") or os.path.expanduser("~/.agentstack"),
+            "/tmp/cc-worktrees", os.path.expanduser("~/.claude"),
+            os.path.expanduser("~/.codex")]
+    raw += list(extra or [])
+    raw += os.environ.get("AGENTSTACK_CODEX_ADD_DIRS", "").split(":")
+    seen: list[str] = []
+    for entry in raw:
+        if not entry:
+            continue
+        expanded = os.path.expanduser(entry)
+        if not os.path.isdir(expanded):
+            continue
+        resolved = os.path.realpath(expanded)
+        if resolved not in seen:
+            seen.append(resolved)
+    return seen
+
+
+def _codex_child_launch_flags(extra_dirs: list[str] | None = None) -> str:
+    """Sandbox / approval / network / --add-dir flags for a product-launched Codex.
+
+    Same policy as spawn_child.sh: AGENTSTACK_CODEX_CHILD_APPROVAL (default
+    `never` — an unattended agent has nobody to answer prompts),
+    AGENTSTACK_CODEX_NETWORK (default on; workspace-write blocks the network
+    otherwise and every curl / git fetch becomes a prompt or a failure)."""
+    approval = os.environ.get("AGENTSTACK_CODEX_CHILD_APPROVAL", "").strip() or "never"
+    network = os.environ.get("AGENTSTACK_CODEX_NETWORK", "").strip().lower() or "on"
+    parts = [f"--sandbox workspace-write --ask-for-approval {shlex.quote(approval)}"]
+    if network not in ("0", "off", "false", "no"):
+        parts.append("-c sandbox_workspace_write.network_access=true")
+    parts += [f"--add-dir {shlex.quote(d)}" for d in _codex_child_add_dirs(extra_dirs)]
+    return " ".join(parts)
+
+
 def _do_resume_codex(session: str) -> dict:
     """Codex agent を `codex resume <sid>` で tmux 再開する。
 
     rollout は ~/.codex/sessions/.../rollout-*.jsonl。session_meta.payload の
     id=session_id / cwd=作業ディレクトリ。cx と同じ起動条件を再現する:
-      - codex_agent_bootstrap.sh を source（AGENT_NAME export + agent-mail
+      - codex_agent_bootstrap.sh を source（AGENT_NAME export + ORRERY Mail
         再登録 + mail-watcher 起動 + tmux リネーム）
       - launch_codex_workspace.sh と同じ writable scope / sandbox / approval
     selfref 探索ではなく inception_ts 一致で rollout を引くので子の会話を
@@ -2071,22 +2372,17 @@ def _do_resume_codex(session: str) -> dict:
     # zsh -lic で .zshrc を読ませ codex を PATH 解決。bootstrap が無ければ
     # source をスキップ（AGENT_NAME export と resume は維持）。
     src = f'source {shlex.quote(bootstrap)}; ' if os.path.exists(bootstrap) else ''
-    add_dirs = ''
-    if VAULT:
-        add_dirs = f' --add-dir {shlex.quote(VAULT)}'
     inner = (
         'export PATH="$HOME/.local/bin:$PATH"; '
         f'export AGENT_NAME={session}; '
         f'{src}'
         f'exec env -u OPENAI_API_KEY codex resume {sid} '
         f'-C {shlex.quote(cwd)} '
-        '--sandbox workspace-write --ask-for-approval on-request '
-        f'{add_dirs} '
-        '--add-dir "$HOME/.claude" --add-dir "$HOME/.codex"'
+        f'{_codex_child_launch_flags()}'
     )
     launch = _open_terminal_tmux(
         ["tmux", "new-session", "-A", "-s", session, "-c", cwd,
-         "zsh", "-lic", inner],
+         _login_shell(), "-lic", inner],
         title=session,
     )
     if launch.get("ok"):
@@ -2147,7 +2443,7 @@ def _codex_transcript_path(session: str) -> str | None:
 
     Codex は `~/.codex/sessions/YYYY/MM/DD/rollout-DATE-UUID.jsonl` に保存し、
     ファイル名にエージェント名が入らない。1 行目の session_meta.payload.timestamp
-    を読み、agent-mail の inception_ts と最も近い (90 秒以内) ものを返す。
+    を読み、ORRERY Mail の inception_ts と最も近い (90 秒以内) ものを返す。
 
     結果は 120 秒キャッシュ。
     """
@@ -2160,7 +2456,7 @@ def _codex_transcript_path(session: str) -> str | None:
         _TPATH_CACHE[("codex", session)] = (now, None)
         return None
 
-    # agent-mail から inception_ts を引く
+    # ORRERY Mail から inception_ts を引く
     project_key = _project_key()
     if not project_key:
         _TPATH_CACHE[("codex", session)] = (now, None)
@@ -2468,7 +2764,7 @@ def messages_since_payload(since_ts: int, limit: int = 80) -> dict:
 
 # --------------------------------------------------------------------------- #
 # Agent history (Task E) — detail panel の 24h sparkline 用。
-#   agent-mail SQLite から 1 エージェントの「送信 / 受信 / spawn / retire」を
+#   ORRERY Mail SQLite から 1 エージェントの「送信 / 受信 / spawn / retire」を
 #   時系列順に返す。live state ではなく past trace を可視化するための専用源。
 #
 # 区分判定:
@@ -2985,11 +3281,54 @@ _WIN_TRUNC_RE = re.compile(
 #   Claude Code: "| Opus 4.6 | ctx: 59% used"
 #   Codex:       "gpt-5.4 xhigh · Context 46% left"
 # 登録時 model 文字列は warm pool claim 等で書き換わるため信用しない。
+#   2026-09-04: Fable/Mythos を追加。未知の Claude family だと statusline を
+#   素通りし、末尾10行の会話中に出た "gpt-5.6" を実モデルと誤読して provider
+#   まで openai に化けた（ProOpus が cockpit で Codex 表示になった実害）。
+#   同時に、ctx 表示と同じ行（= statusline）を最優先で読むようにし、会話中の
+#   モデル名（"gpt-5.6-sol に委任"）を statusline より先に拾わないようにする。
 _MODEL_PANE_RE = re.compile(
-    r"\b(Opus|Sonnet|Haiku)\s+(\d+(?:\.\d+)?)\b"
+    r"\b(Opus|Sonnet|Haiku|Fable|Mythos)\s+(\d+(?:\.\d+)?)\b"
     r"|\b(gpt-\d+(?:\.\d+)?)(?:-(codex|mini|nano|turbo|thinking))?\b",
     re.IGNORECASE,
 )
+_STATUSLINE_HINT_RE = re.compile(
+    r"ctx:\s*\d+%\s*used|Context\s+\d+%\s*(?:left|used)"
+    # Codex footer before any context is used: "gpt-5.6-terra medium · ~/dir"
+    r"|^\s*gpt-\S+\s+(?:low|medium|high|xhigh|max|ultra)\s+[·•]"
+    # Claude's /model or /status line: "Model: Default (Opus 5 with 1M context)"
+    r"|^\s*Model:\s",
+    re.IGNORECASE)
+
+
+def _pane_model_from(tail: str) -> str | None:
+    """末尾行群から実モデル名を読む。statusline（ctx 表示・Codex footer・
+    ``Model:`` 行）だけを見る。会話本文は読まない。
+
+    2026-09-07 WSL2 実害: statusline 未設定の Claude Code 親が「gpt-5.6-terra
+    の子に委任」と話しただけで、末尾全体フォールバックが gpt-5.6 を実モデルと
+    誤読し、cockpit で Codex 表示になった。statusline が無いペインは None を
+    返し、ORRERY Mail の登録（program / model）に判断を委ねる。"""
+    for src in (ln for ln in tail.splitlines() if _STATUSLINE_HINT_RE.search(ln)):
+        mm = _MODEL_PANE_RE.search(src)
+        if not mm:
+            continue
+        if mm.group(1):  # Claude family
+            return f"{mm.group(1).title()} {mm.group(2)}"
+        base, variant = mm.group(3), mm.group(4)
+        return f"{base}-{variant}" if variant else base
+    return None
+
+
+def _pane_model_for(pane_model: str | None, program: str | None) -> str | None:
+    """pane 由来モデルを採用してよいか。登録 program が示す vendor と食い違う
+    読み（claude-code の pane から gpt-*）は捨てて登録側に任せる。"""
+    if not pane_model:
+        return None
+    registered = _provider_of(program)
+    observed = _provider_of(pane_model)
+    if registered and observed and registered != observed:
+        return None
+    return pane_model
 
 # 稼働経過時間。work 中: スピナー行の先頭尺。
 #   Claude: "(2m 24s · ↓ … tokens …)"（区切り · = U+00B7）
@@ -3045,15 +3384,7 @@ def _parse_runtime(text: str) -> dict:
     ctx_window = re.sub(r"\s+", "", w.group(1)).upper() if w else None
     # ペイン由来の実モデル (steruslineから抽出。末尾10行に限定して
     # スクロールバッファ内のコード片やテキスト中の誤マッチを避ける)
-    pane_model = None
-    mm = _MODEL_PANE_RE.search(tail_for_model)
-    if mm:
-        if mm.group(1):  # Claude family (Opus/Sonnet/Haiku)
-            pane_model = f"{mm.group(1).title()} {mm.group(2)}"
-        else:  # gpt-x[.y][-variant]
-            base = mm.group(3)
-            variant = mm.group(4)
-            pane_model = f"{base}-{variant}" if variant else base
+    pane_model = _pane_model_from(tail_for_model)
     # AskUserQuestion ウィジェットは常にペイン最下部に表示される。スクロール
     # バッファ上部の自己マッチ（過去の出力にコードや報告文として regex 自体が
     # 書かれているケース等）を避けるため、末尾 12 行に絞って検出する。
@@ -3318,7 +3649,7 @@ def do_jump(session: str) -> dict:
 def do_kill(session: str, mode: str = "both") -> dict:
     """finished/gone エージェントを kill する。
 
-    mode: 'tmux' (husk shell のみ kill) / 'retire' (agent-mail soft retire のみ) /
+    mode: 'tmux' (husk shell のみ kill) / 'retire' (ORRERY Mail soft retire のみ) /
           'both' (デフォ＝両方)。
 
     安全弁:
@@ -3327,7 +3658,7 @@ def do_kill(session: str, mode: str = "both") -> dict:
         独自 running 判定を do_kill 内に書かない (2026-05-20 自己kill 事故)。
       - retire は soft (`agent.retired_at` を立てるだけ)。transcript JSONL は
         一切触れず、`claude --resume` も do_resume も後から動く
-      - hard_delete は使わない (agent-mail timestamp 情報を保持し
+      - hard_delete は使わない (ORRERY Mail timestamp 情報を保持し
         _transcript_path() の finished-branch 探索を温存)
     """
     if mode not in ("both", "tmux", "retire"):
@@ -3373,7 +3704,7 @@ def do_kill(session: str, mode: str = "both") -> dict:
 
     actions = []
 
-    # 1) retire 先 (agent-mail の retired_at を立てる)
+    # 1) retire 先 (ORRERY Mail の retired_at を立てる)
     if mode in ("both", "retire"):
         project_key = _project_key()
         if not project_key:
@@ -3447,14 +3778,18 @@ _SPAWN_MODELS = {
     "claude-sonnet-5": ("claude-code", "claude-sonnet-5"),
     "claude-opus-5": ("claude-code", "claude-opus-5"),
     "claude-haiku-4-5-20251001": ("claude-code", "claude-haiku-4-5-20251001"),
+    "claude-fable-5-1": ("claude-code", "claude-fable-5-1"),
 }
 _CODEX_DEFAULT_MODEL = "gpt-5.6-sol"
 _CODEX_DEFAULT_MODELS = (
     _CODEX_DEFAULT_MODEL,
+    "gpt-6-astra",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
 )
-_CODEX_EFFORTS = ("low", "medium", "high", "xhigh")
+# max / ultra: gpt-6-astra (Codex CLI 0.153 models cache) accepts them; the
+# launcher still rejects combinations a model cannot take (luna:ultra, 5.5:max).
+_CODEX_EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 SPAWN_SCIENTISTS_SCRIPT = os.path.join(os.path.dirname(HERE), "bin", "lib", "agentstack-scientists.sh")
 
 
@@ -3497,6 +3832,12 @@ def _spawn_name_status(name: str) -> str:
 
 def _spawn_name_vocabulary() -> tuple[list[str], list[str]]:
     """Load the launcher-owned scientist/adjective vocabulary once."""
+    if sys.platform == "win32":
+        from scripts.windows.spawn_catalog import load_vocabulary
+        try:
+            return load_vocabulary(SPAWN_SCIENTISTS_SCRIPT)
+        except ValueError:
+            return [], []
     try:
         output = subprocess.run(
             [
@@ -3658,6 +3999,17 @@ def _spawn_scientist_statuses(
 
 def spawn_names_payload() -> dict:
     """Picker data; scientist vocabulary is emitted by the launcher source."""
+    if sys.platform == "win32":
+        from scripts.windows.spawn_catalog import UNAVAILABLE, load_vocabulary
+        scientists, adjectives = load_vocabulary(SPAWN_SCIENTISTS_SCRIPT)
+        statuses = _spawn_scientist_statuses(adjectives, scientists)
+        return {
+            "unavailable": UNAVAILABLE,
+            "names": [{"name": name, "portrait": bool(_portrait_file(name, False)),
+                       "status": statuses.get(name, "unknown")} for name in scientists],
+            "adjectives": adjectives,
+            "naming": "adjective-scientist",
+        }
     try:
         output = subprocess.run(
             ["bash", "-c", 'source "$1" && ags_adjective_list && printf "\\036" && ags_scientist_list', "spawn-names", SPAWN_SCIENTISTS_SCRIPT],
@@ -3688,7 +4040,7 @@ def spawn_names_payload() -> dict:
 
 
 def _mcp_bearer() -> str:
-    """agent-mail .env から HTTP_BEARER_TOKEN を読む。空なら ''。"""
+    """ORRERY Mail .env から HTTP_BEARER_TOKEN を読む。空なら ''。"""
     if not os.path.exists(MAIL_ENV_PATH):
         return ""
     try:
@@ -3791,7 +4143,7 @@ def _mcp_tool_parameters(tool: str) -> set[str] | None:
 
 
 def _mcp_call(method: str, args: dict, timeout: int = 15) -> dict:
-    """Call one agent-mail tool, shaping arguments to its advertised schema."""
+    """Call one ORRERY Mail tool, shaping arguments to its advertised schema."""
     allowed = _mcp_tool_parameters(method)
     prepared = args if allowed is None else {
         key: value for key, value in args.items() if key in allowed
@@ -3810,7 +4162,7 @@ def _mcp_call(method: str, args: dict, timeout: int = 15) -> dict:
             for block in result.get("content") or []
             if isinstance(block, dict)
         ).strip()
-        return {"ok": False, "error": text or "agent-mail tool failed"}
+        return {"ok": False, "error": text or "ORRERY Mail tool failed"}
     # Newer MCP servers expose the decoded payload in structuredContent.
     try:
         data = result.get("structuredContent")
@@ -3900,6 +4252,9 @@ def do_spawn(payload: dict) -> dict:
     payload: {parent?, standalone?, name?, dir?, role?, group?, task,
               provider?, model?, effort?}.
     """
+    if sys.platform == "win32":
+        from scripts.windows.spawn_catalog import UNAVAILABLE
+        return {"ok": False, "error": UNAVAILABLE}
     if "standalone" in payload and not isinstance(payload["standalone"], bool):
         return {"ok": False, "error": "standalone must be boolean"}
     standalone = payload.get("standalone", False)
@@ -4282,6 +4637,61 @@ def do_spawn(payload: dict) -> dict:
     return result
 
 
+_AGENT_PROCESS_NAMES = {"claude", "codex", "node"}
+
+
+def _pane_agent_process(session: str, ps_output: str | None = None) -> str:
+    """Name of a live agent process (claude / codex / node) under the pane, or "".
+
+    `#{pane_current_command}` is the foreground process *group leader*, and
+    under a `bash -lc '… codex …'` wrapper (Linux / WSL2: no job control, so
+    the child shares bash's group) that is "bash" even while Codex is alive.
+    do_exit then took the zombie-shell branch and typed a bare `exit` into
+    Codex (2026-09-07, SandyTuring on WSL2). Walk the pane's descendants
+    instead of trusting the leader's name.
+    """
+    if ps_output is None:
+        pid_r = subprocess.run(
+            ["tmux", "display-message", "-t", session, "-p", "#{pane_pid}"],
+            capture_output=True, text=True,
+        )
+        try:
+            pane_pid = int(pid_r.stdout.strip())
+        except ValueError:
+            return ""
+        ps_r = subprocess.run(["ps", "-axo", "pid=,ppid=,comm="], capture_output=True, text=True)
+        ps_output = ps_r.stdout
+        root = pane_pid
+    else:
+        root = None
+    children: dict[int, list[tuple[int, str]]] = {}
+    for line in ps_output.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        children.setdefault(ppid, []).append((pid, os.path.basename(parts[2]).lower()))
+    if root is None:
+        # Test entry point: the pane pid is the first line's pid.
+        first = ps_output.strip().splitlines()[0].split(None, 2)
+        root = int(first[0])
+    queue = [root]
+    seen = set()
+    while queue:
+        pid = queue.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        for child_pid, comm in children.get(pid, []):
+            if comm in _AGENT_PROCESS_NAMES:
+                return comm
+            queue.append(child_pid)
+    return ""
+
+
 def do_exit(session: str) -> dict:
     """running/finished エージェントに `/exit` を送り、Claude を graceful exit させる。
 
@@ -4327,9 +4737,20 @@ def do_exit(session: str) -> dict:
     )
     pane_cmd = pane_cmd_r.stdout.strip().lower()
 
-    if pane_cmd in _SHELL_PROCS:
-        # Claude はすでに終了してシェルだけ残っているゾンビ状態。
-        # /exit はシェルに効かないので shell の exit コマンドで tmux session を閉じる。
+    # build_agents() resolves Codex liveness from the shared process snapshot
+    # (#19), so a measured Codex husk arrives here as "finished". Claude is
+    # still classified from pane_current_command plus the title glyph, and on
+    # macOS every Claude session is `zsh > claude` (the pane leader is the
+    # shell), so a Claude whose title carries no glyph is "finished" while its
+    # REPL is alive. The descendant walk stays as the last guard: a shell
+    # `exit` is typed only when nothing agent-like runs below the pane.
+    agent_proc = ""
+    if pane_cmd in _SHELL_PROCS and target["category"] == "finished":
+        agent_proc = _pane_agent_process(session)
+        if agent_proc:
+            actions.append(f"wrapper-shell:{pane_cmd}>{agent_proc}")
+
+    if pane_cmd in _SHELL_PROCS and target["category"] == "finished" and not agent_proc:
         r = subprocess.run(
             ["tmux", "send-keys", "-t", session, "exit", "Enter"],
             capture_output=True, text=True,
@@ -4451,6 +4872,22 @@ def _launchctl_job_running(label: str) -> bool:
         return False
 
 
+def _systemd_user_unit_running(unit: str) -> bool:
+    """True when `systemctl --user is-active <unit>` reports active (Linux)."""
+    if sys.platform != "linux":
+        return False
+    try:
+        process = subprocess.run(
+            ["systemctl", "--user", "is-active", unit],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        return process.returncode == 0 and process.stdout.strip() == "active"
+    except Exception:
+        return False
+
+
 def mail_watcher_health() -> dict:
     now = time.time()
     cached = _MAIL_HEALTH_CACHE["data"]
@@ -4511,14 +4948,17 @@ def mail_watcher_health() -> dict:
     # 配送本体は mail-watcher に統合。GUI launchd domain が使えない環境でも
     # watcher 自身が持つ pidfile と command line を照合して実プロセスを判定する。
     watcher_launchd = _launchctl_job_running(MAIL_WATCHER_LABEL)
+    watcher_systemd = _systemd_user_unit_running(f"{MAIL_WATCHER_LABEL}.service")
     watcher_pidfile, watcher_pid = _pidfile_process_running(
         MAIL_WATCHER_PIDFILE,
         "watch_agent_mail_signals.sh",
         MAIL_WATCHER_HEARTBEAT,
     )
-    result["watcher_running"] = watcher_launchd or watcher_pidfile
+    result["watcher_running"] = watcher_launchd or watcher_systemd or watcher_pidfile
     if watcher_launchd:
         result["watcher_mode"] = "launchd"
+    elif watcher_systemd:
+        result["watcher_mode"] = "systemd-user"
     elif watcher_pidfile:
         result["watcher_mode"] = "pidfile"
         result["watcher_pid"] = watcher_pid
@@ -4579,7 +5019,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(404, b"theme asset missing", "text/plain")
         elif path == "/api/version":
             version = _resolve_version()
-            self._send(200, json.dumps({"name": "claude-agent-stack", "version": version, "api": 1}).encode(), "application/json; charset=utf-8")
+            self._send(200, json.dumps({"name": "orrery-telemetry", "version": version, "api": 1}).encode(), "application/json; charset=utf-8")
         elif path == "/api/spawn-names":
             try:
                 self._send(200, json.dumps(spawn_names_payload()).encode(), "application/json; charset=utf-8")
@@ -4927,7 +5367,7 @@ class Handler(BaseHTTPRequestHandler):
 # --------------------------------------------------------------------------- #
 # do_reactivate — 生きているのに retired にされた agent を受信可能に戻す。
 #
-# agent-mail は 24 時間無活動の agent を毎時 retire する。終了した session に
+# ORRERY Mail は 24 時間無活動の agent を毎時 retire する。終了した session に
 # は妥当な掃除だが、**生きたまま idle だった常駐 agent**（司令塔・監視役）も
 # 一緒に retire される。そして retired agent は送信と自分の inbox 読取は
 # 素通りし、**受信だけが黙って拒否される** ので、本人も人間も気づけない。
@@ -4938,11 +5378,11 @@ class Handler(BaseHTTPRequestHandler):
 # 直すには会話を捨てて再起動するしかなかった。
 #
 # ここは dashboard にしかできない仕事である。tmux が生きているかどうかを
-# 知っているのは agent-mail ではなくこちら側だから。自動では戻さない:
+# 知っているのは ORRERY Mail ではなくこちら側だから。自動では戻さない:
 # 黙って直すのは、今日一日で 4 つの形で踏んだ失敗そのものなので。
 # --------------------------------------------------------------------------- #
 def _mail_web_url(path: str) -> str:
-    """agent-mail の web API を、設定済み endpoint と同じ host:port で叩く。
+    """ORRERY Mail の web API を、設定済み endpoint と同じ host:port で叩く。
 
     以前は特定の localhost port を直書きしていた。既定ポートで動いている
     限り正しく、それ以外では retire が黙って失敗する——「動いている環境では
@@ -4959,7 +5399,7 @@ def do_reactivate(session: str) -> dict:
         return {"ok": False, "error": "invalid session name"}
     if not _has_retired_at():
         return {"ok": False,
-                "error": "this agent-mail has no retired_at column; "
+                "error": "this ORRERY Mail has no retired_at column; "
                          "nothing can be retired on it"}
     project_key = _project_key()
     if not project_key:
@@ -4985,7 +5425,7 @@ def do_reactivate(session: str) -> dict:
         if con is not None:
             con.close()
     if row is None:
-        return {"ok": False, "error": f"agent '{session}' not found in agent-mail"}
+        return {"ok": False, "error": f"agent '{session}' not found in ORRERY Mail"}
     if not row["retired_at"]:
         return {"ok": False, "error": f"agent '{session}' is not retired"}
 
@@ -5069,10 +5509,14 @@ def main():
     _start_supervisor_watchdog()
 
     # 前回(SIGKILL 等で atexit 未実行)の野良 ttyd を掃除してから開始
-    subprocess.run(
-        ["pkill", "-f", "ttyd -p .* tmux attach -t ="],
-        capture_output=True,
-    )
+    try:
+        subprocess.run(
+            ["pkill", "-f", "ttyd -p .* tmux attach -t ="],
+            capture_output=True,
+        )
+    except FileNotFoundError:
+        # Optional cleanup must not prevent startup on hosts without pkill.
+        pass
     threading.Thread(target=_ttyd_reaper, daemon=True).start()
     srv = ThreadingHTTPServer((BIND_HOST, PORT), Handler)
     print(f"agent-dashboard listening on http://{BIND_HOST}:{PORT}/")

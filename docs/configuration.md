@@ -1,6 +1,6 @@
 # 設定
 
-> English version: planned.
+> English version: [configuration.en.md](configuration.en.md)
 
 [前: API reference](api.md) · [README に戻る](../README.md) · [次: トラブルシューティング](troubleshooting.md)
 
@@ -23,13 +23,13 @@
 | `AGENTSTACK_MAIL_DB` | `~/.agentstack/mail/storage.sqlite3` | ORRERY Mail SQLite |
 | `AGENTSTACK_MAIL_ENV` | `~/.agentstack/mail/.env` | standalone dashboard の互換 bearer 参照先。installer は service render を明示 |
 | `AGENTSTACK_MAIL_HTTP_BEARER_MODE` | `disabled` | legacy Authorization header を付けない |
-| `AGENTSTACK_PROJECT_KEY` | 未設定 | agent-mail project の human key |
+| `AGENTSTACK_PROJECT_KEY` | 未設定 | ORRERY Mail project の human key |
 | `AGENTSTACK_VAULT` | 未設定 | project key 不在時の fallback と、vault 内 Output item の Obsidian link hint |
 | `AGENTSTACK_DELIVERABLE_ROOTS` | 未設定 | `:` 区切りで `LOG_*.md` を再帰走査する root。未設定時は project の `logs/` |
 | `AGENTSTACK_LANG` | browser language | murmur の言語を `ja` / `en` で上書き |
 | `AGENTSTACK_MURMUR` | enabled | `off` で murmur の吹き出しを無効化 |
 | `AGENTSTACK_LABEL_PREFIX` | `org.agentstack` | launchd label prefix |
-| `AGENTSTACK_TERMINAL` | `auto` | `ghostty / iterm / terminal / none` |
+| `AGENTSTACK_TERMINAL` | `auto` | `ghostty / iterm / terminal / wt / none`。`wt` は WSL2 の Windows Terminal（`auto` は WSL2 内で `wt.exe` が見えれば選ぶ） |
 | `AGENTSTACK_HOOKS_DIR` | `~/.agentstack/hooks` | hook と既定 spawn script の root |
 | `AGENTSTACK_RUNTIME_DIR` | `~/.agentstack/runtime` | token、annotation、session index、child / watcher state |
 | `AGENTSTACK_MAIL_HOME` | `~/.agentstack/mail` | signal data root |
@@ -137,10 +137,10 @@ installer は `AGENTSTACK_MAIL_DB`、`AGENTSTACK_MAIL_ENV`、`AGENTSTACK_SIGNALS
 | `AGENTSTACK_BASE_DIR` | `$HOME` | `fzf` picker root |
 | `AGENTSTACK_CLAUDE_BIN` | `claude` | Claude CLI |
 | `AGENTSTACK_CLAUDE_MODEL` | `claude-code` | Claude 登録 model label |
-| `AGENTSTACK_CODEX_BIN` | `codex` | Codex CLI |
+| `AGENTSTACK_CODEX_BIN` | install 時に operator の shell で解決した `codex`（`--codex-bin` で明示可） | Codex CLI。dashboard は launchd / systemd の最小 PATH で動くので、nvm / nodebrew / `~/.npm-global` の codex はこの値で届く |
 | `AGENTSTACK_CODEX_MODEL` | launcher / bootstrap の既定 | Codex 登録 model |
 | `AGENTSTACK_CODEX_SANDBOX` | `workspace-write` | Codex `--sandbox` |
-| `AGENTSTACK_CODEX_APPROVAL` | `on-request` | Codex `--ask-for-approval` |
+| `AGENTSTACK_CODEX_APPROVAL` | `on-request` | `agent-start-codex`（利用者自身の対話 session）の `--ask-for-approval`。spawn される child は `AGENTSTACK_CODEX_CHILD_APPROVAL`（Child spawn 参照） |
 | `AGENTSTACK_VAULT` | 未設定 | Codex へ追加する writable `--add-dir` |
 | `AGENTSTACK_MCP_URL` | `http://127.0.0.1:18765/mcp` | registration / hook endpoint |
 | `AGENTSTACK_CONTACT_POLICY` | `open` | 登録後の contact policy。`skip` で server default |
@@ -163,6 +163,11 @@ installer は `AGENTSTACK_MAIL_DB`、`AGENTSTACK_MAIL_ENV`、`AGENTSTACK_SIGNALS
 | `AGENTSTACK_FOCUS_CHILD` | 未設定 | `1` で child の terminal window を前面に出す。既定は背面で開き、手元の作業を奪いません |
 | `AGENTSTACK_STRICT_AGENT_NAMES` | 未設定 | `1` で off-list な child 名を警告ではなくエラーにする |
 | `AGENTSTACK_MONITOR_DANGER_CHECK` | `0` | `1` で monitor の危険コマンド検知を有効にする。既定は passive |
+| `AGENTSTACK_CODEX_CHILD_APPROVAL` | `never` | Codex child の `--ask-for-approval`。installer の `--codex-approval` で永続化 |
+| `AGENTSTACK_CODEX_NETWORK` | `on` | Codex child の sandbox network（`-c sandbox_workspace_write.network_access=true`）。`--codex-network off` で切る |
+| `AGENTSTACK_CODEX_ADD_DIRS` | 未設定 | Codex child に追加で書込を許す root（`:` 区切り）。`--codex-add-dirs` で永続化 |
+
+Codex child の起動フラグは製品が組み立てます。`~/.codex/bin/` にある利用者側の launcher は参照しません（参照すると、その launcher の既定 `on-request` に静かに置き換わり、network flag と追加 root も落ちます）。child は無人で動くので既定は approval `never`・network on です。書込を許す root は「project、`AGENTSTACK_SPAWN_DIRS` / `AGENTSTACK_SPAWN_ROOTS`、install dir、worktree base、`~/.claude`、`~/.codex`、child 専用 `CODEX_HOME`、`AGENTSTACK_CODEX_ADD_DIRS`」で、存在しない directory は黙って外します。dashboard の Codex resume も同じ値を使います。これらは dashboard service の環境なので、shell で `export` しても届きません。installer に渡してください。
 
 `AGENTSTACK_TERMINAL=auto` は利用可能な OS terminal を選び、child window を背面で開きます。これは意図的な既定です。dashboard / ORRERY を持たない導入直後の利用者にも child が起動したことを見せるためで、headless を既定にすると正常な spawn が「何も起きなかった」ように見えます。常用 dashboard から監視する環境や headless host だけ、`AGENTSTACK_TERMINAL=none` を明示してください。
 
@@ -189,7 +194,7 @@ export AGENTSTACK_OBSIDIAN_APP="/Applications/Obsidian.app/Contents/MacOS/Obsidi
 | 環境変数 | 既定値 | 意味 |
 | --- | --- | --- |
 | `AGENTSTACK_ENV_FILE` | 未設定 | `agentstack-preregister-child` / `agentstack-reregister` が標準 `env.sh` より先に読む追加 env file |
-| `AGENTSTACK_CLAUDE_JSON` | `~/.claude.json` | Claude child 用 MCP config を作るとき、既存 agent-mail server 名を読む source |
+| `AGENTSTACK_CLAUDE_JSON` | `~/.claude.json` | Claude child 用 MCP config を作るとき、既存 ORRERY Mail server 名を読む source |
 | `AGENTSTACK_MANAGED_AGENTS_FILE` | `$AGENTSTACK_RUNTIME_DIR/managed_agents.txt` | title / spawn / cleanup helper が管理する agent 名一覧 |
 | `AGENTSTACK_MCP_HEALTH_URL` | `AGENTSTACK_MCP_URL` から導出 | `session-start-reminder.sh` の liveness endpoint |
 | `AGENTSTACK_MCP_PROXY` | `$AGENTSTACK_HOME/integrations/codex_app/plugin/scripts/run-mcp.sh` | spawned child ごとの認証済み stdio proxy runner |
@@ -261,7 +266,7 @@ AGENTSTACK_CODEX_MODELS="gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna" ./scripts/insta
 
 installer に渡して永続化します（shell の `export` は service に届きません）。
 
-空要素と前後空白は除去されます。指定がない場合は上記3モデルで、先頭の `gpt-5.6-sol` が default です。reasoning effort は `low / medium / high / xhigh`、default は `xhigh` です。dashboard spawn は allow-list 外の Codex model / effort を拒否します。
+空要素と前後空白は除去されます。指定がない場合は上記4モデル（`gpt-5.6-sol` / `gpt-6-astra` / `gpt-5.6-terra` / `gpt-5.6-luna`）で、先頭の `gpt-5.6-sol` が default です。reasoning effort は `low / medium / high / xhigh / max / ultra`（max / ultra は `gpt-6-astra` のみ）、default は `xhigh` です。dashboard spawn は allow-list 外の Codex model / effort を拒否します。
 
 ## Portrait overlay
 
