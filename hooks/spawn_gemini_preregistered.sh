@@ -85,8 +85,7 @@ DURABLE_TOKEN="$RUNTIME_DIR/agent_token_$TOKEN_KEY"
 WORKTREE_DIR="$WORKTREE_ROOT/$CHILD_NAME"
 BRANCH_NAME="exp/$CHILD_NAME"
 MCP_CONFIG=""
-EXCLUDE_FILE=""
-EXCLUDE_ADDED=false
+GIT_EXCLUDES_FILE=""
 TASK_EVENT_FILE="$RUNTIME_DIR/gemini-task-$CHILD_NAME.ndjson"
 RUNNER_FILE="$RUNTIME_DIR/gemini-runner-$CHILD_NAME.sh"
 RESULT_LOG="$RUNTIME_DIR/gemini-$CHILD_NAME.ndjson"
@@ -101,28 +100,6 @@ mail_helper() {
   AGENTSTACK_MAIL_ENV="$MAIL_ENV" \
   AGENTSTACK_MAIL_HTTP_BEARER_MODE="$HTTP_BEARER_MODE" \
     "$PYTHON_BIN" "$MAIL_HELPER" "$@"
-}
-
-remove_transient_exclude() {
-  [[ "$EXCLUDE_ADDED" == true && -n "$EXCLUDE_FILE" ]] || return 0
-  "$PYTHON_BIN" - "$EXCLUDE_FILE" <<'PY' 2>/dev/null || true
-from pathlib import Path
-import sys
-path = Path(sys.argv[1])
-try:
-    lines = path.read_text(encoding="utf-8").splitlines()
-except OSError:
-    raise SystemExit(0)
-removed = False
-kept = []
-for line in lines:
-    if not removed and line == ".agents/mcp_config.json":
-        removed = True
-        continue
-    kept.append(line)
-path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
-PY
-  EXCLUDE_ADDED=false
 }
 
 cleanup_failure() {
@@ -140,12 +117,11 @@ cleanup_failure() {
       mail_helper retire --project-key "$PROJECT_KEY" --agent-name "$CHILD_NAME" \
         --token-file "$DURABLE_TOKEN" >/dev/null 2>&1 || true
     fi
-    remove_transient_exclude
     if [[ "$WORKTREE_CREATED" == true ]]; then
       git -C "$SOURCE_REPO" worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1 || true
       git -C "$SOURCE_REPO" branch -D "$BRANCH_NAME" >/dev/null 2>&1 || true
     fi
-    rm -f "$TASK_EVENT_FILE" "$RUNNER_FILE" "$MCP_CONFIG" "$DURABLE_TOKEN"
+    rm -f "$TASK_EVENT_FILE" "$RUNNER_FILE" "$MCP_CONFIG" "$DURABLE_TOKEN" "$GIT_EXCLUDES_FILE"
   fi
 }
 trap cleanup_failure EXIT
@@ -164,12 +140,11 @@ fi
 git -C "$SOURCE_REPO" worktree add -b "$BRANCH_NAME" "$WORKTREE_DIR" "$BASE_REV" >/dev/null
 WORKTREE_CREATED=true
 
-EXCLUDE_FILE="$(git -C "$WORKTREE_DIR" rev-parse --git-path info/exclude)"
-mkdir -p "$(dirname "$EXCLUDE_FILE")"
-if ! grep -qxF '.agents/mcp_config.json' "$EXCLUDE_FILE" 2>/dev/null; then
-  printf '%s\n' '.agents/mcp_config.json' >> "$EXCLUDE_FILE"
-  EXCLUDE_ADDED=true
-fi
+# Linked worktrees share .git/info/exclude. Use a child-owned excludes file
+# injected only into the Antigravity runner instead of mutating shared repo
+# metadata, so overlapping delegated children cannot remove each other's rule.
+GIT_EXCLUDES_FILE="$RUNTIME_DIR/gemini-git-excludes-$CHILD_NAME"
+( umask 077 && printf '%s\n' '.agents/mcp_config.json' > "$GIT_EXCLUDES_FILE" )
 
 mail_helper reserve --project-key "$PROJECT_KEY" --agent-name "$CHILD_NAME" \
   --token-file "$DURABLE_TOKEN" --paths "$RESOURCES" --ttl "$RESOURCE_TTL"
@@ -271,6 +246,15 @@ export AGENTSTACK_MCP_URL=$(printf '%q' "$MCP_URL")
 export AGENTSTACK_MAIL_ENV=$(printf '%q' "$MAIL_ENV")
 export AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE")
 export AGENTSTACK_PYTHON=$(printf '%q' "$PYTHON_BIN")
+git_excludes_file=$(printf '%q' "$GIT_EXCLUDES_FILE")
+git_config_count="\${GIT_CONFIG_COUNT:-0}"
+case "\$git_config_count" in
+  ''|*[!0-9]*) git_config_count=0 ;;
+esac
+export "GIT_CONFIG_KEY_\${git_config_count}=core.excludesFile"
+export "GIT_CONFIG_VALUE_\${git_config_count}=\$git_excludes_file"
+export GIT_CONFIG_COUNT="\$((git_config_count + 1))"
+
 set +e
 cat $(printf '%q' "$TASK_EVENT_FILE") | \
   $(printf '%q' "$GEMINI_BIN") --input-format stream-json --output-format stream-json \
@@ -309,26 +293,8 @@ AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE") \
   $(printf '%q' "$PYTHON_BIN") $(printf '%q' "$MAIL_HELPER") retire --project-key $(printf '%q' "$PROJECT_KEY") \
     --agent-name $(printf '%q' "$CHILD_NAME") --token-file $(printf '%q' "$DURABLE_TOKEN") || true
 [[ -x $(printf '%q' "$CLEANUP_HELPER") ]] && $(printf '%q' "$CLEANUP_HELPER") || true
-if [[ $(printf '%q' "$EXCLUDE_ADDED") == true ]]; then
-  $(printf '%q' "$PYTHON_BIN") - $(printf '%q' "$EXCLUDE_FILE") <<'PYEXCLUDE' 2>/dev/null || true
-from pathlib import Path
-import sys
-path = Path(sys.argv[1])
-try:
-    lines = path.read_text(encoding="utf-8").splitlines()
-except OSError:
-    raise SystemExit(0)
-removed = False
-kept = []
-for line in lines:
-    if not removed and line == ".agents/mcp_config.json":
-        removed = True
-        continue
-    kept.append(line)
-path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
-PYEXCLUDE
-fi
-rm -f $(printf '%q' "$TASK_EVENT_FILE") $(printf '%q' "$DURABLE_TOKEN") $(printf '%q' "$MCP_CONFIG") $(printf '%q' "$RUNNER_FILE")
+rm -f $(printf '%q' "$TASK_EVENT_FILE") $(printf '%q' "$DURABLE_TOKEN") $(printf '%q' "$MCP_CONFIG") \
+  $(printf '%q' "$GIT_EXCLUDES_FILE") $(printf '%q' "$RUNNER_FILE")
 echo "[antigravity] child finished; worktree retained at $(printf '%q' "$WORKTREE_DIR")"
 exit "\$child_status"
 EOF
