@@ -345,17 +345,17 @@ agentstack_recovery_hint() {
         printed=0
     fi
     if [ "$printed" -ne 0 ]; then
-        printf 'No agentstack tools were found under %s/bin; start the agent-mail service the way this machine installs it.\n' "$home"
+        printf 'No agentstack tools were found under %s/bin; start the ORRERY Mail service the way this machine installs it.\n' "$home"
     fi
 }
 
 agentstack_outage_warning_text() {
-    printf '%s' "The agent-mail service at $(agentstack_safe_endpoint) is not answering, so this session cannot register and no file reservation can be taken or checked. Editing continues, uncoordinated: another agent may be changing the same files and neither side will see it. $(agentstack_recovery_hint) Once the service answers, registration is required again."
+    printf '%s' "The ORRERY Mail service at $(agentstack_safe_endpoint) is not answering, so this session cannot register and no file reservation can be taken or checked. Editing continues, uncoordinated: another agent may be changing the same files and neither side will see it. $(agentstack_recovery_hint) Once the service answers, registration is required again."
 }
 
 agentstack_invalid_endpoint_message() {
     local guard="$1"
-    echo "AGENT MAIL ENDPOINT UNUSABLE ($guard): no usable agent-mail endpoint is configured for this session." >&2
+    echo "AGENT MAIL ENDPOINT UNUSABLE ($guard): no usable ORRERY Mail endpoint is configured for this session." >&2
     echo "Checked AGENTSTACK_MCP_URL, MCP_URL, and ${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh." >&2
     echo "Without an endpoint the guards cannot tell a stopped service from a mistyped address, so they" >&2
     echo "refuse rather than assume. Set AGENTSTACK_MCP_URL to the endpoint this install uses." >&2

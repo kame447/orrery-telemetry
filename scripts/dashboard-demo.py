@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Create a deterministic, isolated dashboard environment for documentation.
 
-The demo never reads the user's AgentStack install, agent-mail database, or
+The demo never reads the user's AgentStack install, ORRERY Mail database, or
 tmux server.  It copies only git-tracked dashboard payload files, creates a
 small fictional SQLite database, and places a deterministic tmux shim first on
 PATH.  The HTTP server is wrapped in read-only mode so a misplaced click cannot

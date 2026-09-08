@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """An identity the server did not grant has to be visible, not inferred.
 
-agent-mail sometimes registers an agent under a name other than the one asked
+ORRERY Mail sometimes registers an agent under a name other than the one asked
 for. The agent then works — it sends, it receives, it appears in the deck — and
 the only trace is that the dashboard cannot find a portrait for the name. A
 missing face reads as a style choice, so nobody investigates, and meanwhile the

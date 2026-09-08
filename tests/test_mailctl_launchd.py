@@ -599,7 +599,7 @@ def test_a_foreign_job_appearing_after_the_probes_still_stops_the_spawn(
     Checking before endpoint_port_open and health_ok leaves the probes' worth of
     time in the window, and a job loading there ends with two supervisors for
     one endpoint -- measured on the previous revision, which reported
-    "AgentStack Mail started (pid ...)" with the foreign job still loaded.
+    "ORRERY Mail started (pid ...)" with the foreign job still loaded.
     """
     env, loaded, serving, log, server = harness
     loaded.unlink()

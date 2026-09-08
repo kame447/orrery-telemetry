@@ -71,3 +71,60 @@ def test_truncated_model_status_has_bounded_context_window_match():
 
     prose = server._parse_runtime("Please test this code with 2M context later")
     assert prose["ctx_window"] is None
+
+
+def test_fable_statusline_wins_over_model_names_in_conversation():
+    # 2026-09-04 実害: Fable 親の会話中に "gpt-5.6-sol" が出ると、statusline の
+    # "Fable 5.1" を読めずに gpt を実モデルと誤読し、cockpit で Codex 表示になった。
+    parsed = server._parse_runtime(
+        "⏺ 英語 docs は gpt-5.6-sol の子に委任した\n"
+        "❯ \n"
+        "  Agents & Obsidian | Fable 5.1 | ctx: 13% used\n"
+    )
+    assert parsed["pane_model"] == "Fable 5.1"
+    assert server._provider_of(parsed["pane_model"]) == "anthropic"
+    # A program name stored as the model (a child re-registered by the shell
+    # hook without CLAUDE_CHILD_MODEL) still names the vendor. Before this the
+    # deck showed a blank LED instead of the logo (WSL2, 2026-09-07).
+    assert server._provider_of("claude-code") == "anthropic"
+    assert server._provider_of("codex") == "openai"
+    assert server._provider_of("gpt-5.6-sol") == "openai"
+    assert server._provider_of("something-else") == ""
+
+    codex = server._parse_runtime(
+        "• Opus 4.6 との比較を書いた\n"
+        "gpt-5.6 xhigh · Context 46% left · ~/OSS\n"
+    )
+    assert codex["pane_model"] == "gpt-5.6"
+
+    # statusline が無いペインは None（会話本文からは読まない）。登録側に任せる
+    assert server._parse_runtime("running Sonnet 5 here")["pane_model"] is None
+
+
+def test_pane_model_comes_only_from_a_statusline():
+    # 2026-09-07 WSL2 実害: statusline 未設定の Claude Code 親（sonnet-5）が
+    # 「gpt-5.6-terra の子に委任」と話しただけで Codex 表示になった。
+    chatter = server._parse_runtime(
+        "⏺ Spawned StellarNoether on gpt-5.6-terra (medium)\n"
+        "❯ \n"
+        "  ⏵⏵ auto mode on (shift+tab to cycle)\n"
+    )
+    assert chatter["pane_model"] is None
+    assert server._pane_model_for(None, "claude-code") is None
+
+    # Codex footer before any context is consumed still counts as a statusline
+    fresh = server._parse_runtime(
+        "› Ask Codex to do anything\n"
+        "  gpt-5.6-terra medium · ~/work/wsl-test-project\n"
+    )
+    assert fresh["pane_model"] == "gpt-5.6"
+
+    # Claude's Model: line does too
+    assert server._parse_runtime("Model: Default (Sonnet 5)")["pane_model"] == "Sonnet 5"
+
+    # A pane reading that contradicts the registered program's vendor is dropped;
+    # one that agrees, or has no registered vendor to compare with, is kept.
+    assert server._pane_model_for("gpt-5.6", "claude-code") is None
+    assert server._pane_model_for("Sonnet 5", "codex") is None
+    assert server._pane_model_for("Sonnet 5", "claude-code") == "Sonnet 5"
+    assert server._pane_model_for("gpt-5.6", None) == "gpt-5.6"

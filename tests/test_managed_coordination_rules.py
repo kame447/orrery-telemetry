@@ -76,3 +76,17 @@ def test_notification_shapes_in_the_blocks_match_the_watcher():
     ):
         assert phrase in watcher, phrase
         assert phrase in (ROOT / "claude" / "CLAUDE.md").read_text(encoding="utf-8"), phrase
+
+
+def test_delegate_skill_reads_bare_model_words_as_models_not_names():
+    """2026-09-07: a WSL parent given `/delegate codex terra <task>` registered a
+    child literally named "terra" on gpt-5.5, because the skill had no argument
+    grammar and its Codex example still said gpt-5.5. The shorthand table and the
+    "never a name" rule must ship with the skill."""
+    skill = _read("skills/delegate/SKILL.md")
+    assert "### How to read the arguments" in skill
+    for word in ("`sol`, `terra`, `luna`, `astra`", "gpt-5.6-terra", "gpt-6-astra"):
+        assert word in skill
+    assert "A word such as `terra` is a model, not a name." in skill
+    assert "The child's name is never taken from the arguments." in skill
+    assert "gpt-5.5" not in skill

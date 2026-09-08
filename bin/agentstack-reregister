@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Re-register an existing agent-mail identity without exposing its owner token.
+# Re-register an existing ORRERY Mail identity without exposing its owner token.
 #
 # Usage: agentstack-reregister <agent-name> [program] [model]
 #

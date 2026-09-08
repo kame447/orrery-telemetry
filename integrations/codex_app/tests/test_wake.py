@@ -377,7 +377,7 @@ def test_exec_resume_adapter_disables_only_configured_plugin_server(tmp_path):
     approval_values = [
         value for value in config_values if ".approval_mode=" in value
     ]
-    assert len(approval_values) == 8
+    assert len(approval_values) == len(AGENTSTACK_PROXY_TOOLS)
     assert all(
         value.startswith("mcp_servers.agentstack.tools.")
         for value in approval_values

@@ -2,7 +2,7 @@
 
 The Codex App path learns its binding from the Bridge daemon's identity store.
 A Claude Code child spawned into tmux has no Bridge, so it had no way to reach
-agent-mail as itself and hit:
+ORRERY Mail as itself and hit:
 
     fetch_inbox requires registration_token for agent 'Red-Euler', ...
 

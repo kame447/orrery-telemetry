@@ -41,7 +41,7 @@ Options:
   --install-dir PATH        Default: ~/.agentstack/integrations/codex_app
   --runtime-dir PATH        Default: ~/.agentstack/runtime/codex-app
   --project-key PATH        Required absolute project key
-  --agent-mail-url URL      Required agent-mail JSON-RPC /api/ endpoint
+  --agent-mail-url URL      Required ORRERY Mail JSON-RPC /api/ endpoint
   --agent-mail-env PATH     Bearer reference file; token is not copied
   --signals-dir PATH        Agent-mail signals directory
   --label LABEL             launchd label

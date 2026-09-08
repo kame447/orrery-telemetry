@@ -172,14 +172,14 @@ def test_spawn_names_advertises_codex_provider(monkeypatch):
     assert next(provider for provider in providers if provider["id"] == "codex") == {
         "id": "codex", "label": "Codex", "program": "codex-cli",
         "models": ["gpt-test-a", "gpt-test-b"], "default_model": "gpt-test-a",
-        "efforts": ["low", "medium", "high", "xhigh"], "effort_default": "xhigh",
+        "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"], "effort_default": "xhigh",
     }
 
 
 def test_spawn_names_uses_current_codex_defaults(monkeypatch):
     monkeypatch.delenv("AGENTSTACK_CODEX_MODELS", raising=False)
     assert server._codex_models() == [
-        "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+        "gpt-5.6-sol", "gpt-6-astra", "gpt-5.6-terra", "gpt-5.6-luna",
     ]
 
 
@@ -270,7 +270,7 @@ def test_codex_spawn_passes_model_effort_and_readback_name(monkeypatch, tmp_path
 
 
 def test_auto_spawn_registers_an_explicit_hyphenated_name(monkeypatch, tmp_path):
-    """Omitting name must not let stock agent-mail generate a new identity."""
+    """Omitting name must not let stock ORRERY Mail generate a new identity."""
     launcher = tmp_path / "spawn_child.sh"
     launcher.write_text("#!/bin/bash\n")
     launcher.chmod(0o755)

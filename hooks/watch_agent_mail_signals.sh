@@ -26,7 +26,7 @@ LOCK_ACQUIRED=0
 # 通知として割り込ませる下限。low|normal|high|urgent。既定 low = 従来どおり全通。
 NOTIFY_MIN_IMPORTANCE="${AGENTSTACK_MAIL_NOTIFY_MIN_IMPORTANCE:-low}"
 
-# importance を順序に写す。未知の値は normal 扱い: agent-mail は importance を
+# importance を順序に写す。未知の値は normal 扱い: ORRERY Mail は importance を
 # 自由文字列として受けるので、知らない語を落とすと配送が黙って止まる。
 importance_rank() {
     case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in

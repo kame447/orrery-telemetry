@@ -104,11 +104,16 @@ def _codex_stub(tmpdir: pathlib.Path, help_text: str) -> None:
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
 
 
+def _codex_lookup() -> str:
+    """The binary lookup codex_approval_flags depends on."""
+    return _extract("codex_search_path") + "\n" + _extract("find_codex_bin") + "\n"
+
+
 def _flags(help_text: str) -> str:
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = pathlib.Path(tmp)
         _codex_stub(tmpdir, help_text)
-        script = _extract("codex_approval_flags") + "\ncodex_approval_flags\n"
+        script = _codex_lookup() + _extract("codex_approval_flags") + "\ncodex_approval_flags\n"
         return _run_bash(
             script, {"PATH": f"{tmpdir}:{os.environ['PATH']}"}
         ).stdout.strip()
@@ -122,6 +127,108 @@ def test_approval_flags_follow_the_installed_cli():
     assert _flags("  -s, --sandbox <MODE>\n      --full-auto") == "--full-auto"
     # Unknown build: pass nothing rather than an argument it would reject.
     assert _flags("  -s, --sandbox <MODE>") == ""
+
+
+def _flags_with_env(help_text: str | None, env: dict[str, str]) -> str:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = pathlib.Path(tmp)
+        run_env = {"HOME": tmp, **env}
+        if help_text is None:
+            # No codex anywhere: an empty PATH plus an empty ~/.local/bin.
+            run_env["PATH"] = "/usr/bin:/bin"
+        else:
+            _codex_stub(tmpdir, help_text)
+            run_env["PATH"] = f"{tmpdir}:/usr/bin:/bin"
+        script = _codex_lookup() + _extract("codex_approval_flags") + "\ncodex_approval_flags\n"
+        return _run_bash(script, run_env).stdout.strip()
+
+
+_MODERN_HELP = "  -s, --sandbox <MODE>\n      --ask-for-approval <POLICY>"
+
+
+def test_approval_policy_comes_from_the_installer_setting():
+    assert _flags_with_env(_MODERN_HELP, {"AGENTSTACK_CODEX_CHILD_APPROVAL": "on-request"}) == \
+        "--ask-for-approval on-request"
+    # Empty setting is the product default, not "let codex decide".
+    assert _flags_with_env(_MODERN_HELP, {"AGENTSTACK_CODEX_CHILD_APPROVAL": ""}) == \
+        "--ask-for-approval never"
+
+
+def test_missing_codex_on_the_spawner_path_still_pins_the_policy():
+    # The dashboard runs under launchd's minimal PATH. Probing `codex --help`
+    # there used to yield an empty string, and the child silently fell back to
+    # Codex's own on-request default (2026-09-04).
+    assert _flags_with_env(None, {}) == "--ask-for-approval never"
+
+
+def test_explicit_codex_bin_is_probed_instead_of_path():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = pathlib.Path(tmp)
+        _codex_stub(tmpdir, "  -s, --sandbox <MODE>\n      --full-auto")
+        script = _codex_lookup() + _extract("codex_approval_flags") + "\ncodex_approval_flags\n"
+        out = _run_bash(script, {"PATH": "/usr/bin:/bin", "HOME": tmp,
+                                 "AGENTSTACK_CODEX_BIN": str(tmpdir / "codex")}).stdout.strip()
+    assert out == "--full-auto"
+
+
+def test_network_flag_defaults_on_and_honours_off():
+    script = _extract("codex_network_flags") + "\ncodex_network_flags\n"
+    assert _run_bash(script, {}).stdout.strip() == \
+        "-c sandbox_workspace_write.network_access=true"
+    for off in ("off", "0", "false"):
+        assert _run_bash(script, {"AGENTSTACK_CODEX_NETWORK": off}).stdout.strip() == ""
+
+
+def test_child_add_dirs_cover_project_presets_roots_and_operator_extras():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        project = root / "proj with space"
+        preset = root / "code"
+        typeahead_root = root / "roots"
+        extra = root / "extra"
+        child_home = root / "child.codex-home"
+        for d in (project, preset, typeahead_root, extra, child_home,
+                  root / ".claude", root / ".codex", root / ".agentstack"):
+            d.mkdir()
+        script = (
+            f"HOME={shlex.quote(tmp)}\n"
+            f"PROJECT_KEY={shlex.quote(str(project))}\n"
+            "WORKTREE_BASE=/nonexistent/cc-worktrees\n"
+            f"AGENTSTACK_HOME_DIR={shlex.quote(str(root / '.agentstack'))}\n"
+            + _extract("codex_child_add_dirs")
+            + f"\ncodex_child_add_dirs {shlex.quote(str(child_home))}\n"
+        )
+        env = {
+            "HOME": tmp,
+            "AGENTSTACK_SPAWN_DIRS": f"~/code:{project}:/does/not/exist",
+            "AGENTSTACK_SPAWN_ROOTS": str(typeahead_root),
+            "AGENTSTACK_CODEX_ADD_DIRS": str(extra),
+        }
+        out = _run_bash(script, env).stdout.strip()
+    got = out.split(":")
+    real = lambda p: os.path.realpath(str(p))  # noqa: E731
+    assert got == [real(project), real(preset), real(typeahead_root),
+                   real(root / ".agentstack"), real(root / ".claude"),
+                   real(root / ".codex"), real(child_home), real(extra)]
+    # Missing entries are dropped, and the project appears once even though
+    # it is also listed as a preset.
+    assert "/does/not/exist" not in out
+
+
+def test_launcher_owns_the_codex_flags_and_never_hands_off_to_a_user_launcher():
+    text = _SPAWN.read_text(encoding="utf-8")
+    assert "launch_codex_workspace.sh" not in text.replace(
+        "a user-side launcher (~/.codex/bin/...)", ""
+    ), "spawn_child.sh still defers to the user's ~/.codex/bin launcher"
+    # Both launch paths apply network flags and the resolved writable roots.
+    # (Written in the zsh/bash-shared subset: see test_child_shell_portability.)
+    assert text.count('$(printf "%s" "$AGENTSTACK_CODEX_APPROVAL") $(printf "%s" "$AGENTSTACK_CODEX_NETWORK_FLAGS")') == 2
+    assert text.count('for d in $(printf "%s" "$AGENTSTACK_CODEX_ADD_DIRS_RESOLVED"); do') == 2
+    assert text.count('-e "AGENTSTACK_CODEX_ADD_DIRS_RESOLVED=$(codex_child_add_dirs "$CHILD_CODEX_HOME")"') == 2
+    assert text.count('CHILD_CODEX_BIN="$(resolve_codex_bin)"') == 2
+    assert text.count('-e "AGENTSTACK_CODEX_BIN=$CHILD_CODEX_BIN"') == 2
+    assert text.count('env -u OPENAI_API_KEY "$AGENTSTACK_CODEX_BIN" -C "$PWD"') == 2
+    assert 'env -u OPENAI_API_KEY codex -C "$PWD"' not in text
 
 
 def _model_call(function: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -143,11 +250,14 @@ def test_model_catalog_tracks_current_generations_without_dropping_old_ids():
         ("normalize_claude_model", "opus-5[1m]"): "claude-opus-5[1m]",
         ("normalize_claude_model", "sonnet"): "claude-sonnet-5",
         ("normalize_claude_model", "sonnet-4-6"): "claude-sonnet-4-6",
-        ("normalize_claude_model", "fable"): "claude-fable-5",
+        ("normalize_claude_model", "fable"): "claude-fable-5-1",
+        ("normalize_claude_model", "claude-fable-5"): "claude-fable-5-1",
         ("normalize_codex_model", ""): "gpt-5.6-sol",
         ("normalize_codex_model", "sol"): "gpt-5.6-sol",
         ("normalize_codex_model", "terra"): "gpt-5.6-terra",
         ("normalize_codex_model", "luna"): "gpt-5.6-luna",
+        ("normalize_codex_model", "astra"): "gpt-6-astra",
+        ("normalize_codex_model", "gpt-6-astra"): "gpt-6-astra",
         ("normalize_codex_model", "gpt-5.5"): "gpt-5.5",
     }
     for (function, raw), normalized in expected.items():
@@ -188,7 +298,7 @@ def test_launcher_no_longer_hardcodes_full_auto():
     text = _SPAWN.read_text(encoding="utf-8")
     assert "--full-auto \\" not in text, "hardcoded --full-auto still in a launch line"
     # Both launch paths take the probed flags from the child environment.
-    assert text.count("--sandbox workspace-write ${=AGENTSTACK_CODEX_APPROVAL}") == 2
+    assert text.count('--sandbox workspace-write $(printf "%s" "$AGENTSTACK_CODEX_APPROVAL")') == 2
     assert text.count('-e "AGENTSTACK_CODEX_APPROVAL=$(codex_approval_flags)"') == 2
 
 
@@ -231,7 +341,7 @@ tmux() {
 
 
 def test_claude_fresh_directory_trust_gate_is_not_mistaken_for_readiness():
-    ready = _extract("pane_nonblank_tail") + "\n" + _extract("claude_trust_dialog_present") + "\n" + _extract("claude_pane_ready")
+    ready = _extract("pane_nonblank_tail") + "\n" + _extract("pane_normalize_nbsp") + "\n" + _extract("claude_trust_dialog_present") + "\n" + _extract("claude_pane_ready")
     trust = _extract("claude_accept_trust_dialog")
 
     gated = _run_bash(
@@ -283,6 +393,8 @@ def test_injection_verifier_uses_scrollback_and_warns_without_killing():
 SPAWN_INCIDENT_LOG={str(incident_log)!r}
 INJECTION_VERIFIED=false
 {spawn_note}
+{_extract("injection_match_key")}
+{_extract("injection_utf8_locale")}
 {verifier}
 sleep() {{ :; }}
 """
@@ -315,8 +427,130 @@ printf '%s\\n' "$status"
         )
         assert missing.returncode == 0, missing.stderr
         assert missing.stdout.strip() == "1"
-        assert "injection FAILED (Child)" in incident_log.read_text(encoding="utf-8")
+        warning = incident_log.read_text(encoding="utf-8")
+        assert "injection not verified (Child)" in warning
+        assert "do not close the child on this message alone" in warning
+        assert "close the child session" not in warning
         assert "kill-session" not in tmux_log.read_text(encoding="utf-8")
+
+
+def _verifier_env(tmpdir: pathlib.Path) -> str:
+    return f"""
+SPAWN_INCIDENT_LOG={str(tmpdir / 'spawn-incidents.log')!r}
+INJECTION_VERIFIED=false
+{_extract("spawn_note")}
+{_extract("injection_match_key")}
+{_extract("injection_utf8_locale")}
+{_extract("verify_injection")}
+sleep() {{ :; }}
+"""
+
+
+def test_injection_verifier_matches_a_markdown_heading_the_repl_renders_without_hashes():
+    # Claude Code renders a submitted `## Role: ...` line as `Role: ...`, so a
+    # needle that keeps the hashes can never match (2026-09-08: two healthy
+    # children were reported FAILED). Both sides drop the Markdown markers.
+    with tempfile.TemporaryDirectory() as tmp:
+        result = _run_bash(
+            _verifier_env(pathlib.Path(tmp))
+            + """
+tmux() {
+    printf '%s\\n' '❯ Role: 引用文献' '  Task summary: ハチ論文 Tier A — 注入検証' \\
+        '  これは spawn_child.sh の verify_injection を再現するテスト'
+}
+verify_injection Child '## Role: 引用文献
+## Task summary: ハチ論文 Tier A — 注入検証
+
+これは spawn_child.sh の verify_injection を再現するテスト'
+printf '%s\\n' "$INJECTION_VERIFIED"
+"""
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "true"
+
+
+def test_injection_verifier_slices_the_needle_by_character_under_a_c_locale():
+    # ${var:0:N} counts bytes under LC_ALL=C and cuts Japanese text
+    # mid-character; the needle then is invalid UTF-8 and never matches.
+    with tempfile.TemporaryDirectory() as tmp:
+        result = _run_bash(
+            _verifier_env(pathlib.Path(tmp))
+            + """
+export LC_ALL=C
+tmux() {
+    printf '%s\\n' '❯ あなたは Child（親: Parent）。この起動は embed-task mode です。' \\
+        '  ORRERY Mail への登録は親が完了済み・儀式不要です。'
+}
+verify_injection Child 'あなたは Child（親: Parent）。この起動は embed-task mode です。ORRERY Mail への登録は親が完了済み・儀式不要です。'
+printf '%s\\n' "$INJECTION_VERIFIED"
+"""
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "true"
+
+
+def test_codex_binary_is_found_under_per_user_node_prefixes():
+    # The dashboard's launchd PATH is minimal; codex installed through nvm,
+    # nodebrew or ~/.npm-global must still be found (2026-09-08: NEW AGENT
+    # Codex spawn failed with "Codex CLI not found" on a nodebrew host).
+    with tempfile.TemporaryDirectory() as tmp:
+        home = pathlib.Path(tmp)
+        prefix = home / ".nodebrew" / "current" / "bin"
+        prefix.mkdir(parents=True)
+        fake = prefix / "codex"
+        fake.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake.chmod(0o755)
+        script = (
+            f"{_extract('codex_search_path')}\n{_extract('find_codex_bin')}\n"
+            f"{_extract('resolve_codex_bin')}\nresolve_codex_bin\n"
+        )
+        found = _run_bash(script, {"HOME": str(home), "PATH": "/usr/bin:/bin",
+                                   "AGENTSTACK_CODEX_BIN": ""})
+        assert found.returncode == 0, found.stderr
+        assert found.stdout.strip() == str(fake)
+
+        # A stale explicit path falls through to the search instead of failing.
+        stale = _run_bash(script, {"HOME": str(home), "PATH": "/usr/bin:/bin",
+                                   "AGENTSTACK_CODEX_BIN": str(home / "gone" / "codex")})
+        assert stale.returncode == 0, stale.stderr
+        assert stale.stdout.strip() == str(fake)
+
+        # Nothing anywhere: the launcher still says so instead of guessing.
+        missing = _run_bash(script, {"HOME": str(home / "empty"), "PATH": "/usr/bin:/bin",
+                                     "AGENTSTACK_CODEX_BIN": ""})
+        assert missing.returncode == 1
+        assert "Codex CLI not found" in missing.stderr
+
+
+def test_injection_verifier_accepts_the_prompt_tail_when_the_head_scrolled_off():
+    # Claude Code runs on the alternate screen: tmux keeps no scrollback, and a
+    # task taller than the viewport shows only its last lines. The verifier
+    # must accept the tail of the prompt (2026-09-08: history_size 0 on every
+    # Claude pane; healthy children were reported FAILED).
+    prompt = "あなたは Child（親: Parent）。以下のタスクが正本です。\n" + "\n".join(
+        f"- 手順 {i}: 中身" for i in range(80)
+    ) + "\n完了したら send_message で Parent に報告してください。"
+    with tempfile.TemporaryDirectory() as tmp:
+        result = _run_bash(
+            _verifier_env(pathlib.Path(tmp))
+            + """
+tmux() {
+    printf '%s\\n' '  - 手順 78: 中身' '  - 手順 79: 中身' \\
+        '  完了したら send_message で Parent に報告してください。' '✻ Thinking…'
+}
+verify_injection Child "$PROMPT"
+printf '%s\\n' "$INJECTION_VERIFIED"
+""",
+            {"PROMPT": prompt},
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "true"
+
+
+def test_injection_verifier_waits_thirty_seconds():
+    verifier = _extract("verify_injection")
+    assert "waited < 30" in verifier
+    assert "waited < 10" not in verifier
 
 
 def test_queued_claude_prompt_is_flushed_with_an_empty_submit():
@@ -384,6 +618,50 @@ def test_child_window_opens_in_the_background_by_default():
         assert f'\'"${var}"\'' in text, var
 
 
+
+def test_proxy_recovers_python_from_agentstack_mail_env_when_caller_omits_it():
+    runner = _ROOT / "integrations" / "codex_app" / "plugin" / "scripts" / "run-mcp.sh"
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        home = root / "home"
+        bridge = root / "bridge"
+        home.mkdir()
+        bridge.mkdir()
+        log = root / "python.log"
+        selected = root / "selected-python"
+        selected.write_text(
+  "#!/bin/bash\n"
+  'printf \'%s\\n\' "$0|$1" > "$AGENTSTACK_TEST_PYTHON_LOG"\n',
+  encoding="utf-8",
+        )
+        selected.chmod(selected.stat().st_mode | stat.S_IEXEC)
+        mail_env = root / "service.env"
+        mail_env.write_text(
+  f'AGENTSTACK_PYTHON="{selected}"\n'
+  "HTTP_BEARER_TOKEN=unused-in-disabled-mode\n",
+  encoding="utf-8",
+        )
+        env = os.environ.copy()
+        env.pop("AGENTSTACK_PYTHON", None)
+        env.update({
+  "HOME": str(home),
+  "AGENTSTACK_CODEX_APP_INSTALL_DIR": str(bridge),
+  "AGENTSTACK_MAIL_ENV": str(mail_env),
+  "AGENTSTACK_MAIL_HTTP_BEARER_MODE": "disabled",
+  "AGENTSTACK_TEST_PYTHON_LOG": str(log),
+        })
+        result = subprocess.run(
+  ["bash", str(runner)],
+  cwd=_ROOT,
+  env=env,
+  text=True,
+  stdout=subprocess.PIPE,
+  stderr=subprocess.PIPE,
+  check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert log.read_text(encoding="utf-8").startswith(f"{selected}|")
+
 def _main() -> int:
     failures = 0
     for name, fn in sorted(globals().items()):
@@ -435,6 +713,7 @@ def _helpers() -> str:
         _extract(name)
         for name in (
             "pane_nonblank_tail",
+            "pane_normalize_nbsp",
             "codex_trust_dialog_present",
             "claude_trust_dialog_present",
         )
@@ -483,6 +762,8 @@ def _accept_with_screens(screens: list[str]) -> str:
     script = (
         "SCREENS=(" + " ".join(f'"$SCREEN_{i}"' for i in range(len(screens))) + ")\n"
         + "\n".join(stub_lines)
+        + "\n"
+        + _extract("pane_normalize_nbsp")
         + "\n"
         + _extract("claude_accept_trust_dialog")
         + "\nclaude_accept_trust_dialog Child 1 5 test-prefix\n"
@@ -535,4 +816,7 @@ def test_child_proxy_configs_carry_the_bearer_mode():
     assert "AGENTSTACK_MAIL_HTTP_BEARER_MODE=bearer_mode," in text
     assert 'lines.append("AGENTSTACK_MAIL_HTTP_BEARER_MODE = " + toml_string(bearer_mode))' in text
     run_mcp = (_ROOT / "integrations" / "codex_app" / "plugin" / "scripts" / "run-mcp.sh").read_text(encoding="utf-8")
+    assert 'server_env["AGENTSTACK_PYTHON"] = python_bin' in text
+    assert 'lines.append("AGENTSTACK_PYTHON = " + toml_string(python_bin))' in text
     assert "read -r MCP_AGENT_MAIL_TOKEN" not in run_mcp
+    assert "  AGENTSTACK_PYTHON\n" in run_mcp

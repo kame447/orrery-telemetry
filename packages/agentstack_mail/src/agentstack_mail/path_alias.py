@@ -1,4 +1,4 @@
-"""ASGI path-alias rewriting for the AgentStack Mail HTTP endpoint.
+"""ASGI path-alias rewriting for the ORRERY Mail HTTP endpoint.
 
 The retired third-party server answered the MCP endpoint on both ``/mcp`` and
 ``/api/``, and shell helpers, ``install.sh``, and MCP client configs split

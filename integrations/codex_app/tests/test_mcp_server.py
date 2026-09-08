@@ -48,6 +48,11 @@ class FakeAgentMail:
     def release_reservations(self, **kwargs):
         return self._record("release_reservations", kwargs, {"released": 1})
 
+    def whois(self, **kwargs):
+        return self._record(
+            "whois", kwargs, {"name": kwargs["agent_name"], "program": "claude-code"}
+        )
+
 
 def _save_identity(
     store: IdentityStore,
@@ -265,6 +270,7 @@ def test_stdio_server_lists_only_allowlisted_tools_and_rejects_passthrough(tmp_p
         "renew_reservations",
         "release_reservations",
         "runtime_status",
+        "whois",
     }
     assert names == {tool["name"] for tool in TOOL_DEFINITIONS}
 
@@ -273,7 +279,7 @@ def test_stdio_server_lists_only_allowlisted_tools_and_rejects_passthrough(tmp_p
             "jsonrpc": "2.0",
             "id": 2,
             "method": "tools/call",
-            "params": {"name": "whois", "arguments": {}},
+            "params": {"name": "retire_agent", "arguments": {}},
         }
     )
     assert response["result"]["isError"] is True
@@ -337,7 +343,64 @@ def test_mcp_server_script_runs_directly_without_plugin_root_env(tmp_path):
     assert result.returncode == 0
     responses = [json.loads(line) for line in result.stdout.splitlines()]
     assert responses[0]["result"]["serverInfo"]["name"] == "agentstack"
-    assert len(responses[1]["result"]["tools"]) == 8
+    assert len(responses[1]["result"]["tools"]) == 9
     status = responses[2]["result"]["structuredContent"]
     assert status["external_id"] == "codex:session-example"
     assert "owner-secret" not in result.stdout
+
+
+def test_whois_lets_a_child_confirm_a_recipient_name(tmp_path):
+    proxy, mail = _proxy(tmp_path)
+    proxy.bootstrap("session-example")
+
+    profile = _dispatch(proxy, "whois", {"name": "BraveFaraday"})
+
+    assert profile["name"] == "BraveFaraday"
+    name, kwargs = mail.calls[-1]
+    assert name == "whois"
+    assert kwargs["agent_name"] == "BraveFaraday"
+    assert kwargs["project_key"] == "/workspace/example"
+    # The owner token travels to the server, never back to the model.
+    assert kwargs["registration_token"] == "owner-secret"
+    assert "owner-secret" not in json.dumps(profile)
+    with pytest.raises(ProxyError):
+        _dispatch(proxy, "whois", {"name": ""})
+
+
+def test_server_error_text_reaches_the_model_with_secrets_redacted():
+    from agentstack_codex_app.agent_mail_client import (
+        AgentMailError,
+        _decode_tool_response,
+    )
+
+    unknown = {
+        "result": {
+            "isError": True,
+            "content": [{"type": "text", "text": (
+                "Error calling tool 'send_message': Unknown recipient "
+                "'baravefaraday': looks like a Unix username.\nsecond line"
+            )}],
+        }
+    }
+    with pytest.raises(AgentMailError) as excinfo:
+        _decode_tool_response(unknown)
+    message = str(excinfo.value)
+    # The reason is what lets the child correct the name instead of giving up.
+    assert "Unknown recipient 'baravefaraday'" in message
+    assert "second line" not in message
+
+    token = "A" * 24 + "b8c9d0e1f2a3b4c5d6e7f8a9"
+    leaky = {
+        "result": {
+            "isError": True,
+            "content": [{"type": "text", "text": f"bad bearer {token} rejected"}],
+        }
+    }
+    with pytest.raises(AgentMailError) as excinfo:
+        _decode_tool_response(leaky)
+    assert token not in str(excinfo.value)
+    assert "[redacted]" in str(excinfo.value)
+
+    empty = {"result": {"isError": True, "content": []}}
+    with pytest.raises(AgentMailError, match="^ORRERY Mail tool call failed$"):
+        _decode_tool_response(empty)

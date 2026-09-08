@@ -1,6 +1,6 @@
 # API reference
 
-> English version: planned.
+> English version: [api.en.md](api.en.md)
 
 [前: Dashboard](dashboard.md) · [README に戻る](../README.md) · [次: 設定](configuration.md)
 
@@ -61,7 +61,7 @@ curl -s http://127.0.0.1:8770/api/version
 ```
 
 ```json
-{"name":"claude-agent-stack","version":"0.9.0","api":1}
+{"name":"orrery-telemetry","version":"0.9.0","api":1}
 ```
 
 version の解決順は [インストール](install.md#version)を参照してください。
@@ -85,7 +85,8 @@ curl -s http://127.0.0.1:8770/api/spawn-names
   "models":[
     "claude-sonnet-5",
     "claude-opus-5",
-    "claude-haiku-4-5-20251001"
+    "claude-haiku-4-5-20251001",
+    "claude-fable-5-1"
   ],
   "default_model":"claude-sonnet-5",
   "providers":[
@@ -101,9 +102,9 @@ curl -s http://127.0.0.1:8770/api/spawn-names
       "id":"codex",
       "label":"Codex",
       "program":"codex-cli",
-      "models":["gpt-5.6-sol","gpt-5.6-terra","gpt-5.6-luna"],
+      "models":["gpt-5.6-sol","gpt-6-astra","gpt-5.6-terra","gpt-5.6-luna"],
       "default_model":"gpt-5.6-sol",
-      "efforts":["low","medium","high","xhigh"],
+      "efforts":["low","medium","high","xhigh","max","ultra"],
       "effort_default":"xhigh"
     }
   ]
@@ -112,9 +113,9 @@ curl -s http://127.0.0.1:8770/api/spawn-names
 
 scientist rail の `status` は、その scientist と134語の adjective の組み合わせに少なくとも1件の空きがあるかを表します。全組み合わせが埋まると `occupied`、DB がない、または query に失敗すると `unknown` です。bare surname の登録有無だけでは決めません。
 
-adjective は agent-mail の正典 `SIMPLE_ADJECTIVES` Round 3 と逐語同期し、launcher・catalog・suggestion API が同じ source を使います。独自追加は strict deployment の name validation と乖離するため禁止です。
+adjective は ORRERY Mail の正典 `SIMPLE_ADJECTIVES` Round 3 と逐語同期し、launcher・catalog・suggestion API が同じ source を使います。独自追加は strict deployment の name validation と乖離するため禁止です。
 
-`AGENTSTACK_CODEX_MODELS` があれば Codex model list を上書きします。未設定時は `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` の順で、default は `gpt-5.6-sol`、effort default は `xhigh` です。
+`AGENTSTACK_CODEX_MODELS` があれば Codex model list を上書きします。未設定時は `gpt-5.6-sol`、`gpt-6-astra`、`gpt-5.6-terra`、`gpt-5.6-luna` の順で、default は `gpt-5.6-sol`、effort default は `xhigh` です。
 
 ## GET `/api/name-status`
 
@@ -228,7 +229,7 @@ response:
 }
 ```
 
-agent-mail の timestamp は、legacy の ISO 8601 text と Rust 実装の integer microseconds のどちらも epoch seconds に正規化してから比較します。NULL と空文字以外の解釈不能値がある場合は `timestamp_diagnostics.invalid_count` と該当する `fields` を返し、`degraded` を `true` にします。解釈不能値を epoch 0 として扱うことはありません。
+ORRERY Mail の timestamp は、legacy の ISO 8601 text と Rust 実装の integer microseconds のどちらも epoch seconds に正規化してから比較します。NULL と空文字以外の解釈不能値がある場合は `timestamp_diagnostics.invalid_count` と該当する `fields` を返し、`degraded` を `true` にします。解釈不能値を epoch 0 として扱うことはありません。
 
 data source が読めない場合も HTTP 200 で空の `nodes / edges / spawn` と `error`、`degraded: true` を返し、DECK 全体を巻き込まないようにします。
 
@@ -499,7 +500,7 @@ request:
 | `dir` | no | 存在する working directory。既定は source repo |
 | `provider` | no | `claude`（既定）または `codex` |
 | `model` | no | provider catalog 内。provider の default あり |
-| `effort` | Codex のみ | `low / medium / high / xhigh`。既定 `xhigh` |
+| `effort` | Codex のみ | `low / medium / high / xhigh / max / ultra`（max / ultra は gpt-6-astra のみ）。既定 `xhigh` |
 | `role` | no | 最大40文字 |
 | `group` | no | 最大24文字 |
 | `worktree` | no | isolated worktree |

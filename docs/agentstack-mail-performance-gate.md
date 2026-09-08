@@ -1,4 +1,4 @@
-# AgentStack Mail performance gate design
+# ORRERY Mail performance gate design
 
 Status: design only. This document does not add a benchmark job, choose a
 budget, or authorize an authority switch.

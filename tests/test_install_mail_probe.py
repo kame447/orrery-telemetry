@@ -227,7 +227,7 @@ def test_non_mail_listener_is_rejected_without_guessing_a_database(tmp_path):
         server.shutdown()
 
     assert result.returncode != 0
-    assert "did not answer an AgentStack Mail health check" in result.stderr
+    assert "did not answer an ORRERY Mail health check" in result.stderr
     assert not (tmp_path / "home/.agentstack/install-state.json").exists()
 
 
@@ -260,7 +260,7 @@ def test_retire_flag_plans_legacy_retirement_before_listener_reuse_probe(tmp_pat
         "DRY-RUN would retire legacy mail service: com.test.mcp-agent-mail"
     )
     skip_probe = result.stdout.index("is planned for retirement; skipping reuse probe")
-    provision = result.stdout.index("installer will provision AgentStack Mail")
+    provision = result.stdout.index("installer will provision ORRERY Mail")
     assert retire < skip_probe < provision
     assert "unsupported database URL" not in result.stderr
 
@@ -296,6 +296,6 @@ def test_normal_reinstall_without_legacy_target_still_reuses_native_listener(tmp
         server.shutdown()
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert f"existing AgentStack Mail database: {expected_db}" in result.stdout
+    assert f"existing ORRERY Mail database: {expected_db}" in result.stdout
     assert "retire legacy mail service" not in result.stdout
-    assert "installer will provision AgentStack Mail" not in result.stdout
+    assert "installer will provision ORRERY Mail" not in result.stdout

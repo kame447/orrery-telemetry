@@ -17,8 +17,8 @@
 #   --model opus-1m      → claude-opus-4-8[1m]（旧来の friendly 表記を正規化）
 #   --model claude-opus-4-8 → 旧 200K Opus を明示指定（引き続き有効）
 #   --model sonnet       → claude-sonnet-5（200K。warm pool 対象）
-#   --model haiku/fable  → claude-haiku-4-5-20251001 / claude-fable-5
-#   --codex --model 省略/sol → gpt-5.6-sol（terra / luna alias も利用可）
+#   --model haiku/fable  → claude-haiku-4-5-20251001 / claude-fable-5-1
+#   --codex --model 省略/sol → gpt-5.6-sol（terra / luna / astra=gpt-6-astra alias も利用可）
 #   未知の形             → 明確なエラーで停止（claude-* 接頭の正式 ID は前方互換で素通り）
 #   ※ 正規化は normalize_claude_model() / normalize_codex_model() が担当。warm pool は要求モデルが
 #     事前起動モデル（opus=claude-opus-5/200K, sonnet=claude-sonnet-5/200K）と
@@ -434,12 +434,13 @@ CLAUDE_LEGACY_OPUS_1M_MODEL="claude-opus-4-8[1m]"
 CLAUDE_LEGACY_SONNET_MODEL="claude-sonnet-4-6"
 CLAUDE_LEGACY_SONNET_1M_MODEL="claude-sonnet-4-6[1m]"
 CLAUDE_HAIKU_MODEL="claude-haiku-4-5-20251001"
-CLAUDE_FABLE_MODEL="claude-fable-5"
+CLAUDE_FABLE_MODEL="claude-fable-5-1"
 CLAUDE_WARM_OPUS_MODEL="$CLAUDE_DEFAULT_MODEL"
 CLAUDE_WARM_SONNET_MODEL="$CLAUDE_DEFAULT_SONNET_MODEL"
 CODEX_DEFAULT_MODEL="gpt-5.6-sol"
 CODEX_TERRA_MODEL="gpt-5.6-terra"
 CODEX_LUNA_MODEL="gpt-5.6-luna"
+CODEX_ASTRA_MODEL="gpt-6-astra"
 CODEX_LEGACY_MODEL="gpt-5.5"
 
 # --- Claude モデル名の正規化 ---
@@ -473,7 +474,7 @@ normalize_claude_model() {
             printf '%s\n' "$CLAUDE_LEGACY_SONNET_1M_MODEL" ;;
         haiku|claude-haiku-4-5|"$CLAUDE_HAIKU_MODEL")
             printf '%s\n' "$CLAUDE_HAIKU_MODEL" ;;
-        fable|"$CLAUDE_FABLE_MODEL")
+        fable|claude-fable-5|"$CLAUDE_FABLE_MODEL")
             printf '%s\n' "$CLAUDE_FABLE_MODEL" ;;
         *)
             if [[ "$m" == claude-* ]]; then
@@ -500,10 +501,12 @@ normalize_codex_model() {
             printf '%s\n' "$CODEX_TERRA_MODEL" ;;
         luna|"$CODEX_LUNA_MODEL")
             printf '%s\n' "$CODEX_LUNA_MODEL" ;;
+        astra|gpt-6|"$CODEX_ASTRA_MODEL")
+            printf '%s\n' "$CODEX_ASTRA_MODEL" ;;
         gpt-*)
             printf '%s\n' "$model" ;;
         *)
-            echo "Error: unknown Codex model '$raw'. Valid forms: sol / terra / luna / gpt-<id>" >&2
+            echo "Error: unknown Codex model '$raw'. Valid forms: sol / terra / luna / astra / gpt-<id>" >&2
             return 1 ;;
     esac
 }
@@ -621,17 +624,146 @@ cleanup_worktree() {
 # died instantly and the launcher then sat through its full readiness timeout.
 # Probe --help instead of pinning a version, so both old and new CLIs work.
 # Printed as one line and handed to the child through the tmux environment, so
-# the inner zsh can word-split it with ${=AGENTSTACK_CODEX_APPROVAL}.
+# the child's login shell can word-split it (unquoted command substitution,
+# which zsh and bash both expand).
+#
+# The policy comes from AGENTSTACK_CODEX_CHILD_APPROVAL (installer setting,
+# default `never`): a spawned child works unattended, so every "may I run this"
+# prompt is a stall nobody is watching. The probe resolves the binary the same
+# way the child will (PATH plus ~/.local/bin, or AGENTSTACK_CODEX_BIN); when
+# the dashboard's minimal launchd PATH cannot find codex at all, the modern flag
+# is emitted instead of nothing — an empty result silently reverted every child
+# to Codex's own `on-request` default (2026-09-04).
+# The child's tmux session runs `<shell> -lc '<launch>'`. This used to be a
+# hard-coded zsh path, which does not exist on a stock Ubuntu (WSL2 included):
+# the session died two seconds after spawn with nothing in the pane. Prefer zsh
+# when present (macOS default, and where every operator so far has run this),
+# otherwise bash; AGENTSTACK_CHILD_SHELL overrides both. The launch snippets
+# above are written in the syntax subset both shells share.
+resolve_child_shell() {
+    local shell="${AGENTSTACK_CHILD_SHELL:-}"
+    if [[ -n "$shell" && -x "$shell" ]]; then
+        printf '%s\n' "$shell"
+        return 0
+    fi
+    shell="$(command -v zsh 2>/dev/null || true)"
+    [[ -z "$shell" ]] && shell="$(command -v bash 2>/dev/null || true)"
+    if [[ -z "$shell" ]]; then
+        echo "Error: neither zsh nor bash found for the child session; set AGENTSTACK_CHILD_SHELL" >&2
+        return 1
+    fi
+    printf '%s\n' "$shell"
+}
+CHILD_SHELL="$(resolve_child_shell)" || exit 1
+
+# Per-user Node prefixes where `npm install -g @openai/codex` lands. The
+# dashboard runs under launchd / systemd with the minimal AGENTSTACK_PATH, so
+# without this list a NEW AGENT Codex spawn failed with "Codex CLI not found"
+# on a host where `codex` worked from every shell (2026-09-08, nodebrew). The
+# installer now persists AGENTSTACK_CODEX_BIN; this is the fallback for
+# installs that predate it and for hosts where the setting is empty.
+codex_search_path() {
+    local extra="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.nodebrew/current/bin:/opt/homebrew/bin:/usr/local/bin"
+    local nvm_dir="${NVM_DIR:-$HOME/.nvm}"
+    local candidate
+    for candidate in "$nvm_dir"/versions/node/*/bin; do
+        [[ -d "$candidate" ]] && extra="$extra:$candidate"
+    done
+    printf '%s\n' "$PATH:$extra"
+}
+
+find_codex_bin() {
+    local codex_bin="${AGENTSTACK_CODEX_BIN:-}"
+    if [[ -n "$codex_bin" && ! -x "$codex_bin" ]]; then
+        codex_bin=""
+    fi
+    if [[ -z "$codex_bin" ]]; then
+        codex_bin="$(PATH="$(codex_search_path)" command -v codex 2>/dev/null || true)"
+    fi
+    printf '%s\n' "$codex_bin"
+}
+
+resolve_codex_bin() {
+    local codex_bin
+    codex_bin="$(find_codex_bin)"
+    if [[ -z "$codex_bin" || ! -x "$codex_bin" ]]; then
+        echo "Error: Codex CLI not found; set AGENTSTACK_CODEX_BIN to an executable path" >&2
+        return 1
+    fi
+    printf '%s\n' "$codex_bin"
+}
+
 codex_approval_flags() {
-    local help_text
-    help_text="$(codex --help 2>/dev/null || true)"
+    local help_text codex_bin policy
+    policy="${AGENTSTACK_CODEX_CHILD_APPROVAL:-never}"
+    codex_bin="$(find_codex_bin)"
+    if [[ -z "$codex_bin" ]]; then
+        printf '%s\n' "--ask-for-approval $policy"
+        return 0
+    fi
+    help_text="$("$codex_bin" --help 2>/dev/null || true)"
     if printf '%s' "$help_text" | grep -q -- "--ask-for-approval"; then
-        printf '%s\n' "--ask-for-approval never"
+        printf '%s\n' "--ask-for-approval $policy"
     elif printf '%s' "$help_text" | grep -q -- "--full-auto"; then
         printf '%s\n' "--full-auto"
     fi
     # Neither flag: emit nothing and let codex use its own defaults rather than
     # passing an argument this build will reject.
+}
+
+# Writable roots for a Codex child, ':'-separated, handed to the child through
+# the tmux environment (AGENTSTACK_CODEX_ADD_DIRS_RESOLVED). The child turns each
+# entry into `--add-dir`; a ':' list survives spaces in directory names where a
+# word-split flag string would not.
+#
+# Order and membership mirror what an unattended child actually touches: the
+# project, every NEW AGENT launch preset and typeahead root, the install dir
+# (runtime state, spool, tokens), the worktree base, the user's Claude and
+# Codex homes, the child's own CODEX_HOME, then anything the operator added
+# with AGENTSTACK_CODEX_ADD_DIRS. Missing directories are dropped so codex does
+# not refuse to start on a path that is not there yet.
+codex_child_add_dirs() {
+    local child_codex_home="$1" raw entry expanded resolved
+    local -a candidates=() seen=()
+    raw="${AGENTSTACK_PROJECT_KEY:-$PROJECT_KEY}"
+    raw="$raw:${AGENTSTACK_SPAWN_DIRS:-}:${AGENTSTACK_SPAWN_ROOTS:-}"
+    raw="$raw:${AGENTSTACK_HOME_DIR:-$HOME/.agentstack}:$WORKTREE_BASE"
+    raw="$raw:$HOME/.claude:$HOME/.codex:$child_codex_home"
+    raw="$raw:${AGENTSTACK_CODEX_ADD_DIRS:-}"
+    IFS=':' read -r -a candidates <<< "$raw"
+    for entry in "${candidates[@]}"; do
+        [[ -n "$entry" ]] || continue
+        expanded="$entry"
+        if [[ "$entry" == "~" ]]; then
+            expanded="$HOME"
+        elif [[ "$entry" == "~/"* ]]; then
+            expanded="$HOME/${entry#\~/}"
+        fi
+        [[ -d "$expanded" ]] || continue
+        # Codex compares realpaths (macOS /tmp -> /private/tmp), so hand it the
+        # resolved form and use that for de-duplication too.
+        resolved="$(cd "$expanded" 2>/dev/null && pwd -P)" || continue
+        local dup=false
+        local kept
+        for kept in ${seen[@]+"${seen[@]}"}; do
+            [[ "$kept" == "$resolved" ]] && { dup=true; break; }
+        done
+        [[ "$dup" == true ]] && continue
+        seen+=("$resolved")
+    done
+    local IFS=':'
+    printf '%s\n' "${seen[*]-}"
+}
+
+# Sandbox network flag for a Codex child. workspace-write blocks the network
+# by default, which turns every curl / git fetch / ssh into an approval prompt
+# (or a hard failure under `never`). AGENTSTACK_CODEX_NETWORK (installer
+# setting, default on) controls it.
+codex_network_flags() {
+    case "${AGENTSTACK_CODEX_NETWORK:-1}" in
+        0|off|false|no) ;;
+        *) printf '%s\n' "-c sandbox_workspace_write.network_access=true" ;;
+    esac
 }
 
 # True while the child's tmux session still exists. A child that died (bad
@@ -689,10 +821,17 @@ codex_accept_trust_dialog() {
 # A fresh ~/code/<project> therefore cannot reach the normal input prompt until
 # this is accepted. Keep the detector separate from readiness so task text is
 # never injected into a modal dialog.
+# Claude Code 2.1.26x renders the empty input row as "❯" followed by a
+# NO-BREAK SPACE (U+00A0). Under LC_ALL=C that byte pair is not [[:space:]],
+# so normalize it to a plain space before matching (observed 2026-09-05).
+pane_normalize_nbsp() {
+    LC_ALL=C sed $'s/\xc2\xa0/ /g'
+}
+
 claude_pane_ready() {
     local pane_text="$1" last_lines
     claude_trust_dialog_present "$pane_text" && return 1
-    last_lines="$(printf '%s' "$pane_text" | pane_nonblank_tail 8)"
+    last_lines="$(printf '%s' "$pane_text" | pane_normalize_nbsp | pane_nonblank_tail 8)"
     printf '%s' "$last_lines" | grep -qE 'for shortcuts' && return 0
     # Only an empty input row counts. A selected dialog row also starts with
     # the cursor glyph ("❯ No, exit") and must not read as ready.
@@ -715,12 +854,12 @@ claude_accept_trust_dialog() {
         # New dialog: the default row is "No, exit", so a bare Enter ends the
         # child (observed 2026-09-03: the session lived 4 seconds). Move to the
         # Yes row and confirm it is selected before confirming.
-        if ! printf '%s' "$pane_text" | grep -qE '❯[[:space:]]*Yes, I trust'; then
+        if ! printf '%s' "$pane_text" | pane_normalize_nbsp | grep -qE '❯[[:space:]]*Yes, I trust'; then
             tmux send-keys -t "$session_name" Down
             sleep 1
             pane_text="$(tmux capture-pane -t "$session_name" -p 2>/dev/null || true)"
         fi
-        if printf '%s' "$pane_text" | grep -qE '❯[[:space:]]*Yes, I trust'; then
+        if printf '%s' "$pane_text" | pane_normalize_nbsp | grep -qE '❯[[:space:]]*Yes, I trust'; then
             echo "[$log_prefix] Claude trust dialog detected; selecting 'Yes, I trust this folder' (${attempt}/${max_attempts})" >&2
             tmux send-keys -t "$session_name" C-m
         else
@@ -768,28 +907,71 @@ flush_queued_prompt() {
     return 1
 }
 
-# Verify delivery against pane scrollback, not only the visible viewport. Long
-# embedded tasks push their first line off screen immediately. Normalize line
-# wrapping and spaces before matching a short literal prefix of the prompt.
+# Reduce prompt or pane text to the characters that survive the REPL's
+# rendering: drop whitespace (the TUI re-wraps long lines, CJK mid-word) and
+# the Markdown markers Claude Code strips from a submitted prompt (`## Role:`
+# is shown as `Role:`, so a needle that keeps the `##` can never match).
+injection_match_key() {
+    printf '%s' "$1" | tr -d '\n\r\t #*>`'
+}
+
+# A UTF-8 locale for ${var:0:N}: bash counts characters under UTF-8 and bytes
+# under C, and a byte cut lands mid-character in Japanese prompts, producing a
+# needle that is invalid UTF-8 and matches nothing (LC_CTYPE is unset in cron,
+# launchd and some ssh sessions).
+injection_utf8_locale() {
+    local candidate
+    for candidate in C.UTF-8 en_US.UTF-8 UTF-8; do
+        if locale -a 2>/dev/null | grep -qx "$candidate"; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    return 0
+}
+
+# Verify delivery against the pane, comparing short prefix AND suffix keys of
+# the prompt after the same normalization, polling every second for 30s.
+#
+# Why both ends: Claude Code 2.1.26x draws on the alternate screen, so tmux
+# keeps no scrollback for the pane (history_size 0) and `-S -1000` returns the
+# viewport only. A multi-kilobyte task is taller than the viewport the moment
+# it is rendered, so its first line is never visible; its last line is, until
+# the model's output pushes it up. Codex (normal screen, scrollback kept)
+# matches on the prefix as before. Polling every second catches the short
+# window in which the tail is on screen. The 30s budget covers a cold REPL on
+# a loaded host. A false FAILED is worse than a slow ok because operators act
+# on it (2026-09-08: healthy children reported FAILED while already working).
 verify_injection() {
     local session_name="$1"
     local prompt_text="$2"
-    local needle
+    local head_key tail_key
     local waited=0
-    local pane_text
-    needle="$(printf '%s' "${prompt_text:0:40}" | tr -d '\n ')"
-    [[ -n "$needle" ]] || return 0
-    while (( waited < 10 )); do
+    local pane_text pane_key
+    local utf8_locale
+    utf8_locale="$(injection_utf8_locale)"
+    if [[ -n "$utf8_locale" ]]; then
+        local LC_ALL="$utf8_locale"
+    fi
+    head_key="$(injection_match_key "${prompt_text:0:48}")"
+    [[ -n "$head_key" ]] || return 0
+    tail_key=""
+    if (( ${#prompt_text} > 48 )); then
+        tail_key="$(injection_match_key "${prompt_text: -48}")"
+    fi
+    while (( waited < 30 )); do
         pane_text="$(tmux capture-pane -t "$session_name" -p -S -1000 2>/dev/null || true)"
-        if printf '%s' "$pane_text" | tr -d '\n ' | grep -qF -- "$needle"; then
+        pane_key="$(injection_match_key "$pane_text")"
+        if printf '%s' "$pane_key" | grep -qF -- "$head_key" \
+            || { [[ -n "$tail_key" ]] && printf '%s' "$pane_key" | grep -qF -- "$tail_key"; }; then
             INJECTION_VERIFIED=true
             spawn_note "injected ok ($session_name)"
             return 0
         fi
-        sleep 2
-        waited=$((waited + 2))
+        sleep 1
+        waited=$((waited + 1))
     done
-    spawn_note "WARNING: injection FAILED ($session_name): the REPL is ready but the task text was not found; resend it or close the child session"
+    spawn_note "WARNING: injection not verified ($session_name): the REPL is ready but the task text was not seen in the pane within 30s. This is a failed check, not proof that the task is missing: inspect with 'tmux capture-pane -t $session_name -p -S -1000' before resending, and do not close the child on this message alone"
     return 1
 }
 
@@ -820,14 +1002,15 @@ write_child_mcp_config() {
     mkdir -p "$config_dir" || return 0
     python3 - "$config_path" "$runner" "$child_name" "$PROJECT_KEY" "$token_file" \
         "$MCP_URL" "$MAIL_ENV" "$RUNTIME_DIR" \
-        "${AGENTSTACK_CLAUDE_JSON:-$HOME/.claude.json}" "$HTTP_BEARER_MODE" <<'PY' || return 0
+        "${AGENTSTACK_CLAUDE_JSON:-$HOME/.claude.json}" "$HTTP_BEARER_MODE" \
+        "${AGENTSTACK_PYTHON:-}" <<'PY' || return 0
 # NOTE: no line here may start with "}" in column 0 — the shell function is
 # extracted by "up to the first line that is just a closing brace".
 import json
 import os
 import sys
 
-path, runner, child, project_key, token_file, mcp_url, mail_env, runtime_dir, claude_json, bearer_mode = sys.argv[1:11]
+path, runner, child, project_key, token_file, mcp_url, mail_env, runtime_dir, claude_json, bearer_mode, python_bin = sys.argv[1:12]
 server_env = dict(
     AGENTSTACK_PROXY_AGENT_NAME=child,
     AGENTSTACK_PROXY_TOKEN_FILE=token_file,
@@ -842,6 +1025,8 @@ server_env = dict(
     AGENTSTACK_MAIL_HTTP_BEARER_MODE=bearer_mode,
     AGENTSTACK_RUNTIME_DIR=runtime_dir,
 )
+if python_bin:
+    server_env["AGENTSTACK_PYTHON"] = python_bin
 server = dict(command=runner, args=[], env=server_env)
 
 
@@ -851,8 +1036,8 @@ def looks_like_agent_mail(name):
 
 
 # The child inherits the user's own MCP servers, including their DIRECT
-# agent-mail connection. Publishing the proxy under a NEW name just adds a
-# second agent-mail, and the model reaches for the name it knows — the direct,
+# ORRERY Mail connection. Publishing the proxy under a NEW name just adds a
+# second ORRERY Mail, and the model reaches for the name it knows — the direct,
 # unauthenticated one. --mcp-config overrides a same-named server (measured),
 # so claim the names the user already uses as compatibility aliases as well as
 # the canonical product key.
@@ -917,13 +1102,14 @@ write_child_codex_home() {
 
     local home_dir="$RUNTIME_DIR/child-agents/${child_name}.codex-home"
     python3 - "$home_dir" "$source_home" "$runner" "$child_name" "$PROJECT_KEY" \
-        "$token_file" "$MCP_URL" "$MAIL_ENV" "$RUNTIME_DIR" "$HTTP_BEARER_MODE" <<'PY' || return 0
+        "$token_file" "$MCP_URL" "$MAIL_ENV" "$RUNTIME_DIR" "$HTTP_BEARER_MODE" \
+        "${AGENTSTACK_PYTHON:-}" <<'PY' || return 0
 import os
 import pathlib
 import re
 import sys
 
-home, source, runner, child, project_key, token_file, mcp_url, mail_env, runtime_dir, bearer_mode = sys.argv[1:11]
+home, source, runner, child, project_key, token_file, mcp_url, mail_env, runtime_dir, bearer_mode, python_bin = sys.argv[1:12]
 home_path = pathlib.Path(home)
 source_path = pathlib.Path(source)
 home_path.mkdir(parents=True, exist_ok=True)
@@ -968,10 +1154,11 @@ proxy_tools = (
     "renew_reservations",
     "release_reservations",
     "runtime_status",
+    "whois",
 )
 
 
-# Strip EVERY agent-mail server the user has, not just one spelling. A child
+# Strip EVERY ORRERY Mail server the user has, not just one spelling. A child
 # that still sees the direct connection will use it — the model reaches for the
 # name it knows — and that connection is not authenticated as the child.
 lines = []
@@ -1039,6 +1226,8 @@ for name in claimed:
     # Codex starts the proxy with this env table only; see the Claude writer.
     lines.append("AGENTSTACK_MAIL_HTTP_BEARER_MODE = " + toml_string(bearer_mode))
     lines.append("AGENTSTACK_RUNTIME_DIR = " + toml_string(runtime_dir))
+    if python_bin:
+        lines.append("AGENTSTACK_PYTHON = " + toml_string(python_bin))
     # run-mcp.sh also reads the machine-wide Codex App env for missing values.
     # Pin its state inside this child-owned home so a bridge install cannot
     # redirect the sandboxed child back into the live bridge runtime.
@@ -1323,7 +1512,7 @@ PY
     # shell exit hooks (e.g. a ~/.zshrc zshexit / bash trap that runs `tmux
     # kill-session`): without it, exiting this session can cascade-kill the whole
     # tmux server. Requires tmux >= 3.0.
-    TMUX_ENV_ARGS=(-e "CLAUDECODE=1" -e "AGENTSTACK_RESERVED_IDENTITY=1" -e "AGENT_NAME=$CHILD_NAME" -e "PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_HOOKS_DIR=$HOOKS_DIR" -e "AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR" -e "AGENTSTACK_MCP_URL=$MCP_URL" -e "AGENTSTACK_MAIL_ENV=$MAIL_ENV" -e "AGENTSTACK_MAIL_HTTP_BEARER_MODE=$HTTP_BEARER_MODE" -e "AGENTSTACK_TERMINAL=$TERMINAL_SETTING" -e "AGENTSTACK_CODEX_APPROVAL=$(codex_approval_flags)")
+    TMUX_ENV_ARGS=(-e "CLAUDECODE=1" -e "AGENTSTACK_RESERVED_IDENTITY=1" -e "AGENT_NAME=$CHILD_NAME" -e "PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_HOOKS_DIR=$HOOKS_DIR" -e "AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR" -e "AGENTSTACK_MCP_URL=$MCP_URL" -e "AGENTSTACK_MAIL_ENV=$MAIL_ENV" -e "AGENTSTACK_MAIL_HTTP_BEARER_MODE=$HTTP_BEARER_MODE" -e "AGENTSTACK_TERMINAL=$TERMINAL_SETTING" -e "AGENTSTACK_CODEX_APPROVAL=$(codex_approval_flags)" -e "AGENTSTACK_CODEX_NETWORK_FLAGS=$(codex_network_flags)")
     if [[ "$STANDALONE" != true ]]; then
         TMUX_ENV_ARGS+=(-e "PARENT_AGENT=$PARENT_NAME")
     fi
@@ -1332,16 +1521,19 @@ PY
     fi
     if [[ "$USE_CODEX" == true ]]; then
         # Codex startup (--pre-registered mode).
+        CHILD_CODEX_BIN="$(resolve_codex_bin)"
+        TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_BIN=$CHILD_CODEX_BIN")
         TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_MODEL=$CHILD_MODEL" -e "AGENTSTACK_CODEX_EFFORT=$CODEX_EFFORT")
         CHILD_CODEX_HOME="$(write_child_codex_home "$CHILD_NAME" "$CHILD_TOKEN_FILE")"
+        TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_ADD_DIRS_RESOLVED=$(codex_child_add_dirs "$CHILD_CODEX_HOME")")
         if [[ -n "$CHILD_CODEX_HOME" ]]; then
-            echo "[spawn_child/pre-reg] Child CODEX_HOME with authenticated agent-mail: $CHILD_CODEX_HOME" >&2
+            echo "[spawn_child/pre-reg] Child CODEX_HOME with authenticated ORRERY Mail: $CHILD_CODEX_HOME" >&2
             TMUX_ENV_ARGS+=(
                 -e "CODEX_HOME=$CHILD_CODEX_HOME"
                 -e "CODEX_SHARED_CODEX_DIR=$CHILD_CODEX_HOME"
             )
         else
-            echo "[spawn_child/pre-reg] No MCP proxy available; Codex child uses the shared agent-mail endpoint" >&2
+            echo "[spawn_child/pre-reg] No MCP proxy available; Codex child uses the shared ORRERY Mail endpoint" >&2
         fi
         if [[ "$STANDALONE" == true ]]; then
             CODEX_PROMPT="You are ${CHILD_NAME}, a standalone agent with no parent. The name ${CHILD_NAME} is already reserved; do not register another identity. This prompt is the canonical task. Start it immediately:
@@ -1355,23 +1547,27 @@ ${TASK}"
         tmux new-session -d -s "$CHILD_NAME" \
             -c "$WORK_DIR" \
             "${TMUX_ENV_ARGS[@]}" \
-            '/bin/zsh -lc '"'"'
+            "$CHILD_SHELL"' -lc '"'"'
                 export PATH="$HOME/.local/bin:$PATH";
                 # The child never sources a user-side bootstrap: identity comes
                 # from the reserved name and token file, and a failing script
                 # under set -e would take the whole session with it (2026-09-03).
-                if [[ -f "$HOME/.codex/bin/launch_codex_workspace.sh" ]]; then
-                    env -u OPENAI_API_KEY /bin/bash "$HOME/.codex/bin/launch_codex_workspace.sh" "$PWD" --model "$AGENTSTACK_CODEX_MODEL" -c "model_reasoning_effort=$AGENTSTACK_CODEX_EFFORT"
-                else
-                    EXTRA_ARGS=()
-                    if [[ -n "${AGENTSTACK_PROJECT_KEY:-}" && -d "$AGENTSTACK_PROJECT_KEY" ]]; then
-                        EXTRA_ARGS+=(--add-dir "$AGENTSTACK_PROJECT_KEY")
-                    fi
-                    [[ -d "$HOME/.claude" ]] && EXTRA_ARGS+=(--add-dir "$HOME/.claude")
-                    [[ -d "$HOME/.codex" ]] && EXTRA_ARGS+=(--add-dir "$HOME/.codex")
-                    env -u OPENAI_API_KEY codex -C "$PWD" --sandbox workspace-write ${=AGENTSTACK_CODEX_APPROVAL} \
-                        "${EXTRA_ARGS[@]}" --model "$AGENTSTACK_CODEX_MODEL" -c "model_reasoning_effort=$AGENTSTACK_CODEX_EFFORT"
-                fi
+                # The product decides sandbox, approval, network and writable
+                # roots itself; a user-side launcher (~/.codex/bin/...) is never
+                # consulted. Handing off to one silently replaced `never` with
+                # its `on-request` default and dropped the network flag and the
+                # extra roots (2026-09-04).
+                EXTRA_ARGS=()
+                # Portable across zsh and bash (Ubuntu ships no zsh): split the
+                # colon list with IFS, and word-split the flag strings through
+                # an unquoted command substitution, which both shells expand.
+                _ifs="$IFS"; IFS=":"
+                for d in $(printf "%s" "$AGENTSTACK_CODEX_ADD_DIRS_RESOLVED"); do
+                    [[ -d "$d" ]] && EXTRA_ARGS+=(--add-dir "$d")
+                done
+                IFS="$_ifs"
+                env -u OPENAI_API_KEY "$AGENTSTACK_CODEX_BIN" -C "$PWD" --sandbox workspace-write $(printf "%s" "$AGENTSTACK_CODEX_APPROVAL") $(printf "%s" "$AGENTSTACK_CODEX_NETWORK_FLAGS") \
+                    "${EXTRA_ARGS[@]}" --model "$AGENTSTACK_CODEX_MODEL" -c "model_reasoning_effort=$AGENTSTACK_CODEX_EFFORT"
                 /bin/bash "$AGENTSTACK_HOOKS_DIR/cleanup-child-agent.sh"
             '"'"''
         PRE_REGISTERED_SESSION_STARTED=true
@@ -1488,14 +1684,14 @@ ${TASK}"
             if [[ -n "$CHILD_MCP_CONFIG" ]]; then
                 echo "[spawn_child/pre-reg] Child MCP proxy config: $CHILD_MCP_CONFIG" >&2
             else
-                echo "[spawn_child/pre-reg] No MCP proxy available; child uses the shared agent-mail endpoint" >&2
+                echo "[spawn_child/pre-reg] No MCP proxy available; child uses the shared ORRERY Mail endpoint" >&2
             fi
             tmux new-session -d -s "$CHILD_NAME" \
                 -c "$WORK_DIR" \
                 "${TMUX_ENV_ARGS[@]}" \
                 -e "CLAUDE_CHILD_MODEL=$CHILD_MODEL" \
                 -e "CLAUDE_CHILD_MCP_CONFIG=$CHILD_MCP_CONFIG" \
-                '/bin/zsh -lc '"'"'export PATH="$HOME/.local/bin:$PATH"; MCP_ARGS=(); [[ -n "$CLAUDE_CHILD_MCP_CONFIG" ]] && MCP_ARGS=(--mcp-config "$CLAUDE_CHILD_MCP_CONFIG" --strict-mcp-config); claude --model "$CLAUDE_CHILD_MODEL" "${MCP_ARGS[@]}"; /bin/bash "$AGENTSTACK_HOOKS_DIR/cleanup-child-agent.sh"'"'"''
+                "$CHILD_SHELL"' -lc '"'"'export PATH="$HOME/.local/bin:$PATH"; MCP_ARGS=(); [[ -n "$CLAUDE_CHILD_MCP_CONFIG" ]] && MCP_ARGS=(--mcp-config "$CLAUDE_CHILD_MCP_CONFIG" --strict-mcp-config); claude --model "$CLAUDE_CHILD_MODEL" "${MCP_ARGS[@]}"; /bin/bash "$AGENTSTACK_HOOKS_DIR/cleanup-child-agent.sh"'"'"''
             PRE_REGISTERED_SESSION_STARTED=true
             SPAWN_TRAP_SESSION="$CHILD_NAME"
 
@@ -1618,7 +1814,7 @@ if [[ "$PARENT_NAME" == "unknown" || -z "$PARENT_NAME" ]]; then
     exit 1
 fi
 
-# --- Legacy transport bearer (native AgentStack Mail deliberately has none) ---
+# --- Legacy transport bearer (native ORRERY Mail deliberately has none) ---
 if legacy_http_bearer_enabled; then
     TOKEN=$(get_agentstack_token 2>/dev/null || true)
     bearer_status=0
@@ -2134,7 +2330,7 @@ declare -F ags_warn_tcc_access >/dev/null 2>&1 && ags_warn_tcc_access "$WORK_DIR
 # shell exit hooks (e.g. a ~/.zshrc zshexit / bash trap that runs `tmux
 # kill-session`): without it, exiting this session can cascade-kill the tmux
 # server. Requires tmux >= 3.0.
-TMUX_ENV_ARGS=(-e "CLAUDECODE=1" -e "AGENTSTACK_RESERVED_IDENTITY=1" -e "AGENT_NAME=$CHILD_NAME" -e "PARENT_AGENT=$PARENT_NAME" -e "PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_HOOKS_DIR=$HOOKS_DIR" -e "AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR" -e "AGENTSTACK_MCP_URL=$MCP_URL" -e "AGENTSTACK_MAIL_ENV=$MAIL_ENV" -e "AGENTSTACK_MAIL_HTTP_BEARER_MODE=$HTTP_BEARER_MODE" -e "AGENTSTACK_TERMINAL=$TERMINAL_SETTING" -e "AGENTSTACK_CODEX_APPROVAL=$(codex_approval_flags)")
+TMUX_ENV_ARGS=(-e "CLAUDECODE=1" -e "AGENTSTACK_RESERVED_IDENTITY=1" -e "AGENT_NAME=$CHILD_NAME" -e "PARENT_AGENT=$PARENT_NAME" -e "PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_HOOKS_DIR=$HOOKS_DIR" -e "AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR" -e "AGENTSTACK_MCP_URL=$MCP_URL" -e "AGENTSTACK_MAIL_ENV=$MAIL_ENV" -e "AGENTSTACK_MAIL_HTTP_BEARER_MODE=$HTTP_BEARER_MODE" -e "AGENTSTACK_TERMINAL=$TERMINAL_SETTING" -e "AGENTSTACK_CODEX_APPROVAL=$(codex_approval_flags)" -e "AGENTSTACK_CODEX_NETWORK_FLAGS=$(codex_network_flags)")
 if [[ -n "$AGENTSTACK_HOME_DIR" ]]; then
     TMUX_ENV_ARGS+=(-e "AGENTSTACK_HOME=$AGENTSTACK_HOME_DIR")
 fi
@@ -2142,37 +2338,39 @@ if [[ -n "$RESOURCES" ]]; then
     TMUX_ENV_ARGS+=(-e "CHILD_RESOURCES=$RESOURCES")
 fi
 if [[ "$USE_CODEX" == true ]]; then
+    CHILD_CODEX_BIN="$(resolve_codex_bin)"
+    TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_BIN=$CHILD_CODEX_BIN")
     CHILD_CODEX_HOME="$(write_child_codex_home "$CHILD_NAME" "$CHILD_TOKEN_FILE")"
     TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_MODEL=$CHILD_MODEL" -e "AGENTSTACK_CODEX_EFFORT=$CODEX_EFFORT")
+    TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_ADD_DIRS_RESOLVED=$(codex_child_add_dirs "$CHILD_CODEX_HOME")")
     if [[ -n "$CHILD_CODEX_HOME" ]]; then
-        echo "[spawn_child] Child CODEX_HOME with authenticated agent-mail: $CHILD_CODEX_HOME" >&2
+        echo "[spawn_child] Child CODEX_HOME with authenticated ORRERY Mail: $CHILD_CODEX_HOME" >&2
         TMUX_ENV_ARGS+=(
             -e "CODEX_HOME=$CHILD_CODEX_HOME"
             -e "CODEX_SHARED_CODEX_DIR=$CHILD_CODEX_HOME"
         )
     else
-        echo "[spawn_child] No MCP proxy available; Codex child uses the shared agent-mail endpoint" >&2
+        echo "[spawn_child] No MCP proxy available; Codex child uses the shared ORRERY Mail endpoint" >&2
     fi
     # Codex startup: inject a bootstrap prompt that points the child to inbox.
     CODEX_PROMPT="You are ${CHILD_NAME}. The parent agent is ${PARENT_NAME}. The child name ${CHILD_NAME} is already reserved, so do not register under another name. The canonical task is in your ORRERY Mail inbox. First, if ${REREGISTER_HELPER:-agentstack-reregister} exists, run PROJECT_KEY=${PROJECT_KEY} ${REREGISTER_HELPER:-agentstack-reregister} ${CHILD_NAME}; when that succeeds, skip register_agent and fetch_inbox for ${CHILD_NAME}. The helper reads the child-owned 0600 token file; never request or print its token. Do not infer the task from this prompt; treat the inbox request as authoritative."
     tmux new-session -d -s "$CHILD_NAME" \
         -c "$WORK_DIR" \
         "${TMUX_ENV_ARGS[@]}" \
-        '/bin/zsh -lc '"'"'
+        "$CHILD_SHELL"' -lc '"'"'
                 export PATH="$HOME/.local/bin:$PATH";
             # See the pre-registered path: no user-side bootstrap is sourced.
-            if [[ -f "$HOME/.codex/bin/launch_codex_workspace.sh" ]]; then
-                env -u OPENAI_API_KEY /bin/bash "$HOME/.codex/bin/launch_codex_workspace.sh" "$PWD" --model "$AGENTSTACK_CODEX_MODEL" -c "model_reasoning_effort=$AGENTSTACK_CODEX_EFFORT"
-            else
-                EXTRA_ARGS=()
-                if [[ -n "${AGENTSTACK_PROJECT_KEY:-}" && -d "$AGENTSTACK_PROJECT_KEY" ]]; then
-                    EXTRA_ARGS+=(--add-dir "$AGENTSTACK_PROJECT_KEY")
-                fi
-                [[ -d "$HOME/.claude" ]] && EXTRA_ARGS+=(--add-dir "$HOME/.claude")
-                [[ -d "$HOME/.codex" ]] && EXTRA_ARGS+=(--add-dir "$HOME/.codex")
-                env -u OPENAI_API_KEY codex -C "$PWD" --sandbox workspace-write ${=AGENTSTACK_CODEX_APPROVAL} \
-                    "${EXTRA_ARGS[@]}" --model "$AGENTSTACK_CODEX_MODEL" -c "model_reasoning_effort=$AGENTSTACK_CODEX_EFFORT"
-            fi
+            # See the pre-registered path: the product owns the launch flags and
+            # never hands off to a user-side launcher.
+            EXTRA_ARGS=()
+            # Portable across zsh and bash: see the pre-registered path.
+            _ifs="$IFS"; IFS=":"
+            for d in $(printf "%s" "$AGENTSTACK_CODEX_ADD_DIRS_RESOLVED"); do
+                [[ -d "$d" ]] && EXTRA_ARGS+=(--add-dir "$d")
+            done
+            IFS="$_ifs"
+            env -u OPENAI_API_KEY "$AGENTSTACK_CODEX_BIN" -C "$PWD" --sandbox workspace-write $(printf "%s" "$AGENTSTACK_CODEX_APPROVAL") $(printf "%s" "$AGENTSTACK_CODEX_NETWORK_FLAGS") \
+                "${EXTRA_ARGS[@]}" --model "$AGENTSTACK_CODEX_MODEL" -c "model_reasoning_effort=$AGENTSTACK_CODEX_EFFORT"
             /bin/bash "$AGENTSTACK_HOOKS_DIR/cleanup-child-agent.sh"
         '"'"''
     CHILD_SESSION_STARTED=true
@@ -2263,7 +2461,7 @@ else
         "${TMUX_ENV_ARGS[@]}" \
         -e "CLAUDE_CHILD_MODEL=$CHILD_MODEL" \
         -e "CLAUDE_CHILD_MCP_CONFIG=$CHILD_MCP_CONFIG" \
-        '/bin/zsh -lc '"'"'export PATH="$HOME/.local/bin:$PATH"; MCP_ARGS=(); [[ -n "$CLAUDE_CHILD_MCP_CONFIG" ]] && MCP_ARGS=(--mcp-config "$CLAUDE_CHILD_MCP_CONFIG" --strict-mcp-config); claude --model "$CLAUDE_CHILD_MODEL" "${MCP_ARGS[@]}"; /bin/bash "$AGENTSTACK_HOOKS_DIR/cleanup-child-agent.sh"'"'"''
+        "$CHILD_SHELL"' -lc '"'"'export PATH="$HOME/.local/bin:$PATH"; MCP_ARGS=(); [[ -n "$CLAUDE_CHILD_MCP_CONFIG" ]] && MCP_ARGS=(--mcp-config "$CLAUDE_CHILD_MCP_CONFIG" --strict-mcp-config); claude --model "$CLAUDE_CHILD_MODEL" "${MCP_ARGS[@]}"; /bin/bash "$AGENTSTACK_HOOKS_DIR/cleanup-child-agent.sh"'"'"''
     CHILD_SESSION_STARTED=true
     SPAWN_TRAP_SESSION="$CHILD_NAME"
     # Claude REPL起動待機

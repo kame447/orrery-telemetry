@@ -16,13 +16,13 @@
 | --- | --- |
 | macOS | **対応**。launchd を使い、`gui/$UID` domain を利用できない場合は supervised background mode へ切り替えます。launcher / hook は標準 Bash 3.2 対応です。 |
 | Linux | **未検証（実装あり）**。`systemd --user` を優先し、なければ supervised background mode に落ちる経路を実装していますが、実際の Linux ホストで `systemctl --user` の登録・timer 起動を通した記録はありません。検証済みなのは ubuntu-latest の CI で `systemctl` をスタブに差し替えた unit 生成テストまでです。Linux で試した結果は issue で報告してください。 |
-| WSL2 | **未検証**。設計上は localhost dashboard が使え、Ghostty の click-to-jump は使えない想定ですが、実機で確認していません。 |
-| Windows native | **未対応**。 |
+| Windows（WSL2） | **対応**（実機確認: Ubuntu 26.04 / WSL 2.7、2026-09-07）。install、Mail の timer 起動、dashboard、`agent-start`、`/delegate` の子、dashboard からの jump（Windows Terminal のタブで attach / resume）を通しています。最後のシェルを閉じると VM ごと止まるので、常駐させるには [troubleshooting の WSL2 節](docs/troubleshooting.md#wsl2-では最後のシェルを閉じると-service-が消える) の linger と `vmIdleTimeout` の設定が要ります。Ghostty は無いので jump は Windows Terminal 経由です。 |
+| Windows native | **未対応**。native 向けの貢献は、macOS 側の挙動を変えない形で受け付けます（置き場と作法は [CONTRIBUTING「Windows contributions」](CONTRIBUTING.md#windows-contributions-community-lane)）。community-maintained の実験的な開発用起動手順: [Mail と Dashboard の起動 helper](docs/windows-local.md)。 |
 | その他の OS | **未対応**。installer の preflight が書き込み前に停止します。 |
 
-Python は **3.10 以上**が必須です。上限は設けておらず、全 suite を実測済みなのは 3.10 / 3.12 / 3.13 / 3.14（CI は 3.10 / 3.12 / 3.14）です。
+Python は **3.11 以上**が必須です。上限は設けておらず、全 suite を実測済みなのは 3.12 / 3.13 / 3.14（CI は 3.11 / 3.12 / 3.14）です。3.10 は import こそ通るものの mail service のテストが通らないため対応外です（2026-09-04）。
 
-必須 command は `git` と `tmux` です。agent-mail を新規 provision する場合だけ `uv` も必須です。実行時には Claude Code または Codex CLI の少なくとも一方が必要です。`systemctl` は Linux の user service 用ですが、利用できなければ supervisor が代替します。`fswatch`（mail watcher）、`fzf`（directory picker）、Ghostty、Obsidian は任意です。
+必須 command は `git` と `tmux` です。ORRERY Mail を新規 provision する場合だけ `uv` も必須です。実行時には Claude Code または Codex CLI の少なくとも一方が必要です。`systemctl` は Linux の user service 用ですが、利用できなければ supervisor が代替します。`fswatch`（mail watcher）、`fzf`（directory picker）、Ghostty、Obsidian は任意です。
 
 installer は冒頭で OS、Python、必須 command、ORRERY Mail endpoint（既定 `127.0.0.1:18765`・state root `~/.agentstack/mail`）、install directory の書込権限をまとめて検査します。endpoint が使用中でも、既存の `install-state.json` があれば上書き更新として扱います。新規 install で使用中の場合も socket の所有者を推測して停止せず、health response と canonical database を確認できた場合だけ既存 service を再利用します。無関係または解決不能な listener なら、最初の書き込み前に停止します。
 
@@ -30,7 +30,7 @@ CI や isolated test で platform boundary を意図的に偽装する場合に�
 
 ## クイックスタート
 
-初回は必ず dry-run から始めます。変更予定（service mode・使う agent-mail DB・settings diff）を読んでから本番の install に進みます。
+初回は必ず dry-run から始めます。変更予定（service mode・使う ORRERY Mail DB・settings diff）を読んでから本番の install に進みます。
 
 ```bash
 git clone https://github.com/gyroid-eth/orrery-telemetry.git
@@ -55,9 +55,9 @@ agent-start ~/code/my-project        # または agent-start-codex ~/code/my-pro
 open http://127.0.0.1:8770/          # 別 terminal。DECK に親と child のカードが並べば完了
 ```
 
-`agent-start` は agent-mail identity と同名の tmux session を作ります。これが dashboard の jump、mail signal 配送、token recovery を一意に結びます。設定を変える場合は[インストール](docs/install.md)と[設定](docs/configuration.md)、child の仕組みは[委任と child agent](docs/delegation.md)を参照してください。
+`agent-start` は ORRERY Mail identity と同名の tmux session を作ります。これが dashboard の jump、mail signal 配送、token recovery を一意に結びます。設定を変える場合は[インストール](docs/install.md)と[設定](docs/configuration.md)、child の仕組みは[委任と child agent](docs/delegation.md)を参照してください。
 
-Codex Desktop の root task / subagent も同じ agent-mail と dashboard に接続する場合は、任意の [Codex App 統合](docs/codex-app.md)を追加します。Codex CLI だけを使う場合、この追加 install は不要です。
+Codex Desktop の root task / subagent も同じ ORRERY Mail と dashboard に接続する場合は、任意の [Codex App 統合](docs/codex-app.md)を追加します。Codex CLI だけを使う場合、この追加 install は不要です。
 
 ## 機能ギャラリー
 
@@ -69,11 +69,11 @@ Codex Desktop の root task / subagent も同じ agent-mail と dashboard に接
 
 ### 2. Hook、mail、file reservation
 
-Claude Code hook が未登録 session と競合書き込みを止め、成功した edit の reservation を短い grace 後に解放し、agent-mail inbox signal を Claude / Codex REPL へ再注入します。mail と reservation の正本を一つに保つため、UI を再起動しても協調状態が分裂しません。
+Claude Code hook が未登録 session と競合書き込みを止め、成功した edit の reservation を短い grace 後に解放し、ORRERY Mail inbox signal を Claude / Codex REPL へ再注入します。mail と reservation の正本を一つに保つため、UI を再起動しても協調状態が分裂しません。
 
-agent-mail は監査 archive の Git commit を既定で非同期 queue に積み、DB 更新と archive file の書き込みが完了した時点で tool 応答を返します。同期 commit に戻す kill switch は `AGENTSTACK_MAIL_ARCHIVE_COMMIT_ASYNC=false` です。hard shutdown が応答直後に重なると飛行中の commit は失われる可能性がありますが、archive file は working tree に残り、DB は影響を受けません。次回起動時に未 commit file を同期 commit して回収します。詳細と測定条件は [agentstack-mail 文書](docs/agentstack-mail.md#archive-commit-latency-and-startup-repair)を参照してください。
+ORRERY Mail は監査 archive の Git commit を既定で非同期 queue に積み、DB 更新と archive file の書き込みが完了した時点で tool 応答を返します。同期 commit に戻す kill switch は `AGENTSTACK_MAIL_ARCHIVE_COMMIT_ASYNC=false` です。hard shutdown が応答直後に重なると飛行中の commit は失われる可能性がありますが、archive file は working tree に残り、DB は影響を受けません。次回起動時に未 commit file を同期 commit して回収します。詳細と測定条件は [agentstack-mail 文書](docs/agentstack-mail.md#archive-commit-latency-and-startup-repair)を参照してください。
 
-<!-- TODO: screenshot: agent-mail notification and reservation -->
+<!-- TODO: screenshot: ORRERY Mail notification and reservation -->
 
 ### 3. DECK
 
@@ -83,7 +83,7 @@ agent-mail は監査 archive の Git commit を既定で非同期 queue に積�
 
 ### 4. NETWORK と DIGEST REPLAY
 
-spawn 系譜と agent-mail 通信を force graph に重ね、node、edge、role / group、mail drawer を探索できます。複数 agent を選ぶと、通信と状態遷移を速度・HOLD・TIME-TRAVEL 付きで再生できます。
+spawn 系譜と ORRERY Mail 通信を force graph に重ね、node、edge、role / group、mail drawer を探索できます。複数 agent を選ぶと、通信と状態遷移を速度・HOLD・TIME-TRAVEL 付きで再生できます。
 
 ![NETWORK view](docs/img/network.jpg)
 
@@ -118,7 +118,7 @@ murmur は browser の言語から日本語 / 英語を自動選択し、`?lang=
 | [API reference](docs/api.md) | 全 route、query / request、response schema |
 | [設定](docs/configuration.md) | `AGENTSTACK_*` 環境変数とカスタマイズ |
 | [トラブルシューティング](docs/troubleshooting.md) | `NOT CONFIGURED`、service、通知、spawn、認証 |
-| [第三者コンポーネント](docs/third-party.md) | agent-mail、license、credits |
+| [第三者コンポーネント](docs/third-party.md) | ORRERY Mail、license、credits |
 
 コードへ変更を送る場合は [CONTRIBUTING.md](CONTRIBUTING.md) も参照してください。
 
@@ -146,4 +146,4 @@ tmux session ── telemetry ──► dashboard
 - 利用・改変・再配布は目的を問わず可能です
 - ただし**本ソフトウェアと競合する製品を他者へ提供すること**はできません。無償配布・別言語への移植・service / library / plug-in としての提供も競合に含まれます
 
-同梱 service が継承・派生した部分の attribution は [NOTICE](packages/agentstack_mail/NOTICE.md)、適用 license は [UPSTREAM_LICENSE](packages/agentstack_mail/UPSTREAM_LICENSE) に保持しています。AgentStack 著作部分には [AGENTSTACK_LICENSE](packages/agentstack_mail/AGENTSTACK_LICENSE) が適用されます。境界の説明は[第三者コンポーネント](docs/third-party.md)を参照してください。
+同梱 service が継承・派生した部分の attribution は [NOTICE](packages/agentstack_mail/NOTICE.md)、適用 license は [UPSTREAM_LICENSE](packages/agentstack_mail/UPSTREAM_LICENSE) に保持しています。ORRERY Telemetry 側で新たに書いた部分（file 名の AgentStack は旧名称）には [AGENTSTACK_LICENSE](packages/agentstack_mail/AGENTSTACK_LICENSE) が適用されます。境界の説明は[第三者コンポーネント](docs/third-party.md)を参照してください。

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # agent-start-codex — launch a Codex CLI agent inside a named tmux session in the
-# current terminal tab, registered with agent-mail so it shows up in the dashboard
+# current terminal tab, registered with ORRERY Mail so it shows up in the dashboard
 # and is click-to-jump-able. The Codex counterpart of `agent-start`.
 #
 # Unlike Claude Code, Codex has no hook system, so this launcher runs

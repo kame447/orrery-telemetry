@@ -1,6 +1,6 @@
 ---
 name: coordinate
-description: Coordinate a Codex App task or identify its current agent-mail identity through the session-bound AgentStack bridge.
+description: Coordinate a Codex App task or identify its current ORRERY Mail identity through the session-bound AgentStack bridge.
 ---
 
 # Coordinate through AgentStack

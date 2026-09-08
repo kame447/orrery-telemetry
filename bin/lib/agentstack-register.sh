@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared agent-mail registration helpers for agent launchers.
+# Shared ORRERY Mail registration helpers for agent launchers.
 # SOURCE this file; callers are expected to run with set -euo pipefail.
 
 if [ -n "${BASH_SOURCE:-}" ]; then _ags_register_src="${BASH_SOURCE[0]}"; else _ags_register_src="$0"; fi
@@ -85,6 +85,43 @@ if isinstance(result, dict):
                 if isinstance(text, str) and text.startswith("Error calling tool"):
                     sys.exit(0)
 sys.exit(1)
+'
+}
+
+# The ORRERY Mail row id from a register_agent reply (plain, structuredContent,
+# or a JSON text block). Empty when the reply carries none. The id is the key
+# of the session index, which is why a shell-side registration needs it.
+ags_extract_agent_id() {
+  python3 -c '
+import json, sys
+
+def candidate_id(obj):
+    if isinstance(obj, dict) and isinstance(obj.get("id"), int):
+        return obj["id"]
+    return None
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print("")
+    sys.exit(0)
+
+found = candidate_id(data)
+result = data.get("result") if isinstance(data, dict) else None
+if found is None:
+    found = candidate_id(result)
+if found is None and isinstance(result, dict):
+    found = candidate_id(result.get("structuredContent"))
+    if found is None and isinstance(result.get("content"), list):
+        for part in result["content"]:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                try:
+                    found = candidate_id(json.loads(part["text"]))
+                except Exception:
+                    found = None
+                if found is not None:
+                    break
+print("" if found is None else found)
 '
 }
 
@@ -225,7 +262,7 @@ ags_store_registration_token() {
   chmod 600 "$token_file" 2>/dev/null || true
 }
 
-# Record that agent-mail granted a different identity than the one requested.
+# Record that ORRERY Mail granted a different identity than the one requested.
 # The dashboard reads this file and says so on the agent, because the only
 # other trace is a missing portrait — which reads as a style, not a fault.
 # Best effort: a spawn that otherwise worked must not fail over bookkeeping.
@@ -373,7 +410,7 @@ ags_pick_available_agent_name() {
       return 0
     fi
     if [[ "$name_status" == "unknown" ]]; then
-      echo "agentstack: cannot verify whether '$preferred_name' is free (agent-mail unreachable or refusing whois); refusing to claim it." >&2
+      echo "agentstack: cannot verify whether '$preferred_name' is free (ORRERY Mail unreachable or refusing whois); refusing to claim it." >&2
       return 1
     fi
   fi
@@ -426,6 +463,7 @@ ags_pick_available_agent_name() {
 ags_register_session() {
   local project_key="$1" program="$2" model="$3" prefix="$4" work_dir="$5" requested_name="${6:-}" requested_mode="${7:-reserved}"
   AGS_REGISTERED_AGENT_NAME=""
+  AGS_REGISTERED_AGENT_ID=""
   AGS_REGISTERED_REGISTRATION_TOKEN=""
   AGS_REQUESTED_AGENT_NAME=""
   AGS_SERVER_RETURNED_AGENT_NAME=""
@@ -502,6 +540,7 @@ ags_register_session() {
     ags_apply_contact_policy "$project_key" "$registered" "$registered_token"
   fi
   AGS_REGISTERED_AGENT_NAME="$registered"
+  AGS_REGISTERED_AGENT_ID="$(printf '%s' "$result" | ags_extract_agent_id)"
   printf '%s\n' "$registered"
 }
 
@@ -509,6 +548,18 @@ ags_start_mail_watcher() {
   local tmux_bin="$1" hooks_dir="$2"
   local watcher_session="${AGENTSTACK_MAIL_WATCHER_SESSION:-mail-watcher}"
   [[ -n "$tmux_bin" && -n "$hooks_dir" && -f "$hooks_dir/watch_agent_mail_signals.sh" ]] || return 0
+  # The installer now runs the watcher as a launchd / systemd service. When that
+  # (or any other) watcher holds the single-instance lock, a tmux copy would
+  # only start, print "duplicate", and exit — so this is a fallback, not the
+  # primary path.
+  local pidfile="${AGENTSTACK_MAIL_WATCHER_PIDFILE:-${AGENTSTACK_MAIL_WATCHER_LOCK_DIR:-/tmp/orrery-mail-watcher.lock}/watcher.pid}"
+  if [[ -f "$pidfile" ]]; then
+    local watcher_pid
+    watcher_pid="$(head -n 1 "$pidfile" 2>/dev/null | tr -d '[:space:]')"
+    if [[ "$watcher_pid" =~ ^[0-9]+$ ]] && kill -0 "$watcher_pid" 2>/dev/null; then
+      return 0
+    fi
+  fi
   if ! "$tmux_bin" has-session -t "$watcher_session" 2>/dev/null; then
     "$tmux_bin" new-session -d -s "$watcher_session" \
       "bash '$hooks_dir/watch_agent_mail_signals.sh'" >/dev/null 2>&1 \

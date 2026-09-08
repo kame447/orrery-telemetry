@@ -1,4 +1,4 @@
-"""Default AgentStack Mail installer wiring."""
+"""Default ORRERY Mail installer wiring."""
 
 from __future__ import annotations
 
@@ -185,9 +185,9 @@ def test_default_uses_agentstack_dry_run(tmp_path):
     result, home = _provider_dry_run(tmp_path, None)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "installer will provision AgentStack Mail" in result.stdout
-    assert "create immutable AgentStack Mail candidate venv" in result.stdout
-    assert "clone agent-mail upstream" not in result.stdout
+    assert "installer will provision ORRERY Mail" in result.stdout
+    assert "create immutable ORRERY Mail candidate venv" in result.stdout
+    assert "clone ORRERY Mail upstream" not in result.stdout
     assert not (home / ".agentstack").exists()
 
 
@@ -195,9 +195,9 @@ def test_obsolete_provider_env_cannot_change_the_native_dry_run(tmp_path):
     result, home = _provider_dry_run(tmp_path, "agentstack")
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "installer will provision AgentStack Mail" in result.stdout
-    assert "create immutable AgentStack Mail candidate venv" in result.stdout
-    assert "clone agent-mail upstream" not in result.stdout
+    assert "installer will provision ORRERY Mail" in result.stdout
+    assert "create immutable ORRERY Mail candidate venv" in result.stdout
+    assert "clone ORRERY Mail upstream" not in result.stdout
     assert not (home / ".agentstack").exists()
 
 
@@ -205,9 +205,9 @@ def test_obsolete_upstream_value_no_longer_selects_a_clone_path(tmp_path):
     result, home = _provider_dry_run(tmp_path, "upstream")
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "installer will provision AgentStack Mail" in result.stdout
-    assert "create immutable AgentStack Mail candidate venv" in result.stdout
-    assert "clone agent-mail upstream" not in result.stdout
+    assert "installer will provision ORRERY Mail" in result.stdout
+    assert "create immutable ORRERY Mail candidate venv" in result.stdout
+    assert "clone ORRERY Mail upstream" not in result.stdout
     assert not (home / ".agentstack").exists()
 
 
@@ -286,7 +286,7 @@ def test_default_provisions_isolated_state_and_serves_health(tmp_path):
             timeout=180,
         )
         assert installed.returncode == 0, installed.stdout + installed.stderr
-        assert "AgentStack Mail ready at" in installed.stdout
+        assert "ORRERY Mail ready at" in installed.stdout
 
         health = _wait_health(mail_url)
         alias_health = _wait_health(f"http://127.0.0.1:{mail_port}/api/")
@@ -316,7 +316,7 @@ def test_default_provisions_isolated_state_and_serves_health(tmp_path):
         assert manifest["env"]["AGENTSTACK_MAIL_DB"] == str(destination_db)
         assert manifest["env"]["AGENTSTACK_MAIL_HTTP_BEARER_MODE"] == "disabled"
         assert any(
-            item.get("role") == "agent-mail" for item in manifest["services"]
+            item.get("role") == "ORRERY Mail" for item in manifest["services"]
         )
 
         claude_mcp = json.loads(
@@ -393,8 +393,8 @@ def test_default_provisions_isolated_state_and_serves_health(tmp_path):
 
         restarted = run_mailctl("restart")
         assert restarted.returncode == 0, restarted.stdout + restarted.stderr
-        assert "AgentStack Mail stopped" in restarted.stdout
-        assert "AgentStack Mail started" in restarted.stdout
+        assert "ORRERY Mail stopped" in restarted.stdout
+        assert "ORRERY Mail started" in restarted.stdout
         _wait_health(mail_url)
         assert int(pidfile.read_text(encoding="utf-8").split()[0]) != first_pid
 
@@ -402,7 +402,7 @@ def test_default_provisions_isolated_state_and_serves_health(tmp_path):
         assert stopped.returncode == 0, stopped.stdout + stopped.stderr
         stopped_status = run_mailctl("status")
         assert stopped_status.returncode == 3
-        assert "AgentStack Mail stopped" in stopped_status.stdout
+        assert "ORRERY Mail stopped" in stopped_status.stdout
 
         started = run_mailctl("start")
         assert started.returncode == 0, started.stdout + started.stderr
@@ -421,8 +421,8 @@ def test_default_provisions_isolated_state_and_serves_health(tmp_path):
             check=False,
         )
         combined = doctor.stdout + doctor.stderr
-        assert "AgentStack Mail transport uses owner tokens" in combined
-        assert f"AgentStack Mail health serving {destination_db}" in combined
+        assert "ORRERY Mail transport uses owner tokens" in combined
+        assert f"ORRERY Mail health serving {destination_db}" in combined
     finally:
         _stop_mail(home, destination_state, mail_port)
         stop_dashboard(home, label_prefix="")

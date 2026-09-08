@@ -1482,7 +1482,7 @@ def foreground(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agentstack-mail-service",
-        description="Render or explicitly control the AgentStack Mail launchd service.",
+        description="Render or explicitly control the ORRERY Mail launchd service.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     render = subparsers.add_parser("render")

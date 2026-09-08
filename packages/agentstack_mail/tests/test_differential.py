@@ -1,4 +1,4 @@
-"""Hermetic frozen-live versus AgentStack Mail behavior differential.
+"""Hermetic frozen-live versus ORRERY Mail behavior differential.
 
 Absolute clock values and archive filename timestamps are intentionally
 different because the two isolated workers run sequentially.  The oracle

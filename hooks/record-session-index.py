@@ -4,12 +4,12 @@
 Called from mark-agent-registered.sh (PostToolUse on register_agent).
 
 Records a precise, unambiguous mapping so the agent-dashboard can resume the
-EXACT Claude session belonging to an agent-mail row — instead of guessing via
+EXACT Claude session belonging to an ORRERY Mail row — instead of guessing via
 name self-reference scoring + an mtime activity window (which mis-fires when
 `last_active_ts` is stuck at inception, or when a name is reused across
 projects; see logs/ in the dashboard project).
 
-Key = agent-mail `id` (global PRIMARY KEY → unique per session). For each
+Key = ORRERY Mail `id` (global PRIMARY KEY → unique per session). For each
 register_agent we write:
 
     ~/.agentstack/runtime/session_index/<agent_id>.json
@@ -30,7 +30,7 @@ import time
 
 
 def _extract_id(v):
-    """Pull agent-mail numeric id out of the register_agent tool_response,
+    """Pull ORRERY Mail numeric id out of the register_agent tool_response,
     which may be a JSON string, a dict, or the MCP content-block wrapper."""
     if isinstance(v, str):
         try:

@@ -7,7 +7,7 @@ AGS_SCIENTISTS_LIB_DIR="$(cd "$(dirname "$_ags_scientists_src")" && pwd)"
 
 # Keep byte-for-byte semantic parity with the frozen predecessor vocabulary.
 # SIMPLE_ADJECTIVES (Round 3, 2026-06-26).  Do not extend independently:
-# strict agent-mail deployments validate generated names against that canon.
+# strict ORRERY Mail deployments validate generated names against that canon.
 AGS_SIMPLE_ADJECTIVES=(
   Red Orange Pink Black Purple Blue Brown White Green Gold Gray Navy Silver
   Amber Coral Crimson Cyan Indigo Jade Olive Rose Ruby Sage Scarlet Teal Violet

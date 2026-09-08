@@ -1,9 +1,9 @@
-This machine runs **claude-agent-stack**: multiple Claude Code and Codex agents
+This machine runs **ORRERY Telemetry**: multiple Claude Code and Codex agents
 coordinate over ORRERY Mail (inter-agent messaging + a shared file-lock
 registry) and appear in a live dashboard. As a Codex agent you are a first-class
 participant. Follow the rules below.
 
-## Coordination (agent-mail)
+## Coordination (ORRERY Mail)
 
 First calls:
 
@@ -14,7 +14,7 @@ First calls:
    `AGENT_NAME`:
    `AGENTSTACK_PROJECT_KEY="__AGENTSTACK_PROJECT_KEY__" __AGENTSTACK_HOME__/bin/agentstack-reregister "$AGENT_NAME"`.
 3. If that succeeds, do not call `register_agent` again.
-4. Tokens: **if your agent-mail MCP server runs through the local proxy, you
+4. Tokens: **if your ORRERY Mail MCP server runs through the local proxy, you
    never touch a token.** Spawned Codex children are configured that way (their
    `CODEX_HOME` points `[mcp_servers.orrery-mail]` at the proxy), and the
    SessionStart reminder says so. The proxy holds your token and authenticates
@@ -77,7 +77,7 @@ Details and exceptions for the first calls:
   `register_agent(project_key="__AGENTSTACK_PROJECT_KEY__", program="codex",
   name="$AGENT_NAME", ...)` when `AGENT_NAME` is set. If
   `CHILD_REGISTRATION_TOKEN` is visible, pass it as `registration_token`; stock
-  agent-mail is token-strict for existing names, so same-name re-registration
+  ORRERY Mail is token-strict for existing names, so same-name re-registration
   requires the original token. If `CHILD_REGISTRATION_TOKEN` is not visible,
   omit `registration_token` rather than inventing one. If `AGENT_NAME` is not
   set, omit `name`.
@@ -97,7 +97,7 @@ Details and exceptions for the first calls:
   Delegated children also use
   `${AGENTSTACK_RUNTIME_DIR:-$HOME/.agentstack/runtime}/child-agents/<name>.json`.
   `agentstack-reregister` reads both locations. It is acceptable for stack
-  helpers to use these token files. Do not read agent-mail's `storage.sqlite3`
+  helpers to use these token files. Do not read ORRERY Mail's `storage.sqlite3`
   directly; the DB is outside the recovery boundary and ad hoc DB reads risk
   stale paths, token leakage, and identity splits.
 
@@ -135,18 +135,18 @@ Failure handling:
 
 ## Canonical coordination paths are fail-closed
 
-- If a documented AgentStack tool, helper, transport, or workflow is missing or
+- If a documented ORRERY Telemetry tool, helper, transport, or workflow is missing or
   fails, use only the recovery steps explicitly documented above. If they do
   not restore the canonical path, report the exact failure and stop the affected
   coordination action. Do not invent a substitute merely to make the task look
   successful.
-- Never replace `fetch_inbox` or another agent-mail tool with direct reads of
+- Never replace `fetch_inbox` or another ORRERY Mail tool with direct reads of
   mailbox directories, message files, or `storage.sqlite3`; ad hoc `find`
   loops; `while true` polling; direct database queries; raw tmux prompt
   injection; or a newly written watcher. Those paths bypass authentication,
   read/ack semantics, wake delivery, and the configured project identity.
 - Delegation is one instance of the rule. Use the `delegate` skill and its
-  documented pre-registration flow. If its agent-mail tools are unavailable,
+  documented pre-registration flow. If its ORRERY Mail tools are unavailable,
   report that failure and stop the delegation attempt. Do not substitute a
   built-in child, direct-mode launcher, or other improvised workflow.
 
@@ -166,7 +166,7 @@ agent does not clobber it:
   `release_file_reservations`. Nothing releases for you — Codex has no
   PostToolUse hook — so a forgotten reservation blocks Claude agents until
   the TTL runs out.
-- If a path is already reserved by another agent, coordinate over agent-mail
+- If a path is already reserved by another agent, coordinate over ORRERY Mail
   instead of editing it.
 
 Skipping this is the main way two Codex agents corrupt each other's work.

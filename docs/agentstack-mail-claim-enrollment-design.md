@@ -1,4 +1,4 @@
-# AgentStack Mail claim and enrollment design
+# ORRERY Mail claim and enrollment design
 
 Status: supporting design for the normative product-decision ledger. D7's
 selection, implementation state, and cutover state live only in

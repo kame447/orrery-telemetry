@@ -110,7 +110,7 @@ ags_register_session /project codex model cx /work Fresh-Dirac candidate >/dev/n
 
 
 def test_registration_adopts_the_server_returned_name_on_every_call():
-    """Local agent-mail removes hyphens, so response name is the identity."""
+    """Local ORRERY Mail removes hyphens, so response name is the identity."""
     register_lib = _ROOT / "bin" / "lib" / "agentstack-register.sh"
     script = f'''
 source "{register_lib}"

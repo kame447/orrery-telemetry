@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agentstack-codex-app"
 version = "0.1.0"
-description = "Optional Codex App bridge for claude-agent-stack"
+description = "Optional Codex App bridge for ORRERY Telemetry"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}

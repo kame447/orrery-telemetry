@@ -28,7 +28,7 @@ fi
 # Is the mail server answering?
 #
 # The obvious probe -- GET the liveness URL derived above -- was wrong in a way
-# that looked exactly like the server being down. AgentStack Mail serves its MCP
+# that looked exactly like the server being down. ORRERY Mail serves its MCP
 # path and the configured aliases and nothing else, so there is no
 # /health/liveness route to answer, and `curl -sf` fails on any non-2xx. Every
 # healthy install therefore reported "not running" at every session start, every
@@ -156,7 +156,7 @@ find_register_lib() {
     return 1
 }
 
-# True when this session's agent-mail MCP server is the per-child proxy that
+# True when this session's ORRERY Mail MCP server is the per-child proxy that
 # spawn_child.sh configured. The proxy injects the token, so the agent must not
 # read it: doing so triggers a Bash approval prompt and pulls the secret into
 # the model's context for no benefit.
@@ -188,17 +188,54 @@ shell_register_resolved_agent() {
     CHILD_REGISTRATION_TOKEN="$restored_token"
     export CHILD_REGISTRATION_TOKEN
     work_dir="${PWD:-$PROJECT_KEY}"
-    model="${AGENTSTACK_CLAUDE_MODEL:-claude-code}"
+    # spawn_child.sh hands the child its model as CLAUDE_CHILD_MODEL; without
+    # it this re-registration overwrote the pre-registered model with the
+    # program name, and the dashboard lost the provider (no logo, chip said
+    # "CLAUDE-CODE" — seen on WSL2, where no pane model is parsed either).
+    model="${AGENTSTACK_CLAUDE_MODEL:-${CLAUDE_CHILD_MODEL:-claude-code}}"
     ags_register_session "$PROJECT_KEY" "claude-code" "$model" "cc" "$work_dir" "$RESOLVED_AGENT" "reserved" >/dev/null 2>&1
     register_status=$?
     if [ "$register_status" -ne 0 ]; then
         if [ "$register_status" -eq 2 ] && [ "${AGS_AGENT_NAME_SUBSTITUTED:-0}" = "1" ]; then
-            SHELL_REGISTRATION_ERROR="agent-mail changed reserved identity '$RESOLVED_AGENT' to '${AGS_SERVER_RETURNED_AGENT_NAME:-unknown}'"
+            SHELL_REGISTRATION_ERROR="ORRERY Mail changed reserved identity '$RESOLVED_AGENT' to '${AGS_SERVER_RETURNED_AGENT_NAME:-unknown}'"
         fi
         return 1
     fi
     SHELL_REGISTERED_AGENT="${AGS_REGISTERED_AGENT_NAME:-$RESOLVED_AGENT}"
+    record_shell_registration_index
     return 0
+}
+
+# A session registered here never calls register_agent itself, so the
+# PostToolUse writer (mark-agent-registered.sh) never runs for it and no
+# session index is written. Every pre-registered child is such a session, and
+# without the index the dashboard falls back to guessing its transcript by
+# name counts -- a parent's transcript mentions the child at least as often as
+# the child's own, so "resume" opened the wrong history or none (WSL2 test,
+# 2026-09-07). Write the same record from the same SessionStart payload.
+record_shell_registration_index() {
+    [ -n "${AGENTSTACK_SESSION_ID:-}" ] || return 0
+    [ -n "${AGS_REGISTERED_AGENT_ID:-}" ] || return 0
+    [ -f "$HOOKS_DIR/record-session-index.py" ] || return 0
+    AGS_START_INPUT="${SESSION_START_INPUT:-}" python3 -c '
+import json, os, sys
+try:
+    start = json.loads(os.environ.get("AGS_START_INPUT") or "{}")
+except Exception:
+    start = {}
+agent_id, name, project_key = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+print(json.dumps({
+    "session_id": start.get("session_id", ""),
+    "transcript_path": start.get("transcript_path", ""),
+    "cwd": start.get("cwd", ""),
+    "tool_response": {"id": agent_id, "name": name},
+    "tool_input": {"project_key": project_key, "name": name},
+}))
+' "$AGS_REGISTERED_AGENT_ID" "$SHELL_REGISTERED_AGENT" "$PROJECT_KEY" 2>/dev/null |
+    AGENTSTACK_REGISTERING_SOURCE="${RESOLVED_AGENT_SRC:-env}" \
+    AGENTSTACK_REGISTERING_AGENT="$SHELL_REGISTERED_AGENT" \
+    AGENTSTACK_RUNTIME_DIR="$RUNTIME_DIR" \
+        python3 "$HOOKS_DIR/record-session-index.py" >/dev/null 2>&1 || true
 }
 
 mkdir -p "$RUNTIME_DIR" 2>/dev/null

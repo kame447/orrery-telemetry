@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safely register claude-agent-stack's fixed Claude Code MCP server."""
+"""Safely register ORRERY Telemetry's fixed Claude Code MCP server."""
 
 from __future__ import annotations
 
@@ -39,10 +39,10 @@ class MergeError(RuntimeError):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Safely add or remove the Claude Code agent-mail MCP entry."
+        description="Safely add or remove the Claude Code ORRERY Mail MCP entry."
     )
     parser.add_argument("--config", required=True, help="Claude Code user config")
-    parser.add_argument("--mcp-url", help="agent-mail HTTP MCP endpoint")
+    parser.add_argument("--mcp-url", help="ORRERY Mail HTTP MCP endpoint")
     parser.add_argument("--mail-env", default="", help="file containing HTTP_BEARER_TOKEN")
     parser.add_argument("--backup-dir", required=True, help="backup root")
     parser.add_argument("--result-json", help="write a machine-readable result")
@@ -91,7 +91,7 @@ def read_bearer_token(path: pathlib.Path | None) -> str:
     except FileNotFoundError:
         return ""
     except (OSError, UnicodeError) as exc:
-        raise MergeError(f"could not read agent-mail env {path}: {exc}") from exc
+        raise MergeError(f"could not read ORRERY Mail env {path}: {exc}") from exc
     for line in lines:
         key, separator, value = line.partition("=")
         if separator and key.strip() == "HTTP_BEARER_TOKEN":

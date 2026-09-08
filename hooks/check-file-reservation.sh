@@ -159,7 +159,7 @@ paths = [rel_path]
 if abs_path != rel_path:
     paths.append(abs_path)
 
-# The pinned live schema and AgentStack Mail both omit registration_token from
+# The pinned live schema and ORRERY Mail both omit registration_token from
 # reservation tools. A legacy HTTP bearer, when selected above, remains a
 # transport credential and must never be copied into tool arguments.
 arguments = {

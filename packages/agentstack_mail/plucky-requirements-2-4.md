@@ -35,5 +35,5 @@ The #2/#4 defect closure is bound to `5ff73d9`. A later final candidate must reg
 Repository documentation review for this closure covered the package README,
 Claude/Codex runtime guidance, and the root README pair. The root README pair
 describes the currently shipped legacy AgentMail release rather than claiming
-that AgentStack Mail is already the production authority, so it remains
+that ORRERY Mail is already the production authority, so it remains
 unchanged until the installer/cutover release changes that fact.

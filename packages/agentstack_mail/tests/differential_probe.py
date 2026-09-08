@@ -1,4 +1,4 @@
-"""Subprocess worker for frozen-live versus AgentStack Mail comparisons.
+"""Subprocess worker for frozen-live versus ORRERY Mail comparisons.
 
 The worker imports exactly one server namespace, runs one ordered scenario via
 an in-memory FastMCP client, and writes JSON to an explicit output path.  Live

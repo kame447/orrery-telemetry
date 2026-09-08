@@ -1,7 +1,7 @@
 # AgentStack Codex App integration
 
 This directory is the source of truth for the optional Codex App bridge. It
-keeps experimental app-server control isolated from agent-mail identities and
+keeps experimental app-server control isolated from ORRERY Mail identities and
 from the dashboard's tmux runtime path.
 
 The current P3 implementation provides:
@@ -11,7 +11,7 @@ The current P3 implementation provides:
 - a private Bridge socket, fail-open hook spool, durable identity bindings,
   separately protected owner tokens, and sanitized dashboard snapshots;
 - server-assigned root and subagent names: fresh registrations omit `name`,
-  then atomically adopt the canonical agent-mail response into the binding;
+  then atomically adopt the canonical ORRERY Mail response into the binding;
 - a fail-closed App-surface filter backed by matching `Codex Desktop` rollout
   metadata; transcript-less sessions are skipped because cold wake requires a
   resumable rollout and such identities would be unusable;
@@ -42,14 +42,14 @@ The current P3 implementation provides:
 - fail-closed stopped-subagent handling: durable cold wake targets root tasks;
   blocked child delivery exposes only its parent root external ID for a future
   count-only escalation path;
-- injectable agent-mail transport and a Codex App runtime provider;
+- injectable ORRERY Mail transport and a Codex App runtime provider;
 - fake-server protocol tests that do not start Codex or require tmux.
 
 ## Identity lifecycle
 
 The Bridge does not maintain an agent-name pool. A fresh root or subagent
 binding starts with a local-only `Pending-<external-id-hash>` label and calls
-`register_agent` without `name`, allowing agent-mail to choose from its
+`register_agent` without `name`, allowing ORRERY Mail to choose from its
 canonical name and portrait namespace. The response name is immediately
 adopted by the durable binding and its runtime snapshot. The provisional label
 is also withheld during registration retries, so it cannot become a remote
@@ -122,7 +122,7 @@ Waiting runtimes become `dormant` after one hour without a lifecycle event by
 default. The installer accepts `--stale-after SECONDS` (minimum five minutes)
 for environments with a different observed idle cadence.
 
-Transient agent-mail registration failures retry at most 12 calls over a
+Transient ORRERY Mail registration failures retry at most 12 calls over a
 maximum one-hour lifetime, with a five-minute backoff cap. The corresponding
 installer options are `--retry-max-attempts`, `--retry-max-age`, and
 `--retry-max-backoff`. Non-Desktop or transcript-less rows are deterministic

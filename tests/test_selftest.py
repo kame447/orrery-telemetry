@@ -78,7 +78,7 @@ def _stub_healthy_mail_flow(monkeypatch) -> list[str]:
                 return {"status": "healthy"}
             if tool == "ensure_project":
                 return {"id": 1}
-            raise AssertionError(f"unexpected agent-mail call: {tool}")
+            raise AssertionError(f"unexpected ORRERY Mail call: {tool}")
 
     monkeypatch.setattr(SELFTEST, "AgentMail", HealthyMail)
     monkeypatch.setattr(
@@ -148,7 +148,7 @@ def test_dashboard_on_different_database_makes_selftest_fail(
         dashboard_port=8770,
     )
 
-    # Model the regression exactly: agent-mail registered the pair, but the
+    # Model the regression exactly: ORRERY Mail registered the pair, but the
     # dashboard successfully answers from another database and lists neither.
     monkeypatch.setattr(
         SELFTEST,

@@ -1,6 +1,6 @@
 # トラブルシューティング
 
-> English version: planned.
+> English version: [troubleshooting.en.md](troubleshooting.en.md)
 
 [前: 設定](configuration.md) · [README に戻る](../README.md) · [次: 第三者コンポーネント](third-party.md)
 
@@ -27,7 +27,7 @@ dashboard は `/api/version` の正しい JSON response を「実際に配信中
 
 | 項目 | これが分かれば判ること |
 |---|---|
-| agent-mail の commit・origin より何コミット先か | 動いているコードが本当はどれか |
+| ORRERY Mail の commit・origin より何コミット先か | 動いているコードが本当はどれか |
 | `AGENT_NAME_ENFORCEMENT_MODE` | 要求した名前がそのまま通るかどうか |
 | passthrough patch の有無 | 上のモードがそもそも受け付けられる版かどうか |
 | requested-name handling | #140 / passthrough / 旧処理を合わせた最終判定。`unknown` は未判定 |
@@ -36,6 +36,30 @@ dashboard は `/api/version` の正しい JSON response を「実際に配信中
 | tmux / python3 / uv / claude / codex の有無と版 | 前提コマンドが揃っているか |
 
 **token や Authorization ヘッダは含みません**（そのままチャットに貼れるように、意図的に値を出さない作りにしてあり、テストで固定しています）。「何をして」「何を期待して」「何が起きたか」を末尾の欄に書き足してください。エラー文はそのまま貼ってもらうのが最も速いです。
+
+## Mail の fixture digest mismatch
+
+`Authorization fixture digest mismatch` や tools fixture の digest mismatch は、Git の `core.autocrlf=true` による checkout 時の CRLF 変換でも発生します。
+次の command で対象ファイルの改行を確認できます。
+
+```bash
+git ls-files --eol packages/agentstack_mail/fixtures/authorization-tools-v1.json packages/agentstack_mail/fixtures/live-tools-list.json
+```
+
+この2ファイルは配布時の bytes を SHA-256 で固定しているため、`.gitattributes` で `text eol=lf` を指定しています。
+新しい checkout では `core.autocrlf` の値にかかわらず `i/lf w/lf` になります。
+既存 checkout で `w/crlf` のままなら、未コミットの変更を保存したうえで、この属性を含む revision から新しく clone してください。
+CRLF に合わせて期待する digest を変更したり、認可 catalog の検証を無効にしたりしないでください。
+
+## Windows Mail archive の MAX_PATH 超過
+
+長い project path と message subject によって archive path が Windows の MAX_PATH を超えると、`WinError 206` で保存に失敗することがあります。
+filesystem access には extended-length path を使い、Git staging には archive repository 内だけで `core.longpaths=true` を設定した Git を使います。
+project identity、slug、filename と global Git 設定は維持します。
+
+Windows 回帰テストは260文字を超える path で message 保存、Git staging、起動時の未commit file 回復を検証します。
+native Windows installer、service 管理、Codex Desktop Bridge の対応を示すテストではありません。
+UNC path の変換も含みますが、network share での実動作は未検証です。
 
 ## `NOT CONFIGURED`
 
@@ -103,7 +127,7 @@ installer は使用中 port を検出すると service 登録前に停止しま�
 
 ## Linux / WSL で service がない
 
-**Linux と WSL は未検証です。** systemd user 経路と supervised background への fallback は実装されていますが、開発者の環境は macOS のみで、実 Linux ホストでの登録・timer 起動は通していません。CI（ubuntu-latest）は `systemctl` をスタブにして unit の生成と呼び出し順だけを検査しています。以下は設計上の期待であり、うまくいかなければ issue で環境と出力を報告してください。
+**素の Linux は未検証、WSL2 は実機確認済みです。** systemd user 経路と supervised background への fallback は実装されていますが、素の Linux ホストでの登録・timer 起動は通していません。CI（ubuntu-latest）は `systemctl` をスタブにして unit の生成と呼び出し順だけを検査しています。WSL2（Ubuntu 26.04 / WSL 2.7）では Mail の timer 起動と dashboard、agent 起動、jump まで通しています。うまくいかなければ issue で環境と出力を報告してください。
 
 systemd user session が使える場合:
 
@@ -112,7 +136,26 @@ systemctl --user status agentstack-dashboard.service
 systemctl --user daemon-reload
 ```
 
-systemd user が使えない環境と WSL では installer が `nohup` と pidfile に fallback します。Ghostty click-to-jump は使えませんが、localhost dashboard と browser terminal は利用できます。
+systemd user が使えない環境と WSL では installer が `nohup` と pidfile に fallback します。localhost dashboard と browser terminal は利用できます。WSL2 では dashboard の jump が Windows Terminal（`wt.exe`）の新しいタブを開いて `wsl.exe -d <distro>` 経由で tmux に attach します（`AGENTSTACK_TERMINAL=auto` が `wt` を選ぶ）。素の Linux では jump は未対応のままです。
+
+### WSL2 では最後のシェルを閉じると service が消える
+
+WSL2 は開いているセッションが無くなると distro の VM ごと停止し、`nohup` で立てた Mail と dashboard は一緒に消えます。加えて、ユーザーに linger が無いと最後のログアウトで systemd user manager も終了します。常駐させたいなら両方を設定します（Ubuntu 26.04 / WSL 2.7 で確認）:
+
+```bash
+# WSL 内: ログアウト後も systemd --user を残す
+loginctl enable-linger "$USER"
+```
+
+```ini
+# Windows 側 %UserProfile%\.wslconfig: セッションが無くても VM を止めない
+[wsl2]
+vmIdleTimeout=-1
+```
+
+設定後は `wsl --shutdown` で一度止めてから開き直します。Mail は起動 1 分後に timer が立て、dashboard は `install.sh` の再実行で立て直します。
+
+同じ PC で native Windows の helper（`scripts/windows/`）も動かしている場合、WSL2 の 8770 は Windows の localhost に転送されるので、Windows 側に同じ port の dashboard が残っているとブラウザはそちらに繋がり、WSL の agent が見えません。どちらかの port を変えるか、native 側を止めてから開きます。
 
 ## macOS で `EPERM`
 
@@ -152,8 +195,16 @@ curl -s http://127.0.0.1:8770/api/mail-watcher-health
 
 - watcher process がない
 - signal が残り、直近成功が古い
-- agent-mail endpoint / bearer token が不正
+- ORRERY Mail endpoint / bearer token が不正
 - target tmux session がない
+
+watcher は installer が service として登録します（macOS は launchd `org.agentstack.mail-watcher`、Linux / WSL2 は systemd user unit `org.agentstack.mail-watcher.service`。`watcher_mode` にどちらで動いているかが出ます）。`watcher_running` が `false` のまま signal が溜まるのは、この unit が無い古いインストール（2026-09-07 より前は `agent-start` が tmux session として起動するだけで、dashboard から spawn した agent しかいない host では誰も起動しなかった）か、unit の登録に失敗した場合です。`bash scripts/install.sh` を再実行すると登録し直します。手動で確認するなら:
+
+```bash
+launchctl print gui/$(id -u)/org.agentstack.mail-watcher   # macOS
+systemctl --user status org.agentstack.mail-watcher.service   # Linux / WSL2
+tail ~/.agentstack/runtime/mail-watcher.log
+```
 
 `AGENTSTACK_MAIL_HOME` と `AGENTSTACK_SIGNALS_DIR` が service と launcher で一致しているか確認します。
 
@@ -179,11 +230,11 @@ Codex の場合は `AGENTSTACK_CODEX_MODELS` と request model、effort allow-li
 - `unknown`: DB / auth / transport failure
 - `available`: 使用可
 
-`unknown` は使用できません。別名で回避する前に agent-mail と project key を直してください。identity continuity を守るためです。
+`unknown` は使用できません。別名で回避する前に ORRERY Mail と project key を直してください。identity continuity を守るためです。
 
 ## 要求した名前と違う名前で登録される
 
-agent-mail が名前を受け入れず、生成名に置き換えた状態です。エージェントは動き続けるので気づきにくく、他のエージェントから宛先として呼べないことで初めて分かります。
+ORRERY Mail が名前を受け入れず、生成名に置き換えた状態です。エージェントは動き続けるので気づきにくく、他のエージェントから宛先として呼べないことで初めて分かります。
 
 ```bash
 ~/.agentstack/bin/agentstack-doctor --report \
@@ -320,7 +371,7 @@ protected root 内の Edit / Write では、hook が exact identity を確定し
 1. `AGENTSTACK_PROJECT_KEY` / `PROJECT_KEY` が reservation を作った project と一致するか確認
 2. `AGENT_NAME`、または`TMUX_PANE`で明示したtmux sessionがcanonical identityを指すか確認。pane metadataとの不一致は`AGENT IDENTITY CONFLICT`として先に直す。tmux 外の client は `register_agent` 済みなら session index から identity が解決される。同一 session に複数の identity が結び付いている場合も `AGENT IDENTITY CONFLICT` で、どちらを残すかを決めてから再登録する
 3. exact path または最小の glob を `file_reservation_paths` で予約
-4. conflict が返ったら holder へ agent-mail で連絡し、release または expiry を待つ
+4. conflict が返ったら holder へ ORRERY Mail で連絡し、release または expiry を待つ
 
 owner `registration_token` はこのhookのtool argumentsへ送られず、legacy HTTP bearerとは別物です。`isError`は省略またはboolean `false`だけを成功とします。exact identityとprotected scopeの確定後、最初の照会がtransport unreachableの場合だけfail-openです。HTTP/MCP/schema rejection、malformed response、definitive zero後のtransport failureはblockします。pathなし・protected root外はenforcement対象外なのでexit 0です。
 
@@ -342,7 +393,7 @@ Codex Desktop 統合には core doctor とは別の doctor、runtime state、失
 
 ## Dashboard に agent が二重表示される
 
-tmux session 名と agent-mail identity が一致しているか確認します。
+tmux session 名と ORRERY Mail identity が一致しているか確認します。
 
 ```bash
 tmux list-sessions
@@ -355,7 +406,7 @@ stale な top-level environment を継承した可能性がある場合は、新
 
 `/api/history` は agent program に応じて Claude / Codex transcript を探し、見つからなければ他方へ fallback します。
 
-- agent-mail の program が正しいか
+- ORRERY Mail の program が正しいか
 - transcript が disk に残っているか
 - session / agent 名が一致しているか
 - child と parent の transcript を取り違えていないか

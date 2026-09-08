@@ -21,7 +21,7 @@ back so the user can answer, or use `--assume-yes` **only if they told you
 to**. Never add that flag on your own initiative to get a clean run.
 
 **2. Never invent a path or a value to get past an error.** The installer
-stops when it cannot determine something — which database agent-mail is
+stops when it cannot determine something — which database ORRERY Mail is
 actually using, whether the port is free, whether the interpreter is new
 enough. Those stops are the product working. Guessing `AGENTSTACK_MAIL_DB`
 to make the message go away will point the dashboard at a database that does
@@ -48,19 +48,19 @@ Check the machine first and tell the user what you found. Every one of these
 has already broken a real install.
 
 ```sh
-python3 --version                     # must be 3.10 or newer
+python3 --version                     # must be 3.11 or newer
 command -v tmux git uv                # all three are required
 lsof -i :8770                         # dashboard port; must be free
-lsof -i :18765                        # agent-mail (default port; see below)
+lsof -i :18765                        # ORRERY Mail (default port; see below)
 uname -s                              # macOS is the primary target
 ```
 
 **If something is already listening on 18765** (or on the port named by an
-existing `AGENTSTACK_MCP_URL`), the user likely has agent-mail running. That is
+existing `AGENTSTACK_MCP_URL`), the user likely has ORRERY Mail running. That is
 good and normal — the installer will detect it and reuse both the server and
 its database. Do not stop it. Do not start a second one.
 
-**If `python3` is older than 3.10**, do not upgrade their system Python.
+**If `python3` is older than 3.11**, do not upgrade their system Python.
 Point `AGENTSTACK_PYTHON` at a newer interpreter they already have, or tell
 them what to install.
 
@@ -73,7 +73,7 @@ cd orrery-telemetry
 ```
 
 Read the dry run with the user. It prints the planned service mode, the
-agent-mail database it resolved, and the settings diff. If the resolved
+ORRERY Mail database it resolved, and the settings diff. If the resolved
 database is not the one they actually use, stop and ask — that is worth more
 than a completed install.
 
@@ -83,7 +83,7 @@ Then, for the real run, choose one of two paths.
 terminal the user controls, or tell them to run it themselves. It pauses for a
 typed `yes` four times — the settings merge, the `~/.claude.json` MCP entry,
 the Codex `AGENTS.md` block, and the Claude `CLAUDE.md` block. Reuse of an
-already-running agent-mail is reported, not prompted for. This is the right
+already-running ORRERY Mail is reported, not prompted for. This is the right
 choice when you are unsure, and when the user has not said otherwise.
 
 **Opt-in — `./scripts/install.sh --assume-yes`.** Use this only when the user
@@ -127,7 +127,7 @@ agentstack-doctor --report
 and give the user the block it prints, between the `copy from here` and `copy
 to here` markers, to file with the failure. It carries no tokens. Every defect
 found so far has been a difference between the reporter's machine and the
-developer's — the agent-mail commit, the name-enforcement mode, the database
+developer's — the ORRERY Mail commit, the name-enforcement mode, the database
 schema, the file-descriptor limit — and that block answers all of those at
 once instead of over several rounds of questions.
 

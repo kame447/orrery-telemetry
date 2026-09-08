@@ -2,7 +2,7 @@
 # agentstack-codex-bootstrap — register a Codex session with agent-mail.
 #
 # Codex has no Claude Code hook system, so unlike `claude` it does not register
-# itself. This script does what the Claude hooks do: health-check agent-mail,
+# itself. This script does what the Claude hooks do: health-check ORRERY Mail,
 # ensure the project, register the agent (with an Adjective-Scientist name),
 # rename the tmux session to that name, and export AGENT_NAME for the Codex
 # process that runs next.
@@ -14,7 +14,7 @@
 # through its MCP client if shell registration is unavailable.
 #
 # Env (normally provided by ~/.agentstack/env.sh):
-#   AGENTSTACK_PROJECT_KEY          agent-mail project key (REQUIRED)
+#   AGENTSTACK_PROJECT_KEY          ORRERY Mail project key (REQUIRED)
 #   AGENTSTACK_MCP_URL              ORRERY Mail MCP endpoint (default :18765/mcp)
 #   AGENTSTACK_MAIL_ENV             file holding HTTP_BEARER_TOKEN
 #   AGENTSTACK_MANAGED_AGENTS_FILE  list the dashboard monitors (optional)
@@ -116,9 +116,9 @@ fi
 # Ensure the MCP token is available for the Codex MCP client and our curl calls.
 ags_mail_load_token
 
-# 1. health check — degrade gracefully if agent-mail is down.
+# 1. health check — degrade gracefully if ORRERY Mail is down.
 if ! ags_mcp_call "health_check" >/dev/null 2>&1; then
-  echo "⚠️  agent-mail unreachable at $MCP_URL; launching Codex with preselected AGENT_NAME=${AGENT_NAME:-}." >&2
+  echo "⚠️  ORRERY Mail unreachable at $MCP_URL; launching Codex with preselected AGENT_NAME=${AGENT_NAME:-}." >&2
   finalize_agent_name
   if [[ -n "${TMUX:-}" && -n "${AGENT_NAME:-}" && "$TMUX_IDENTITY_MATCHED" != "1" ]]; then
     return 1 2>/dev/null || exit 1
@@ -142,14 +142,14 @@ if [[ "$TMUX_PREFLIGHT_CONFLICT" != "1" ]]; then
 fi
 
 if [[ "$REGISTER_STATUS" == "2" && "${AGS_AGENT_NAME_SUBSTITUTED:-0}" == "1" ]]; then
-  echo "⚠️  agent-mail changed reserved identity '${AGS_REQUESTED_AGENT_NAME:-$CANDIDATE_AGENT_NAME}' to '${AGS_SERVER_RETURNED_AGENT_NAME:-unknown}'; refusing to rename this child/resumed session away from its existing inbox." >&2
+  echo "⚠️  ORRERY Mail changed reserved identity '${AGS_REQUESTED_AGENT_NAME:-$CANDIDATE_AGENT_NAME}' to '${AGS_SERVER_RETURNED_AGENT_NAME:-unknown}'; refusing to rename this child/resumed session away from its existing inbox." >&2
   return 1 2>/dev/null || exit 1
 fi
 
 if [[ -n "$REGISTERED_AGENT_NAME" ]]; then
   AGENT_NAME="$REGISTERED_AGENT_NAME"
   if [[ "${AGS_AGENT_NAME_SUBSTITUTED:-0}" == "1" ]]; then
-    echo "⚠️  agent-mail changed requested identity '${AGS_REQUESTED_AGENT_NAME:-$CANDIDATE_AGENT_NAME}' to '$REGISTERED_AGENT_NAME'; reconciling the current tmux session to the server-returned name." >&2
+    echo "⚠️  ORRERY Mail changed requested identity '${AGS_REQUESTED_AGENT_NAME:-$CANDIDATE_AGENT_NAME}' to '$REGISTERED_AGENT_NAME'; reconciling the current tmux session to the server-returned name." >&2
   fi
 elif [[ "$TMUX_PREFLIGHT_CONFLICT" == "1" ]]; then
   echo "⚠️  agent registration skipped because the target tmux session name is already in use." >&2
@@ -159,11 +159,11 @@ fi
 
 finalize_agent_name
 if [[ -n "$REGISTERED_AGENT_NAME" && "$TMUX_IDENTITY_MATCHED" == "1" ]]; then
-  echo "✅ agent-mail registered: $AGENT_NAME"
+  echo "✅ ORRERY Mail registered: $AGENT_NAME"
 elif [[ -n "$REGISTERED_AGENT_NAME" ]]; then
-  echo "⚠️  agent-mail registered as $AGENT_NAME, but the tmux session name is not synchronized." >&2
+  echo "⚠️  ORRERY Mail registered as $AGENT_NAME, but the tmux session name is not synchronized." >&2
 else
-  echo "ℹ️  agent-mail not registered; AGENT_NAME preselected: ${AGENT_NAME:-}"
+  echo "ℹ️  ORRERY Mail not registered; AGENT_NAME preselected: ${AGENT_NAME:-}"
 fi
 if [[ -n "${TMUX:-}" && -n "${AGENT_NAME:-}" && "$TMUX_IDENTITY_MATCHED" != "1" ]]; then
   return 1 2>/dev/null || exit 1

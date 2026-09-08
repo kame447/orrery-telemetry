@@ -401,7 +401,7 @@ def isolated_worker_env(
     """Build a secret-free environment for one live or core worker.
 
     Only a small OS bootstrap allowlist is inherited from ``base``.  API keys,
-    credentials, caller ``PYTHONPATH``, and both legacy and AgentStack Mail
+    credentials, caller ``PYTHONPATH``, and both legacy and ORRERY Mail
     configuration names are therefore absent unless this function sets the
     appropriate variant explicitly.
     """

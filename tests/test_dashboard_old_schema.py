@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The dashboard reads a database it does not own, at whatever version is installed.
 
-A tester running an agent-mail from forty days earlier has no `retired_at`
+A tester running an ORRERY Mail from forty days earlier has no `retired_at`
 column, and every query naming it raised
 
     OperationalError: no such column: a.retired_at

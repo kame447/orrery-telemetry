@@ -11,10 +11,7 @@ import subprocess
 import sys
 import threading
 
-try:  # pragma: no cover - Python 3.11+ uses the stdlib module.
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 only
-    import tomli as tomllib
+import tomllib
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -117,7 +114,7 @@ esac
 
     assert result.returncode != 0
     assert "preflight failed with 1 problem(s)" in result.stderr
-    assert "AGENTSTACK_PYTHON must be Python 3.10 or newer" in result.stderr
+    assert "AGENTSTACK_PYTHON must be Python 3.11 or newer" in result.stderr
     assert "found 3.9.18" in result.stderr
     assert "Install a current Python" in result.stderr
 
@@ -168,10 +165,10 @@ def test_preflight_marks_occupied_port_as_existing_install_update(tmp_path):
 
     assert result.returncode != 0
     assert (
-        "existing AgentStack install detected; occupied agent-mail port "
+        "existing ORRERY Telemetry install detected; occupied ORRERY Mail port "
         f"{server.server_port} will be verified for reuse"
     ) in result.stdout
-    assert "did not answer an AgentStack Mail health check" in result.stderr
+    assert "did not answer an ORRERY Mail health check" in result.stderr
 
 
 def test_shell_python_floor_matches_package_metadata():
@@ -235,7 +232,7 @@ def test_preflight_reports_free_port_as_available(tmp_path):
     result = _run(env, "--dry-run")
 
     port = env["AGENTSTACK_MCP_URL"].rsplit(":", 1)[1].split("/", 1)[0]
-    assert f"preflight: agent-mail port {port} is available" in result.stdout
+    assert f"preflight: ORRERY Mail port {port} is available" in result.stdout
 
 
 def test_preflight_refuses_to_call_an_unprobeable_port_available(tmp_path):
@@ -250,8 +247,8 @@ def test_preflight_refuses_to_call_an_unprobeable_port_available(tmp_path):
 
     port = env["AGENTSTACK_MCP_URL"].rsplit(":", 1)[1].split("/", 1)[0]
     assert result.returncode != 0
-    assert f"agent-mail port {port} is available" not in result.stdout
-    assert "could not determine whether agent-mail port" in result.stderr
+    assert f"ORRERY Mail port {port} is available" not in result.stdout
+    assert "could not determine whether ORRERY Mail port" in result.stderr
     assert "Can't assign requested address" in result.stderr
     assert "run the installer from a local terminal" in result.stderr
 
@@ -267,5 +264,5 @@ def test_preflight_port_skip_switch_accepts_an_unprobeable_port(tmp_path):
 
     result = _run(env, "--dry-run")
 
-    assert "could not determine whether agent-mail port" not in result.stderr
+    assert "could not determine whether ORRERY Mail port" not in result.stderr
     assert "preflight: passed" in result.stdout

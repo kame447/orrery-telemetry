@@ -1,12 +1,16 @@
 # Dashboard
 
-> English version: planned.
+> English version: [dashboard.en.md](dashboard.en.md)
 
 [前: Codex App 統合](codex-app.md) · [README に戻る](../README.md) · [次: API reference](api.md)
 
-dashboard は既定で `http://127.0.0.1:8770/` に公開されます。tmux、agent-mail SQLite、runtime state、project log、任意の Obsidian link hint を読み合わせ、観測と安全な control operation を一つの画面にまとめます。
+dashboard は既定で `http://127.0.0.1:8770/` に公開されます。tmux、ORRERY Mail SQLite、runtime state、project log、任意の Obsidian link hint を読み合わせ、観測と安全な control operation を一つの画面にまとめます。
 
-ここでいう agent-mail / mail-watcher は、AgentStack 内のエージェント間メッセージを扱う機構です。利用者のメールアカウント、メールクライアント、受信箱には一切アクセスしません。
+起動時には `pkill` で前回の browser terminal（ttyd）の残存プロセスを整理します。
+`pkill` がない環境では、この整理だけをスキップして HTTP server を起動します。
+この処理は Windows native の installer や Codex App Bridge を対応済みにするものではありません。
+
+ここでいう ORRERY Mail / mail-watcher は、ORRERY Telemetry 内のエージェント間メッセージを扱う機構です。利用者のメールアカウント、メールクライアント、受信箱には一切アクセスしません。
 
 ## やりたいことから探す
 
@@ -39,7 +43,7 @@ NETWORK は選択中の time window 外にある node を表示しないこと�
 | モデルの下の細い横線 | **残りの作業メモリ（context remaining）**。長いほど余裕があり、残り20%未満では赤寄りになります。telemetry を取得できないカードには出ません。 |
 | 黒い帯 | terminal で観測した現在の表示。作業中か待機中かを読む手掛かりです。 |
 | `ORD` | そのエージェントに与えられている直近の指示です。 |
-| `RX` | agent-mail で直近に受信した指示です。送信者、件名、重要度が並びます。まだ受信がなければ行自体がありません。 |
+| `RX` | ORRERY Mail で直近に受信した指示です。送信者、件名、重要度が並びます。まだ受信がなければ行自体がありません。 |
 | `● ONLINE` | agent process が稼働中です。**いま仕事を進めているという意味とは限りません**。 |
 | 右上の状態表示 | 黄色の秒数は作業中、薄い `LAST …` は入力待ち、`?` と `APPROVAL` は人の介入待ちです。 |
 | `↩ EXIT` | 稼働中のエージェントへ graceful な `/exit` を送ります。誤操作防止のため二度押しで確定します。 |
@@ -87,6 +91,24 @@ NETWORK は選択中の time window 外にある node を表示しないこと�
 
 mail の `last_active` だけで running と判定せず、tmux process、pane state、session state を合わせます。過去 session を現在実行中と誤表示しないためです。
 
+running と finished の境目は、pane の先頭 process 名ではなく process tree で決めます。Claude も Codex も shell の下で動く（`zsh > claude`、`zsh > node > codex`）ので、`pane_current_command` は生きていても死んでいても shell の名前です。dashboard は 4.5 秒ごとに `ps` を 1 回読み、pane の子孫に登録された program の実体（`claude` / version 名の binary / `node`、`codex`）が居るかで判定します。`ps` が使えない環境では従来どおり pane の command 名と title の glyph に落ちます。
+
+### Lifecycle: EXIT の後に finished と gone のどちらへ行くか
+
+分類は「設計した遷移」ではなく、その時点で測れるもの（tmux session の有無、pane 配下の agent process の有無）を映しています。EXIT は agent に `/exit` を送るだけで、その後 `finished` と `gone` のどちらに落ちるかは Dashboard ではなく、**その agent を起こした launcher が REPL 終了後に shell を残すかどうか**で決まります。
+
+| 起動のしかた | REPL 終了後 | 分類 |
+| --- | --- | --- |
+| `/delegate` / `spawn_child.sh`（REPL の後ろに cleanup を繋ぐ） | cleanup が reservation 解放と soft-retire を済ませ、command 列が尽きて tmux session も閉じる | `gone`（soft-retire 済みなら `retired`） |
+| 対話 shell から手で起動した session、cleanup を後置しない launcher | shell が残る | `finished` |
+
+`finished` は EXIT の次の段階として用意した状態ではなく、shell が残っている現実を表す状態です。provider を追加するときに Claude / Codex と同じ見え方にしたければ、Dashboard 側ではなく child 経路の launcher に cleanup を後置します（[#20](https://github.com/gyroid-eth/orrery-telemetry/issues/20)）。
+
+- `finished` への EXIT は shell に `exit` を送って session を閉じるので `gone` に落ちます
+- resume は `finished` / `gone` のどちらも transcript から新しい session を作る同じ経路です。`finished` は先に husk を kill してから乗ります
+- `finished` の実用上の違いは、DECK の既定表示に残ること、`OPEN TMUX` で最後の画面と cwd を見に行けることの 2 点です
+- husk は待機中の shell 1 個なので、溜めても memory 負荷にはなりません。溜まって困るのは DECK の見通しの方で、retire / kill で片付けます
+
 ### 検索
 
 上部の `FILTER · name / task` は、名前だけでなく **task description、live pane title、最後に受け取った指示の subject と送信者**も対象にします。何をしていた agent かを覚えていれば、名前を思い出せなくても引けます。
@@ -105,7 +127,7 @@ KILL の可否は frontend の見た目だけで決めず、server の `build_ag
 
 ### Child 完了後の表示
 
-正常な completion flow では、`/delegate` で起動した child が終了前に agent-mail の完了報告を親へ送ります。親はその報告を読み、成果物を検証してから利用者へ結果を返します。child の REPL が終了した後は launcher の cleanup が reservation を解放し、remote identity を soft-retire し、child runtime の credential と state を削除します。その command の終了に伴い tmux session も閉じます。
+正常な completion flow では、`/delegate` で起動した child が終了前に ORRERY Mail の完了報告を親へ送ります。親はその報告を読み、成果物を検証してから利用者へ結果を返します。child の REPL が終了した後は launcher の cleanup が reservation を解放し、remote identity を soft-retire し、child runtime の credential と state を削除します。その command の終了に伴い tmux session も閉じます。
 
 このため、完了した child のカードは DECK の通常表示から消えますが、失敗ではありません。`show all` を有効にすると、直近30日の `gone` / `retired` agent もカードとして表示されます。
 
@@ -123,7 +145,7 @@ project base は絶対 path の `AGENTSTACK_PROJECT_KEY`、絶対 path の `AGEN
 
 ## Codex App runtime
 
-[Codex App 統合](codex-app.md)を導入すると、dashboard は Bridge の allowlist 済み snapshot を tmux state と並べて読みます。同じ agent-mail 名の row を `surface: codex-app` として昇格し、`Codex App · <state>` または `Codex App · wake:<status>` を live 表示します。
+[Codex App 統合](codex-app.md)を導入すると、dashboard は Bridge の allowlist 済み snapshot を tmux state と並べて読みます。同じ ORRERY Mail 名の row を `surface: codex-app` として昇格し、`Codex App · <state>` または `Codex App · wake:<status>` を live 表示します。
 
 - `registering / working / waiting / blocked`: running 扱い
 - `dormant / degraded`: finished 扱い
@@ -155,7 +177,7 @@ NETWORK は「誰から生まれたか」と「誰と通信したか」を一枚
 ### Edge と mail
 
 - spawn edge: parent-child lineage
-- communication edge: agent-mail message
+- communication edge: ORRERY Mail message
 - communication edge 上の数字: その2者間の通信回数
 - communication edge の矢印: 通信方向
 - edge click で二者間 mail drawer
@@ -234,15 +256,15 @@ TIME-TRAVEL ON は initial snapshot から node、edge、state を再構築し�
 - `occupied / unknown`: 選択不可
 - roster 外または空き候補なし: HTTP 409 として別 scientist / AUTO を促す
 
-scientist rail の `available` は bare surname ではなく、134 adjective のどれかとの組み合わせに空きがあることを意味します。adjective は agent-mail 正典 `SIMPLE_ADJECTIVES` と同期し、client は local で未検証名を作りません。AUTO でも server が最大75候補を live registry で fail-closed 検証し、空きを確認できなければ spawn を拒否します。
+scientist rail の `available` は bare surname ではなく、134 adjective のどれかとの組み合わせに空きがあることを意味します。adjective は ORRERY Mail 正典 `SIMPLE_ADJECTIVES` と同期し、client は local で未検証名を作りません。AUTO でも server が最大75候補を live registry で fail-closed 検証し、空きを確認できなければ spawn を拒否します。
 
 ### Engine
 
 - Claude / Codex provider tab
 - provider ごとの model card と用途 guide
 - Claude は Sonnet / Opus / Haiku
-- Codex は `gpt-5.6-sol / terra / luna`
-- Codex の effort は `low / medium / high / xhigh`、既定 `xhigh`
+- Codex は `gpt-5.6-sol / terra / luna / gpt-6-astra`
+- Codex の effort は `low / medium / high / xhigh / max / ultra`（max / ultra は gpt-6-astra のみ）、既定 `xhigh`
 
 server の provider / model / effort allow-list を catalog と validation の両方に使います。
 
@@ -288,7 +310,7 @@ Codex では `--codex --model <model> --effort <effort>` を渡します。non-g
 branch: exp/<child-name>
 ```
 
-を使います。`worktree_base` を省略すると `HEAD` です。task message には元 project key、branch、base、directory を明記し、worktree path を agent-mail project key と誤認しないようにします。
+を使います。`worktree_base` を省略すると `HEAD` です。task message には元 project key、branch、base、directory を明記し、worktree path を ORRERY Mail project key と誤認しないようにします。
 
 ## Embed mode
 
