@@ -20,13 +20,13 @@ Codex App Server の `account/rateLimits/read` を利用する。
 
 ## Antigravity
 
-Antigravity CLI 1.1.12 以降で提供される read-only print command を利用する。1.1.11 以前では `/usage` を安全な非対話 command とみなさず、Dashboard から実行しない。
+Antigravity CLI 1.1.11 以降で提供される read-only print command を利用する。1.1.10 以前では `/usage` を安全な非対話 command とみなさず、Dashboard から実行しない。
 
 ```sh
 agy -p "/usage" --output-format json
 ```
 
-CLI の envelope や field casing が release 間で異なっても、返却された quota group / bucket のみを正規化する。`displayName` / `bucketId` / `remaining.remainingFraction` と、従来の snake_case 相当の両方を受け付けるが、Gemini / Claude / GPT などの固定 bucket を ORRERY 側では作らない。
+CLI の envelope や field casing が release 間で異なっても、返却された quota group / bucket のみを正規化する。`displayName` / `bucketId` / `remainingFraction` と、その互換表現である snake_case / nested `remaining` の両方を受け付けるが、Gemini / Claude / GPT などの固定 bucket を ORRERY 側では作らない。
 
 binary は既存 provider と同じ `AGENTSTACK_GEMINI_BIN` を優先する。未設定時は PATH に加えて `~/.local/bin/agy`、Homebrew の代表的な場所も確認する。
 
