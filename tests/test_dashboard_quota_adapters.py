@@ -333,3 +333,5 @@ def test_demo_usage_strip_never_falls_through_to_live_quota():
     assert b"if(demo){renderQuota(demoQuota);return;}" in injected
     assert b"Number.isFinite" in injected
     assert b"usage-observed" in injected
+    assert b"usage-status" in injected
+    assert b"status!=='ok'" in injected
