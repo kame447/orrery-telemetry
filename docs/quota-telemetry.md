@@ -12,7 +12,7 @@ provider の refresh は provider ごとの lock と cache を持ち、cold miss
 
 `remaining_percent` は残量で、100 に近いほど余裕がある。取得に失敗した場合、直近の正常観測が短い stale window 内なら `stale`、それ以外は `unavailable` とする。
 
-provider の stderr や例外本文はブラウザ向け API へそのまま返さない。API の `reason` は安定した状態コードのみとし、詳細はローカル Dashboard log 側で扱う。
+provider の stderr や例外本文はブラウザ向け API に返さず、Dashboard log にも任意本文を永続化しない。API の `reason` は安定した状態コード、log は provider 名と例外型までに限定する。
 
 ## Codex
 
@@ -34,7 +34,7 @@ agy -p "/usage" --output-format json
 
 ただし Antigravity CLI は有効な認証がない場合に Google Sign-In を開始し得る。常駐 Dashboard の telemetry poll が認証 UI を勝手に起動しないよう、Antigravity quota は明示 opt-in とする。
 
-インストール済みの常駐 Dashboard では、runtime marker を作るのが最も単純な opt-in になる。marker は各 poll 時に確認するため、サービス再インストールは不要。
+インストール済みの常駐 Dashboard では、runtime marker を作るのが最も単純な opt-in になる。marker は次回の provider cache refresh 時に確認されるためサービス再インストールは不要だが、既存 cache がある場合は最大 180 秒程度反映が遅れる。
 
 ```sh
 mkdir -p ~/.agentstack/runtime
@@ -65,7 +65,7 @@ Claude Code は status line 入力に subscription rate limit を含める。ORR
 ~/.agentstack/dashboard/claude_quota_observe.py
 ```
 
-Claude の `statusLine.command` としてこの script を Python で実行すると、status line の stdin JSON から `rate_limits` だけを `~/.agentstack/runtime/claude-quota.json` へ保存し、Dashboard がそれを読む。
+Claude の `statusLine.command` としてこの script を Python で実行すると、status line の stdin JSON から `rate_limits` だけを `~/.agentstack/runtime/claude-quota.json` へ保存し、Dashboard がそれを読む。複数 Claude session が同時に status line を更新しても壊れないよう、同一 directory の unique temporary file から atomic replace し、snapshot は可能な環境で mode 600 にする。
 
 例:
 
