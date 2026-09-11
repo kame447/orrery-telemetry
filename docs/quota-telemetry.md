@@ -20,7 +20,7 @@ Codex App Server の `account/rateLimits/read` を利用する。
 
 `primary` / `secondary` の位置を 5h / 7d に固定対応させず、`windowDurationMins` から表示 label を決める。App Server は `/api/quotas` の cache miss 時だけ起動し、`/api/agents` の refresh では起動しない。
 
-App Server の stdout 待ちは subprocess pipe を `selectors` へ直接登録せず、reader thread と bounded queue/deadline で処理する。このため POSIX と Windows で同じ transport path を利用できる。
+App Server の stdout 待ちは subprocess pipe を `selectors` へ直接登録せず、reader thread + queue + bounded deadline で処理する。このため POSIX と Windows で同じ transport path を利用できる。
 
 `AGENTSTACK_CODEX_BIN` が設定されていれば、その executable を利用する。
 
@@ -34,11 +34,22 @@ agy -p "/usage" --output-format json
 
 ただし Antigravity CLI は有効な認証がない場合に Google Sign-In を開始し得る。常駐 Dashboard の telemetry poll が認証 UI を勝手に起動しないよう、Antigravity quota は明示 opt-in とする。
 
+インストール済みの常駐 Dashboard では、runtime marker を作るのが最も単純な opt-in になる。marker は各 poll 時に確認するため、サービス再インストールは不要。
+
 ```sh
-export AGENTSTACK_ANTIGRAVITY_QUOTA_ENABLED=1
+mkdir -p ~/.agentstack/runtime
+touch ~/.agentstack/runtime/antigravity-quota.enabled
 ```
 
-この値が有効でない間は `agy --version` も `/usage` も実行せず、Antigravity は `unavailable / telemetry_opt_in_required` として表示する。opt-in は「この常駐 telemetry から Antigravity CLI を呼び出してよい」という明示的な許可として扱う。
+無効化する場合は marker を削除する。
+
+```sh
+rm ~/.agentstack/runtime/antigravity-quota.enabled
+```
+
+手動起動など、Dashboard プロセスへ環境変数を確実に渡せる場合は `AGENTSTACK_ANTIGRAVITY_QUOTA_ENABLED=1` でも opt-in できる。marker の場所は `AGENTSTACK_RUNTIME_DIR` に追従し、必要なら `AGENTSTACK_ANTIGRAVITY_QUOTA_OPT_IN_FILE` で明示できる。
+
+opt-in が有効でない間は `agy --version` も `/usage` も実行せず、Antigravity は `unavailable / telemetry_opt_in_required` として表示する。opt-in は「この常駐 telemetry から Antigravity CLI を呼び出してよい」という明示的な許可として扱う。
 
 CLI の envelope や field casing が release 間で異なっても、返却された quota group / bucket のみを正規化する。`displayName` / `bucketId` / `remainingFraction` と、その互換表現である snake_case / nested `remaining` の両方を受け付けるが、Gemini / Claude / GPT などの固定 bucket を ORRERY 側では作らない。
 
@@ -73,7 +84,7 @@ Claude quota がまだ観測されていない場合、Dashboard は推定値を
 
 ## Demo mode
 
-`?demo=1` または static demo の強制フラグが有効な場合、USAGE strip も synthetic fixture のみを表示する。demo mode から `/api/quotas` へ fall through して実アカウントの残量を取得することはない。
+quota wrapper が注入された served Dashboard を `?demo=1` で開いた場合、USAGE strip は synthetic fixture のみを表示し、`/api/quotas` へ fall through して実アカウントの残量を取得しない。static demo bundle は現時点では wrapper 注入前の `index.html` を使うため、USAGE strip 自体を含まない。
 
 ## API
 
