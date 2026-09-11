@@ -21,6 +21,8 @@ from .base import QuotaBucket, QuotaSnapshot
 # quota, so they must never be probed by the dashboard.
 _MIN_SAFE_VERSION = (1, 1, 11)
 _OPT_IN_ENV = "AGENTSTACK_ANTIGRAVITY_QUOTA_ENABLED"
+_OPT_IN_FILE_ENV = "AGENTSTACK_ANTIGRAVITY_QUOTA_OPT_IN_FILE"
+_OPT_IN_FILENAME = "antigravity-quota.enabled"
 
 
 class AntigravityQuotaProvider:
@@ -34,6 +36,7 @@ class AntigravityQuotaProvider:
         *,
         timeout: float = 15.0,
         enabled: bool | None = None,
+        opt_in_file: str | os.PathLike[str] | None = None,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     ) -> None:
         configured = (
@@ -43,7 +46,12 @@ class AntigravityQuotaProvider:
         )
         self.command = _resolve_command(configured or "agy")
         self.timeout = timeout
-        self.enabled = _env_bool(_OPT_IN_ENV, False) if enabled is None else bool(enabled)
+        self._enabled_override = enabled
+        self.opt_in_file = (
+            Path(opt_in_file).expanduser()
+            if opt_in_file is not None
+            else _default_opt_in_file()
+        )
         self._runner = runner
 
     def read(self) -> QuotaSnapshot:
@@ -51,7 +59,7 @@ class AntigravityQuotaProvider:
         # Antigravity falls back to an interactive Google Sign-In flow when no
         # active session exists. A background telemetry poll must never trigger
         # that side effect unless the operator explicitly opted in.
-        if not self.enabled:
+        if not self._is_enabled():
             return QuotaSnapshot(
                 provider=self.provider_name,
                 source=self.source_name,
@@ -85,6 +93,16 @@ class AntigravityQuotaProvider:
         if not isinstance(payload, Mapping):
             raise RuntimeError("agy /usage returned a non-object payload")
         return parse_antigravity_usage(payload, observed_at=observed_at)
+
+    def _is_enabled(self) -> bool:
+        if self._enabled_override is not None:
+            return bool(self._enabled_override)
+        if _env_bool(_OPT_IN_ENV, False):
+            return True
+        try:
+            return self.opt_in_file.is_file()
+        except OSError:
+            return False
 
 
 def parse_antigravity_usage(
@@ -232,6 +250,16 @@ def _resolve_command(configured: str) -> str:
             if candidate.is_file() and os.access(candidate, os.X_OK):
                 return str(candidate)
     return configured
+
+
+def _default_opt_in_file() -> Path:
+    explicit = os.environ.get(_OPT_IN_FILE_ENV, "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    runtime = os.environ.get("AGENTSTACK_RUNTIME_DIR", "").strip()
+    if runtime:
+        return Path(runtime).expanduser() / _OPT_IN_FILENAME
+    return Path("~/.agentstack/runtime").expanduser() / _OPT_IN_FILENAME
 
 
 def _read_version(
