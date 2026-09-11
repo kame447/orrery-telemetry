@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from dashboard.quota_server import inject_usage_ui
 from dashboard.quotas.antigravity import parse_antigravity_usage
 from dashboard.quotas.base import QuotaBucket, QuotaSnapshot
-from dashboard.quotas.claude import parse_claude_statusline
+from dashboard.quotas.claude import ClaudeQuotaProvider, parse_claude_statusline
 from dashboard.quotas.codex import parse_codex_rate_limits
 from dashboard.quotas.service import QuotaService
 
@@ -25,6 +25,24 @@ def test_claude_statusline_normalizes_subscription_windows():
     assert [bucket.label for bucket in snapshot.buckets] == ["5h", "7d"]
     assert snapshot.buckets[0].remaining_percent == 76.5
     assert snapshot.buckets[1].remaining_percent == 58.8
+
+
+def test_claude_provider_expires_old_observation(tmp_path):
+    path = tmp_path / "claude-quota.json"
+    path.write_text(
+        '{"observed_at":1000,"rate_limits":{"five_hour":{"used_percentage":25,"resets_at":2000}}}',
+        encoding="utf-8",
+    )
+    now = [1005.0]
+    provider = ClaudeQuotaProvider(path, max_age_seconds=10, clock=lambda: now[0])
+
+    assert provider.read().status == "ok"
+    now[0] = 1011.0
+    expired = provider.read()
+    assert expired.status == "unavailable"
+    assert expired.reason == "observation_stale"
+    assert expired.buckets == ()
+    assert expired.observed_at == 1000
 
 
 def test_codex_uses_window_duration_not_primary_secondary_position():
@@ -126,13 +144,13 @@ def test_antigravity_accepts_current_camelcase_summary_shape():
                             {
                                 "bucketId": "gemini-5h",
                                 "displayName": "Five Hour Limit",
-                                "remaining": {"remainingFraction": 0.41},
+                                "remainingFraction": 0.41,
                                 "resetTime": "2026-09-11T18:00:00Z",
                             },
                             {
                                 "bucketId": "gemini-weekly",
                                 "displayName": "Weekly Limit",
-                                "remaining": {"remainingFraction": 0.73},
+                                "remainingFraction": 0.73,
                                 "resetTime": "2026-09-14T00:00:00Z",
                             },
                         ],
@@ -227,6 +245,7 @@ def test_usage_ui_is_injected_once_and_renders_dynamic_provider_data():
 
     assert first == second
     assert b'id="usage-strip"' in first
+    assert b'body[data-view="net"] .usage-strip{display:none}' in first
     assert b"/api/quotas" in first
     assert b"data.providers" in first
     assert b"Gemini Models" not in first
