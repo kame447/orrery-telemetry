@@ -31,6 +31,7 @@ body[data-view="net"] .usage-strip{display:none}
 .usage-providers{display:flex;align-items:center;gap:18px;min-width:0;flex:1;overflow-x:auto}
 .usage-provider{display:flex;align-items:center;gap:9px;white-space:nowrap;min-width:0}
 .usage-provider-name{font-size:10px;letter-spacing:1.4px;color:var(--bone);text-transform:uppercase}
+.usage-observed{font-size:8px;letter-spacing:.6px;color:var(--bone-dim);opacity:.68;font-variant-numeric:tabular-nums}
 .usage-bucket{display:inline-flex;align-items:center;gap:5px;font-size:9px;color:var(--bone-dim)}
 .usage-bucket-label{max-width:160px;overflow:hidden;text-overflow:ellipsis}
 .usage-meter{width:42px;height:3px;background:var(--line-soft);overflow:hidden;display:inline-block}
@@ -60,13 +61,24 @@ _USAGE_SCRIPT = r"""
   const root=document.getElementById('usage-providers');
   if(!root)return;
   const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const pct=v=>Math.max(0,Math.min(100,Number(v)||0));
+  const pct=v=>{
+    const n=Number(v);
+    return Number.isFinite(n)?Math.max(0,Math.min(100,n)):null;
+  };
   const resetText=ts=>{
     if(!ts)return '';
-    try{return `reset ${new Date(Number(ts)*1000).toLocaleString()}`}catch(_){return ''}
+    const date=new Date(Number(ts)*1000);
+    return Number.isNaN(date.getTime())?'':`reset ${date.toLocaleString()}`;
+  };
+  const observedText=ts=>{
+    if(!ts)return '';
+    const date=new Date(Number(ts)*1000);
+    if(Number.isNaN(date.getTime()))return '';
+    return date.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
   };
   function bucket(b){
     const remaining=pct(b.remaining_percent);
+    if(remaining===null)return '';
     const title=[b.scope,b.quality,resetText(b.resets_at)].filter(Boolean).join(' · ');
     return `<span class="usage-bucket" title="${esc(title)}">`+
       `<span class="usage-bucket-label">${esc(b.label||b.id)}</span>`+
@@ -77,10 +89,13 @@ _USAGE_SCRIPT = r"""
     const status=p.status||'unavailable';
     const name=esc(p.provider||'provider');
     const items=Array.isArray(p.buckets)?p.buckets:[];
-    const detail=items.length?items.map(bucket).join(''):`<span class="usage-state">${esc(status)}</span>`;
+    const rendered=items.map(bucket).filter(Boolean);
+    const detail=rendered.length?rendered.join(''):`<span class="usage-state">${esc(status)}</span>`;
+    const observed=observedText(p.observed_at);
+    const observedHtml=observed?`<span class="usage-observed" aria-label="last update ${esc(observed)}">${esc(observed)}</span>`:'';
     const title=[p.source,p.reason,p.observed_at?`observed ${new Date(Number(p.observed_at)*1000).toLocaleString()}`:''].filter(Boolean).join(' · ');
     return `<div class="usage-provider" data-status="${esc(status)}" title="${esc(title)}">`+
-      `<span class="usage-provider-name">${name}</span>${detail}</div>`;
+      `<span class="usage-provider-name">${name}</span>${observedHtml}${detail}</div>`;
   }
   function renderQuota(data){
     const providers=Array.isArray(data&&data.providers)?data.providers:[];
