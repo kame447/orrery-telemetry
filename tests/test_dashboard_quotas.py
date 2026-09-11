@@ -115,6 +115,43 @@ def test_antigravity_uses_only_returned_dynamic_buckets():
     assert snapshot.buckets[1].remaining_percent == 58.0
 
 
+def test_antigravity_accepts_current_camelcase_summary_shape():
+    snapshot = parse_antigravity_usage(
+        {
+            "response": {
+                "groups": [
+                    {
+                        "displayName": "Gemini Models",
+                        "buckets": [
+                            {
+                                "bucketId": "gemini-5h",
+                                "displayName": "Five Hour Limit",
+                                "remaining": {"remainingFraction": 0.41},
+                                "resetTime": "2026-09-11T18:00:00Z",
+                            },
+                            {
+                                "bucketId": "gemini-weekly",
+                                "displayName": "Weekly Limit",
+                                "remaining": {"remainingFraction": 0.73},
+                                "resetTime": "2026-09-14T00:00:00Z",
+                            },
+                        ],
+                    }
+                ]
+            }
+        },
+        observed_at=1000,
+    )
+
+    assert snapshot.status == "ok"
+    assert [bucket.id for bucket in snapshot.buckets] == ["gemini-5h", "gemini-weekly"]
+    assert [bucket.label for bucket in snapshot.buckets] == [
+        "Gemini Models · 5h",
+        "Gemini Models · 7d",
+    ]
+    assert [bucket.remaining_percent for bucket in snapshot.buckets] == [41.0, 73.0]
+
+
 @dataclass
 class _Provider:
     provider_name: str
