@@ -4,17 +4,23 @@ Dashboard の `USAGE` strip は、各 agent の context remaining とは別に�
 
 値は `GET /api/quotas` から取得し、既存の `GET /api/agents` には quota 取得処理を混ぜない。provider 側の CLI / App Server が失敗しても、他 provider と Dashboard 本体は継続する。
 
+provider の refresh は provider ごとの lock と cache を持ち、cold miss 時は独立 provider を並列に取得する。一つの CLI timeout を他 provider の timeout に加算しない。
+
 ## 表示の意味
 
 各 bucket は provider が実際に返した window だけを表示する。5h / 7d が存在すると仮定して補完しない。
 
 `remaining_percent` は残量で、100 に近いほど余裕がある。取得に失敗した場合、直近の正常観測が短い stale window 内なら `stale`、それ以外は `unavailable` とする。
 
+provider の stderr や例外本文はブラウザ向け API へそのまま返さない。API の `reason` は安定した状態コードのみとし、詳細はローカル Dashboard log 側で扱う。
+
 ## Codex
 
 Codex App Server の `account/rateLimits/read` を利用する。
 
 `primary` / `secondary` の位置を 5h / 7d に固定対応させず、`windowDurationMins` から表示 label を決める。App Server は `/api/quotas` の cache miss 時だけ起動し、`/api/agents` の refresh では起動しない。
+
+App Server の stdout 待ちは subprocess pipe を `selectors` へ直接登録せず、reader thread と bounded queue/deadline で処理する。このため POSIX と Windows で同じ transport path を利用できる。
 
 `AGENTSTACK_CODEX_BIN` が設定されていれば、その executable を利用する。
 
@@ -25,6 +31,14 @@ Antigravity CLI 1.1.11 以降で提供される read-only print command を利�
 ```sh
 agy -p "/usage" --output-format json
 ```
+
+ただし Antigravity CLI は有効な認証がない場合に Google Sign-In を開始し得る。常駐 Dashboard の telemetry poll が認証 UI を勝手に起動しないよう、Antigravity quota は明示 opt-in とする。
+
+```sh
+export AGENTSTACK_ANTIGRAVITY_QUOTA_ENABLED=1
+```
+
+この値が有効でない間は `agy --version` も `/usage` も実行せず、Antigravity は `unavailable / telemetry_opt_in_required` として表示する。opt-in は「この常駐 telemetry から Antigravity CLI を呼び出してよい」という明示的な許可として扱う。
 
 CLI の envelope や field casing が release 間で異なっても、返却された quota group / bucket のみを正規化する。`displayName` / `bucketId` / `remainingFraction` と、その互換表現である snake_case / nested `remaining` の両方を受け付けるが、Gemini / Claude / GPT などの固定 bucket を ORRERY 側では作らない。
 
@@ -56,6 +70,10 @@ Claude の `statusLine.command` としてこの script を Python で実行す�
 既に独自 status line を使用している場合、この例で置き換えないこと。既存 command と observer の出力を両立させる wrapper が必要になる。ORRERY installer は現時点ではそこを自動変更しない。
 
 Claude quota がまだ観測されていない場合、Dashboard は推定値を作らず `unavailable` を表示する。
+
+## Demo mode
+
+`?demo=1` または static demo の強制フラグが有効な場合、USAGE strip も synthetic fixture のみを表示する。demo mode から `/api/quotas` へ fall through して実アカウントの残量を取得することはない。
 
 ## API
 
