@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -10,6 +11,7 @@ from queue import Queue
 
 from dashboard import claude_quota_observe
 from dashboard.quota_server import inject_usage_ui
+from dashboard.quotas import codex as codex_quota
 from dashboard.quotas.antigravity import AntigravityQuotaProvider
 from dashboard.quotas.base import QuotaBucket, QuotaSnapshot
 from dashboard.quotas.codex import CodexQuotaProvider, _read_response
@@ -171,12 +173,65 @@ def test_codex_adapter_accepts_injected_transport_without_spawning_process():
 
 def test_codex_response_reader_is_pipe_independent():
     responses: Queue[str | None] = Queue()
-    responses.put('{"jsonrpc":"2.0","method":"account/rateLimits/updated"}\n')
-    responses.put('{"jsonrpc":"2.0","id":2,"result":{"rateLimits":{}}}\n')
+    responses.put('{"method":"account/rateLimits/updated"}\n')
+    responses.put('{"id":2,"result":{"rateLimits":{}}}\n')
 
     result = _read_response(responses, 2, time.monotonic() + 1)
 
     assert result == {"rateLimits": {}}
+
+
+def test_codex_transport_matches_documented_headerless_jsonl(monkeypatch):
+    class RecordingStdin:
+        def __init__(self) -> None:
+            self.chunks: list[str] = []
+
+        def write(self, value: str) -> int:
+            self.chunks.append(value)
+            return len(value)
+
+        def flush(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.stdin = RecordingStdin()
+            self.stdout = io.StringIO(
+                '{"id":1,"result":{"userAgent":"test"}}\n'
+                '{"id":2,"result":{"rateLimits":{"limitId":"codex","primary":'
+                '{"usedPercent":20,"windowDurationMins":300,"resetsAt":2000}}}}\n'
+            )
+            self.returncode: int | None = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = 0
+
+        def wait(self, timeout=None) -> int:
+            self.returncode = 0
+            return 0
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    process = FakeProcess()
+    monkeypatch.setattr(codex_quota.subprocess, "Popen", lambda *args, **kwargs: process)
+
+    result = codex_quota._read_app_server_rate_limits("codex-fixture", timeout=1)
+    wire = [json.loads(line) for line in "".join(process.stdin.chunks).splitlines()]
+
+    assert result["rateLimits"]["primary"]["windowDurationMins"] == 300
+    assert [message["method"] for message in wire] == [
+        "initialize",
+        "initialized",
+        "account/rateLimits/read",
+    ]
+    assert all("jsonrpc" not in message for message in wire)
 
 
 def test_claude_observer_concurrent_writes_are_atomic(tmp_path, monkeypatch):
@@ -276,3 +331,5 @@ def test_demo_usage_strip_never_falls_through_to_live_quota():
     assert b"demo-fixture" in injected
     assert b"params.get('demo')==='1'" in injected
     assert b"if(demo){renderQuota(demoQuota);return;}" in injected
+    assert b"Number.isFinite" in injected
+    assert b"usage-observed" in injected
