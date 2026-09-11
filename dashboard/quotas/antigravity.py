@@ -16,10 +16,10 @@ from typing import Any
 from .base import QuotaBucket, QuotaSnapshot
 
 
-# Non-interactive /usage and /quota handling landed in Antigravity CLI 1.1.12.
+# Non-interactive /usage and /quota handling landed in Antigravity CLI 1.1.11.
 # Older versions can interpret the slash command as an agent prompt and spend
 # quota, so they must never be probed by the dashboard.
-_MIN_SAFE_VERSION = (1, 1, 12)
+_MIN_SAFE_VERSION = (1, 1, 11)
 
 
 class AntigravityQuotaProvider:
