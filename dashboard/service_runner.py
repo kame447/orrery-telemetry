@@ -197,7 +197,10 @@ def run(server_path: pathlib.Path) -> int:
 
 
 def main() -> int:
-    server_path = pathlib.Path(sys.argv[1]).expanduser() if len(sys.argv) > 1 else HERE / "server.py"
+    default_server = HERE / "quota_server.py"
+    if not default_server.is_file():
+        default_server = HERE / "server.py"
+    server_path = pathlib.Path(sys.argv[1]).expanduser() if len(sys.argv) > 1 else default_server
     return run(server_path)
 
 
