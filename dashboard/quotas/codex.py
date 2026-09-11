@@ -131,10 +131,11 @@ def _read_app_server_rate_limits(command: str, *, timeout: float) -> dict[str, A
     reader.start()
     deadline = time.monotonic() + timeout
     try:
+        # Codex App Server uses JSON-RPC semantics but its documented stdio
+        # wire format omits the conventional `jsonrpc: "2.0"` member.
         _write_message(
             process,
             {
-                "jsonrpc": "2.0",
                 "id": 1,
                 "method": "initialize",
                 "params": {
@@ -147,10 +148,10 @@ def _read_app_server_rate_limits(command: str, *, timeout: float) -> dict[str, A
             },
         )
         _read_response(responses, 1, deadline)
-        _write_message(process, {"jsonrpc": "2.0", "method": "initialized"})
+        _write_message(process, {"method": "initialized"})
         _write_message(
             process,
-            {"jsonrpc": "2.0", "id": 2, "method": "account/rateLimits/read"},
+            {"id": 2, "method": "account/rateLimits/read"},
         )
         result = _read_response(responses, 2, deadline)
         if not isinstance(result, dict):
@@ -211,7 +212,7 @@ def _read_response(
             continue
         if "error" in message:
             # Keep remote error text out of the browser-facing snapshot. The
-            # service boundary logs local diagnostics and exposes a stable code.
+            # service boundary exposes only a stable failure code.
             raise RuntimeError("codex app-server request failed")
         result = message.get("result", {})
         return result if isinstance(result, dict) else {}
