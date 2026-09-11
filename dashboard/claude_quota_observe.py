@@ -12,6 +12,7 @@ import json
 import os
 import pathlib
 import sys
+import tempfile
 import time
 
 
@@ -30,17 +31,40 @@ def _write_snapshot(rate_limits: object) -> None:
         return
     target = _snapshot_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_suffix(target.suffix + ".tmp")
     payload = {"observed_at": int(time.time()), "rate_limits": rate_limits}
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, target)
+    temporary: pathlib.Path | None = None
     try:
-        target.chmod(0o600)
-    except OSError:
-        pass
+        # Multiple Claude sessions may invoke the status line concurrently.
+        # A unique same-directory temp file keeps the final rename atomic and
+        # avoids two observers racing over one shared `claude-quota.json.tmp`.
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = pathlib.Path(handle.name)
+            handle.write(
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+            )
+        try:
+            temporary.chmod(0o600)
+        except OSError:
+            pass
+        os.replace(temporary, target)
+        temporary = None
+        try:
+            target.chmod(0o600)
+        except OSError:
+            pass
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _remaining(window: object) -> float | None:
