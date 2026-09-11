@@ -16,7 +16,10 @@ from typing import Any
 from .base import QuotaBucket, QuotaSnapshot
 
 
-_MIN_SAFE_VERSION = (1, 1, 11)
+# Non-interactive /usage and /quota handling landed in Antigravity CLI 1.1.12.
+# Older versions can interpret the slash command as an agent prompt and spend
+# quota, so they must never be probed by the dashboard.
+_MIN_SAFE_VERSION = (1, 1, 12)
 
 
 class AntigravityQuotaProvider:
@@ -67,10 +70,8 @@ def parse_antigravity_usage(
     *,
     observed_at: int,
 ) -> QuotaSnapshot:
-    command = payload.get("command")
-    data = command.get("data") if isinstance(command, Mapping) else None
-    groups = data.get("groups") if isinstance(data, Mapping) else None
-    if not isinstance(groups, Sequence) or isinstance(groups, (str, bytes)):
+    groups = _find_groups(payload)
+    if groups is None:
         return QuotaSnapshot(
             provider="antigravity",
             source="agy-print-usage",
@@ -83,23 +84,42 @@ def parse_antigravity_usage(
     for group in groups:
         if not isinstance(group, Mapping):
             continue
-        group_name = str(group.get("name") or "Antigravity")
+        group_name = str(
+            group.get("displayName")
+            or group.get("display_name")
+            or group.get("name")
+            or "Antigravity"
+        )
         raw_buckets = group.get("buckets")
         if not isinstance(raw_buckets, Sequence) or isinstance(raw_buckets, (str, bytes)):
             continue
         for raw in raw_buckets:
             if not isinstance(raw, Mapping):
                 continue
-            fraction = _number(raw.get("remaining_fraction"))
+            fraction = _remaining_fraction(raw)
             if fraction is None:
+                # Disabled or otherwise non-numeric buckets are not invented as
+                # 0%; absence is materially different from exhaustion.
                 continue
             remaining = fraction * 100.0 if fraction <= 1.0 else fraction
-            bucket_id = str(raw.get("id") or raw.get("window") or "quota")
-            raw_window = str(raw.get("window") or bucket_id)
-            window_seconds = _window_seconds(raw_window)
-            window_label = _window_label(raw_window, window_seconds)
+            bucket_id = str(
+                raw.get("bucketId")
+                or raw.get("bucket_id")
+                or raw.get("id")
+                or raw.get("window")
+                or "quota"
+            )
+            display_name = str(
+                raw.get("displayName")
+                or raw.get("display_name")
+                or raw.get("label")
+                or raw.get("window")
+                or bucket_id
+            )
+            window_seconds = _window_seconds(f"{bucket_id} {display_name}")
+            window_label = _window_label(display_name, window_seconds)
             label = f"{group_name} · {window_label}" if group_name else window_label
-            resets_at = _parse_reset(raw.get("reset_time"))
+            resets_at = _parse_reset(raw.get("resetTime") or raw.get("reset_time"))
             buckets.append(
                 QuotaBucket.from_remaining(
                     id=bucket_id,
@@ -127,6 +147,51 @@ def parse_antigravity_usage(
         status="ok",
         buckets=tuple(buckets),
     )
+
+
+def _find_groups(payload: Mapping[str, Any]) -> Sequence[Any] | None:
+    """Accept CLI envelope and backend-style quota summary shapes.
+
+    Antigravity's print-mode command payload and underlying quota summary have
+    used slightly different wrappers/field casing across releases. The quota
+    semantics are stable at the group/bucket boundary, so find that boundary
+    without parsing the human-facing text report.
+    """
+
+    candidates: list[object] = [payload]
+    for key in ("data", "response", "command", "result"):
+        value = payload.get(key)
+        if isinstance(value, Mapping):
+            candidates.append(value)
+            nested = value.get("data")
+            if isinstance(nested, Mapping):
+                candidates.append(nested)
+            nested_response = value.get("response")
+            if isinstance(nested_response, Mapping):
+                candidates.append(nested_response)
+
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            continue
+        groups = candidate.get("groups")
+        if isinstance(groups, Sequence) and not isinstance(groups, (str, bytes)):
+            return groups
+    return None
+
+
+def _remaining_fraction(bucket: Mapping[str, Any]) -> float | None:
+    direct = bucket.get("remaining_fraction")
+    if direct is None:
+        direct = bucket.get("remainingFraction")
+    if direct is not None:
+        return _number(direct)
+
+    remaining = bucket.get("remaining")
+    if isinstance(remaining, Mapping):
+        for key in ("remainingFraction", "remaining_fraction", "value"):
+            if key in remaining:
+                return _number(remaining.get(key))
+    return None
 
 
 def _resolve_command(configured: str) -> str:
@@ -194,7 +259,7 @@ def _parse_reset(value: object) -> int | None:
 
 def _window_seconds(value: str) -> int | None:
     text = value.strip().lower()
-    if text in {"weekly", "week", "7d", "seven_day", "seven-day"}:
+    if "weekly" in text or re.search(r"(?:^|[^a-z])week(?:ly)?(?:[^a-z]|$)", text):
         return 7 * 24 * 60 * 60
     match = re.search(r"(\d+(?:\.\d+)?)\s*([mhdw])", text)
     if not match:
