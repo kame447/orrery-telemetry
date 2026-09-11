@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import signal
 import socket
 import subprocess
@@ -139,8 +140,17 @@ def _normalize_sample_paths(value, manifest):
     return value
 
 
+def _optional_provider_files() -> set[str]:
+    """Files declared by the optional Gemini provider installer, not the core."""
+    text = (ROOT / "scripts" / "install-gemini-provider.sh").read_text(encoding="utf-8")
+    match = re.search(r"^FILES=\(\n(.*?)^\)\n", text, re.DOTALL | re.MULTILINE)
+    assert match, "provider installer FILES declaration missing"
+    return set(re.findall(r'^  "([^"]+)"$', match.group(1), re.MULTILINE))
+
+
 def _tracked_core_payload_files() -> list[str]:
     """Return only files the core installer copies, never ignored artifacts."""
+    provider_files = _optional_provider_files()
     tracked = subprocess.run(
         [
             "git", "-C", str(ROOT), "ls-files", "-z",
@@ -151,7 +161,7 @@ def _tracked_core_payload_files() -> list[str]:
         text=True,
         check=True,
     ).stdout.split("\0")
-    return [path for path in tracked if path]
+    return [path for path in tracked if path and path not in provider_files]
 
 
 def _expected_owned_dirs(install_dir: pathlib.Path) -> list[str]:
