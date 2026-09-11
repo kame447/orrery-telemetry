@@ -102,9 +102,13 @@ class QuotaService:
                         f"provider returned snapshot for {snapshot.provider!r}, expected {name!r}"
                     )
             except Exception as exc:  # provider boundary: keep all other telemetry alive
-                # Raw provider stderr/details belong in the local dashboard log,
-                # not in the read-only API response or browser tooltip.
-                LOGGER.warning("quota provider %s failed: %s", name, exc)
+                # Provider/CLI errors can contain account or authentication data.
+                # Keep logs diagnostic without persisting arbitrary exception text.
+                LOGGER.warning(
+                    "quota provider %s failed (%s)",
+                    name,
+                    type(exc).__name__,
+                )
                 snapshot = self._failure_snapshot(provider, now)
             else:
                 if snapshot.status in {"ok", "degraded"} and snapshot.buckets:
