@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Protocol
 
 from .base import QuotaSnapshot
+
+
+LOGGER = logging.getLogger("agentstack.dashboard.quotas")
 
 
 class QuotaProvider(Protocol):
@@ -36,6 +41,9 @@ class QuotaService:
         clock=time.time,
     ) -> None:
         self.providers = list(providers)
+        names = [provider.provider_name for provider in self.providers]
+        if len(names) != len(set(names)):
+            raise ValueError("quota provider names must be unique")
         self.default_ttl_seconds = max(1, int(default_ttl_seconds))
         # Stale lifetime is about the age of the last successful observation,
         # not about the cache refresh cadence. Keep it independently tunable.
@@ -43,63 +51,80 @@ class QuotaService:
         self._clock = clock
         self._cache: dict[str, _CacheEntry] = {}
         self._last_success: dict[str, QuotaSnapshot] = {}
-        self._lock = threading.Lock()
+        # One lock per provider prevents duplicate CLI/App Server processes when
+        # concurrent HTTP requests miss the same cache without serializing other
+        # providers behind the slowest one.
+        self._provider_locks = {name: threading.Lock() for name in names}
 
     def read_all(self) -> dict[str, object]:
-        # ThreadingHTTPServer may receive simultaneous /api/quotas requests.
-        # Serialize this cold path so a cache miss starts each external provider
-        # at most once instead of spawning duplicate CLI/App Server processes.
-        with self._lock:
-            now = self._clock()
+        now = self._clock()
+        if len(self.providers) <= 1:
             snapshots = [self._read_provider(provider, now) for provider in self.providers]
-            return {
-                "ts": int(now),
-                "degraded": any(snapshot.status != "ok" for snapshot in snapshots),
-                "providers": [snapshot.to_dict() for snapshot in snapshots],
-            }
+        else:
+            # Provider refreshes are independent I/O. Parallelize cold misses so
+            # one unhealthy CLI does not add its timeout to every other provider.
+            with ThreadPoolExecutor(
+                max_workers=len(self.providers),
+                thread_name_prefix="quota-refresh",
+            ) as pool:
+                futures = [
+                    pool.submit(self._read_provider, provider, now)
+                    for provider in self.providers
+                ]
+                # Preserve configured provider order in the API response.
+                snapshots = [future.result() for future in futures]
+        return {
+            "ts": int(now),
+            "degraded": any(snapshot.status != "ok" for snapshot in snapshots),
+            "providers": [snapshot.to_dict() for snapshot in snapshots],
+        }
 
     def _read_provider(self, provider: QuotaProvider, now: float) -> QuotaSnapshot:
         name = provider.provider_name
-        ttl = max(1, int(getattr(provider, "ttl_seconds", self.default_ttl_seconds)))
-        cached = self._cache.get(name)
-        if cached is not None and now - cached.fetched_at < ttl:
-            # A stale snapshot has a separate absolute lifetime based on the
-            # successful observation it wraps. Do not let cache TTL extend it.
-            if (
-                cached.snapshot.status != "stale"
-                or now - cached.snapshot.observed_at <= self.stale_seconds
-            ):
-                return cached.snapshot
+        with self._provider_locks[name]:
+            # Re-check the cache only after taking the provider lock. Another
+            # request may have populated it while this request was waiting.
+            ttl = max(1, int(getattr(provider, "ttl_seconds", self.default_ttl_seconds)))
+            cached = self._cache.get(name)
+            if cached is not None and now - cached.fetched_at < ttl:
+                # A stale snapshot has a separate absolute lifetime based on the
+                # successful observation it wraps. Do not let cache TTL extend it.
+                if (
+                    cached.snapshot.status != "stale"
+                    or now - cached.snapshot.observed_at <= self.stale_seconds
+                ):
+                    return cached.snapshot
 
-        try:
-            snapshot = provider.read()
-            if snapshot.provider != name:
-                raise ValueError(
-                    f"provider returned snapshot for {snapshot.provider!r}, expected {name!r}"
-                )
-        except Exception as exc:  # provider boundary: keep all other telemetry alive
-            snapshot = self._failure_snapshot(provider, now, exc)
-        else:
-            if snapshot.status in {"ok", "degraded"} and snapshot.buckets:
-                self._last_success[name] = snapshot
-            elif snapshot.status == "unavailable":
-                snapshot = self._stale_or_unavailable(
-                    provider,
-                    now,
-                    snapshot.reason or "provider_unavailable",
-                )
+            try:
+                snapshot = provider.read()
+                if snapshot.provider != name:
+                    raise ValueError(
+                        f"provider returned snapshot for {snapshot.provider!r}, expected {name!r}"
+                    )
+            except Exception as exc:  # provider boundary: keep all other telemetry alive
+                # Raw provider stderr/details belong in the local dashboard log,
+                # not in the read-only API response or browser tooltip.
+                LOGGER.warning("quota provider %s failed: %s", name, exc)
+                snapshot = self._failure_snapshot(provider, now)
+            else:
+                if snapshot.status in {"ok", "degraded"} and snapshot.buckets:
+                    self._last_success[name] = snapshot
+                elif snapshot.status == "unavailable":
+                    snapshot = self._stale_or_unavailable(
+                        provider,
+                        now,
+                        snapshot.reason or "provider_unavailable",
+                    )
 
-        self._cache[name] = _CacheEntry(fetched_at=now, snapshot=snapshot)
-        return snapshot
+            self._cache[name] = _CacheEntry(fetched_at=now, snapshot=snapshot)
+            return snapshot
 
     def _failure_snapshot(
         self,
         provider: QuotaProvider,
         now: float,
-        exc: Exception,
     ) -> QuotaSnapshot:
-        reason = f"{type(exc).__name__}: {exc}"[:160]
-        return self._stale_or_unavailable(provider, now, reason)
+        return self._stale_or_unavailable(provider, now, "provider_read_failed")
 
     def _stale_or_unavailable(
         self,
