@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -22,15 +22,23 @@ class ClaudeQuotaProvider:
     source_name = "claude-statusline"
     ttl_seconds = 30
 
-    def __init__(self, snapshot_path: str | os.PathLike[str] | None = None) -> None:
+    def __init__(
+        self,
+        snapshot_path: str | os.PathLike[str] | None = None,
+        *,
+        max_age_seconds: int = 600,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
         self.snapshot_path = (
             Path(snapshot_path).expanduser()
             if snapshot_path is not None
             else _default_snapshot_path()
         )
+        self.max_age_seconds = max(1, int(max_age_seconds))
+        self._clock = clock
 
     def read(self) -> QuotaSnapshot:
-        now = int(time.time())
+        now = int(self._clock())
         try:
             payload = json.loads(self.snapshot_path.read_text(encoding="utf-8"))
             modified = int(self.snapshot_path.stat().st_mtime)
@@ -47,6 +55,14 @@ class ClaudeQuotaProvider:
         if not isinstance(payload, Mapping):
             raise RuntimeError("Claude quota observation must be a JSON object")
         observed_at = _int_or_none(payload.get("observed_at")) or modified
+        if now - observed_at > self.max_age_seconds:
+            return QuotaSnapshot(
+                provider=self.provider_name,
+                source=self.source_name,
+                observed_at=observed_at,
+                status="unavailable",
+                reason="observation_stale",
+            )
         return parse_claude_statusline(payload, observed_at=observed_at)
 
 
