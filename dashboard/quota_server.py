@@ -26,6 +26,7 @@ _USAGE_STYLE = r"""
 .usage-strip{margin:16px 26px 0;border:1px solid var(--line);background:var(--panel);
   padding:9px 12px;display:flex;align-items:center;gap:14px;min-height:42px;
   font-family:"IBM Plex Mono",ui-monospace,monospace}
+body[data-view="net"] .usage-strip{display:none}
 .usage-title{flex:none;font-size:9px;letter-spacing:2.6px;color:var(--bone-dim)}
 .usage-providers{display:flex;align-items:center;gap:18px;min-width:0;flex:1;overflow-x:auto}
 .usage-provider{display:flex;align-items:center;gap:9px;white-space:nowrap;min-width:0}
