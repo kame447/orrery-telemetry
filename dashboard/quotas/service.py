@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass
 from typing import Protocol
@@ -40,15 +41,20 @@ class QuotaService:
         self._clock = clock
         self._cache: dict[str, _CacheEntry] = {}
         self._last_success: dict[str, QuotaSnapshot] = {}
+        self._lock = threading.Lock()
 
     def read_all(self) -> dict[str, object]:
-        now = self._clock()
-        snapshots = [self._read_provider(provider, now) for provider in self.providers]
-        return {
-            "ts": int(now),
-            "degraded": any(snapshot.status != "ok" for snapshot in snapshots),
-            "providers": [snapshot.to_dict() for snapshot in snapshots],
-        }
+        # ThreadingHTTPServer may receive simultaneous /api/quotas requests.
+        # Serialize this cold path so a cache miss starts each external provider
+        # at most once instead of spawning duplicate CLI/App Server processes.
+        with self._lock:
+            now = self._clock()
+            snapshots = [self._read_provider(provider, now) for provider in self.providers]
+            return {
+                "ts": int(now),
+                "degraded": any(snapshot.status != "ok" for snapshot in snapshots),
+                "providers": [snapshot.to_dict() for snapshot in snapshots],
+            }
 
     def _read_provider(self, provider: QuotaProvider, now: float) -> QuotaSnapshot:
         name = provider.provider_name
