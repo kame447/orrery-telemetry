@@ -19,7 +19,11 @@ def normalize_percent(value: object) -> float:
         raise ValueError(f"invalid percentage: {value!r}") from exc
     if number != number or number in {float("inf"), float("-inf")}:
         raise ValueError(f"invalid percentage: {value!r}")
-    return max(0.0, min(100.0, number))
+    # Provider payloads commonly encode quota as fractions (for example 0.58).
+    # Multiplying those by 100 can produce 57.99999999999999; normalize that
+    # representation noise at the schema boundary so equality, caching and UI
+    # consumers see the provider's intended percentage.
+    return round(max(0.0, min(100.0, number)), 6)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +69,7 @@ class QuotaBucket:
             label=label,
             scope=scope,
             used_percent=used,
-            remaining_percent=100.0 - used,
+            remaining_percent=normalize_percent(100.0 - used),
             window_seconds=window_seconds,
             resets_at=resets_at,
             quality=quality,
@@ -88,7 +92,7 @@ class QuotaBucket:
             id=id,
             label=label,
             scope=scope,
-            used_percent=100.0 - remaining,
+            used_percent=normalize_percent(100.0 - remaining),
             remaining_percent=remaining,
             window_seconds=window_seconds,
             resets_at=resets_at,
