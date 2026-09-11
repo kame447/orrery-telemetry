@@ -31,6 +31,7 @@ body[data-view="net"] .usage-strip{display:none}
 .usage-providers{display:flex;align-items:center;gap:18px;min-width:0;flex:1;overflow-x:auto}
 .usage-provider{display:flex;align-items:center;gap:9px;white-space:nowrap;min-width:0}
 .usage-provider-name{font-size:10px;letter-spacing:1.4px;color:var(--bone);text-transform:uppercase}
+.usage-status{font-size:8px;letter-spacing:.8px;color:var(--amber);text-transform:uppercase}
 .usage-observed{font-size:8px;letter-spacing:.6px;color:var(--bone-dim);opacity:.68;font-variant-numeric:tabular-nums}
 .usage-bucket{display:inline-flex;align-items:center;gap:5px;font-size:9px;color:var(--bone-dim)}
 .usage-bucket-label{max-width:160px;overflow:hidden;text-overflow:ellipsis}
@@ -91,11 +92,12 @@ _USAGE_SCRIPT = r"""
     const items=Array.isArray(p.buckets)?p.buckets:[];
     const rendered=items.map(bucket).filter(Boolean);
     const detail=rendered.length?rendered.join(''):`<span class="usage-state">${esc(status)}</span>`;
+    const statusHtml=rendered.length&&status!=='ok'?`<span class="usage-status">${esc(status)}</span>`:'';
     const observed=observedText(p.observed_at);
     const observedHtml=observed?`<span class="usage-observed" aria-label="last update ${esc(observed)}">${esc(observed)}</span>`:'';
     const title=[p.source,p.reason,p.observed_at?`observed ${new Date(Number(p.observed_at)*1000).toLocaleString()}`:''].filter(Boolean).join(' · ');
     return `<div class="usage-provider" data-status="${esc(status)}" title="${esc(title)}">`+
-      `<span class="usage-provider-name">${name}</span>${observedHtml}${detail}</div>`;
+      `<span class="usage-provider-name">${name}</span>${statusHtml}${observedHtml}${detail}</div>`;
   }
   function renderQuota(data){
     const providers=Array.isArray(data&&data.providers)?data.providers:[];
