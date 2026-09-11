@@ -37,7 +37,9 @@ class QuotaService:
     ) -> None:
         self.providers = list(providers)
         self.default_ttl_seconds = max(1, int(default_ttl_seconds))
-        self.stale_seconds = max(self.default_ttl_seconds, int(stale_seconds))
+        # Stale lifetime is about the age of the last successful observation,
+        # not about the cache refresh cadence. Keep it independently tunable.
+        self.stale_seconds = max(1, int(stale_seconds))
         self._clock = clock
         self._cache: dict[str, _CacheEntry] = {}
         self._last_success: dict[str, QuotaSnapshot] = {}
@@ -61,7 +63,13 @@ class QuotaService:
         ttl = max(1, int(getattr(provider, "ttl_seconds", self.default_ttl_seconds)))
         cached = self._cache.get(name)
         if cached is not None and now - cached.fetched_at < ttl:
-            return cached.snapshot
+            # A stale snapshot has a separate absolute lifetime based on the
+            # successful observation it wraps. Do not let cache TTL extend it.
+            if (
+                cached.snapshot.status != "stale"
+                or now - cached.snapshot.observed_at <= self.stale_seconds
+            ):
+                return cached.snapshot
 
         try:
             snapshot = provider.read()
