@@ -8,7 +8,7 @@ import re
 import shutil
 import subprocess
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -20,6 +20,7 @@ from .base import QuotaBucket, QuotaSnapshot
 # Older versions can interpret the slash command as an agent prompt and spend
 # quota, so they must never be probed by the dashboard.
 _MIN_SAFE_VERSION = (1, 1, 11)
+_OPT_IN_ENV = "AGENTSTACK_ANTIGRAVITY_QUOTA_ENABLED"
 
 
 class AntigravityQuotaProvider:
@@ -27,7 +28,14 @@ class AntigravityQuotaProvider:
     source_name = "agy-print-usage"
     ttl_seconds = 180
 
-    def __init__(self, command: str | None = None, *, timeout: float = 15.0) -> None:
+    def __init__(
+        self,
+        command: str | None = None,
+        *,
+        timeout: float = 15.0,
+        enabled: bool | None = None,
+        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    ) -> None:
         configured = (
             command
             or os.environ.get("AGENTSTACK_GEMINI_BIN", "").strip()
@@ -35,10 +43,23 @@ class AntigravityQuotaProvider:
         )
         self.command = _resolve_command(configured or "agy")
         self.timeout = timeout
+        self.enabled = _env_bool(_OPT_IN_ENV, False) if enabled is None else bool(enabled)
+        self._runner = runner
 
     def read(self) -> QuotaSnapshot:
         observed_at = int(time.time())
-        version = _read_version(self.command)
+        # Antigravity falls back to an interactive Google Sign-In flow when no
+        # active session exists. A background telemetry poll must never trigger
+        # that side effect unless the operator explicitly opted in.
+        if not self.enabled:
+            return QuotaSnapshot(
+                provider=self.provider_name,
+                source=self.source_name,
+                observed_at=observed_at,
+                status="unavailable",
+                reason="telemetry_opt_in_required",
+            )
+        version = _read_version(self.command, runner=self._runner)
         if version is None or version < _MIN_SAFE_VERSION:
             return QuotaSnapshot(
                 provider=self.provider_name,
@@ -47,15 +68,16 @@ class AntigravityQuotaProvider:
                 status="unavailable",
                 reason="agy_too_old_for_safe_print_usage",
             )
-        process = subprocess.run(
+        process = self._runner(
             [self.command, "-p", "/usage", "--output-format", "json"],
             capture_output=True,
             text=True,
             timeout=self.timeout,
         )
         if process.returncode != 0:
-            detail = (process.stderr or process.stdout or "agy /usage failed").strip()
-            raise RuntimeError(detail[:160])
+            # Do not expose provider stderr through /api/quotas. It may contain
+            # account/auth details; a stable reason code is sufficient for UI.
+            raise RuntimeError(f"agy /usage failed with exit {process.returncode}")
         try:
             payload = json.loads(process.stdout)
         except json.JSONDecodeError as exc:
@@ -212,9 +234,13 @@ def _resolve_command(configured: str) -> str:
     return configured
 
 
-def _read_version(command: str) -> tuple[int, int, int] | None:
+def _read_version(
+    command: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> tuple[int, int, int] | None:
     try:
-        process = subprocess.run(
+        process = runner(
             [command, "--version"],
             capture_output=True,
             text=True,
@@ -227,6 +253,13 @@ def _read_version(command: str) -> tuple[int, int, int] | None:
     if not match:
         return None
     return tuple(int(part) for part in match.groups())  # type: ignore[return-value]
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _number(value: object) -> float | None:
