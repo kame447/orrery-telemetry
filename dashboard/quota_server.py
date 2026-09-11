@@ -82,13 +82,31 @@ _USAGE_SCRIPT = r"""
     return `<div class="usage-provider" data-status="${esc(status)}" title="${esc(title)}">`+
       `<span class="usage-provider-name">${name}</span>${detail}</div>`;
   }
+  function renderQuota(data){
+    const providers=Array.isArray(data&&data.providers)?data.providers:[];
+    root.innerHTML=providers.length?providers.map(provider).join(''):'<span class="usage-state">NO QUOTA SIGNAL</span>';
+  }
+  const params=new URLSearchParams(location.search);
+  const demo=params.get('demo')==='1'||Boolean(window.AGENTSTACK_DEMO_FORCE);
+  const demoQuota={providers:[
+    {provider:'claude',status:'ok',source:'demo-fixture',observed_at:null,buckets:[
+      {id:'five_hour',label:'5h',scope:'account',remaining_percent:76,quality:'exact'},
+      {id:'seven_day',label:'7d',scope:'account',remaining_percent:59,quality:'exact'}]},
+    {provider:'codex',status:'ok',source:'demo-fixture',observed_at:null,buckets:[
+      {id:'codex-300m',label:'5h',scope:'account',remaining_percent:43,quality:'exact'},
+      {id:'codex-10080m',label:'7d',scope:'account',remaining_percent:68,quality:'exact'}]},
+    {provider:'antigravity',status:'ok',source:'demo-fixture',observed_at:null,buckets:[
+      {id:'demo-5h',label:'5h',scope:'account',remaining_percent:82,quality:'exact'},
+      {id:'demo-weekly',label:'7d',scope:'account',remaining_percent:58,quality:'exact'}]}
+  ]};
   async function refreshQuota(){
+    // Demo mode has a strict no-real-machine contract. Never fall through to
+    // the live quota endpoint when the rest of the dashboard is synthetic.
+    if(demo){renderQuota(demoQuota);return;}
     try{
       const res=await fetch('/api/quotas',{cache:'no-store'});
       if(!res.ok)throw new Error(`HTTP ${res.status}`);
-      const data=await res.json();
-      const providers=Array.isArray(data.providers)?data.providers:[];
-      root.innerHTML=providers.length?providers.map(provider).join(''):'<span class="usage-state">NO QUOTA SIGNAL</span>';
+      renderQuota(await res.json());
     }catch(err){
       root.innerHTML=`<span class="usage-state" title="${esc(err)}">QUOTA UNAVAILABLE</span>`;
     }
