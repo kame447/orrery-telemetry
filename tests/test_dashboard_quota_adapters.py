@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 import time
 from dataclasses import dataclass
 from queue import Queue
 
+from dashboard import claude_quota_observe
 from dashboard.quota_server import inject_usage_ui
 from dashboard.quotas.antigravity import AntigravityQuotaProvider
 from dashboard.quotas.base import QuotaBucket, QuotaSnapshot
@@ -177,6 +179,34 @@ def test_codex_response_reader_is_pipe_independent():
     assert result == {"rateLimits": {}}
 
 
+def test_claude_observer_concurrent_writes_are_atomic(tmp_path, monkeypatch):
+    target = tmp_path / "claude-quota.json"
+    monkeypatch.setenv("AGENTSTACK_CLAUDE_QUOTA_SNAPSHOT", str(target))
+    errors: list[BaseException] = []
+
+    def writer(used: int) -> None:
+        try:
+            claude_quota_observe._write_snapshot(
+                {"five_hour": {"used_percentage": used, "resets_at": 2000}}
+            )
+        except BaseException as exc:  # test records cross-thread failures
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(used,)) for used in range(10, 60, 10)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+
+    assert errors == []
+    assert all(not thread.is_alive() for thread in threads)
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["rate_limits"]["five_hour"]["used_percentage"] in {10, 20, 30, 40, 50}
+    assert list(tmp_path.glob(".claude-quota.json.*.tmp")) == []
+    if os.name != "nt":
+        assert target.stat().st_mode & 0o777 == 0o600
+
+
 @dataclass
 class _BlockingProvider:
     provider_name: str
@@ -220,7 +250,7 @@ def test_quota_service_refreshes_independent_providers_concurrently():
     assert [item["status"] for item in result[0]["providers"]] == ["ok", "ok"]
 
 
-def test_provider_exception_details_do_not_escape_api_snapshot():
+def test_provider_exception_details_do_not_escape_api_or_logs(caplog):
     class FailingProvider:
         provider_name = "codex"
         source_name = "fixture"
@@ -235,6 +265,8 @@ def test_provider_exception_details_do_not_escape_api_snapshot():
     assert provider["status"] == "unavailable"
     assert provider["reason"] == "provider_read_failed"
     assert "secret-account-token" not in json.dumps(payload)
+    assert "secret-account-token" not in caplog.text
+    assert "RuntimeError" in caplog.text
 
 
 def test_demo_usage_strip_never_falls_through_to_live_quota():
