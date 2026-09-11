@@ -52,6 +52,52 @@ def test_antigravity_opt_in_gate_never_invokes_cli():
     assert calls == []
 
 
+def test_antigravity_runtime_marker_enables_poll_without_service_env(tmp_path):
+    calls: list[list[str]] = []
+    marker = tmp_path / "antigravity-quota.enabled"
+
+    def runner(argv, **kwargs):
+        calls.append(list(argv))
+        if argv[-1] == "--version":
+            return subprocess.CompletedProcess(argv, 0, "Antigravity CLI 1.1.11\n", "")
+        payload = {
+            "response": {
+                "groups": [
+                    {
+                        "displayName": "Gemini Models",
+                        "buckets": [
+                            {
+                                "bucketId": "five-hour",
+                                "displayName": "5h",
+                                "remainingFraction": 0.5,
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+
+    provider = AntigravityQuotaProvider(
+        command="/fake/agy",
+        opt_in_file=marker,
+        runner=runner,
+    )
+    before = provider.read()
+    assert before.status == "unavailable"
+    assert before.reason == "telemetry_opt_in_required"
+    assert calls == []
+
+    marker.touch()
+    after = provider.read()
+    assert after.status == "ok"
+    assert after.buckets[0].remaining_percent == 50.0
+    assert calls == [
+        ["/fake/agy", "--version"],
+        ["/fake/agy", "-p", "/usage", "--output-format", "json"],
+    ]
+
+
 def test_antigravity_opted_in_adapter_uses_only_read_only_usage_command():
     calls: list[list[str]] = []
 
