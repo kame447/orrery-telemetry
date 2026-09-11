@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import os
 import re
-import selectors
 import shutil
 import subprocess
+import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from queue import Empty, Queue
 from typing import Any
 
 from .base import QuotaBucket, QuotaSnapshot
@@ -20,14 +21,21 @@ class CodexQuotaProvider:
     source_name = "codex-app-server"
     ttl_seconds = 120
 
-    def __init__(self, command: str | None = None, *, timeout: float = 8.0) -> None:
+    def __init__(
+        self,
+        command: str | None = None,
+        *,
+        timeout: float = 8.0,
+        reader: Callable[..., dict[str, Any]] | None = None,
+    ) -> None:
         configured = command or os.environ.get("AGENTSTACK_CODEX_BIN", "").strip()
         self.command = configured or shutil.which("codex") or "codex"
         self.timeout = timeout
+        self._reader = reader or _read_app_server_rate_limits
 
     def read(self) -> QuotaSnapshot:
         observed_at = int(time.time())
-        payload = _read_app_server_rate_limits(self.command, timeout=self.timeout)
+        payload = self._reader(self.command, timeout=self.timeout)
         return parse_codex_rate_limits(payload, observed_at=observed_at)
 
 
@@ -110,8 +118,17 @@ def _read_app_server_rate_limits(command: str, *, timeout: float) -> dict[str, A
         process.terminate()
         raise RuntimeError("codex app-server did not expose stdio")
 
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ)
+    # selectors cannot wait on subprocess pipes on Windows. A tiny reader
+    # thread works on POSIX and Windows while the main thread keeps a bounded
+    # deadline for the JSON-RPC exchange.
+    responses: Queue[str | None] = Queue()
+    reader = threading.Thread(
+        target=_pump_stdout,
+        args=(process.stdout, responses),
+        name="codex-quota-stdout",
+        daemon=True,
+    )
+    reader.start()
     deadline = time.monotonic() + timeout
     try:
         _write_message(
@@ -129,18 +146,17 @@ def _read_app_server_rate_limits(command: str, *, timeout: float) -> dict[str, A
                 },
             },
         )
-        _read_response(process, selector, 1, deadline)
+        _read_response(responses, 1, deadline)
         _write_message(process, {"jsonrpc": "2.0", "method": "initialized"})
         _write_message(
             process,
             {"jsonrpc": "2.0", "id": 2, "method": "account/rateLimits/read"},
         )
-        result = _read_response(process, selector, 2, deadline)
+        result = _read_response(responses, 2, deadline)
         if not isinstance(result, dict):
             raise RuntimeError("account/rateLimits/read returned a non-object result")
         return result
     finally:
-        selector.close()
         if process.stdin is not None:
             try:
                 process.stdin.close()
@@ -153,6 +169,15 @@ def _read_app_server_rate_limits(command: str, *, timeout: float) -> dict[str, A
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=1)
+        reader.join(timeout=1)
+
+
+def _pump_stdout(stream: Any, responses: Queue[str | None]) -> None:
+    try:
+        for line in stream:
+            responses.put(line)
+    finally:
+        responses.put(None)
 
 
 def _write_message(process: subprocess.Popen[str], message: Mapping[str, Any]) -> None:
@@ -162,20 +187,21 @@ def _write_message(process: subprocess.Popen[str], message: Mapping[str, Any]) -
 
 
 def _read_response(
-    process: subprocess.Popen[str],
-    selector: selectors.BaseSelector,
+    responses: Queue[str | None],
     request_id: int,
     deadline: float,
 ) -> dict[str, Any]:
-    assert process.stdout is not None
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError(f"codex app-server timed out waiting for request {request_id}")
-        if not selector.select(remaining):
-            raise TimeoutError(f"codex app-server timed out waiting for request {request_id}")
-        line = process.stdout.readline()
-        if line == "":
+        try:
+            line = responses.get(timeout=remaining)
+        except Empty as exc:
+            raise TimeoutError(
+                f"codex app-server timed out waiting for request {request_id}"
+            ) from exc
+        if line is None:
             raise RuntimeError("codex app-server closed stdout")
         try:
             message = json.loads(line)
@@ -184,12 +210,9 @@ def _read_response(
         if not isinstance(message, dict) or message.get("id") != request_id:
             continue
         if "error" in message:
-            error = message.get("error")
-            if isinstance(error, Mapping):
-                detail = error.get("message") or json.dumps(dict(error), sort_keys=True)
-            else:
-                detail = str(error)
-            raise RuntimeError(f"codex app-server request failed: {detail}")
+            # Keep remote error text out of the browser-facing snapshot. The
+            # service boundary logs local diagnostics and exposes a stable code.
+            raise RuntimeError("codex app-server request failed")
         result = message.get("result", {})
         return result if isinstance(result, dict) else {}
 
