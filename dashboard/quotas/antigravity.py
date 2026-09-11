@@ -10,6 +10,7 @@ import subprocess
 import time
 from collections.abc import Mapping, Sequence
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from .base import QuotaBucket, QuotaSnapshot
@@ -24,8 +25,12 @@ class AntigravityQuotaProvider:
     ttl_seconds = 180
 
     def __init__(self, command: str | None = None, *, timeout: float = 15.0) -> None:
-        configured = command or os.environ.get("AGENTSTACK_ANTIGRAVITY_BIN", "").strip()
-        self.command = configured or shutil.which("agy") or "agy"
+        configured = (
+            command
+            or os.environ.get("AGENTSTACK_GEMINI_BIN", "").strip()
+            or os.environ.get("AGENTSTACK_ANTIGRAVITY_BIN", "").strip()
+        )
+        self.command = _resolve_command(configured or "agy")
         self.timeout = timeout
 
     def read(self) -> QuotaSnapshot:
@@ -122,6 +127,24 @@ def parse_antigravity_usage(
         status="ok",
         buckets=tuple(buckets),
     )
+
+
+def _resolve_command(configured: str) -> str:
+    path = Path(configured).expanduser()
+    if path.is_absolute() or "/" in configured:
+        return str(path)
+    resolved = shutil.which(configured)
+    if resolved:
+        return resolved
+    if configured == "agy":
+        for candidate in (
+            Path("~/.local/bin/agy").expanduser(),
+            Path("/opt/homebrew/bin/agy"),
+            Path("/usr/local/bin/agy"),
+        ):
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+    return configured
 
 
 def _read_version(command: str) -> tuple[int, int, int] | None:
