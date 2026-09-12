@@ -12,9 +12,13 @@
 - Verified: Chromium 1440/390px, DECK/NETWORK, no JS errors, demo makes zero
   live API requests; wheel/sdist build and artifact contracts; live Codex read.
 - Local full suite with inherited agent settings removed: 1691 passed,
-  34 skipped, 1 failed. The remaining core/optional installer contract failure
-  has an existing fix in PR #13; awaiting user direction to reuse it.
-- Next: resolve that owned test patch, publish this branch, verify final-head CI.
+  34 skipped, 1 installer-contract failure, subsequently corrected. The
+  installer suite now passes all 15 tests, including real isolated installs.
+  PR #13 owner approved reuse of its optional-provider test helper; only
+  optional bin files are excluded, preserving checks on copied hooks/assets.
+  The sample now includes the persisted Codex binary and quota directory.
+- Next: publish the final corrections, rerun the full suite and final-head CI.
+  The PR description records the terminal results and exact verified HEAD.
 - Done: audit Issue #12 and complete PR diff, fix confirmed defects, re-audit,
   verify tests/build/UI and terminal CI on final PR HEAD; leave merge to user.
 
