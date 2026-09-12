@@ -242,18 +242,13 @@ def _duration_label(minutes: int) -> str:
 
 
 def _positive_int(value: object) -> int | None:
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return None
-    return number if number > 0 else None
+    # JSON integer fields must not turn booleans/fractions into invented
+    # durations. In particular, int(True) silently manufactures a 1m window.
+    return value if type(value) is int and value > 0 else None
 
 
 def _optional_int(value: object) -> int | None:
-    try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
+    return value if type(value) is int and value >= 0 else None
 
 
 def _safe_id(value: str) -> str:

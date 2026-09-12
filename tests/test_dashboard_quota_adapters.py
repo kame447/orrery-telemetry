@@ -417,3 +417,24 @@ def test_codex_invalid_utf8_is_not_logged_from_reader_thread():
     stream = io.TextIOWrapper(io.BytesIO(b"secret-account\xff\n"), encoding="utf-8")
     codex_quota._pump_stdout(stream, responses)
     assert responses.get_nowait() is None
+
+
+@pytest.mark.parametrize("value", [True, False, 1.5, "300", float("inf"), -1, 0])
+def test_codex_invalid_duration_does_not_manufacture_window(value):
+    snapshot = codex_quota.parse_codex_rate_limits(
+        {"rateLimits": {"primary": {"windowDurationMins": value, "usedPercent": 20}}},
+        observed_at=1000,
+    )
+    assert snapshot.status == "unavailable"
+    assert snapshot.buckets == ()
+
+
+@pytest.mark.parametrize("value", [True, False, 1200.5, "1200", float("inf"), -1])
+def test_codex_invalid_reset_does_not_manufacture_timestamp(value):
+    snapshot = codex_quota.parse_codex_rate_limits(
+        {"rateLimits": {"primary": {
+            "windowDurationMins": 300, "usedPercent": 20, "resetsAt": value,
+        }}},
+        observed_at=1000,
+    )
+    assert snapshot.buckets[0].resets_at is None

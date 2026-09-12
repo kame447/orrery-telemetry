@@ -5,7 +5,7 @@
 - Branch: `feat/provider-usage-telemetry`; base: `8db5dc11ccab08581ed44e9fc9e82a1001df8358`.
 - Audit starting HEAD: `59f5aa9689d6e6002d91990120fc2cbe7a8ef299` (Issue #12).
 - Owner: SnugBoltzmann; user-authorized continuation of PR #14, no merge.
-- Baseline quota tests: 20 passed; audit regressions: 59 passed.
+- Baseline quota tests: 20 passed; audit regressions: 72 passed.
 - Implemented: preserve real-page scripts, served-demo privacy guard/assets,
   mobile layout, provider validation/labels, observation expiry and nonblocking
   concurrent refresh, foreground startup, UTF-8 subprocess handling.
@@ -43,6 +43,8 @@ provider の stderr や例外本文はブラウザ向け API に返さず、Dash
 Codex App Server の `account/rateLimits/read` を利用する。
 
 `primary` / `secondary` の位置を 5h / 7d に固定対応させず、`windowDurationMins` から表示 label を決める。App Server は `/api/quotas` の cache miss 時だけ起動し、`/api/agents` の refresh では起動しない。
+
+window durationとresetはJSON整数のみ受け入れ、真偽値・小数・文字列を暗黙変換しない。不正なdurationからbucketを作らず、不正なresetは未取得として扱う。
 
 複数の利用枠がある場合は`limitName`または`limitId`を表示し、同じ長さのwindowも区別できるようにする。`rateLimitsByLimitId`が返る場合は同じ枠の旧形式`rateLimits`より優先する。
 
