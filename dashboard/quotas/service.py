@@ -57,9 +57,8 @@ class QuotaService:
         self._provider_locks = {name: threading.Lock() for name in names}
 
     def read_all(self) -> dict[str, object]:
-        now = self._clock()
         if len(self.providers) <= 1:
-            snapshots = [self._read_provider(provider, now) for provider in self.providers]
+            snapshots = [self._read_provider(provider) for provider in self.providers]
         else:
             # Provider refreshes are independent I/O. Parallelize cold misses so
             # one unhealthy CLI does not add its timeout to every other provider.
@@ -68,32 +67,37 @@ class QuotaService:
                 thread_name_prefix="quota-refresh",
             ) as pool:
                 futures = [
-                    pool.submit(self._read_provider, provider, now)
+                    pool.submit(self._read_provider, provider)
                     for provider in self.providers
                 ]
                 # Preserve configured provider order in the API response.
                 snapshots = [future.result() for future in futures]
+        now = self._clock()
+        snapshots = [
+            self._bounded_snapshot(provider, snapshot, now)
+            for provider, snapshot in zip(self.providers, snapshots)
+        ]
         return {
             "ts": int(now),
             "degraded": any(snapshot.status != "ok" for snapshot in snapshots),
             "providers": [snapshot.to_dict() for snapshot in snapshots],
         }
 
-    def _read_provider(self, provider: QuotaProvider, now: float) -> QuotaSnapshot:
+    def _read_provider(self, provider: QuotaProvider) -> QuotaSnapshot:
         name = provider.provider_name
-        with self._provider_locks[name]:
-            # Re-check the cache only after taking the provider lock. Another
-            # request may have populated it while this request was waiting.
+        lock = self._provider_locks[name]
+        if not lock.acquire(blocking=False):
+            # A slow refresh must not accumulate HTTP workers and executor
+            # threads waiting for the same subprocess. Return bounded prior
+            # evidence (or unavailable) immediately; the next poll can retry.
+            return self._stale_or_unavailable(provider, self._clock(), "refresh_in_progress")
+        try:
+            now = self._clock()
+            # Cache and last-success updates belong to the refresh owner.
             ttl = max(1, int(getattr(provider, "ttl_seconds", self.default_ttl_seconds)))
             cached = self._cache.get(name)
-            if cached is not None and now - cached.fetched_at < ttl:
-                # A stale snapshot has a separate absolute lifetime based on the
-                # successful observation it wraps. Do not let cache TTL extend it.
-                if (
-                    cached.snapshot.status != "stale"
-                    or now - cached.snapshot.observed_at <= self.stale_seconds
-                ):
-                    return cached.snapshot
+            if cached is not None and 0 <= now - cached.fetched_at < ttl:
+                return self._bounded_snapshot(provider, cached.snapshot, now)
 
             try:
                 snapshot = provider.read()
@@ -101,6 +105,7 @@ class QuotaService:
                     raise ValueError(
                         f"provider returned snapshot for {snapshot.provider!r}, expected {name!r}"
                     )
+                snapshot = self._bounded_snapshot(provider, snapshot, self._clock())
             except Exception as exc:  # provider boundary: keep all other telemetry alive
                 # Provider/CLI errors can contain account or authentication data.
                 # Keep logs diagnostic without persisting arbitrary exception text.
@@ -120,8 +125,32 @@ class QuotaService:
                         snapshot.reason or "provider_unavailable",
                     )
 
+            now = self._clock()
+            snapshot = self._bounded_snapshot(provider, snapshot, now)
             self._cache[name] = _CacheEntry(fetched_at=now, snapshot=snapshot)
             return snapshot
+        finally:
+            lock.release()
+
+    def _bounded_snapshot(
+        self, provider: QuotaProvider, snapshot: QuotaSnapshot, now: float
+    ) -> QuotaSnapshot:
+        max_age = min(self.stale_seconds, getattr(provider, "max_age_seconds", self.stale_seconds))
+        age = now - snapshot.observed_at
+        if snapshot.buckets and (age < 0 or age > max_age):
+            return QuotaSnapshot(
+                provider=provider.provider_name,
+                source=provider.source_name,
+                observed_at=int(now),
+                status="unavailable",
+                reason="observation_expired" if age >= 0 else "observation_in_future",
+            )
+        if snapshot.buckets and any(
+            bucket.resets_at is not None and bucket.resets_at <= now
+            for bucket in snapshot.buckets
+        ):
+            return snapshot.with_status("stale", "window_reset_pending")
+        return snapshot
 
     def _failure_snapshot(
         self,
@@ -137,8 +166,8 @@ class QuotaService:
         reason: str,
     ) -> QuotaSnapshot:
         previous = self._last_success.get(provider.provider_name)
-        if previous is not None and now - previous.observed_at <= self.stale_seconds:
-            return previous.with_status("stale", reason)
+        if previous is not None:
+            return self._bounded_snapshot(provider, previous.with_status("stale", reason), now)
         return QuotaSnapshot(
             provider=provider.provider_name,
             source=provider.source_name,

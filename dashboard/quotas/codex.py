@@ -50,12 +50,15 @@ def parse_codex_rate_limits(
     by_limit_id = payload.get("rateLimitsByLimitId")
     candidates: list[tuple[str, Mapping[str, Any]]] = []
 
-    if isinstance(rate_limits, Mapping):
-        candidates.append((str(rate_limits.get("limitId") or "codex"), rate_limits))
     if isinstance(by_limit_id, Mapping):
         for limit_id, value in by_limit_id.items():
             if isinstance(value, Mapping):
                 candidates.append((str(limit_id), value))
+    if isinstance(rate_limits, Mapping):
+        limit_id = str(rate_limits.get("limitId") or "codex")
+        # The keyed map is authoritative; the legacy view is only a fallback.
+        if not any(key == limit_id for key, _ in candidates):
+            candidates.append((limit_id, rate_limits))
 
     buckets: list[QuotaBucket] = []
     seen: set[tuple[str, int, int | None]] = set()
@@ -74,6 +77,8 @@ def parse_codex_rate_limits(
                 continue
             seen.add(key)
             label = _duration_label(duration_mins)
+            if len(candidates) > 1:
+                label = f"{record.get('limitName') or limit_id} · {label}"
             bucket_id = _safe_id(f"{limit_id}-{duration_mins}m")
             buckets.append(
                 QuotaBucket.from_used(
@@ -112,6 +117,7 @@ def _read_app_server_rate_limits(command: str, *, timeout: float) -> dict[str, A
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
+        encoding="utf-8",
         bufsize=1,
     )
     if process.stdin is None or process.stdout is None:
@@ -171,12 +177,18 @@ def _read_app_server_rate_limits(command: str, *, timeout: float) -> dict[str, A
                 process.kill()
                 process.wait(timeout=1)
         reader.join(timeout=1)
+        if not reader.is_alive():
+            process.stdout.close()
 
 
 def _pump_stdout(stream: Any, responses: Queue[str | None]) -> None:
     try:
         for line in stream:
             responses.put(line)
+    except (OSError, UnicodeError):
+        # Treat invalid transport bytes as EOF. A background-thread traceback
+        # could otherwise log fragments of a provider/account payload.
+        pass
     finally:
         responses.put(None)
 

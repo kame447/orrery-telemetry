@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+
+import pytest
 
 from dashboard.quota_server import inject_usage_ui
 from dashboard.quotas.antigravity import parse_antigravity_usage
@@ -249,3 +252,87 @@ def test_usage_ui_is_injected_once_and_renders_dynamic_provider_data():
     assert b"/api/quotas" in first
     assert b"data.providers" in first
     assert b"Gemini Models" not in first
+
+
+def test_normal_cache_cannot_extend_claude_observation_lifetime(tmp_path):
+    path = tmp_path / "claude.json"
+    path.write_text(json.dumps({"observed_at": 1000, "rate_limits": {
+        "five_hour": {"used_percentage": 25, "resets_at": 2000},
+    }}), encoding="utf-8")
+    now = [1599.0]
+    provider = ClaudeQuotaProvider(path, clock=lambda: now[0])
+    service = QuotaService([provider], clock=lambda: now[0])
+    assert service.read_all()["providers"][0]["status"] == "ok"
+    now[0] = 1601.0  # still in the 30-second cache TTL, but observation expired
+    expired = service.read_all()["providers"][0]
+    assert expired["status"] == "unavailable"
+    assert expired["buckets"] == []
+
+
+def test_service_marks_pre_reset_value_stale_without_inventing_new_balance():
+    now = [1000.0]
+    provider = _Provider("codex", "codex-source", _ok_snapshot("codex", 1000), ttl_seconds=180)
+    service = QuotaService([provider], clock=lambda: now[0])
+    assert service.read_all()["providers"][0]["status"] == "ok"
+    now[0] = 1101.0
+    snapshot = service.read_all()["providers"][0]
+    assert snapshot["status"] == "stale"
+    assert snapshot["reason"] == "window_reset_pending"
+    assert snapshot["buckets"][0]["remaining_percent"] == 75
+    assert provider.calls == 1
+
+
+def test_future_observation_is_not_accepted_as_fresh(tmp_path):
+    path = tmp_path / "claude.json"
+    path.write_text(json.dumps({"observed_at": 2000, "rate_limits": {
+        "five_hour": {"used_percentage": 25},
+    }}), encoding="utf-8")
+    assert ClaudeQuotaProvider(path, clock=lambda: 1000).read().status == "unavailable"
+    provider = _Provider("codex", "fixture", _ok_snapshot("codex", 2000))
+    assert QuotaService([provider], clock=lambda: 1000).read_all()["providers"][0]["buckets"] == []
+
+
+def test_codex_keyed_limits_override_legacy_view_and_keep_distinct_labels():
+    def record(used, name=None):
+        return {"limitName": name, "primary": {
+            "usedPercent": used, "windowDurationMins": 300, "resetsAt": 2000,
+        }}
+    snapshot = parse_codex_rate_limits({
+        "rateLimits": {"limitId": "codex", **record(10)},
+        "rateLimitsByLimitId": {"codex": record(20), "other": record(80, "Other pool")},
+    }, observed_at=1000)
+    assert len(snapshot.buckets) == 2
+    assert [b.remaining_percent for b in snapshot.buckets] == [80, 20]
+    assert [b.label for b in snapshot.buckets] == ["codex · 5h", "Other pool · 5h"]
+
+
+@pytest.mark.parametrize("fraction", [1.01, 58, -0.01, True, float("nan"), float("inf")])
+def test_antigravity_rejects_invalid_fractions_without_guessing_units(fraction):
+    snapshot = parse_antigravity_usage({"groups": [{"buckets": [
+        {"id": "invalid", "remainingFraction": fraction},
+        {"id": "valid", "remainingFraction": 0},
+    ]}]}, observed_at=1000)
+    assert [b.id for b in snapshot.buckets] == ["valid"]
+    assert snapshot.buckets[0].remaining_percent == 0
+
+
+def test_antigravity_uses_explicit_window_and_does_not_parse_model_id_as_duration():
+    snapshot = parse_antigravity_usage({"groups": [{"buckets": [
+        {"id": "gemini-3model", "displayName": "Model", "remainingFraction": 0.5},
+        {"id": "opaque", "displayName": "Limit", "window": "5h", "remainingFraction": 1},
+        {"id": "disabled", "remainingFraction": 1, "disabled": True},
+    ]}]}, observed_at=1000)
+    assert [b.window_seconds for b in snapshot.buckets] == [None, 18000]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("used_percent", True), ("used_percent", float("nan")),
+    ("remaining_percent", 50), ("window_seconds", float("inf")),
+    ("window_seconds", True), ("resets_at", float("nan")), ("id", 1),
+])
+def test_bucket_schema_rejects_invalid_or_contradictory_data(field, value):
+    values = dict(id="quota", label="5h", scope="account", used_percent=25,
+                  remaining_percent=75, window_seconds=18000, resets_at=2000)
+    values[field] = value
+    with pytest.raises(ValueError):
+        QuotaBucket(**values)

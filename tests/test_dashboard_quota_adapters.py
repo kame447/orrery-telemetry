@@ -6,6 +6,8 @@ import os
 import subprocess
 import threading
 import time
+import pytest
+import sys
 from dataclasses import dataclass
 from queue import Queue
 
@@ -63,7 +65,7 @@ def test_antigravity_runtime_marker_enables_poll_without_service_env(tmp_path):
     def runner(argv, **kwargs):
         calls.append(list(argv))
         if argv[-1] == "--version":
-            return subprocess.CompletedProcess(argv, 0, "Antigravity CLI 1.1.11\n", "")
+            return subprocess.CompletedProcess(argv, 0, "Antigravity CLI 1.1.24\n", "")
         payload = {
             "response": {
                 "groups": [
@@ -108,7 +110,7 @@ def test_antigravity_opted_in_adapter_uses_only_read_only_usage_command():
     def runner(argv, **kwargs):
         calls.append(list(argv))
         if argv[-1] == "--version":
-            return subprocess.CompletedProcess(argv, 0, "Antigravity CLI 1.1.11\n", "")
+            return subprocess.CompletedProcess(argv, 0, "Antigravity CLI 1.1.24\n", "")
         payload = {
             "response": {
                 "groups": [
@@ -335,3 +337,83 @@ def test_demo_usage_strip_never_falls_through_to_live_quota():
     assert b"usage-observed" in injected
     assert b"usage-status" in injected
     assert b"status!=='ok'" in injected
+
+
+@pytest.mark.parametrize("code,stdout,stderr", [
+    (1, "1.2.1", "failed"), (0, "", "requires version 1.2.1"),
+    (0, "Gemini CLI 2.0.0", ""), (0, "1.1.11-beta.1", ""),
+    (0, "1.1.10", ""), (0, "1.1.11", ""), (0, "1.1.23", ""),
+])
+def test_antigravity_version_gate_rejects_unproven_read_only_support(code, stdout, stderr):
+    calls = []
+    def runner(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, code, stdout, stderr)
+    result = AntigravityQuotaProvider(command="fixture", enabled=True, runner=runner).read()
+    assert result.status == "unavailable"
+    assert len(calls) == 1
+    assert calls[0][0][-1] == "--version"
+    assert calls[0][1]["stdin"] == subprocess.DEVNULL
+    assert calls[0][1]["encoding"] == "utf-8"
+
+
+def test_concurrent_poll_does_not_wait_or_launch_duplicate_provider():
+    entered = set()
+    condition = threading.Condition()
+    release = threading.Event()
+    provider = _BlockingProvider("codex", entered, condition, release)
+    service = QuotaService([provider], clock=lambda: 1000.0)
+    worker = threading.Thread(target=service.read_all, daemon=True)
+    worker.start()
+    try:
+        with condition:
+            assert condition.wait_for(lambda: bool(entered), timeout=1)
+        # No release is signalled: a locking implementation would wait until
+        # the fake provider's timeout rather than returning in-flight status.
+        result = service.read_all()["providers"][0]
+        assert result["status"] == "unavailable"
+        assert result["reason"] == "refresh_in_progress"
+        assert worker.is_alive()
+    finally:
+        release.set()
+        worker.join(timeout=4)
+    assert not worker.is_alive()
+
+
+def test_response_rechecks_age_after_another_provider_finishes():
+    now = [1000.0]
+    class SlowProvider:
+        provider_name = "codex"
+        source_name = "fixture"
+        ttl_seconds = 60
+        def read(self):
+            now[0] = 1012.0
+            return _ok("codex")
+    result = QuotaService([SlowProvider()], clock=lambda: now[0], stale_seconds=10).read_all()
+    assert result["ts"] == 1012
+    assert result["providers"][0]["status"] == "unavailable"
+    assert result["providers"][0]["buckets"] == []
+
+
+def test_codex_silent_real_subprocess_times_out_and_is_reaped(monkeypatch):
+    native_popen = subprocess.Popen
+    children = []
+    def popen(argv, **kwargs):
+        child = native_popen([sys.executable, "-c", "import time; time.sleep(30)"], **kwargs)
+        children.append(child)
+        return child
+    monkeypatch.setattr(codex_quota.subprocess, "Popen", popen)
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        codex_quota._read_app_server_rate_limits("fake-codex", timeout=0.2)
+    assert time.monotonic() - started < 5
+    assert children[0].poll() is not None
+    assert children[0].stdin.closed
+    assert children[0].stdout.closed
+
+
+def test_codex_invalid_utf8_is_not_logged_from_reader_thread():
+    responses = Queue()
+    stream = io.TextIOWrapper(io.BytesIO(b"secret-account\xff\n"), encoding="utf-8")
+    codex_quota._pump_stdout(stream, responses)
+    assert responses.get_nowait() is None

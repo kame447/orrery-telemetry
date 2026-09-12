@@ -9,7 +9,8 @@ HTML, then delegates every other route and action to dashboard.server.
 from __future__ import annotations
 
 import json
-from urllib.parse import urlparse
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 try:
     from dashboard import server as legacy
@@ -29,7 +30,7 @@ _USAGE_STYLE = r"""
 body[data-view="net"] .usage-strip{display:none}
 .usage-title{flex:none;font-size:9px;letter-spacing:2.6px;color:var(--bone-dim)}
 .usage-providers{display:flex;align-items:center;gap:18px;min-width:0;flex:1;overflow-x:auto}
-.usage-provider{display:flex;align-items:center;gap:9px;white-space:nowrap;min-width:0}
+.usage-provider{display:flex;align-items:center;gap:9px;white-space:nowrap;flex:none}
 .usage-provider-name{font-size:10px;letter-spacing:1.4px;color:var(--bone);text-transform:uppercase}
 .usage-status{font-size:8px;letter-spacing:.8px;color:var(--amber);text-transform:uppercase}
 .usage-observed{font-size:8px;letter-spacing:.6px;color:var(--bone-dim);opacity:.68;font-variant-numeric:tabular-nums}
@@ -42,14 +43,14 @@ body[data-view="net"] .usage-strip{display:none}
 .usage-provider[data-status="stale"]{opacity:.62}
 .usage-provider[data-status="unavailable"]{opacity:.42}
 .usage-provider[data-status="degraded"] .usage-provider-name{color:var(--amber)}
-@media(max-width:760px){.usage-strip{margin-left:14px;margin-right:14px;align-items:flex-start}
-  .usage-providers{gap:13px}.usage-provider{align-items:flex-start;flex-direction:column;gap:4px}}
+@media(max-width:760px){.usage-strip{margin-left:14px;margin-right:14px;align-items:flex-start;flex-direction:column;gap:8px}
+  .usage-providers{gap:13px;width:100%}.usage-provider{align-items:flex-start;flex-direction:column;gap:4px}}
 </style>
 """
 
 _USAGE_HTML = r"""
 <section id="usage-strip" class="usage-strip" aria-label="Provider account usage">
-  <span class="usage-title">USAGE</span>
+  <span class="usage-title">USAGE · LEFT</span>
   <div id="usage-providers" class="usage-providers">
     <span class="usage-state">ACQUIRING QUOTA</span>
   </div>
@@ -63,6 +64,7 @@ _USAGE_SCRIPT = r"""
   if(!root)return;
   const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const pct=v=>{
+    if(v===null||v===undefined||typeof v==='boolean'||v==='')return null;
     const n=Number(v);
     return Number.isFinite(n)?Math.max(0,Math.min(100,n)):null;
   };
@@ -80,7 +82,7 @@ _USAGE_SCRIPT = r"""
   function bucket(b){
     const remaining=pct(b.remaining_percent);
     if(remaining===null)return '';
-    const title=[b.scope,b.quality,resetText(b.resets_at)].filter(Boolean).join(' · ');
+    const title=['remaining quota',b.scope,b.quality,resetText(b.resets_at)].filter(Boolean).join(' · ');
     return `<span class="usage-bucket" title="${esc(title)}">`+
       `<span class="usage-bucket-label">${esc(b.label||b.id)}</span>`+
       `<span class="usage-meter"><i style="width:${remaining.toFixed(1)}%"></i></span>`+
@@ -149,14 +151,46 @@ def inject_usage_ui(source: bytes) -> bytes:
         text = text.replace(marker, _USAGE_HTML + "\n" + marker, 1)
     else:
         text = text.replace("<body>", "<body>\n" + _USAGE_HTML, 1)
-    text = text.replace("</body>", _USAGE_SCRIPT + "\n</body>", 1)
+    # The real dashboard contains a document.write('...<body></body>...')
+    # string inside its main script. Replacing the first closing body would
+    # inject a literal </script> there and break the entire dashboard script.
+    before, closing, after = text.rpartition("</body>")
+    text = before + _USAGE_SCRIPT + "\n" + closing + after
     return text.encode("utf-8")
 
 
 class Handler(legacy.Handler):
     def do_GET(self):
         path = urlparse(self.path).path
+        demo_assets = {f"/demo/{name}": Path(legacy.HERE) / "demo" / name for name in (
+            "demo_api.js", "demo_tour.js", "story_bugreport.js", "story_research.js",
+        )}
+        if path in demo_assets:
+            try:
+                self._send(200, demo_assets[path].read_bytes(), "text/javascript; charset=utf-8")
+            except OSError:
+                self._send(404, b"demo asset missing", "text/plain")
+            return
+        # Only bundled public portraits, never runtime/custom portrait files.
+        if path.startswith("/portraits_64/"):
+            name = path.removeprefix("/portraits_64/")
+            if name.endswith(".png") and name[:-4].isalpha() and name.isascii():
+                try:
+                    self._send(200, (Path(legacy.PORT_64) / name).read_bytes(), "image/png")
+                except OSError:
+                    self._send(404, b"portrait missing", "text/plain")
+                return
         if path == "/api/quotas":
+            # A GET can start an authenticated provider process on a cache
+            # miss. Reject cross-origin browser triggers before any refresh;
+            # local CLI clients and direct navigation remain usable.
+            origin = (self.headers.get("Origin") or "").strip()
+            fetch_site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+            expected_origin = f"http://{self.headers.get('Host', '')}"
+            if ((origin and origin != expected_origin)
+                    or fetch_site not in {"", "none", "same-origin"}):
+                self._send(403, b'{"error":"cross_origin_quota_request"}', "application/json")
+                return
             body = json.dumps(
                 QUOTA_SERVICE.read_all(),
                 ensure_ascii=False,
@@ -168,6 +202,9 @@ class Handler(legacy.Handler):
             try:
                 with open(legacy.INDEX_HTML, "rb") as handle:
                     source = inject_usage_ui(handle.read())
+                demo = parse_qs(urlparse(self.path).query, keep_blank_values=True).get("demo", [""])[0]
+                if demo == "1":
+                    source = inject_served_demo(source)
                 body = legacy._render_dashboard_index(source)
             except OSError as exc:
                 self._send(500, str(exc).encode("utf-8"), "text/plain; charset=utf-8")
@@ -175,6 +212,22 @@ class Handler(legacy.Handler):
             self._send(200, body, "text/html; charset=utf-8")
             return
         super().do_GET()
+
+
+def inject_served_demo(source: bytes) -> bytes:
+    # Install a fail-closed transport BEFORE any page script. If a demo engine
+    # or story asset is missing, no live API read/write may escape. The demo
+    # engine then wraps this guard with its synthetic responses.
+    guard = b"""<script>
+(()=>{const original=window.fetch.bind(window);window.fetch=(input,init)=>{
+const url=new URL(typeof input==='string'?input:input.url,location.href);
+if(url.pathname.startsWith('/api/'))return Promise.reject(new Error('demo API blocked'));
+return original(input,init);};})();
+</script>
+<script src="demo/story_bugreport.js"></script>
+<script src="demo/story_research.js"></script>
+"""
+    return source.replace(b"<head>", b"<head>" + guard, 1)
 
 
 def main() -> None:

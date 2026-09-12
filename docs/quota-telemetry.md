@@ -1,16 +1,36 @@
 # Provider 使用量 telemetry
 
+## PR #14 audit checkpoint
+
+- Branch: `feat/provider-usage-telemetry`; base: `8db5dc11ccab08581ed44e9fc9e82a1001df8358`.
+- Audit starting HEAD: `59f5aa9689d6e6002d91990120fc2cbe7a8ef299` (Issue #12).
+- Owner: SnugBoltzmann; user-authorized continuation of PR #14, no merge.
+- Baseline quota tests: 20 passed; audit regressions: 59 passed.
+- Implemented: preserve real-page scripts, served-demo privacy guard/assets,
+  mobile layout, provider validation/labels, observation expiry and nonblocking
+  concurrent refresh, foreground startup, UTF-8 subprocess handling.
+- Verified: Chromium 1440/390px, DECK/NETWORK, no JS errors, demo makes zero
+  live API requests; wheel/sdist build and artifact contracts; live Codex read.
+- Local full suite with inherited agent settings removed: 1691 passed,
+  34 skipped, 1 failed. The remaining core/optional installer contract failure
+  has an existing fix in PR #13; awaiting user direction to reuse it.
+- Next: resolve that owned test patch, publish this branch, verify final-head CI.
+- Done: audit Issue #12 and complete PR diff, fix confirmed defects, re-audit,
+  verify tests/build/UI and terminal CI on final PR HEAD; leave merge to user.
+
 Dashboard の `USAGE` strip は、各 agent の context remaining とは別に、Claude / Codex / Antigravity のアカウント単位の利用枠を表示する。
 
 値は `GET /api/quotas` から取得し、既存の `GET /api/agents` には quota 取得処理を混ぜない。provider 側の CLI / App Server が失敗しても、他 provider と Dashboard 本体は継続する。
 
-provider の refresh は provider ごとの lock と cache を持ち、cold miss 時は独立 provider を並列に取得する。一つの CLI timeout を他 provider の timeout に加算しない。
+provider の refresh は provider ごとの lock と cache を持ち、cold miss 時は独立 provider を並列に取得する。一つの CLI timeout を他 provider の timeout に加算しない。同一providerの取得中は後続pollを待機させず、期限内の前回値を`stale / refresh_in_progress`として返す。前回値がなければ`unavailable`を返す。
 
 ## 表示の意味
 
 各 bucket は provider が実際に返した window だけを表示する。5h / 7d が存在すると仮定して補完しない。
 
 `remaining_percent` は残量で、100 に近いほど余裕がある。取得に失敗した場合、直近の正常観測が短い stale window 内なら `stale`、それ以外は `unavailable` とする。
+
+正常値をcacheから返す場合も観測から最大600秒（Claudeの設定が短ければその期限）で失効する。未来の観測時刻も受け付けない。reset時刻を過ぎた値は`stale / window_reset_pending`とし、次回の実観測なしに100%へ戻さない。`observed_at`はローカルで値を受け取った時刻であり、provider内部の測定時刻やアカウント識別情報ではない。
 
 provider の stderr や例外本文はブラウザ向け API に返さず、Dashboard log にも任意本文を永続化しない。API の `reason` は安定した状態コード、log は provider 名と例外型までに限定する。
 
@@ -20,13 +40,15 @@ Codex App Server の `account/rateLimits/read` を利用する。
 
 `primary` / `secondary` の位置を 5h / 7d に固定対応させず、`windowDurationMins` から表示 label を決める。App Server は `/api/quotas` の cache miss 時だけ起動し、`/api/agents` の refresh では起動しない。
 
+複数の利用枠がある場合は`limitName`または`limitId`を表示し、同じ長さのwindowも区別できるようにする。`rateLimitsByLimitId`が返る場合は同じ枠の旧形式`rateLimits`より優先する。
+
 App Server の stdout 待ちは subprocess pipe を `selectors` へ直接登録せず、reader thread + queue + bounded deadline で処理する。このため POSIX と Windows で同じ transport path を利用できる。
 
 `AGENTSTACK_CODEX_BIN` が設定されていれば、その executable を利用する。
 
 ## Antigravity
 
-Antigravity CLI 1.1.11 以降で提供される read-only print command を利用する。1.1.10 以前では `/usage` を安全な非対話 command とみなさず、Dashboard から実行しない。
+Antigravity CLI **1.1.24以上**のread-only print commandを利用する。read-only `/usage`は1.1.11で導入されたが、headless呼び出しのstdout/stderrを子プロセスが保持して終了待ちが止まる問題は1.1.24で修正されたため、両方の修正を必要条件とする。[公式変更履歴](https://github.com/google-antigravity/antigravity-cli/blob/main/CHANGELOG.md)を根拠とし、古い版、非ゼロ終了、stderrだけのversion、pre-release、別CLIのbannerではusageを実行しない。
 
 ```sh
 agy -p "/usage" --output-format json
@@ -52,6 +74,8 @@ rm ~/.agentstack/runtime/antigravity-quota.enabled
 opt-in が有効でない間は `agy --version` も `/usage` も実行せず、Antigravity は `unavailable / telemetry_opt_in_required` として表示する。opt-in は「この常駐 telemetry から Antigravity CLI を呼び出してよい」という明示的な許可として扱う。
 
 CLI の envelope や field casing が release 間で異なっても、返却された quota group / bucket のみを正規化する。`displayName` / `bucketId` / `remainingFraction` と、その互換表現である snake_case / nested `remaining` の両方を受け付けるが、Gemini / Claude / GPT などの固定 bucket を ORRERY 側では作らない。
+
+fractionは0〜1だけを受け付け、1を超えた値をpercentageに読み替えない。disabledまたは無効なfractionのbucketは表示しない。windowは明示フィールドを優先し、model名の途中の数字をdurationとして誤認しない。
 
 binary は既存 provider と同じ `AGENTSTACK_GEMINI_BIN` を優先する。未設定時は PATH に加えて `~/.local/bin/agy`、Homebrew の代表的な場所も確認する。
 
@@ -84,11 +108,17 @@ Claude quota がまだ観測されていない場合、Dashboard は推定値を
 
 ## Demo mode
 
-quota wrapper が注入された served Dashboard を `?demo=1` で開いた場合、USAGE strip は synthetic fixture のみを表示し、`/api/quotas` へ fall through して実アカウントの残量を取得しない。static demo bundle は現時点では wrapper 注入前の `index.html` を使うため、USAGE strip 自体を含まない。
+quota wrapper が注入された served Dashboard を `?demo=1` で開いた場合、USAGE stripはsynthetic fixtureのみを表示する。wrapperは既存のdemo engineとstoryも配信し、全ページscriptより前にAPI通信の遮断を設定する。demo assetが欠けた場合も実APIへfallbackしない。static demo bundleは現時点ではwrapper注入前の`index.html`を使うため、USAGE strip自体を含まない。
 
 ## API
 
 `GET /api/quotas` は常に provider 単位で状態を返す。一部 provider の取得失敗だけで endpoint 全体を 500 にしない。
+
+取得はread-onlyだがcache miss時にはCLIを起動するため、cross-origin browser requestは取得前に403で拒否する。認証情報は既存CLI側に委ね、Dashboardからlogin/logoutや設定の書き換えは要求しない。Dashboard自体は既存のlocalhost/trusted LAN境界を使い、独自login layerは追加しない。
+
+常駐起動と`agentctl.sh fg`はともにquota wrapperを使う。明示的に旧`server.py`を起動した場合はquota追加前のAPI/UIとなる。
+
+API契約の参照: [Codex App Server](https://learn.chatgpt.com/docs/app-server)、[Claude status line](https://code.claude.com/docs/en/statusline)。実アカウントの値や認証ファイルをfixtureに含めない。
 
 概念的な response:
 

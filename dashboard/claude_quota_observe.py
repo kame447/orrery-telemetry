@@ -9,6 +9,7 @@ status line while the quota fields are copied into dashboard runtime state.
 from __future__ import annotations
 
 import json
+import math
 import os
 import pathlib
 import sys
@@ -90,9 +91,13 @@ def _write_snapshot(rate_limits: object) -> None:
 def _remaining(window: object) -> float | None:
     if not isinstance(window, dict):
         return None
+    if isinstance(window.get("used_percentage"), bool):
+        return None
     try:
         used = float(window.get("used_percentage"))
     except (TypeError, ValueError):
+        return None
+    if not math.isfinite(used):
         return None
     return max(0.0, min(100.0, 100.0 - used))
 

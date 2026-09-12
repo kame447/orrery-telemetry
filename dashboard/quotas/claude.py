@@ -55,6 +55,14 @@ class ClaudeQuotaProvider:
         if not isinstance(payload, Mapping):
             raise RuntimeError("Claude quota observation must be a JSON object")
         observed_at = _int_or_none(payload.get("observed_at")) or modified
+        if observed_at > now:
+            return QuotaSnapshot(
+                provider=self.provider_name,
+                source=self.source_name,
+                observed_at=now,
+                status="unavailable",
+                reason="observation_in_future",
+            )
         if now - observed_at > self.max_age_seconds:
             return QuotaSnapshot(
                 provider=self.provider_name,

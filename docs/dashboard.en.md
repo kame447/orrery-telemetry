@@ -23,6 +23,8 @@ NETWORK may omit nodes outside its selected time window. Absence from the curren
 
 ## DECK
 
+The `USAGE · LEFT` strip shows remaining provider account quota, separately from each card's context remaining. See [setup, data sources and stale values](quota-telemetry.md).
+
 DECK opens first. **One card represents one agent**, so you can inspect who is doing what and whether each agent is stopped waiting for input.
 
 In the following image, the top counter and card area both show three agents. The counter is the total; each card shows an individual state.

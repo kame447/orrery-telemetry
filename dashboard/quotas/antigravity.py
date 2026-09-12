@@ -16,10 +16,10 @@ from typing import Any
 from .base import QuotaBucket, QuotaSnapshot
 
 
-# Non-interactive /usage and /quota handling landed in Antigravity CLI 1.1.11.
-# Older versions can interpret the slash command as an agent prompt and spend
-# quota, so they must never be probed by the dashboard.
-_MIN_SAFE_VERSION = (1, 1, 11)
+# Read-only /usage landed in 1.1.11, but 1.1.24 also fixes inherited stdout/
+# stderr handles hanging headless invocations. subprocess.run's timeout can
+# otherwise hang draining pipes even after killing the CLI. Require both fixes.
+_MIN_SAFE_VERSION = (1, 1, 24)
 _OPT_IN_ENV = "AGENTSTACK_ANTIGRAVITY_QUOTA_ENABLED"
 _OPT_IN_FILE_ENV = "AGENTSTACK_ANTIGRAVITY_QUOTA_OPT_IN_FILE"
 _OPT_IN_FILENAME = "antigravity-quota.enabled"
@@ -80,6 +80,8 @@ class AntigravityQuotaProvider:
             [self.command, "-p", "/usage", "--output-format", "json"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            stdin=subprocess.DEVNULL,
             timeout=self.timeout,
         )
         if process.returncode != 0:
@@ -141,7 +143,11 @@ def parse_antigravity_usage(
                 # Disabled or otherwise non-numeric buckets are not invented as
                 # 0%; absence is materially different from exhaustion.
                 continue
-            remaining = fraction * 100.0 if fraction <= 1.0 else fraction
+            # This field is a fraction, never an ambiguously scaled percent.
+            # Reject malformed data rather than inventing a plausible balance.
+            if not 0.0 <= fraction <= 1.0 or raw.get("disabled") is True:
+                continue
+            remaining = fraction * 100.0
             bucket_id = str(
                 raw.get("bucketId")
                 or raw.get("bucket_id")
@@ -156,7 +162,9 @@ def parse_antigravity_usage(
                 or raw.get("window")
                 or bucket_id
             )
-            window_seconds = _window_seconds(f"{bucket_id} {display_name}")
+            window_seconds = _window_seconds(str(raw.get("window") or ""))
+            if window_seconds is None:
+                window_seconds = _window_seconds(f"{bucket_id} {display_name}")
             window_label = _window_label(display_name, window_seconds)
             label = f"{group_name} · {window_label}" if group_name else window_label
             resets_at = _parse_reset(raw.get("resetTime") or raw.get("reset_time"))
@@ -272,12 +280,22 @@ def _read_version(
             [command, "--version"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            stdin=subprocess.DEVNULL,
             timeout=3,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    text = f"{process.stdout}\n{process.stderr}"
-    match = re.search(r"(?<!\d)(\d+)\.(\d+)\.(\d+)(?!\d)", text)
+    if process.returncode != 0:
+        return None
+    # agy emits a bare version; also accept its explicitly branded form.
+    # An error mentioning a required version, another CLI's banner, or a
+    # prerelease is not evidence that read-only slash commands are supported.
+    match = re.fullmatch(
+        r"(?:Antigravity CLI\s+)?v?(\d+)\.(\d+)\.(\d+)",
+        process.stdout.strip(),
+        flags=re.IGNORECASE,
+    )
     if not match:
         return None
     return tuple(int(part) for part in match.groups())  # type: ignore[return-value]
@@ -291,6 +309,8 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _number(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
     try:
         number = float(value)
     except (TypeError, ValueError):
@@ -320,9 +340,9 @@ def _parse_reset(value: object) -> int | None:
 
 def _window_seconds(value: str) -> int | None:
     text = value.strip().lower()
-    if "weekly" in text or re.search(r"(?:^|[^a-z])week(?:ly)?(?:[^a-z]|$)", text):
+    if re.search(r"(?:^|[^a-z])week(?:ly)?(?:[^a-z]|$)", text):
         return 7 * 24 * 60 * 60
-    match = re.search(r"(\d+(?:\.\d+)?)\s*([mhdw])", text)
+    match = re.search(r"(?:^|[^a-z0-9.])(\d+(?:\.\d+)?)\s*([mhdw])(?:$|[^a-z])", text)
     if not match:
         return None
     amount = float(match.group(1))

@@ -13,6 +13,8 @@ QuotaStatus = Literal["ok", "degraded", "stale", "unavailable"]
 def normalize_percent(value: object) -> float:
     """Return a finite percentage clamped to the provider-neutral 0..100 range."""
 
+    if isinstance(value, bool):
+        raise ValueError("boolean is not a percentage")
     try:
         number = float(value)
     except (TypeError, ValueError) as exc:
@@ -38,16 +40,18 @@ class QuotaBucket:
     quality: QuotaQuality = "exact"
 
     def __post_init__(self) -> None:
-        if not self.id or not self.label or not self.scope:
+        if not all(isinstance(value, str) and value.strip() for value in (self.id, self.label, self.scope)):
             raise ValueError("quota bucket id, label and scope must be non-empty")
         if self.quality not in {"exact", "derived", "estimated"}:
             raise ValueError(f"invalid quota quality: {self.quality}")
         used = normalize_percent(self.used_percent)
         remaining = normalize_percent(self.remaining_percent)
-        if self.window_seconds is not None and self.window_seconds <= 0:
+        if self.window_seconds is not None and (type(self.window_seconds) is not int or self.window_seconds <= 0):
             raise ValueError("window_seconds must be positive")
-        if self.resets_at is not None and self.resets_at < 0:
+        if self.resets_at is not None and (type(self.resets_at) is not int or self.resets_at < 0):
             raise ValueError("resets_at must be non-negative")
+        if abs(used + remaining - 100.0) > 0.00001:
+            raise ValueError("used and remaining percentages must add up to 100")
         object.__setattr__(self, "used_percent", used)
         object.__setattr__(self, "remaining_percent", remaining)
 
@@ -122,12 +126,14 @@ class QuotaSnapshot:
     reason: str = ""
 
     def __post_init__(self) -> None:
-        if not self.provider or not self.source:
+        if not all(isinstance(value, str) and value.strip() for value in (self.provider, self.source)):
             raise ValueError("quota snapshot provider and source must be non-empty")
         if self.status not in {"ok", "degraded", "stale", "unavailable"}:
             raise ValueError(f"invalid quota status: {self.status}")
-        if self.observed_at < 0:
+        if type(self.observed_at) is not int or self.observed_at < 0:
             raise ValueError("observed_at must be non-negative")
+        if not isinstance(self.buckets, tuple) or not all(isinstance(bucket, QuotaBucket) for bucket in self.buckets):
+            raise ValueError("buckets must be a tuple of quota buckets")
 
     def with_status(self, status: QuotaStatus, reason: str = "") -> "QuotaSnapshot":
         return replace(self, status=status, reason=reason)
