@@ -306,6 +306,57 @@ def test_codex_keyed_limits_override_legacy_view_and_keep_distinct_labels():
     assert [b.label for b in snapshot.buckets] == ["codex · 5h", "Other pool · 5h"]
 
 
+def test_codex_groups_windows_by_usage_pool_before_sorting_by_duration():
+    def record(name, durations):
+        windows = [
+            {"usedPercent": index, "windowDurationMins": duration, "resetsAt": 2000 + index}
+            for index, duration in enumerate(durations, start=10)
+        ]
+        return {"limitName": name, "primary": windows[0], "secondary": windows[1]}
+
+    snapshot = parse_codex_rate_limits(
+        {
+            "rateLimitsByLimitId": {
+                "spark": record("GPT-5.3-Codex-Spark", [10080, 300]),
+                "codex": record("codex", [10080, 300]),
+            }
+        },
+        observed_at=1000,
+    )
+
+    assert [bucket.label for bucket in snapshot.buckets] == [
+        "codex · 5h",
+        "codex · 7d",
+        "GPT-5.3-Codex-Spark · 5h",
+        "GPT-5.3-Codex-Spark · 7d",
+    ]
+
+
+def test_codex_pool_order_uses_shortest_window_not_map_order():
+    def record(name, windows):
+        return {"limitName": name, **windows}
+
+    codex = record("codex", {
+        "primary": {"usedPercent": 40, "windowDurationMins": 10080, "resetsAt": 3000},
+    })
+    spark = record("GPT-5.3-Codex-Spark", {
+        "primary": {"usedPercent": 20, "windowDurationMins": 300, "resetsAt": 1500},
+        "secondary": {"usedPercent": 30, "windowDurationMins": 10080, "resetsAt": 3000},
+    })
+    expected = [
+        "GPT-5.3-Codex-Spark · 5h",
+        "GPT-5.3-Codex-Spark · 7d",
+        "codex · 7d",
+    ]
+
+    for limits in ({"codex": codex, "spark": spark}, {"spark": spark, "codex": codex}):
+        snapshot = parse_codex_rate_limits(
+            {"rateLimitsByLimitId": limits},
+            observed_at=1000,
+        )
+        assert [bucket.label for bucket in snapshot.buckets] == expected
+
+
 @pytest.mark.parametrize("fraction", [1.01, 58, -0.01, True, float("nan"), float("inf")])
 def test_antigravity_rejects_invalid_fractions_without_guessing_units(fraction):
     snapshot = parse_antigravity_usage({"groups": [{"buckets": [

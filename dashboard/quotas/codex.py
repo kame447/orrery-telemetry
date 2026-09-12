@@ -60,7 +60,14 @@ def parse_codex_rate_limits(
         if not any(key == limit_id for key, _ in candidates):
             candidates.append((limit_id, rate_limits))
 
-    buckets: list[QuotaBucket] = []
+    # Keep each usage pool together, ordered by its shortest valid window. This
+    # avoids making the UI order depend on JSON map insertion order.
+    ordered_groups = sorted(
+        candidates,
+        key=lambda item: (_shortest_valid_window_duration(item[1]), item[0]),
+    )
+    group_order = {limit_id: index for index, (limit_id, _) in enumerate(ordered_groups)}
+    buckets: list[tuple[int, QuotaBucket]] = []
     seen: set[tuple[str, int, int | None]] = set()
     for limit_id, record in candidates:
         for field in ("primary", "secondary"):
@@ -81,18 +88,21 @@ def parse_codex_rate_limits(
                 label = f"{record.get('limitName') or limit_id} · {label}"
             bucket_id = _safe_id(f"{limit_id}-{duration_mins}m")
             buckets.append(
-                QuotaBucket.from_used(
-                    id=bucket_id,
-                    label=label,
-                    scope="account",
-                    used_percent=used,
-                    window_seconds=duration_mins * 60,
-                    resets_at=resets_at,
-                    quality="exact",
+                (
+                    group_order[limit_id],
+                    QuotaBucket.from_used(
+                        id=bucket_id,
+                        label=label,
+                        scope="account",
+                        used_percent=used,
+                        window_seconds=duration_mins * 60,
+                        resets_at=resets_at,
+                        quality="exact",
+                    ),
                 )
             )
 
-    buckets.sort(key=lambda bucket: (bucket.window_seconds or 0, bucket.id))
+    buckets.sort(key=lambda item: (item[0], item[1].window_seconds or 0, item[1].id))
     if not buckets:
         return QuotaSnapshot(
             provider="codex",
@@ -106,8 +116,20 @@ def parse_codex_rate_limits(
         source="codex-app-server",
         observed_at=observed_at,
         status="ok",
-        buckets=tuple(buckets),
+        buckets=tuple(bucket for _, bucket in buckets),
     )
+
+
+def _shortest_valid_window_duration(record: Mapping[str, Any]) -> int:
+    durations = []
+    for field in ("primary", "secondary"):
+        window = record.get(field)
+        if not isinstance(window, Mapping):
+            continue
+        duration_mins = _positive_int(window.get("windowDurationMins"))
+        if duration_mins is not None and window.get("usedPercent") is not None:
+            durations.append(duration_mins)
+    return min(durations, default=2**63 - 1)
 
 
 def _read_app_server_rate_limits(command: str, *, timeout: float) -> dict[str, Any]:

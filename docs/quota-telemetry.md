@@ -46,7 +46,7 @@ Codex App Server の `account/rateLimits/read` を利用する。
 
 window durationとresetはJSON整数のみ受け入れ、真偽値・小数・文字列を暗黙変換しない。不正なdurationからbucketを作らず、不正なresetは未取得として扱う。
 
-複数の利用枠がある場合は`limitName`または`limitId`を表示し、同じ長さのwindowも区別できるようにする。`rateLimitsByLimitId`が返る場合は同じ枠の旧形式`rateLimits`より優先する。
+複数の利用枠がある場合は`limitName`または`limitId`を表示し、同じ長さのwindowも区別できるようにする。同じ利用枠のwindowを隣接させ、枠内では短いwindowから並べる。利用枠同士は最短の有効windowが短い枠から並べ、同じ長さならlimit IDで順序を固定する。`rateLimitsByLimitId`が返る場合は同じ枠の旧形式`rateLimits`より優先する。
 
 App Server の stdout 待ちは subprocess pipe を `selectors` へ直接登録せず、reader thread + queue + bounded deadline で処理する。このため POSIX と Windows で同じ transport path を利用できる。
 
