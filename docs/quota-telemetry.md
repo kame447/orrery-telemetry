@@ -5,7 +5,7 @@
 - Branch: `feat/provider-usage-telemetry`; base: `8db5dc11ccab08581ed44e9fc9e82a1001df8358`.
 - Audit starting HEAD: `59f5aa9689d6e6002d91990120fc2cbe7a8ef299` (Issue #12).
 - Owner: SnugBoltzmann; user-authorized continuation of PR #14, no merge.
-- Baseline quota tests: 20 passed; audit regressions: 72 passed.
+- Baseline quota tests: 20 passed; audit regressions: 86 passed.
 - Implemented: preserve real-page scripts, served-demo privacy guard/assets,
   mobile layout, provider validation/labels, observation expiry and nonblocking
   concurrent refresh, foreground startup, UTF-8 subprocess handling.

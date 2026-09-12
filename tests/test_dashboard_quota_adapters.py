@@ -14,6 +14,8 @@ from queue import Queue
 from dashboard import claude_quota_observe
 from dashboard.quota_server import inject_usage_ui
 from dashboard.quotas import codex as codex_quota
+from dashboard.quotas import claude as claude_quota
+from dashboard.quotas import antigravity as agy_quota
 from dashboard.quotas.antigravity import AntigravityQuotaProvider
 from dashboard.quotas.base import QuotaBucket, QuotaSnapshot
 from dashboard.quotas.codex import CodexQuotaProvider, _read_response
@@ -438,3 +440,24 @@ def test_codex_invalid_reset_does_not_manufacture_timestamp(value):
         observed_at=1000,
     )
     assert snapshot.buckets[0].resets_at is None
+
+
+@pytest.mark.parametrize("value", [True, False, 1200.5, "1200", float("inf"), -1])
+def test_claude_invalid_reset_does_not_manufacture_timestamp(value):
+    snapshot = claude_quota.parse_claude_statusline(
+        {"rate_limits": {"five_hour": {"used_percentage": 20, "resets_at": value}}},
+        observed_at=1000,
+    )
+    assert snapshot.buckets[0].resets_at is None
+
+
+@pytest.mark.parametrize("value", [True, False, float("inf"), float("nan"), -1,
+                                   "2026-09-12T12:00:00", "garbage"])
+def test_antigravity_invalid_reset_is_unknown_not_local_time(value):
+    assert agy_quota._parse_reset(value) is None
+
+
+def test_antigravity_reset_offset_identifies_same_instant():
+    assert agy_quota._parse_reset("2026-09-12T12:00:00+09:00") == agy_quota._parse_reset(
+        "2026-09-12T03:00:00Z"
+    )

@@ -141,7 +141,4 @@ def _default_snapshot_path() -> Path:
 
 
 def _int_or_none(value: object) -> int | None:
-    try:
-        return int(value) if value is not None else None
-    except (TypeError, ValueError):
-        return None
+    return value if type(value) is int and value >= 0 else None

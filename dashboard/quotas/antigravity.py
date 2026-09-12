@@ -321,20 +321,23 @@ def _number(value: object) -> float | None:
 
 
 def _parse_reset(value: object) -> int | None:
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
-    if isinstance(value, (int, float)):
-        return int(value)
     text = str(value).strip()
     if not text:
         return None
+    number = _number(value)
+    if number is not None:
+        return int(number) if number >= 0 else None
     try:
-        return int(float(text))
-    except ValueError:
-        pass
-    try:
-        return int(datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp())
-    except ValueError:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        # A timezone-free timestamp would depend on the dashboard machine's
+        # timezone, not the provider's actual reset instant.
+        if parsed.tzinfo is None:
+            return None
+        timestamp = int(parsed.timestamp())
+        return timestamp if timestamp >= 0 else None
+    except (ValueError, OverflowError, OSError):
         return None
 
 
