@@ -26,6 +26,26 @@ def _snapshot_path() -> pathlib.Path:
     return pathlib.Path("~/.agentstack/runtime/claude-quota.json").expanduser()
 
 
+def _replace_snapshot(temporary: pathlib.Path, target: pathlib.Path) -> None:
+    """Atomically publish a snapshot, tolerating transient Windows sharing races."""
+
+    delay = 0.005
+    for attempt in range(8):
+        try:
+            os.replace(temporary, target)
+            return
+        except PermissionError:
+            # Windows can briefly reject ReplaceFile/MoveFileEx when two status
+            # line processes publish the same target concurrently. The source
+            # file is unique, so retrying the atomic rename is safe. POSIX
+            # PermissionError is not a transient sharing violation and should
+            # still surface immediately.
+            if os.name != "nt" or attempt == 7:
+                raise
+            time.sleep(delay)
+            delay *= 2
+
+
 def _write_snapshot(rate_limits: object) -> None:
     if not isinstance(rate_limits, dict):
         return
@@ -53,7 +73,7 @@ def _write_snapshot(rate_limits: object) -> None:
             temporary.chmod(0o600)
         except OSError:
             pass
-        os.replace(temporary, target)
+        _replace_snapshot(temporary, target)
         temporary = None
         try:
             target.chmod(0o600)
