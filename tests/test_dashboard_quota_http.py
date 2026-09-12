@@ -211,7 +211,7 @@ async function run(payload){
     {provider:'claude',status:'ok',buckets:[
       {id:'claude-main',label:'5h',scope:'account',remaining_percent:80,resets_at:1800000000}]},
     {provider:'antigravity',status:'ok',buckets:[
-      {id:'gemini-weekly',label:'Claude',scope:'account',remaining_percent:50,resets_at:1800000000},
+      {id:'gemini-weekly',label:'Gemini Models · 7d',scope:'account',remaining_percent:50,resets_at:1800000000},
       {id:'3p-weekly',label:'GPT',scope:'account',remaining_percent:40,resets_at:1800000000}]}
   ]});
   assert.equal(result.requests,1);
@@ -219,24 +219,18 @@ async function run(payload){
   const additional=result.nodes['usage-additional-track'].innerHTML;
   assert.match(main,/codex-10080m/);
   assert.doesNotMatch(main,/codex_bengalfox|codex-other/,'non-main limits must not enter main root');
-  assert.match(additional,/codex_bengalfox-300m/);
-  assert.match(additional,/codex_bengalfox-10080m/);
+  assert.doesNotMatch(additional,/codex_bengalfox/);
   assert.match(additional,/codex-other/,'unknown Codex limits may remain safely in additional area');
   assert.match(additional,/data-pool="other"/);
-  assert.match(additional,/Spark/); assert.match(additional,/Extra/);
+  assert.doesNotMatch(additional,/Spark|Extra/);
   assert.match(additional,/<span class="usage-pct" data-unknown="true">UNKNOWN<\/span>/);
   assert.match(additional,/role="img"[^>]*aria-label="[^"]*unknown/i);
   assert.match(main+additional,/1\/15 08:00 reset/);
   assert.match(main+additional,/RESET UNKNOWN/);
   assert.match(main+additional,/data-provider="antigravity"[\s\S]*data-scope="antigravity"/);
-  assert.match(main+additional,/gemini-weekly/); assert.match(main+additional,/3p-weekly/);
-  const scopeBuckets=main.match(/<div class="usage-bucket"[^>]*>[\s\S]*?<\/div>/g)??[];
-  for(const id of ['gemini-weekly','3p-weekly']){
-    const scopedBucket=scopeBuckets.find(html=>html.includes(`data-bucket-id="${id}"`));
-    assert.ok(scopedBucket,`missing Antigravity bucket ${id}`);
-    assert.match(scopedBucket,/<span class="usage-via">· via Antigravity<\/span>/);
-  }
-  assert.match(main,/<div class="usage-card-scope">Claude \/ GPT limits are scoped via Antigravity<\/div>/);
+  assert.match(main,/gemini-weekly/);
+  assert.doesNotMatch(main,/3p-weekly|via Antigravity/);
+  assert.doesNotMatch(main,/<div class="usage-card-scope">/);
   const arrows=Object.values(result.nodes).flatMap(n=>n.querySelectorAll('[data-overflow-arrow]'));
   assert.equal(arrows.length,2,'both overflow arrows must always be rendered');
   const track=result.nodes['usage-additional-viewport'];
@@ -265,7 +259,8 @@ async function run(payload){
   const identities=[...absentMain.matchAll(/data-provider="([^"]+)"/g)].map(m=>m[1]);
   assert.deepEqual(identities,['claude','codex','antigravity']);
   assert.match(absentMain,/unavailable/i);
-  assert.match(absentAdditional,/Spark/);
+  assert.equal(absentAdditional,'');
+  assert.equal(absent.nodes['usage-additional'].hidden,true);
   assert.doesNotMatch(absentMain,/Spark/);
 })().catch(error=>{console.error(error);process.exitCode=1;});
 '''

@@ -1,6 +1,8 @@
 # Provider 使用量 telemetry
 
-## PR #14 audit checkpoint
+## PR #14 initial audit checkpoint
+
+以下は表示・観測時刻の追加修正前の監査記録。追加修正の検証結果は PR の最新コメントを参照する。
 
 - Branch: `feat/provider-usage-telemetry`; base: `8db5dc11ccab08581ed44e9fc9e82a1001df8358`.
 - Audit starting HEAD: `59f5aa9689d6e6002d91990120fc2cbe7a8ef299` (Issue #12).
@@ -34,10 +36,13 @@ provider の refresh は provider ごとの lock と cache を持ち、cold miss
 
 上段には Claude / Codex の通常利用枠 / Antigravity を固定順のカードで表示する。
 主要3 provider の領域は横スクロールせず、画面幅に応じて折り返す。
-Spark など Codex の追加 limit は下段の追加情報へ分離する。通常枠が取得できない場合に
-追加 limit を通常枠として表示しない。Codex の通常枠は `codex-<minutes>m` の ID で識別し、
-未知の ID は追加情報へ表示する。Antigravity 内の Claude / GPT quota には
-Antigravity 経由の枠であることを明記し、独立した Claude / Codex の利用枠と区別する。
+利用しない Spark と Antigravity 内の Claude / GPT quota は画面から非表示にする。
+これは提供終了の判定ではなく、この Dashboard の表示方針であり、API の bucket は削除しない。
+Codex の通常枠は `codex-<minutes>m` の ID で識別し、通常枠が取得できない場合に
+追加 limit を通常枠として表示しない。Spark 以外の未知の ID は追加情報へ表示する。
+非表示処理の結果、追加枠が空なら `ADDITIONAL LIMITS` の領域全体を隠す。
+Antigravity の第三者モデル枠だけを非表示にし、取得できた Gemini 枠や未知の枠は残す。
+独立した Claude / Codex の利用枠にはこの非表示方針を適用しない。
 
 各 quota の reset はブラウザのローカル時刻で `9/19 21:18 reset` の形式を常時表示する。
 reset が取得できない場合も不明であることを表示し、推定日時を作らない。
@@ -46,7 +51,9 @@ reset が取得できない場合も不明であることを表示し、推定�
 
 `remaining_percent` は残量で、100 に近いほど余裕がある。取得に失敗した場合、直近の正常観測が短い stale window 内なら `stale`、それ以外は `unavailable` とする。
 
-正常値をcacheから返す場合も観測から最大600秒（Claudeの設定が短ければその期限）で失効する。未来の観測時刻も受け付けない。reset時刻を過ぎた値は`stale / window_reset_pending`とし、次回の実観測なしに100%へ戻さない。`observed_at`はローカルで値を受け取った時刻であり、provider内部の測定時刻やアカウント識別情報ではない。
+正常値をcacheから返す場合も観測から最大600秒（Claudeの設定が短ければその期限）で失効する。未来の観測時刻も受け付けない。reset時刻を過ぎた値は`stale / window_reset_pending`とし、次回の実観測なしに100%へ戻さない。
+
+`last_observed_at` は最後の有効な quota 観測時刻、`checked_at` は provider の取得試行が最後に完了した時刻で、ともに Unix 秒または `null`。観測がなければ `last_observed_at` は `null` とし、取得を試みた時刻を観測成功として表示しない。期限切れ後も最後の観測時刻を保持するが、期限切れの残量は返さない。通常の cache hit や取得中の重複リクエストだけでは `checked_at` を進めない。これらはローカルの観測・確認時刻であり、provider 内部の測定時刻やアカウント識別情報ではない。既存の `observed_at` は互換性のため残し、期限切れ時は元の観測時刻を保持する。UI は `last_observed_at` を優先し、最終確認時刻は tooltip で区別する。
 
 provider の stderr や例外本文はブラウザ向け API に返さず、Dashboard log にも任意本文を永続化しない。API の `reason` は安定した状態コード、log は provider 名と例外型までに限定する。
 
@@ -124,9 +131,11 @@ Claude の `statusLine.command` としてこの script を Python で実行す�
 
 Claude quota がまだ観測されていない場合、Dashboard は推定値を作らず `unavailable` を表示する。
 
+この経路は受動的な観測なので、Claude Code を使っていない間は観測が更新されず、正常な設定でも10分で期限切れになり得る。`observation_stale` / `observation_expired` の場合は残量を隠したまま `WAITING FOR UPDATE` と `Last observed ... ago. Waiting for Claude Code activity.` を表示する。画面やサービスを再起動しても、保存済みの最終観測時刻を現在時刻へ置き換えない。新しい有効な status line 観測が入ると、既存の cache / polling 周期で残量表示が復帰する。期限の延長、古いファイルへの `touch`、自動会話の実行は行わない。
+
 ## Demo mode
 
-quota wrapper が注入された served Dashboard を `?demo=1` で開いた場合、USAGE stripはsynthetic fixtureのみを表示する。wrapperは既存のdemo engineとstoryも配信し、全ページscriptより前にAPI通信の遮断を設定する。demo assetが欠けた場合も実APIへfallbackしない。static demo bundleは現時点ではwrapper注入前の`index.html`を使うため、USAGE strip自体を含まない。
+quota wrapper が注入された served Dashboard を `?demo=1` で開いた場合、USAGE stripはsynthetic fixtureのみを表示する。wrapperは既存のdemo engineとstoryも配信し、全ページscriptより前にAPI通信の遮断を設定する。demo assetが欠けた場合も実APIへfallbackしない。static demo bundleは現時点ではwrapper注入前の`index.html`を使うため、USAGE strip自体を含まない。表示フィルターは live / demo 共通で適用する。
 
 ## API
 
@@ -150,6 +159,8 @@ API契約の参照: [Codex App Server](https://learn.chatgpt.com/docs/app-server
       "status": "ok",
       "source": "codex-app-server",
       "observed_at": 1789123440,
+      "last_observed_at": 1789123440,
+      "checked_at": 1789123440,
       "buckets": [
         {
           "id": "codex-300m",

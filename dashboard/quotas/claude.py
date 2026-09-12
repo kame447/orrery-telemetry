@@ -63,7 +63,8 @@ class ClaudeQuotaProvider:
                 status="unavailable",
                 reason="observation_in_future",
             )
-        if now - observed_at > self.max_age_seconds:
+        snapshot = parse_claude_statusline(payload, observed_at=observed_at)
+        if snapshot.buckets and now - observed_at > self.max_age_seconds:
             return QuotaSnapshot(
                 provider=self.provider_name,
                 source=self.source_name,
@@ -71,7 +72,7 @@ class ClaudeQuotaProvider:
                 status="unavailable",
                 reason="observation_stale",
             )
-        return parse_claude_statusline(payload, observed_at=observed_at)
+        return snapshot
 
 
 def parse_claude_statusline(

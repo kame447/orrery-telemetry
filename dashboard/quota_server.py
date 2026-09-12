@@ -125,8 +125,8 @@ _USAGE_SCRIPT = r"""
     return `${date.getMonth()+1}/${date.getDate()} ${pad(date.getHours())}:${pad(date.getMinutes())} reset`;
   };
   const observedText=ts=>{
-    if(!ts)return '';
-    const date=new Date(Number(ts)*1000);
+    if(typeof ts!=='number'||!Number.isFinite(ts)||ts<0)return '';
+    const date=new Date(ts*1000);
     if(Number.isNaN(date.getTime()))return '';
     return date.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
   };
@@ -137,7 +137,7 @@ _USAGE_SCRIPT = r"""
   };
   const antigravityScope=b=>{
     const explicit=String(b&&b.scope||'').toLowerCase();
-    if(explicit==='claude'||explicit==='gpt')return explicit;
+    if(['claude','gpt','claude-gpt','gemini'].includes(explicit))return explicit;
     const label=String(b&&b.label||'');
     if(/claude/i.test(label)&&/gpt/i.test(label))return 'claude-gpt';
     if(/claude/i.test(label))return 'claude';
@@ -167,6 +167,21 @@ _USAGE_SCRIPT = r"""
       `<span class="usage-pct" data-unknown="${meterUnknown}">${percent}</span>`+
       `<span class="usage-reset">${esc(reset)}${via}</span></div>`;
   }
+  const lastObserved=p=>{
+    // A null last_observed_at is intentional: no valid quota was observed.
+    if(Object.prototype.hasOwnProperty.call(p,'last_observed_at'))return p.last_observed_at;
+    return Array.isArray(p.buckets)&&p.buckets.length?p.observed_at:null;
+  };
+  const observationAge=ts=>{
+    if(typeof ts!=='number'||!Number.isFinite(ts)||ts<0||ts*1000>Date.now())return '';
+    const minutes=Math.floor((Date.now()/1000-ts)/60);
+    if(minutes<1)return 'less than a minute ago';
+    if(minutes<60)return `${minutes} minute${minutes===1?'':'s'} ago`;
+    const hours=Math.floor(minutes/60);
+    if(hours<24)return `${hours} hour${hours===1?'':'s'} ago`;
+    const days=Math.floor(hours/24);
+    return `${days} day${days===1?'':'s'} ago`;
+  };
   function provider(p,options={}){
     const status=statusOf(p);
     const providerName=String(options.name||p.provider||'provider');
@@ -174,12 +189,19 @@ _USAGE_SCRIPT = r"""
     const items=Array.isArray(options.buckets)?options.buckets:(Array.isArray(p.buckets)?p.buckets:[]);
     const rendered=items.map(item=>bucket(item,{labelPrefix:options.labelPrefix,
       antigravityScope:Boolean(options.antigravityScope)}));
-    const state=options.emptyState||p.reason||status;
+    const waiting=String(p.provider||'').toLowerCase()==='claude'&&status==='unavailable'&&
+      ['observation_expired','observation_stale'].includes(p.reason);
+    const observedAt=lastObserved(p);
+    const age=observationAge(observedAt);
+    const state=waiting
+      ?`${age?`Last observed ${age}. `:''}Waiting for Claude Code activity.`
+      :options.emptyState||p.reason||status;
     const detail=rendered.length?rendered.join(''):`<span class="usage-state">${esc(state)}</span>`;
-    const statusHtml=status!=='ok'?`<span class="usage-status">${esc(status)}</span>`:'';
-    const observed=observedText(p.observed_at);
-    const observedHtml=observed?`<span class="usage-observed" aria-label="last update ${esc(observed)}">${esc(observed)}</span>`:'';
-    const title=[p.source,p.reason,p.observed_at?`observed ${new Date(Number(p.observed_at)*1000).toLocaleString()}`:''].filter(Boolean).join(' · ');
+    const statusHtml=status!=='ok'?`<span class="usage-status">${esc(waiting?'WAITING FOR UPDATE':status)}</span>`:'';
+    const observed=observedText(observedAt);
+    const observedHtml=observed?`<span class="usage-observed" aria-label="last observed ${esc(observed)}">${esc(observed)}</span>`:'';
+    const title=[p.source,p.reason,observed?`last observed ${new Date(observedAt*1000).toLocaleString()}`:'',
+      observedText(p.checked_at)?`last checked ${new Date(p.checked_at*1000).toLocaleString()}`:''].filter(Boolean).join(' · ');
     const cardId=options.id?` id="${esc(options.id)}"`:'';
     const scope=options.scope?`<div class="usage-card-scope">${esc(options.scope)}</div>`:'';
     const role=options.role||'additional';
@@ -203,6 +225,10 @@ _USAGE_SCRIPT = r"""
       const pool=codexPool(item&&item.id);
       const id=String(item&&item.id||'');
       if(pool==='codex'&&/^codex-\d+m$/i.test(id)){main.push(item);continue;}
+      // Display policy only: the API retains unused pools for other clients.
+      const label=String(item&&item.label||'').split(' · ')[0].trim().toLowerCase();
+      if(['codex_bengalfox','spark','gpt-5.3-codex-spark'].includes(pool)||
+          ['spark','gpt-5.3-codex-spark'].includes(label))continue;
       // Unknown IDs stay visible as additional information, but are never
       // guessed to be the primary Codex pool.
       const extraPool=pool&&pool!=='codex'?pool:'other';
@@ -245,14 +271,16 @@ _USAGE_SCRIPT = r"""
     const codex=byName.get('codex')||emptyProvider('codex');
     const antigravity=byName.get('antigravity')||emptyProvider('antigravity');
     const codexGroups=splitCodex(codex);
+    const antigravityBuckets=(Array.isArray(antigravity.buckets)?antigravity.buckets:[])
+      .filter(item=>!['claude','gpt','claude-gpt'].includes(antigravityScope(item)));
     const codexMain=codexGroups.main.length?codex:{...codex,status:'unavailable',reason:'NO CODEX POOL SIGNAL'};
     root.innerHTML=[
       provider(claude,{id:'usage-card-claude',providerKey:'claude',name:'Claude',role:'main',pool:'main'}),
       provider(codexMain,{id:'usage-card-codex',providerKey:'codex',name:'Codex',role:'main',pool:'main',
         buckets:codexGroups.main,labelPrefix:poolName('codex',codexGroups.main),emptyState:'NO CODEX POOL SIGNAL'}),
       provider(antigravity,{id:'usage-card-antigravity',providerKey:'antigravity',name:'Antigravity',
-        role:'main',pool:'main',cardScope:'antigravity',scope:'Claude / GPT limits are scoped via Antigravity',
-        antigravityScope:true})
+        role:'main',pool:'main',cardScope:'antigravity',buckets:antigravityBuckets,
+        emptyState:antigravity.status==='ok'?'NO VISIBLE QUOTA LIMITS':'',antigravityScope:true})
     ].join('');
     const cards=[];
     for(const [pool,items] of codexGroups.extra){

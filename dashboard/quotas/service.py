@@ -80,8 +80,24 @@ class QuotaService:
         return {
             "ts": int(now),
             "degraded": any(snapshot.status != "ok" for snapshot in snapshots),
-            "providers": [snapshot.to_dict() for snapshot in snapshots],
+            "providers": [self._snapshot_payload(snapshot, now) for snapshot in snapshots],
         }
+
+    def _snapshot_payload(self, snapshot: QuotaSnapshot, now: float) -> dict[str, object]:
+        payload = snapshot.to_dict()
+        previous = self._last_success.get(snapshot.provider)
+        has_observation = bool(snapshot.buckets) or snapshot.reason in {
+            "observation_stale", "observation_expired",
+        }
+        observed = snapshot.observed_at if has_observation else (
+            previous.observed_at if previous is not None else None
+        )
+        # Unlike legacy observed_at on an unavailable snapshot, these fields
+        # distinguish real quota evidence from a completed refresh attempt.
+        payload["last_observed_at"] = observed if observed is not None and observed <= now else None
+        cached = self._cache.get(snapshot.provider)
+        payload["checked_at"] = int(cached.fetched_at) if cached is not None else None
+        return payload
 
     def _read_provider(self, provider: QuotaProvider) -> QuotaSnapshot:
         name = provider.provider_name
@@ -123,6 +139,7 @@ class QuotaService:
                         provider,
                         now,
                         snapshot.reason or "provider_unavailable",
+                        fallback=snapshot,
                     )
 
             now = self._clock()
@@ -141,7 +158,7 @@ class QuotaService:
             return QuotaSnapshot(
                 provider=provider.provider_name,
                 source=provider.source_name,
-                observed_at=int(now),
+                observed_at=snapshot.observed_at,
                 status="unavailable",
                 reason="observation_expired" if age >= 0 else "observation_in_future",
             )
@@ -164,8 +181,15 @@ class QuotaService:
         provider: QuotaProvider,
         now: float,
         reason: str,
+        *,
+        fallback: QuotaSnapshot | None = None,
     ) -> QuotaSnapshot:
         previous = self._last_success.get(provider.provider_name)
+        # A restarted dashboard may only have an expired on-disk observation.
+        # Preserve that evidence, including when it is newer than our cache.
+        if fallback is not None and fallback.reason in {"observation_stale", "observation_expired"}:
+            if previous is None or fallback.observed_at > previous.observed_at:
+                return fallback
         if previous is not None:
             return self._bounded_snapshot(provider, previous.with_status("stale", reason), now)
         return QuotaSnapshot(
