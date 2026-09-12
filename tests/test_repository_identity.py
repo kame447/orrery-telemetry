@@ -36,6 +36,7 @@ class RepositoryIdentityTests(unittest.TestCase):
             "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_TERMINAL_PROMPT": "0",
             "AGENTSTACK_HOME": str(self.home / ".agentstack"),
+            "AGENTSTACK_LABEL_PREFIX": "org.agentstack.repository-identity." + self.root.name,
             "AGENTSTACK_PYTHON": sys.executable,
         }
         self.repo = self.root / "repo A"
