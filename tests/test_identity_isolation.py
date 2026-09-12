@@ -228,68 +228,67 @@ printf 'status=%s registered=%s substituted=%s requested=%s returned=%s\\n' \
 
 
 def _run_root_claude_substitution(*, collision: bool):
-    temp = tempfile.TemporaryDirectory()
-    tmpdir = pathlib.Path(temp.name)
-    bindir = tmpdir / "bin"
-    libdir = bindir / "lib"
-    libdir.mkdir(parents=True)
-    launcher = bindir / "agent-start"
-    launcher.write_text(_read("bin/agent-start"), encoding="utf-8")
-    launcher.chmod(0o755)
-    tmux_log = tmpdir / "tmux.log"
-    tmux_state = tmpdir / "tmux.state"
-    fake_tmux = tmpdir / "tmux"
-    fake_tmux.write_text(
-        "#!/bin/bash\n"
-        f'printf "%s\\n" "$*" >> "{tmux_log}"\n'
-        'case "$1" in\n'
-        f'  display-message) [[ -f "{tmux_state}" ]] && cat "{tmux_state}" || echo RootBefore ;;\n'
-        f'  has-session) exit {0 if collision else 1} ;;\n'
-        f'  rename-session) printf "%s\\n" "$2" > "{tmux_state}" ;;\n'
-        "esac\n",
-        encoding="utf-8",
-    )
-    fake_tmux.chmod(0o755)
-    fake_claude = tmpdir / "claude"
-    fake_claude.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
-    fake_claude.chmod(0o755)
-    (libdir / "agentstack-launch.sh").write_text(
-        'ags_die() { printf "%s: %s\\n" "$AGS_PROG" "$*" >&2; exit 1; }\n'
-        "ags_load_env() { :; }\n"
-        'ags_resolve_tmux() { printf "%s\\n" "$FAKE_TMUX"; }\n'
-        'ags_choose_dir() { printf "%s\\n" "$1"; }\n',
-        encoding="utf-8",
-    )
-    (libdir / "agentstack-register.sh").write_text(
-        'ags_pick_adjective_scientist_name() { printf "Zesty-Einstein\\n"; }\n'
-        "ags_mail_load_token() { :; }\n"
-        "ags_mcp_call() { :; }\n"
-        "ags_start_mail_watcher() { :; }\n"
-        "ags_register_session() {\n"
-        '  AGS_REGISTERED_AGENT_NAME="MossyEagle"\n'
-        '  AGS_REQUESTED_AGENT_NAME="Zesty-Einstein"\n'
-        "  AGS_AGENT_NAME_SUBSTITUTED=1\n"
-        "  return 0\n"
-        "}\n"
-        "ags_record_managed_agent() { :; }\n",
-        encoding="utf-8",
-    )
-    env = _isolated_env(tmpdir, {
-        "TMUX": "/tmp/fake,1,0",
-        "FAKE_TMUX": str(fake_tmux),
-        "AGENTSTACK_CLAUDE_BIN": str(fake_claude),
-        "AGENTSTACK_PROJECT_KEY": "/project",
-        "AGENTSTACK_MANAGED_AGENTS_FILE": str(tmpdir / "managed"),
-        "AGENTSTACK_HOOKS_DIR": str(tmpdir),
-    })
-    result = subprocess.run(
-        [str(launcher), str(tmpdir)],
-        env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        check=False, timeout=20,
-    )
-    calls = tmux_log.read_text(encoding="utf-8") if tmux_log.exists() else ""
-    temp.cleanup()
-    return result, calls
+    with tempfile.TemporaryDirectory() as raw:
+        tmpdir = pathlib.Path(raw)
+        bindir = tmpdir / "bin"
+        libdir = bindir / "lib"
+        libdir.mkdir(parents=True)
+        launcher = bindir / "agent-start"
+        launcher.write_text(_read("bin/agent-start"), encoding="utf-8")
+        launcher.chmod(0o755)
+        tmux_log = tmpdir / "tmux.log"
+        tmux_state = tmpdir / "tmux.state"
+        fake_tmux = tmpdir / "tmux"
+        fake_tmux.write_text(
+            "#!/bin/bash\n"
+            f'printf "%s\\n" "$*" >> "{tmux_log}"\n'
+            'case "$1" in\n'
+            f'  display-message) [[ -f "{tmux_state}" ]] && cat "{tmux_state}" || echo RootBefore ;;\n'
+            f'  has-session) exit {0 if collision else 1} ;;\n'
+            f'  rename-session) printf "%s\\n" "$2" > "{tmux_state}" ;;\n'
+            "esac\n",
+            encoding="utf-8",
+        )
+        fake_tmux.chmod(0o755)
+        fake_claude = tmpdir / "claude"
+        fake_claude.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+        fake_claude.chmod(0o755)
+        (libdir / "agentstack-launch.sh").write_text(
+            'ags_die() { printf "%s: %s\\n" "$AGS_PROG" "$*" >&2; exit 1; }\n'
+            "ags_load_env() { :; }\n"
+            'ags_resolve_tmux() { printf "%s\\n" "$FAKE_TMUX"; }\n'
+            'ags_choose_dir() { printf "%s\\n" "$1"; }\n',
+            encoding="utf-8",
+        )
+        (libdir / "agentstack-register.sh").write_text(
+            'ags_pick_adjective_scientist_name() { printf "Zesty-Einstein\\n"; }\n'
+            "ags_mail_load_token() { :; }\n"
+            "ags_mcp_call() { :; }\n"
+            "ags_start_mail_watcher() { :; }\n"
+            "ags_register_session() {\n"
+            '  AGS_REGISTERED_AGENT_NAME="MossyEagle"\n'
+            '  AGS_REQUESTED_AGENT_NAME="Zesty-Einstein"\n'
+            "  AGS_AGENT_NAME_SUBSTITUTED=1\n"
+            "  return 0\n"
+            "}\n"
+            "ags_record_managed_agent() { :; }\n",
+            encoding="utf-8",
+        )
+        env = _isolated_env(tmpdir, {
+            "TMUX": "/tmp/fake,1,0",
+            "FAKE_TMUX": str(fake_tmux),
+            "AGENTSTACK_CLAUDE_BIN": str(fake_claude),
+            "AGENTSTACK_PROJECT_KEY": "/project",
+            "AGENTSTACK_MANAGED_AGENTS_FILE": str(tmpdir / "managed"),
+            "AGENTSTACK_HOOKS_DIR": str(tmpdir),
+        })
+        result = subprocess.run(
+            [str(launcher), str(tmpdir)],
+            env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            check=False, timeout=20,
+        )
+        calls = tmux_log.read_text(encoding="utf-8") if tmux_log.exists() else ""
+        return result, calls
 
 
 def test_root_claude_renames_tmux_to_the_server_returned_identity():
