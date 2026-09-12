@@ -35,6 +35,7 @@ response body は、画像と HTML を除き JSON です。dashboard 自体に l
 | GET | `/api/suggest-name` | `scientist` | verified `Adjective-Scientist`（要求形。実登録名は register 応答の read-back が正） |
 | GET | `/api/fs/dirs` | optional `path` | root-scoped child directories |
 | GET | `/api/agents` | なし | `{ts, agents}` |
+| GET | `/api/quotas` | なし | `{ts, degraded, providers}` — [provider 使用量](quota-telemetry.md) |
 | GET | `/api/graph` | `days`, `all` | `{nodes, edges, spawn, timestamp_diagnostics, degraded, ts}` |
 | GET | `/api/history` | `session`, `limit` | transcript events |
 | GET | `/api/agent-history` | `name` または `names`, `hours`, `include_pane_states` | agent event timeline |

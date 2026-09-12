@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import signal
 import socket
 import subprocess
@@ -139,8 +140,17 @@ def _normalize_sample_paths(value, manifest):
     return value
 
 
+def _optional_provider_files() -> set[str]:
+    """Payload declared by the separate optional Gemini installer (PR #13)."""
+    text = (ROOT / "scripts" / "install-gemini-provider.sh").read_text(encoding="utf-8")
+    match = re.search(r"^FILES=\(\n(.*?)^\)\n", text, re.DOTALL | re.MULTILINE)
+    assert match, "provider installer FILES declaration missing"
+    return set(re.findall(r'^  "([^"]+)"$', match.group(1), re.MULTILINE))
+
+
 def _tracked_core_payload_files() -> list[str]:
     """Return only files the core installer copies, never ignored artifacts."""
+    provider_files = _optional_provider_files()
     tracked = subprocess.run(
         [
             "git", "-C", str(ROOT), "ls-files", "-z",
@@ -151,7 +161,12 @@ def _tracked_core_payload_files() -> list[str]:
         text=True,
         check=True,
     ).stdout.split("\0")
-    return [path for path in tracked if path]
+    # Core copies hooks/dashboard recursively, including shared provider
+    # assets, but installs only its explicit bin helpers. Keep checking every
+    # copied hook/asset; only optional bin entrypoints belong to the add-on.
+    return [path for path in tracked if path and not (
+        path.startswith("bin/") and path in provider_files
+    )]
 
 
 def _expected_owned_dirs(install_dir: pathlib.Path) -> list[str]:
@@ -635,6 +650,7 @@ def test_isolated_installer_migrates_annotations_and_matches_manifest_sample(tmp
         "tmux": "#!/bin/sh\nexit 0\n",
         "uname": "#!/bin/sh\necho Linux\n",
         "uv": "#!/bin/sh\nexit 0\n",
+        "codex": "#!/bin/sh\nexit 0\n",
     }.items():
         command = fake_bin / name
         command.write_text(body, encoding="utf-8")
@@ -666,6 +682,7 @@ def test_isolated_installer_migrates_annotations_and_matches_manifest_sample(tmp
         "PATH": f"{fake_bin}:{env['PATH']}",
         "AGENTSTACK_HOME": str(install_dir),
         "AGENTSTACK_MAIL_STATE_ROOT": str(mail_dir),
+        "AGENTSTACK_CODEX_BIN": str(fake_bin / "codex"),
         "AGENTSTACK_MAIL_SERVICE_VENV": str(pathlib.Path(sys.executable).parent.parent),
         "AGENTSTACK_PORT": str(port),
         "AGENTSTACK_LABEL_PREFIX": TEST_LABEL_PREFIX,
@@ -811,6 +828,7 @@ def test_isolated_installer_migrates_annotations_and_matches_manifest_sample(tmp
     assert "export AGENTSTACK_PORTRAITS_DIR='~/faces'" in generated_env
     assert manifest["env"]["AGENTSTACK_CUSTOM_PORTRAITS"] == f"{project_dir}/faces.json"
     assert manifest["env"]["AGENTSTACK_CODEX_MODELS"] == "gpt-5.6-sol,gpt-5.6-luna"
+    assert manifest["env"]["AGENTSTACK_CODEX_BIN"] == str(fake_bin / "codex")
 
     sample = json.loads(INSTALL_STATE_SAMPLE.read_text(encoding="utf-8"))
     assert set(sample) == set(manifest)
@@ -843,6 +861,7 @@ def test_isolated_installer_migrates_annotations_and_matches_manifest_sample(tmp
     normalized_env["AGENTSTACK_PORTRAITS_DIR"] = ""
     normalized_env["AGENTSTACK_CUSTOM_PORTRAITS"] = ""
     normalized_env["AGENTSTACK_CODEX_MODELS"] = ""
+    normalized_env["AGENTSTACK_CODEX_BIN"] = ""
     assert normalized_env == sample["env"]
     for key in ("retained_paths", "purge_paths", "notes", "services", "skill_links"):
         assert _normalize_sample_paths(manifest[key], manifest) == sample[key]

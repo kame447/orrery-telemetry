@@ -129,6 +129,10 @@ key を使い、同時に `env.sh` 内の任意 shell code は実行されませ
 installer は `AGENTSTACK_MAIL_DB`、`AGENTSTACK_MAIL_ENV`、`AGENTSTACK_SIGNALS_DIR`
 を state / render から導出し、`env.sh` へ state root と
 `AGENTSTACK_MAIL_HTTP_BEARER_MODE=disabled` を一緒に保存します。
+稼働中の native Mail を再利用する upgrade では、その service の既存 render を採用してから
+`AGENTSTACK_MAIL_ENV` を検証します。既存 install の `env.sh` から引き継いだ値が
+採用 render と一致すれば継続し、空の値や異なるパスを明示した場合は停止します。
+新規 provisioning では、この checkout 用に導出した render との一致が必要です。
 
 ## Launcher
 

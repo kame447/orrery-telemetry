@@ -114,6 +114,11 @@ The installer's project-key precedence is `--project-key` / process `AGENTSTACK_
 At hook and helper runtime the precedence is `AGENTSTACK_PROJECT_KEY` → `PROJECT_KEY` → `${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh` → current cwd. The installed `env.sh` is not sourced; only `AGENTSTACK_PROJECT_KEY`, and `AGENTSTACK_PROTECTED_ROOTS` when falling back for protected roots, are read literally. Thus an installed editor started from another directory uses the same project key for reservation and registration without executing arbitrary shell code from `env.sh`.
 
 The installer derives `AGENTSTACK_MAIL_DB`, `AGENTSTACK_MAIL_ENV`, and `AGENTSTACK_SIGNALS_DIR` from state / render and stores the state root together with `AGENTSTACK_MAIL_HTTP_BEARER_MODE=disabled` in `env.sh`.
+When an upgrade reuses a running native Mail service, it adopts that service's existing
+render before validating `AGENTSTACK_MAIL_ENV`. A value inherited from the installed
+`env.sh` is accepted when it matches the adopted render; an explicitly empty value or
+a different path stops the installer. Fresh provisioning requires a match with the
+render derived for the current checkout.
 
 ## Launcher
 
