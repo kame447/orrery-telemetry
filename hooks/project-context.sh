@@ -40,6 +40,84 @@ for line in raw.splitlines():
 PY
 }
 
+# Repository identity primitives. These are intentionally not wired into the
+# legacy resolver below yet: registration and delegated contexts must migrate
+# together, rather than changing project keys underneath existing consumers.
+agentstack_physical_dir() {
+    local directory="${1:-}"
+    [ -n "$directory" ] && [ -d "$directory" ] || return 1
+    (CDPATH= cd -- "$directory" 2>/dev/null && pwd -P)
+}
+
+# Explicit human keys are normalized as paths only when they are absolute or
+# name an existing directory. In particular, an explicit linked-worktree key
+# is not collapsed to its repository key and a logical key is not a pathname.
+agentstack_normalize_project_key() {
+    local project_key="${1:-}"
+    local physical=""
+    [ -n "$project_key" ] || {
+        printf '\n'
+        return 0
+    }
+    if [ -d "$project_key" ]; then
+        physical="$(agentstack_physical_dir "$project_key")" || return 1
+        printf '%s\n' "$physical"
+        return 0
+    fi
+    case "$project_key" in
+        /*)
+            "${AGENTSTACK_PYTHON:-python3}" - "$project_key" <<'PY'
+import pathlib
+import sys
+
+print(pathlib.Path(sys.argv[1]).resolve())
+PY
+            ;;
+        *) printf '%s\n' "$project_key" ;;
+    esac
+}
+
+# git -C alone does not override inherited GIT_DIR / GIT_WORK_TREE. Unset the
+# repository selectors in the probe process only, never in the caller.
+agentstack_git_worktree_root() {
+    local target="${1:-}"
+    local root=""
+    [ -n "$target" ] && [ -d "$target" ] || return 1
+    root="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+        git -C "$target" rev-parse --show-toplevel 2>/dev/null)" || return 1
+    agentstack_physical_dir "$root"
+}
+
+# Main and linked worktrees share a common Git directory. Use the main
+# checkout as the human key for the usual .git layout; keep the physical
+# common directory for bare/separate-git-dir layouts. A remote URL is not an
+# identity: two independent clones of the same remote must stay separate.
+agentstack_repository_key() {
+    local target="${1:-}"
+    local common="" common_abs=""
+    [ -n "$target" ] && [ -d "$target" ] || return 1
+    common="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+        git -C "$target" rev-parse --git-common-dir 2>/dev/null)" || return 1
+    case "$common" in
+        /*) common_abs="$(agentstack_physical_dir "$common")" || return 1 ;;
+        *) common_abs="$(agentstack_physical_dir "$target/$common")" || return 1 ;;
+    esac
+    if [ "$(basename "$common_abs")" = ".git" ]; then
+        dirname "$common_abs"
+    else
+        printf '%s\n' "$common_abs"
+    fi
+}
+
+agentstack_same_repository() {
+    local left="${1:-}"
+    local right="${2:-}"
+    local left_key="" right_key=""
+    left_key="$(agentstack_repository_key "$left" 2>/dev/null)" || return 1
+    right_key="$(agentstack_repository_key "$right" 2>/dev/null)" || return 1
+    [ -n "$left_key" ] && [ "$left_key" = "$right_key" ]
+}
+
 # Priority: live AGENTSTACK_PROJECT_KEY, live PROJECT_KEY, installed env, cwd.
 agentstack_resolve_project_key() {
     local fallback="${1:-}"
