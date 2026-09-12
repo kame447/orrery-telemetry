@@ -358,6 +358,31 @@ def test_an_existing_service_env_is_adopted_from_the_running_runner():
     )
 
 
+def test_fallback_does_not_adopt_ambient_override_when_installed_env_omits_mail_env():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = pathlib.Path(td)
+        install = tmp / "agentstack"
+        install.mkdir()
+        (install / "env.sh").write_text("export AGENTSTACK_PROJECT_KEY=/project\n", encoding="utf-8")
+        arbitrary = tmp / "arbitrary.env"
+        arbitrary.write_text("# ambient\n", encoding="utf-8")
+        r = _call_installer_function(
+            f"NATIVE_MAIL_PIDFILE='{tmp / 'missing.pid'}'\n"
+            f"INSTALL_DIR='{install}'\n"
+            f"NATIVE_MAIL_ENV='{tmp / 'planned.env'}'\n"
+            f"MAIL_ENV='{tmp / 'planned.env'}'\n"
+            f"AGENTSTACK_MAIL_ENV='{arbitrary}'\n"
+            "say() { :; }\n"
+            f"eval \"$(sed -n '/^adopt_running_native_mail_render()/,"
+            f"/^}} # end adopt_running_native_mail_render/p' {INSTALLER})\"\n"
+            "adopt_running_native_mail_render\n"
+            'printf "%s\n" "$MAIL_ENV"\n',
+            tmp,
+        )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.strip().splitlines()[-1] == str(tmp / "planned.env")
+
+
 def test_no_trigger_is_registered_when_the_service_env_is_missing():
     """A unit that fails only at boot is worse than no unit at all."""
     with tempfile.TemporaryDirectory() as td:

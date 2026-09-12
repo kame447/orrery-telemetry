@@ -98,7 +98,9 @@ def _serve(handler):
     return server
 
 
-def _run_installer(tmp_path: pathlib.Path, mail_port: int):
+def _run_installer(
+    tmp_path: pathlib.Path, mail_port: int, *, mail_env: str | None = None
+):
     home = tmp_path / "home"
     home.mkdir()
     project = tmp_path / "project"
@@ -114,6 +116,9 @@ def _run_installer(tmp_path: pathlib.Path, mail_port: int):
         command.write_text(body, encoding="utf-8")
         command.chmod(0o755)
     env = os.environ.copy()
+    for name in tuple(env):
+        if name.startswith("AGENTSTACK_") or name in {"PROJECT_KEY"}:
+            env.pop(name, None)
     env.update({
         "HOME": str(home),
         "PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin",
@@ -125,6 +130,8 @@ def _run_installer(tmp_path: pathlib.Path, mail_port: int):
         "AGENTSTACK_TERMINAL": "none",
         "AGENTSTACK_LABEL_PREFIX": "org.agentstack.test",
     })
+    if mail_env is not None:
+        env["AGENTSTACK_MAIL_ENV"] = mail_env
     return subprocess.run(
         ["bash", str(ROOT / "scripts" / "install.sh"), "--dashboard-only"],
         cwd=ROOT,
@@ -141,6 +148,9 @@ def _run_legacy_dry_run(
     *,
     loaded_legacy: bool,
     retire: bool,
+    mail_env: str | None = None,
+    live_render: pathlib.Path | None = None,
+    live_pid: int | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
     home = tmp_path / "home"
     home.mkdir()
@@ -201,6 +211,27 @@ esac
         "AGENTSTACK_MCP_URL": f"http://127.0.0.1:{mail_port}/mcp",
         "AGENTSTACK_PORT": str(_free_port()),
     })
+    if mail_env is not None:
+        env["AGENTSTACK_MAIL_ENV"] = mail_env
+    if live_render is not None:
+        assert live_pid is not None
+        live_render.mkdir(parents=True, exist_ok=True)
+        (live_render / "service.env").write_text("# live\n", encoding="utf-8")
+        runner = live_render / "run-agentstack-mail.sh"
+        runner.write_text("#!/bin/bash\nsleep 30\n", encoding="utf-8")
+        runner.chmod(0o755)
+        pidfile = home / ".agentstack" / "mail-service" / "runtime" / "agentstack-mail.pid"
+        pidfile.parent.mkdir(parents=True)
+        (home / ".agentstack" / "env.sh").write_text(
+            f"export AGENTSTACK_MAIL_ENV={live_render / 'service.env'}\n",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            ["bash", "-c", f"PIDFILE='{pidfile}'; MAIL_RUNNER='{runner}'; "
+             f"eval \"$(sed -n '/^write_pid()/,/^}}$/p' {ROOT / 'bin' / 'agentstack-mailctl'})\"; "
+             f"write_pid {live_pid}"],
+            check=True,
+        )
     args = [
         "/bin/bash",
         str(ROOT / "scripts" / "install.sh"),
@@ -299,3 +330,79 @@ def test_normal_reinstall_without_legacy_target_still_reuses_native_listener(tmp
     assert f"existing ORRERY Mail database: {expected_db}" in result.stdout
     assert "retire legacy mail service" not in result.stdout
     assert "installer will provision ORRERY Mail" not in result.stdout
+
+
+def test_upgrade_adopts_live_render_before_matching_inherited_env_validation(tmp_path):
+    live = tmp_path / "live-render"
+    live.mkdir()
+    runner = live / "run-agentstack-mail.sh"
+    runner.write_text("#!/bin/bash\nsleep 30\n", encoding="utf-8")
+    runner.chmod(0o755)
+    process = subprocess.Popen(["/bin/bash", str(runner)])
+    server = _serve(_ForeignDatabaseListener)
+    _ForeignDatabaseListener.database = tmp_path / "native-state" / "storage.sqlite3"
+    _ForeignDatabaseListener.database.parent.mkdir()
+    _ForeignDatabaseListener.database.touch()
+    try:
+        result, _state_root = _run_legacy_dry_run(
+            tmp_path,
+            server.server_port,
+            loaded_legacy=False,
+            retire=False,
+            mail_env=str(live / "service.env"),
+            live_render=live,
+            live_pid=process.pid,
+        )
+    finally:
+        server.shutdown()
+        process.terminate()
+        process.wait(timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"adopted the running ORRERY Mail service env: {live / 'service.env'}" in result.stdout
+    assert f"existing ORRERY Mail database" in result.stdout
+    assert "installer will provision ORRERY Mail" not in result.stdout
+
+
+def test_upgrade_rejects_explicit_empty_or_different_mail_env_after_adoption(tmp_path):
+    for explicit in ("", str(tmp_path / "other.env")):
+        case = tmp_path / ("empty" if explicit == "" else "different")
+        case.mkdir()
+        live = case / "live-render"
+        live.mkdir()
+        runner = live / "run-agentstack-mail.sh"
+        runner.write_text("#!/bin/bash\nsleep 30\n", encoding="utf-8")
+        runner.chmod(0o755)
+        process = subprocess.Popen(["/bin/bash", str(runner)])
+        server = _serve(_ForeignDatabaseListener)
+        _ForeignDatabaseListener.database = case / "native-state" / "storage.sqlite3"
+        _ForeignDatabaseListener.database.parent.mkdir(parents=True)
+        _ForeignDatabaseListener.database.touch()
+        try:
+            result, _state_root = _run_legacy_dry_run(
+                case,
+                server.server_port,
+                loaded_legacy=False,
+                retire=False,
+                mail_env=explicit,
+                live_render=live,
+                live_pid=process.pid,
+            )
+        finally:
+            server.shutdown()
+            process.terminate()
+            process.wait(timeout=10)
+        assert result.returncode != 0
+        expected = (
+            "AGENTSTACK_MAIL_ENV was set but empty"
+            if explicit == ""
+            else "AGENTSTACK_MAIL_ENV must equal the native service env"
+        )
+        assert expected in result.stderr
+
+
+def test_fresh_install_still_rejects_a_different_explicit_mail_env(tmp_path):
+    result = _run_installer(
+        tmp_path, _free_port(), mail_env=str(tmp_path / "other.env")
+    )
+    assert result.returncode != 0
+    assert "AGENTSTACK_MAIL_ENV must equal the native service env" in result.stderr

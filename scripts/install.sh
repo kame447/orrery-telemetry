@@ -895,11 +895,6 @@ PY
     [[ "$explicit_db" == "$expected_db" ]] || \
       die "AGENTSTACK_MAIL_DB must equal the native state database '$expected_db'"
   fi
-  if [[ -n "$MAIL_ENV_EXPLICIT" ]]; then
-    [[ -n "${AGENTSTACK_MAIL_ENV:-}" ]] || die "AGENTSTACK_MAIL_ENV was set but empty"
-    [[ "$(normalize_path "$AGENTSTACK_MAIL_ENV")" == "$NATIVE_MAIL_ENV" ]] || \
-      die "AGENTSTACK_MAIL_ENV must equal the native service env '$NATIVE_MAIL_ENV'"
-  fi
 
   if mcp_endpoint_listening; then
     if [[ -n "${LEGACY_MAIL_DETECTED_LABELS:-}" ]]; then
@@ -925,16 +920,28 @@ PY
       NATIVE_MAIL_EXISTING=true
       EXISTING_AGENT_MAIL_SERVER=true
       adopt_running_native_mail_render
+      validate_native_mail_env
       say "existing ORRERY Mail database: $resolved_db"
       return
     fi
   fi
 
+  validate_native_mail_env
   PROVISION_NATIVE_MAIL=true
   if [[ -f "$expected_db" && -d "$NATIVE_MAIL_STATE_ROOT/archive" ]]; then
     say "no native listener found; installer will start existing ORRERY Mail state at $NATIVE_MAIL_STATE_ROOT"
   else
     say "no native listener or state found; installer will provision ORRERY Mail at $MCP_URL"
+  fi
+}
+
+# Validate against the selected render: upgrades may inherit the live render
+# from env.sh, while this checkout computes a different render for provisioning.
+validate_native_mail_env() {
+  if [[ -n "$MAIL_ENV_EXPLICIT" ]]; then
+    [[ -n "${AGENTSTACK_MAIL_ENV:-}" ]] || die "AGENTSTACK_MAIL_ENV was set but empty"
+    [[ "$(normalize_path "$AGENTSTACK_MAIL_ENV")" == "$NATIVE_MAIL_ENV" ]] || \
+      die "AGENTSTACK_MAIL_ENV must equal the native service env '$NATIVE_MAIL_ENV'"
   fi
 }
 
@@ -976,6 +983,7 @@ adopt_running_native_mail_render() {
     # sourcing cannot leak into this one.
     candidate="$(
       set +u
+      unset AGENTSTACK_MAIL_ENV
       . "$INSTALL_DIR/env.sh" >/dev/null 2>&1 || exit 0
       printf '%s' "${AGENTSTACK_MAIL_ENV:-}"
     )"
