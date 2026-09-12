@@ -32,6 +32,18 @@ provider の refresh は provider ごとの lock と cache を持ち、cold miss
 
 各 bucket は provider が実際に返した window だけを表示する。5h / 7d が存在すると仮定して補完しない。
 
+上段には Claude / Codex の通常利用枠 / Antigravity を固定順のカードで表示する。
+主要3 provider の領域は横スクロールせず、画面幅に応じて折り返す。
+Spark など Codex の追加 limit は下段の追加情報へ分離する。通常枠が取得できない場合に
+追加 limit を通常枠として表示しない。Codex の通常枠は `codex-<minutes>m` の ID で識別し、
+未知の ID は追加情報へ表示する。Antigravity 内の Claude / GPT quota には
+Antigravity 経由の枠であることを明記し、独立した Claude / Codex の利用枠と区別する。
+
+各 quota の reset はブラウザのローカル時刻で `9/19 21:18 reset` の形式を常時表示する。
+reset が取得できない場合も不明であることを表示し、推定日時を作らない。
+追加情報に横スクロールが生じる場合は、左右の操作ボタンと edge fade で残りを示す。
+スクロール位置や画面サイズの変更に合わせて、操作可能な方向を更新する。
+
 `remaining_percent` は残量で、100 に近いほど余裕がある。取得に失敗した場合、直近の正常観測が短い stale window 内なら `stale`、それ以外は `unavailable` とする。
 
 正常値をcacheから返す場合も観測から最大600秒（Claudeの設定が短ければその期限）で失効する。未来の観測時刻も受け付けない。reset時刻を過ぎた値は`stale / window_reset_pending`とし、次回の実観測なしに100%へ戻さない。`observed_at`はローカルで値を受け取った時刻であり、provider内部の測定時刻やアカウント識別情報ではない。

@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from dashboard.quota_server import inject_usage_ui
+from dashboard.quota_server import _USAGE_HTML, inject_usage_ui
 from dashboard.quotas.antigravity import parse_antigravity_usage
 from dashboard.quotas.base import QuotaBucket, QuotaSnapshot
 from dashboard.quotas.claude import ClaudeQuotaProvider, parse_claude_statusline
@@ -251,7 +251,9 @@ def test_usage_ui_is_injected_once_and_renders_dynamic_provider_data():
     assert b'body[data-view="net"] .usage-strip{display:none}' in first
     assert b"/api/quotas" in first
     assert b"data.providers" in first
-    assert b"Gemini Models" not in first
+    # Provider labels are payload-derived (including demo fixtures); only the
+    # static markup must remain free of hardcoded provider labels.
+    assert "Gemini Models" not in _USAGE_HTML
 
 
 def test_normal_cache_cannot_extend_claude_observation_lifetime(tmp_path):
