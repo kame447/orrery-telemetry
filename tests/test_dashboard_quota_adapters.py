@@ -97,8 +97,8 @@ def test_antigravity_runtime_marker_enables_poll_without_service_env(tmp_path):
     assert after.status == "ok"
     assert after.buckets[0].remaining_percent == 50.0
     assert calls == [
-        ["/fake/agy", "--version"],
-        ["/fake/agy", "-p", "/usage", "--output-format", "json"],
+        [provider.command, "--version"],
+        [provider.command, "-p", "/usage", "--output-format", "json"],
     ]
 
 
@@ -137,8 +137,8 @@ def test_antigravity_opted_in_adapter_uses_only_read_only_usage_command():
     assert snapshot.status == "ok"
     assert snapshot.buckets[0].remaining_percent == 61.0
     assert calls == [
-        ["/fake/agy", "--version"],
-        ["/fake/agy", "-p", "/usage", "--output-format", "json"],
+        [provider.command, "--version"],
+        [provider.command, "-p", "/usage", "--output-format", "json"],
     ]
 
 
