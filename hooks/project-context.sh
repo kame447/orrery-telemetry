@@ -40,9 +40,9 @@ for line in raw.splitlines():
 PY
 }
 
-# Repository identity primitives. These are intentionally not wired into the
-# legacy resolver below yet: registration and delegated contexts must migrate
-# together, rather than changing project keys underneath existing consumers.
+# Repository-aware primitives and an explicit invocation selector. The legacy
+# resolver below stays unchanged until its launcher/registration consumers
+# can be migrated together.
 agentstack_physical_dir() {
     local directory="${1:-}"
     [ -n "$directory" ] && [ -d "$directory" ] || return 1
@@ -118,6 +118,68 @@ agentstack_same_repository() {
     [ -n "$left_key" ] && [ "$left_key" = "$right_key" ]
 }
 
+# Select a top-level invocation's key from explicit inputs, never ambient
+# PROJECT_KEY / AGENTSTACK_PROJECT_KEY or installed env.sh. The caller may
+# pass its configured non-Git fallback separately after reading it safely.
+# This selects a namespace; it does not authenticate a delegated identity.
+agentstack_resolve_invocation_project_key() {
+    local target="${1:-}"
+    local explicit_key="${2:-}"
+    local non_git_fallback="${3:-}"
+    local target_dir="" repository="" probe_dir="" parent_dir="" failure=""
+    target_dir="$(agentstack_physical_dir "$target")" || {
+        printf 'agentstack: invocation target must be an existing directory\n' >&2
+        return 1
+    }
+    if [ -n "$explicit_key" ]; then
+        agentstack_normalize_project_key "$explicit_key"
+        return $?
+    fi
+    command -v git >/dev/null 2>&1 || {
+        printf 'agentstack: git is required to resolve invocation context\n' >&2
+        return 1
+    }
+    if repository="$(agentstack_repository_key "$target_dir")"; then
+        printf '%s\n' "$repository"
+        return 0
+    fi
+
+    # Distinguish Git's normal non-repository result from execution/IO errors.
+    # The second probe is read-only; unexpected results fail rather than guess.
+    if failure="$(LC_ALL=C env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+        git -C "$target_dir" rev-parse --git-common-dir 2>&1)"; then
+        printf 'agentstack: repository identity changed or could not be normalized\n' >&2
+        return 1
+    fi
+    case "$failure" in
+        'fatal: not a git repository'*) ;;
+        *)
+            printf 'agentstack: git could not inspect invocation target\n' >&2
+            return 1
+            ;;
+    esac
+
+    # A failed probe is not proof of a non-Git workspace. In particular, do
+    # not turn a broken/unreadable .git or bare repository into an install
+    # fallback. Only a directory without repository markers may fall back.
+    probe_dir="$target_dir"
+    while :; do
+        if [ -e "$probe_dir/.git" ] || [ -L "$probe_dir/.git" ] ||
+           { [ -e "$probe_dir/HEAD" ] && [ -d "$probe_dir/objects" ]; }; then
+            printf 'agentstack: cannot resolve repository metadata for invocation target\n' >&2
+            return 1
+        fi
+        parent_dir="$(dirname "$probe_dir")"
+        [ "$parent_dir" != "$probe_dir" ] || break
+        probe_dir="$parent_dir"
+    done
+    if [ -n "$non_git_fallback" ]; then
+        agentstack_normalize_project_key "$non_git_fallback"
+    else
+        printf '%s\n' "$target_dir"
+    fi
+}
+
 # Priority: live AGENTSTACK_PROJECT_KEY, live PROJECT_KEY, installed env, cwd.
 agentstack_resolve_project_key() {
     local fallback="${1:-}"
@@ -165,6 +227,14 @@ agentstack_resolve_protected_roots() {
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     case "${1:-}" in
+        resolve-invocation-project-key)
+            shift
+            if [ "$#" -lt 1 ] || [ "$#" -gt 3 ]; then
+                printf 'usage: project-context.sh resolve-invocation-project-key TARGET [EXPLICIT_KEY [NON_GIT_FALLBACK]]\n' >&2
+                exit 2
+            fi
+            agentstack_resolve_invocation_project_key "$1" "${2:-}" "${3:-}"
+            ;;
         resolve-project-key)
             shift
             agentstack_resolve_project_key "${1:-}" "${2:-}" "${3:-1}"
@@ -174,7 +244,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
             agentstack_installed_env_value "${1:-}" "${2:-}"
             ;;
         *)
-            printf 'usage: project-context.sh {resolve-project-key FALLBACK [ENV_FILE [USE_CWD]]|installed-env-value NAME [ENV_FILE]}\n' >&2
+            printf 'usage: project-context.sh {resolve-invocation-project-key TARGET [EXPLICIT_KEY [NON_GIT_FALLBACK]]|resolve-project-key FALLBACK [ENV_FILE [USE_CWD]]|installed-env-value NAME [ENV_FILE]}\n' >&2
             exit 2
             ;;
     esac
