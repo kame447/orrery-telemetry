@@ -1,0 +1,217 @@
+diff --git a/docs/hooks.en.md b/docs/hooks.en.md
+index efc037a..fd8c75c 100644
+--- a/docs/hooks.en.md
++++ b/docs/hooks.en.md
+@@ -163,3 +163,7 @@ Codex Desktop uses a further, separate plugin hook / Bridge lifecycle. See [Code
+ - [Codex App integration](codex-app.en.md)
+ - [Configuration](configuration.en.md)
+ - [Troubleshooting](troubleshooting.en.md)
++
++### Reservation workspace boundary
++
++Reservation renewal/release uses the project and protected root validated from the hook payload `cwd`, never an early outside-root decision based on installed roots. Relative file paths are resolved physically against that payload cwd, not the hook process cwd. Linked worktrees share the Mail namespace but retain their own protected root. Missing or invalid cwd refuses the edit and sends no reservation mutation.
+diff --git a/docs/hooks.md b/docs/hooks.md
+index ed9f1dc..a1c1f50 100644
+--- a/docs/hooks.md
++++ b/docs/hooks.md
+@@ -168,3 +168,7 @@ Codex Desktop はさらに別の plugin hook / Bridge lifecycle を使います
+ - [Codex App 統合](codex-app.md)
+ - [設定](configuration.md)
+ - [トラブルシューティング](troubleshooting.md)
++
++### 予約の workspace 境界
++
++予約の更新・解除は、hook payload の `cwd` から検証した project と保護対象 root を使います。installed environment の古い root で先に対象外と判定しません。相対 file path も hook プロセスの cwd ではなく payload の cwd を基準に物理パスへ解決します。同一 repository の linked worktree は Mail namespace を共有し、保護範囲は各 worktree です。cwd が不明・無効なら編集を拒否し、予約変更を送りません。
+diff --git a/hooks/reservation-common.sh b/hooks/reservation-common.sh
+index 1988382..ea4e45c 100755
+--- a/hooks/reservation-common.sh
++++ b/hooks/reservation-common.sh
+@@ -116,6 +116,10 @@ except Exception:
+             fi
+         fi
+     fi
++    # Protection and namespace come from the same validated invocation.
++    # Do this before classifying a path; installed roots are not authority.
++    agentstack_export_context_json "$context_json" || return 2
++    PROTECTED_ROOTS="$AGENTSTACK_PROTECTED_ROOTS"
+     return 0
+ }
+ 
+@@ -185,13 +189,14 @@ except Exception:
+ ' 2>/dev/null || echo "")
+     [ -n "$FILE_PATH" ] || return 1
+ 
+-    if [[ "$FILE_PATH" == /* ]]; then
+-        :
+-    elif [[ "$FILE_PATH" == "~/"* ]]; then
+-        FILE_PATH="$HOME/${FILE_PATH:2}"
+-    else
+-        FILE_PATH="$(pwd)/$FILE_PATH"
+-    fi
++    reservation_resolve_lookup_context "$tool_document" || return 2
++    FILE_PATH=$(python3 -c '
++import pathlib, sys
++path = pathlib.Path(sys.argv[1]).expanduser()
++if not path.is_absolute():
++    path = pathlib.Path(sys.argv[2]) / path
++print(path.resolve())
++' "$FILE_PATH" "$AGENTSTACK_LOOKUP_WORK_DIR") || return 2
+ 
+     MATCHED_ROOT=""
+     if [[ -n "$PROTECTED_ROOTS" ]]; then
+@@ -217,8 +222,6 @@ except Exception:
+     if [[ "$REL_PATH" == "$FILE_PATH" ]]; then
+         REL_PATH="$(basename "$FILE_PATH")"
+     fi
+-    reservation_resolve_lookup_context "$tool_document"
+-    [ "$?" -eq 0 ] || return 2
+     return 0
+ }
+ 
+diff --git a/tests/test_check_file_reservation.py b/tests/test_check_file_reservation.py
+index 8083229..8fce2ea 100644
+--- a/tests/test_check_file_reservation.py
++++ b/tests/test_check_file_reservation.py
+@@ -138,11 +138,13 @@ class ReservationHookTests(unittest.TestCase):
+         fake_python = fake_bin / "python3"
+         fake_python.write_text(
+             "#!/bin/sh\n"
+-            "if [ \"${1-}\" = \"-c\" ]; then\n"
+-            f"    exec {json.dumps(os.sys.executable)} \"$@\"\n"
++            "if [ -n \"${AGENTSTACK_PROBE_URL+x}\" ]; then\n"
++            "    cat >/dev/null; printf '%s\\n' reachable; exit 0\n"
+             "fi\n"
+-            "cat >/dev/null\n"
+-            "printf '%s\\n' 'HOOK_RENEWED: 0'\n",
++            "if [ -n \"${QUERY_PROJECT_KEY-}\" ]; then\n"
++            "    cat >/dev/null; printf '%s\\n' 'HOOK_RENEWED: 0'; exit 0\n"
++            "fi\n"
++            f"exec {json.dumps(os.sys.executable)} \"$@\"\n",
+             encoding="utf-8",
+         )
+         fake_python.chmod(0o755)
+diff --git a/tests/test_reservation_project_scope.py b/tests/test_reservation_project_scope.py
+new file mode 100644
+index 0000000..8cd2db2
+--- /dev/null
++++ b/tests/test_reservation_project_scope.py
+@@ -0,0 +1,119 @@
++"""Actual hook cwd, not installed or process context, defines reservation scope."""
++import json
++import os
++import subprocess
++from pathlib import Path
++
++import pytest
++from test_check_file_reservation import _Server, _mcp_result
++
++ROOT = Path(__file__).resolve().parents[1]
++
++@pytest.fixture
++def repos(tmp_path):
++    env = {key: value for key, value in os.environ.items()
++           if not key.startswith(('AGENTSTACK_', 'GIT_')) and key not in
++           {'HOME', 'PROJECT_KEY', 'AGENT_NAME', 'PARENT_AGENT', 'CHILD_REGISTRATION_TOKEN',
++            'TMUX', 'TMUX_PANE', 'MCP_URL', 'MCP_AGENT_MAIL_TOKEN', 'BASH_ENV', 'ENV'}}
++    home = tmp_path / 'home'
++    home.mkdir()
++    env['HOME'] = str(home)
++    first, second = tmp_path / 'first', tmp_path / 'second'
++    for repo in (first, second):
++        subprocess.run(['git', 'init', '-q', str(repo)], env=env, check=True)
++    return first.resolve(), second.resolve(), env
++
++
++def run_hook(repos, url, payload, *, process_cwd=None, roots=None):
++    first, second, env = repos
++    env = dict(env)
++    env.update(AGENTSTACK_PROJECT_KEY=str(first),
++               AGENTSTACK_PROTECTED_ROOTS=str(roots or first),
++               AGENTSTACK_PROJECT_CONTEXT='1',
++               AGENTSTACK_HOOKS_DIR=str(ROOT / 'hooks'),
++               AGENTSTACK_RUNTIME_DIR=str(first.parent / 'runtime'),
++               AGENTSTACK_MCP_URL=url, AGENTSTACK_MAIL_HTTP_BEARER_MODE='disabled',
++               AGENT_NAME='BrightCurie', FILE_RESERVATION_RETRY_DELAY_SECONDS='0',
++               GIT_DIR=str(first / '.git'), GIT_WORK_TREE=str(first))
++    return subprocess.run(['/bin/bash', str(ROOT / 'hooks/check-file-reservation.sh')],
++        input=json.dumps(payload), cwd=process_cwd or first, env=env,
++        text=True, capture_output=True, timeout=20)
++
++
++def arguments(server):
++    return [request['json']['params']['arguments'] for request in server.requests]
++
++
++def test_stale_installed_roots_cannot_bypass_the_actual_repository(repos):
++    first, second, _ = repos
++    with _Server(lambda _: (200, _mcp_result(0))) as server:
++        result = run_hook(repos, server.url,
++            {'cwd': str(second), 'tool_input': {'file_path': str(second / 'note.md')}})
++    assert result.returncode == 2, result.stderr
++    assert 'FILE RESERVATION REQUIRED' in result.stderr
++    assert server.requests
++    assert all(item['project_key'] == str(second) for item in arguments(server))
++
++
++def test_another_repository_is_not_renewed_under_the_current_namespace(repos):
++    first, second, _ = repos
++    with _Server(lambda _: (200, _mcp_result(1))) as server:
++        result = run_hook(repos, server.url,
++            {'cwd': str(second), 'tool_input': {'file_path': str(first / 'note.md')}})
++    assert result.returncode == 0, result.stderr
++    assert server.requests == []
++
++
++def test_relative_file_uses_payload_cwd_not_process_cwd(repos):
++    first, second, _ = repos
++    sub = second / 'sub'
++    sub.mkdir()
++    with _Server(lambda _: (200, _mcp_result(1))) as server:
++        result = run_hook(repos, server.url,
++            {'cwd': str(sub), 'tool_input': {'file_path': 'note.md'}}, roots=second)
++    assert result.returncode == 0, result.stderr
++    assert len(server.requests) == 1
++    args = arguments(server)[0]
++    assert args['project_key'] == str(second)
++    assert args['paths'] == ['sub/note.md', str(sub / 'note.md')]
++
++
++def test_linked_worktree_has_its_own_protected_root_and_shared_namespace(repos):
++    first, second, env = repos
++    subprocess.run(['git', '-C', str(second), '-c', 'user.name=Fixture',
++                    '-c', 'user.email=fixture@example.invalid', 'commit',
++                    '--allow-empty', '-qm', 'fixture'], env=env, check=True)
++    linked = second.parent / 'linked'
++    subprocess.run(['git', '-C', str(second), 'worktree', 'add', '-qb', 'linked', str(linked)],
++                   env=env, check=True)
++    with _Server(lambda _: (200, _mcp_result(1))) as server:
++        result = run_hook(repos, server.url,
++            {'cwd': str(linked), 'tool_input': {'file_path': str(linked / 'note.md')}})
++    assert result.returncode == 0, result.stderr
++    assert len(server.requests) == 1
++    assert arguments(server)[0]['project_key'] == str(second)
++    assert arguments(server)[0]['paths'] == ['note.md', str(linked.resolve() / 'note.md')]
++
++
++@pytest.mark.parametrize('kind', ['absent', 'deleted'])
++def test_invalid_cwd_cannot_hide_behind_outside_stale_roots(repos, kind):
++    _, second, _ = repos
++    payload = {'tool_input': {'file_path': str(second / 'note.md')}}
++    if kind == 'deleted':
++        payload['cwd'] = str(second / 'missing')
++    with _Server(lambda _: (200, _mcp_result(1))) as server:
++        result = run_hook(repos, server.url, payload)
++    assert result.returncode == 2
++    assert 'AGENT PROJECT CONTEXT UNRESOLVED' in result.stderr
++    assert server.requests == []
++
++
++def test_symlink_outside_workspace_does_not_touch_its_namespace(repos):
++    first, second, _ = repos
++    (second / 'outside').symlink_to(first, target_is_directory=True)
++    with _Server(lambda _: (200, _mcp_result(1))) as server:
++        result = run_hook(repos, server.url,
++            {'cwd': str(second), 'tool_input': {'file_path': str(second / 'outside/note.md')}},
++            roots=second)
++    assert result.returncode == 0, result.stderr
++    assert server.requests == []
