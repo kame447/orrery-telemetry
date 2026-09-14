@@ -1,217 +1,385 @@
-diff --git a/docs/hooks.en.md b/docs/hooks.en.md
-index efc037a..fd8c75c 100644
---- a/docs/hooks.en.md
-+++ b/docs/hooks.en.md
-@@ -163,3 +163,7 @@ Codex Desktop uses a further, separate plugin hook / Bridge lifecycle. See [Code
- - [Codex App integration](codex-app.en.md)
+diff --git a/bin/lib/agentstack-register.sh b/bin/lib/agentstack-register.sh
+index 1173b4e..ffd25a2 100755
+--- a/bin/lib/agentstack-register.sh
++++ b/bin/lib/agentstack-register.sh
+@@ -901,6 +901,67 @@ PY
+ # True means the local host-global name cannot be claimed for PROJECT_KEY.
+ # Mail identities are project-local, while tmux sessions and token paths are
+ # not; candidate names therefore fail closed on any legacy/corrupt artifact.
++# Read only a private regular credential file. The secret is captured by the
++# caller, never placed in an external command's argv or an invocation context.
++ags_read_private_registration_token() {
++  local path="$1" format="${2:-token}"
++  "${AGENTSTACK_PYTHON:-python3}" - "$path" "$format" <<'PY'
++import json
++import os
++import stat
++import sys
++
++fd = os.open(sys.argv[1], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
++try:
++    info = os.fstat(fd)
++    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
++        raise ValueError("registration credential must be a private regular file")
++    raw = os.read(fd, 65537)
++finally:
++    os.close(fd)
++if len(raw) > 65536:
++    raise ValueError("registration credential is too large")
++value = raw.decode("utf-8").rstrip("\n")
++if sys.argv[2] == "child-state":
++    value = json.loads(value).get("registration_token")
++if not isinstance(value, str) or not value or len(value) > 4096:
++    raise ValueError("registration credential is empty or invalid")
++if any(char in value for char in "\r\n\0"):
++    raise ValueError("registration credential contains a control character")
++print(value, end="")
++PY
++}
++
++# A delegated/resumed identity selects its namespace through durable ownership,
++# not a caller's ambient key or marker. Legacy same-repository state needs the
++# existing authenticated upgrade; a contradictory strong owner never downgrades.
++ags_apply_owned_workspace() {
++  local agent_name="$1" work_dir="$2" token_file="${3:-}"
++  local expected_token="${4:-}" token="" context="" state_file=""
++  [[ "$agent_name" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
++  if [[ -n "$token_file" ]]; then
++    token="$(ags_read_private_registration_token "$token_file")" || return 1
++  else
++    token_file="$(ags_registration_token_file "$agent_name")" || return 1
++    if [[ -e "$token_file" || -L "$token_file" ]]; then
++      token="$(ags_read_private_registration_token "$token_file")" || return 1
++    else
++      state_file="$(ags_registration_runtime_dir)/child-agents/$agent_name.json"
++      token="$(ags_read_private_registration_token "$state_file" child-state)" || return 1
++    fi
++  fi
++  [[ -z "$expected_token" || "$token" == "$expected_token" ]] || return 1
++  context="$(ags_resolve_registration_context "" "$work_dir" "$agent_name" reserved "$token")" || return 1
++  if ! ags_registration_owner_exists_for_name "$agent_name"; then
++    ags_mail_load_token
++    ags_verify_registration_owner_with_mail "$(ags_registration_context_project_key "$context")" "$agent_name" "$token" || return 1
++    ags_store_registration_token "$agent_name" "$token" "$context" legacy-resume || return 1
++  fi
++  agentstack_export_context_json "$context" || return 1
++  unset AGS_OWNED_REGISTRATION_TOKEN
++  AGS_OWNED_REGISTRATION_TOKEN="$token"
++}
++
+ ags_local_agent_name_conflicts() {
+   local project_key="$1" agent_name="$2" mode="${3:-candidate}"
+   local runtime_dir="" requested_key="" owner_file="" path="" local_name="" artifact_name=""
+diff --git a/docs/launchers.en.md b/docs/launchers.en.md
+index 35379a1..7676d03 100644
+--- a/docs/launchers.en.md
++++ b/docs/launchers.en.md
+@@ -239,3 +239,8 @@ See [Hooks and operational helpers](hooks.en.md) for the trigger timing, caller,
+ - [Dashboard](dashboard.en.md)
  - [Configuration](configuration.en.md)
  - [Troubleshooting](troubleshooting.en.md)
 +
-+### Reservation workspace boundary
 +
-+Reservation renewal/release uses the project and protected root validated from the hook payload `cwd`, never an early outside-root decision based on installed roots. Relative file paths are resolved physically against that payload cwd, not the hook process cwd. Linked worktrees share the Mail namespace but retain their own protected root. Missing or invalid cwd refuses the edit and sends no reservation mutation.
-diff --git a/docs/hooks.md b/docs/hooks.md
-index ed9f1dc..a1c1f50 100644
---- a/docs/hooks.md
-+++ b/docs/hooks.md
-@@ -168,3 +168,7 @@ Codex Desktop はさらに別の plugin hook / Bridge lifecycle を使います
- - [Codex App 統合](codex-app.md)
++### Child cleanup ownership
++
++Child cleanup validates the explicit agent identity, private credential, and actual workspace against its durable owner before release/retire. An ambient project key cannot authorize cleanup from another repository. If ownership changes during the network operation, local state is retained; otherwise the owner record is removed last, after child-specific artifacts.
+diff --git a/docs/launchers.md b/docs/launchers.md
+index bb54757..f8512dc 100644
+--- a/docs/launchers.md
++++ b/docs/launchers.md
+@@ -241,3 +241,8 @@ repository にある11件の hook / helper の発火タイミング、caller、b
+ - [Dashboard](dashboard.md)
  - [設定](configuration.md)
  - [トラブルシューティング](troubleshooting.md)
 +
-+### 予約の workspace 境界
 +
-+予約の更新・解除は、hook payload の `cwd` から検証した project と保護対象 root を使います。installed environment の古い root で先に対象外と判定しません。相対 file path も hook プロセスの cwd ではなく payload の cwd を基準に物理パスへ解決します。同一 repository の linked worktree は Mail namespace を共有し、保護範囲は各 worktree です。cwd が不明・無効なら編集を拒否し、予約変更を送りません。
-diff --git a/hooks/reservation-common.sh b/hooks/reservation-common.sh
-index 1988382..ea4e45c 100755
---- a/hooks/reservation-common.sh
-+++ b/hooks/reservation-common.sh
-@@ -116,6 +116,10 @@ except Exception:
-             fi
-         fi
-     fi
-+    # Protection and namespace come from the same validated invocation.
-+    # Do this before classifying a path; installed roots are not authority.
-+    agentstack_export_context_json "$context_json" || return 2
-+    PROTECTED_ROOTS="$AGENTSTACK_PROTECTED_ROOTS"
-     return 0
- }
++### Child cleanup ownership
++
++子agentの終了処理は、明示されたagent名・private token・実workspaceに一致するowner recordを検証してから予約解除とretireを行います。古いproject環境変数や他repositoryからの同名cleanupは権限の根拠になりません。通信中にownerが変わった場合はlocal stateを削除せず、正常時はchild固有stateの後にowner recordを削除します。
+diff --git a/hooks/cleanup-child-agent.sh b/hooks/cleanup-child-agent.sh
+index f395dc2..2f76a5d 100755
+--- a/hooks/cleanup-child-agent.sh
++++ b/hooks/cleanup-child-agent.sh
+@@ -17,32 +17,10 @@ PROJECT_CONTEXT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/project-conte
+ . "$PROJECT_CONTEXT_LIB"
+ STATE_DIR="$RUNTIME_DIR/child-agents"
+ MANAGED_FILE="${AGENTSTACK_MANAGED_AGENTS_FILE:-$RUNTIME_DIR/managed_agents.txt}"
+-PROJECT_KEY_DEFAULT="$(agentstack_resolve_project_key "$(pwd -P)")"
+ MCP_URL="${AGENTSTACK_MCP_URL:-${MCP_URL:-http://127.0.0.1:18765/mcp}}"
+ MAIL_ENV="${AGENTSTACK_MAIL_ENV:-$HOME/.agentstack/mail/.env}"
+ HTTP_BEARER_MODE="${AGENTSTACK_MAIL_HTTP_BEARER_MODE:-auto}"
  
-@@ -185,13 +189,14 @@ except Exception:
- ' 2>/dev/null || echo "")
-     [ -n "$FILE_PATH" ] || return 1
- 
--    if [[ "$FILE_PATH" == /* ]]; then
--        :
--    elif [[ "$FILE_PATH" == "~/"* ]]; then
--        FILE_PATH="$HOME/${FILE_PATH:2}"
--    else
--        FILE_PATH="$(pwd)/$FILE_PATH"
+-resolve_agent_name() {
+-    if [[ -f "$HOOKS_DIR/resolve-agent-name.sh" ]]; then
+-        # shellcheck disable=SC1091
+-        source "$HOOKS_DIR/resolve-agent-name.sh"
+-        printf '%s\n' "${RESOLVED_AGENT:-}"
+-        return 0
 -    fi
-+    reservation_resolve_lookup_context "$tool_document" || return 2
-+    FILE_PATH=$(python3 -c '
-+import pathlib, sys
-+path = pathlib.Path(sys.argv[1]).expanduser()
-+if not path.is_absolute():
-+    path = pathlib.Path(sys.argv[2]) / path
-+print(path.resolve())
-+' "$FILE_PATH" "$AGENTSTACK_LOOKUP_WORK_DIR") || return 2
- 
-     MATCHED_ROOT=""
-     if [[ -n "$PROTECTED_ROOTS" ]]; then
-@@ -217,8 +222,6 @@ except Exception:
-     if [[ "$REL_PATH" == "$FILE_PATH" ]]; then
-         REL_PATH="$(basename "$FILE_PATH")"
-     fi
--    reservation_resolve_lookup_context "$tool_document"
--    [ "$?" -eq 0 ] || return 2
-     return 0
+-    if [[ -n "${AGENT_NAME:-}" ]]; then
+-        printf '%s\n' "$AGENT_NAME"
+-        return 0
+-    fi
+-    if [[ -n "${TMUX_PANE:-}" ]]; then
+-        local pane_key metadata_file
+-        pane_key="${TMUX_PANE//%/_}"
+-        metadata_file="$RUNTIME_DIR/agent_name_${pane_key}"
+-        if [[ -f "$metadata_file" ]]; then
+-            tr -d '[:space:]' < "$metadata_file" 2>/dev/null
+-        fi
+-    fi
+-}
+-
+ get_agentstack_token() {
+     if [[ -n "${MCP_AGENT_MAIL_TOKEN:-}" ]]; then
+         printf '%s' "$MCP_AGENT_MAIL_TOKEN"
+@@ -74,9 +52,7 @@ legacy_http_bearer_enabled() {
+     esac
  }
  
-diff --git a/tests/test_check_file_reservation.py b/tests/test_check_file_reservation.py
-index 8083229..8fce2ea 100644
---- a/tests/test_check_file_reservation.py
-+++ b/tests/test_check_file_reservation.py
-@@ -138,11 +138,13 @@ class ReservationHookTests(unittest.TestCase):
-         fake_python = fake_bin / "python3"
-         fake_python.write_text(
-             "#!/bin/sh\n"
--            "if [ \"${1-}\" = \"-c\" ]; then\n"
--            f"    exec {json.dumps(os.sys.executable)} \"$@\"\n"
-+            "if [ -n \"${AGENTSTACK_PROBE_URL+x}\" ]; then\n"
-+            "    cat >/dev/null; printf '%s\\n' reachable; exit 0\n"
-             "fi\n"
--            "cat >/dev/null\n"
--            "printf '%s\\n' 'HOOK_RENEWED: 0'\n",
-+            "if [ -n \"${QUERY_PROJECT_KEY-}\" ]; then\n"
-+            "    cat >/dev/null; printf '%s\\n' 'HOOK_RENEWED: 0'; exit 0\n"
-+            "fi\n"
-+            f"exec {json.dumps(os.sys.executable)} \"$@\"\n",
-             encoding="utf-8",
-         )
-         fake_python.chmod(0o755)
-diff --git a/tests/test_reservation_project_scope.py b/tests/test_reservation_project_scope.py
-new file mode 100644
-index 0000000..8cd2db2
---- /dev/null
-+++ b/tests/test_reservation_project_scope.py
-@@ -0,0 +1,119 @@
-+"""Actual hook cwd, not installed or process context, defines reservation scope."""
-+import json
-+import os
-+import subprocess
-+from pathlib import Path
+-RESOLVED_AGENT="$(resolve_agent_name)"
+-AGENT_NAME="${1:-${RESOLVED_AGENT:-${AGENT_NAME:-}}}"
+-PROJECT_KEY="${PROJECT_KEY:-$PROJECT_KEY_DEFAULT}"
++AGENT_NAME="${1:-$AGENT_NAME_ENV_AT_ENTRY}"
+ 
+ if [[ -z "$AGENT_NAME" ]]; then
+     exit 0
+@@ -92,34 +68,26 @@ TOKEN_KEY="$(printf '%s' "$AGENT_NAME" | LC_ALL=C tr -c 'A-Za-z0-9_.-' '_')"
+ TOKEN_FILE="$RUNTIME_DIR/agent_token_$TOKEN_KEY"
+ MCP_CONFIG_FILE="$STATE_DIR/${AGENT_NAME}.mcp.json"
+ CODEX_HOME_DIR="$STATE_DIR/${AGENT_NAME}.codex-home"
+-if [[ -f "$STATE_FILE" ]]; then
+-    if ! STATE_PROJECT_KEY=$(
+-        python3 - "$STATE_FILE" 2>/dev/null <<'PYEOF'
+-import json
+-import sys
+-
+-data = json.load(open(sys.argv[1], encoding="utf-8"))
+-print(data.get("project_key", ""))
+-PYEOF
+-    ); then
+-        echo "[cleanup-child-agent] could not read child state for '$AGENT_NAME'; refusing partial cleanup" >&2
+-        exit 1
+-    fi
+-    if [[ -n "$STATE_PROJECT_KEY" ]]; then
+-        PROJECT_KEY="$STATE_PROJECT_KEY"
+-    else
+-        echo "[cleanup-child-agent] child state for '$AGENT_NAME' has no project key; using the configured project key if available" >&2
+-    fi
+-fi
+-
+-if [[ ! -s "$TOKEN_FILE" && ! -s "$STATE_FILE" && -z "${CHILD_REGISTRATION_TOKEN:-}" ]]; then
++OWNER_FILE="$RUNTIME_DIR/agent_owner_$TOKEN_KEY.json"
++if [[ ! -e "$TOKEN_FILE" && ! -L "$TOKEN_FILE" && ! -e "$STATE_FILE" && ! -L "$STATE_FILE" \
++      && ! -e "$OWNER_FILE" && ! -L "$OWNER_FILE" && -z "${CHILD_REGISTRATION_TOKEN:-}" ]]; then
+     exit 0
+ fi
+ 
+-if [[ -z "$PROJECT_KEY" ]]; then
+-    echo "[cleanup-child-agent] project key is unavailable for '$AGENT_NAME'; leaving child state intact" >&2
++# Caller identity, actual workspace and private credential must agree before any
++# Mail request or local deletion. A copied project key is not cleanup authority.
++REGISTER_LIB="${AGENTSTACK_REGISTER_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin/lib" && pwd)/agentstack-register.sh}"
++[[ -f "$REGISTER_LIB" ]] || { echo "[cleanup-child-agent] missing registration library" >&2; exit 1; }
++# shellcheck disable=SC1090
++. "$REGISTER_LIB"
++WORK_DIR="$(pwd -P)" || exit 1
++if ! ags_apply_owned_workspace "$AGENT_NAME" "$WORK_DIR" "" "${CHILD_REGISTRATION_TOKEN:-}"; then
++    echo "[cleanup-child-agent] could not read child state or verify workspace ownership for '$AGENT_NAME'; refusing partial cleanup" >&2
+     exit 1
+ fi
++CLEANUP_OWNER_TOKEN="$AGS_OWNED_REGISTRATION_TOKEN"
++unset AGS_OWNED_REGISTRATION_TOKEN
++CLEANUP_PROJECT_KEY="$AGENTSTACK_PROJECT_KEY"
+ 
+ if legacy_http_bearer_enabled; then
+     TOKEN=$(get_agentstack_token 2>/dev/null || true)
+@@ -173,6 +141,12 @@ conn.close()
+ ' "$method" "$MCP_URL"
+ }
+ 
++cleanup_owner_still_matches() {
++    local context
++    context="$(ags_registration_owner_context "$AGENT_NAME" "$CLEANUP_OWNER_TOKEN" "$WORK_DIR")" || return 1
++    ags_project_keys_equal "$(ags_registration_context_project_key "$context")" "$CLEANUP_PROJECT_KEY"
++}
 +
-+import pytest
-+from test_check_file_reservation import _Server, _mcp_result
+ release_args=$(python3 -c "
+ import json, sys
+ print(json.dumps({
+@@ -182,34 +156,24 @@ print(json.dumps({
+ " "$PROJECT_KEY" "$AGENT_NAME")
+ call_mcp "release_file_reservations" "$release_args" > /dev/null 2>&1 || true
+ 
+-retire_args=$(python3 -c '
++# Recheck after the release request before using the frozen retire credential.
++cleanup_owner_still_matches || exit 1
++retire_args=$(CLEANUP_REGISTRATION_TOKEN="$CLEANUP_OWNER_TOKEN" python3 -c '
+ import json
+ import os
+-import pathlib
+ import sys
+-
+-project_key, agent_name, token_file, state_file = sys.argv[1:5]
+-token = ""
+-if pathlib.Path(token_file).is_file():
+-    token = pathlib.Path(token_file).read_text(encoding="utf-8").strip()
+-elif pathlib.Path(state_file).is_file():
+-    token = json.loads(
+-        pathlib.Path(state_file).read_text(encoding="utf-8")
+-    ).get("registration_token", "")
+-else:
+-    token = os.environ.get("CHILD_REGISTRATION_TOKEN", "")
+-if not token:
+-    raise SystemExit(1)
+ print(json.dumps({
+-    "project_key": project_key,
+-    "agent_name": agent_name,
+-    "registration_token": token,
++    "project_key": sys.argv[1],
++    "agent_name": sys.argv[2],
++    "registration_token": os.environ["CLEANUP_REGISTRATION_TOKEN"],
+ }))
+-' "$PROJECT_KEY" "$AGENT_NAME" "$TOKEN_FILE" "$STATE_FILE") || retire_args=""
++' "$CLEANUP_PROJECT_KEY" "$AGENT_NAME") || retire_args=""
+ if [[ -n "$retire_args" ]]; then
+     call_mcp "retire_agent" "$retire_args" > /dev/null 2>&1 || true
+ fi
+ 
++cleanup_owner_still_matches || exit 1
 +
-+ROOT = Path(__file__).resolve().parents[1]
-+
-+@pytest.fixture
-+def repos(tmp_path):
-+    env = {key: value for key, value in os.environ.items()
-+           if not key.startswith(('AGENTSTACK_', 'GIT_')) and key not in
-+           {'HOME', 'PROJECT_KEY', 'AGENT_NAME', 'PARENT_AGENT', 'CHILD_REGISTRATION_TOKEN',
-+            'TMUX', 'TMUX_PANE', 'MCP_URL', 'MCP_AGENT_MAIL_TOKEN', 'BASH_ENV', 'ENV'}}
-+    home = tmp_path / 'home'
+ python3 - "$MANAGED_FILE" "$AGENT_NAME" <<'PYEOF' 2>/dev/null || true
+ import pathlib
+ import sys
+@@ -224,5 +188,7 @@ path.write_text("\n".join(line for line in lines if line != name) + "\n", encodi
+ PYEOF
+ rm -f "$STATE_FILE" "$TOKEN_FILE" "$MCP_CONFIG_FILE"
+ rm -rf "$CODEX_HOME_DIR"
++# Release the durable name only after its owned runtime artifacts are gone.
++rm -f "$OWNER_FILE"
+ 
+ exit 0
+diff --git a/tests/test_cleanup_child_agent.py b/tests/test_cleanup_child_agent.py
+index 36e4934..af2e8dc 100644
+--- a/tests/test_cleanup_child_agent.py
++++ b/tests/test_cleanup_child_agent.py
+@@ -65,7 +65,22 @@ def _arrange_child_state(tmp_path: Path) -> tuple[str, dict[str, str], list[Path
+             "AGENTSTACK_MCP_URL": "http://127.0.0.1:1/mcp",
+         }
+     )
+-    artifacts = [state_file, token_file, mcp_config, codex_home]
++    home = tmp_path / "home"
 +    home.mkdir()
-+    env['HOME'] = str(home)
-+    first, second = tmp_path / 'first', tmp_path / 'second'
-+    for repo in (first, second):
-+        subprocess.run(['git', 'init', '-q', str(repo)], env=env, check=True)
-+    return first.resolve(), second.resolve(), env
++    env["HOME"] = str(home)
++    env["AGENTSTACK_REGISTER_LIB"] = str(ROOT / "bin/lib/agentstack-register.sh")
++    state_file.chmod(0o600)
++    token_file.chmod(0o600)
++    published = subprocess.run(
++        ["/bin/bash", "-c",
++         '. "$1"; ctx=$(agentstack_resolve_invocation_context "$2" /test/project) || exit; '
++         'ags_store_registration_token "$3" test-registration-token "$ctx" preregister-child',
++         "fixture", env["AGENTSTACK_REGISTER_LIB"], str(ROOT), agent_name],
++        env=env, capture_output=True, text=True, timeout=20,
++    )
++    assert published.returncode == 0, published.stderr
++    owner_file = runtime / f"agent_owner_{agent_name}.json"
++    artifacts = [state_file, token_file, mcp_config, codex_home, owner_file]
+     return agent_name, env, artifacts
+ 
+ 
+@@ -139,6 +154,75 @@ def test_invalid_child_state_fails_loudly_without_partial_cleanup(
+     assert all(path.exists() for path in artifacts)
+ 
+ 
++def test_foreign_workspace_cannot_clean_an_owned_child(tmp_path: Path) -> None:
++    agent_name, env, artifacts = _arrange_child_state(tmp_path)
++    foreign = tmp_path / "foreign"
++    foreign.mkdir()
++    # The marker and an exact-looking key still cannot prove this workspace.
++    env.update(AGENTSTACK_PROJECT_KEY="/test/project", AGENTSTACK_PROJECT_CONTEXT="1")
++    result = subprocess.run(["/bin/bash", str(HOOK), agent_name], cwd=foreign,
++                            env=env, capture_output=True, text=True, timeout=20)
++    assert result.returncode != 0
++    assert all(path.exists() for path in artifacts)
 +
 +
-+def run_hook(repos, url, payload, *, process_cwd=None, roots=None):
-+    first, second, env = repos
-+    env = dict(env)
-+    env.update(AGENTSTACK_PROJECT_KEY=str(first),
-+               AGENTSTACK_PROTECTED_ROOTS=str(roots or first),
-+               AGENTSTACK_PROJECT_CONTEXT='1',
-+               AGENTSTACK_HOOKS_DIR=str(ROOT / 'hooks'),
-+               AGENTSTACK_RUNTIME_DIR=str(first.parent / 'runtime'),
-+               AGENTSTACK_MCP_URL=url, AGENTSTACK_MAIL_HTTP_BEARER_MODE='disabled',
-+               AGENT_NAME='BrightCurie', FILE_RESERVATION_RETRY_DELAY_SECONDS='0',
-+               GIT_DIR=str(first / '.git'), GIT_WORK_TREE=str(first))
-+    return subprocess.run(['/bin/bash', str(ROOT / 'hooks/check-file-reservation.sh')],
-+        input=json.dumps(payload), cwd=process_cwd or first, env=env,
-+        text=True, capture_output=True, timeout=20)
++def test_replacement_token_is_not_deleted_by_an_old_process(tmp_path: Path) -> None:
++    agent_name, env, artifacts = _arrange_child_state(tmp_path)
++    env["CHILD_REGISTRATION_TOKEN"] = "token-from-a-previous-process"
++    result = subprocess.run(["/bin/bash", str(HOOK), agent_name], cwd=ROOT,
++                            env=env, capture_output=True, text=True, timeout=20)
++    assert result.returncode != 0
++    assert all(path.exists() for path in artifacts)
 +
 +
-+def arguments(server):
-+    return [request['json']['params']['arguments'] for request in server.requests]
-+
-+
-+def test_stale_installed_roots_cannot_bypass_the_actual_repository(repos):
-+    first, second, _ = repos
-+    with _Server(lambda _: (200, _mcp_result(0))) as server:
-+        result = run_hook(repos, server.url,
-+            {'cwd': str(second), 'tool_input': {'file_path': str(second / 'note.md')}})
-+    assert result.returncode == 2, result.stderr
-+    assert 'FILE RESERVATION REQUIRED' in result.stderr
-+    assert server.requests
-+    assert all(item['project_key'] == str(second) for item in arguments(server))
-+
-+
-+def test_another_repository_is_not_renewed_under_the_current_namespace(repos):
-+    first, second, _ = repos
-+    with _Server(lambda _: (200, _mcp_result(1))) as server:
-+        result = run_hook(repos, server.url,
-+            {'cwd': str(second), 'tool_input': {'file_path': str(first / 'note.md')}})
++def test_stale_namespace_does_not_change_cleanup_requests(tmp_path: Path) -> None:
++    from test_check_file_reservation import _Server
++    agent_name, env, artifacts = _arrange_child_state(tmp_path)
++    env.update(AGENTSTACK_PROJECT_KEY="wrong-team", PROJECT_KEY="wrong-team")
++    answer = json.dumps({"result": {"structuredContent": {"ok": True}}}).encode()
++    with _Server(lambda _: (200, answer)) as server:
++        env["AGENTSTACK_MCP_URL"] = server.url
++        result = subprocess.run(["/bin/bash", str(HOOK), agent_name], cwd=ROOT,
++                                env=env, capture_output=True, text=True, timeout=20)
 +    assert result.returncode == 0, result.stderr
-+    assert server.requests == []
++    assert not any(path.exists() for path in artifacts)
++    calls = [item["json"]["params"] for item in server.requests]
++    assert [item["name"] for item in calls] == ["release_file_reservations", "retire_agent"]
++    assert all(item["arguments"]["project_key"] == "/test/project" for item in calls)
++    assert calls[-1]["arguments"]["registration_token"] == "test-registration-token"
++    assert "test-registration-token" not in result.stdout + result.stderr
 +
 +
-+def test_relative_file_uses_payload_cwd_not_process_cwd(repos):
-+    first, second, _ = repos
-+    sub = second / 'sub'
-+    sub.mkdir()
-+    with _Server(lambda _: (200, _mcp_result(1))) as server:
-+        result = run_hook(repos, server.url,
-+            {'cwd': str(sub), 'tool_input': {'file_path': 'note.md'}}, roots=second)
-+    assert result.returncode == 0, result.stderr
-+    assert len(server.requests) == 1
-+    args = arguments(server)[0]
-+    assert args['project_key'] == str(second)
-+    assert args['paths'] == ['sub/note.md', str(sub / 'note.md')]
++def test_owner_replacement_during_mail_prevents_local_deletion(tmp_path: Path) -> None:
++    from test_check_file_reservation import _Server
++    agent_name, env, artifacts = _arrange_child_state(tmp_path)
++    owner_file = artifacts[-1]
++    def answer(_count):
++        data = json.loads(owner_file.read_text())
++        data["token_sha256"] = "replacement-generation"
++        owner_file.write_text(json.dumps(data))
++        return 200, b'{"result":{"structuredContent":{"ok":true}}}'
++    with _Server(answer) as server:
++        env["AGENTSTACK_MCP_URL"] = server.url
++        result = subprocess.run(["/bin/bash", str(HOOK), agent_name], cwd=ROOT,
++                                env=env, capture_output=True, text=True, timeout=20)
++    assert result.returncode != 0
++    assert all(path.exists() for path in artifacts)
++    assert [item["json"]["params"]["name"] for item in server.requests] == ["release_file_reservations"]
 +
 +
-+def test_linked_worktree_has_its_own_protected_root_and_shared_namespace(repos):
-+    first, second, env = repos
-+    subprocess.run(['git', '-C', str(second), '-c', 'user.name=Fixture',
-+                    '-c', 'user.email=fixture@example.invalid', 'commit',
-+                    '--allow-empty', '-qm', 'fixture'], env=env, check=True)
-+    linked = second.parent / 'linked'
-+    subprocess.run(['git', '-C', str(second), 'worktree', 'add', '-qb', 'linked', str(linked)],
-+                   env=env, check=True)
-+    with _Server(lambda _: (200, _mcp_result(1))) as server:
-+        result = run_hook(repos, server.url,
-+            {'cwd': str(linked), 'tool_input': {'file_path': str(linked / 'note.md')}})
-+    assert result.returncode == 0, result.stderr
-+    assert len(server.requests) == 1
-+    assert arguments(server)[0]['project_key'] == str(second)
-+    assert arguments(server)[0]['paths'] == ['note.md', str(linked.resolve() / 'note.md')]
++def test_symlinked_owner_is_not_cleanup_authority(tmp_path: Path) -> None:
++    agent_name, env, artifacts = _arrange_child_state(tmp_path)
++    owner = artifacts[-1]
++    saved = tmp_path / "saved-owner"
++    owner.rename(saved)
++    owner.symlink_to(saved)
++    result = subprocess.run(["/bin/bash", str(HOOK), agent_name], cwd=ROOT,
++                            env=env, capture_output=True, text=True, timeout=20)
++    assert result.returncode != 0
++    assert all(path.exists() for path in artifacts)
 +
 +
-+@pytest.mark.parametrize('kind', ['absent', 'deleted'])
-+def test_invalid_cwd_cannot_hide_behind_outside_stale_roots(repos, kind):
-+    _, second, _ = repos
-+    payload = {'tool_input': {'file_path': str(second / 'note.md')}}
-+    if kind == 'deleted':
-+        payload['cwd'] = str(second / 'missing')
-+    with _Server(lambda _: (200, _mcp_result(1))) as server:
-+        result = run_hook(repos, server.url, payload)
-+    assert result.returncode == 2
-+    assert 'AGENT PROJECT CONTEXT UNRESOLVED' in result.stderr
-+    assert server.requests == []
-+
-+
-+def test_symlink_outside_workspace_does_not_touch_its_namespace(repos):
-+    first, second, _ = repos
-+    (second / 'outside').symlink_to(first, target_is_directory=True)
-+    with _Server(lambda _: (200, _mcp_result(1))) as server:
-+        result = run_hook(repos, server.url,
-+            {'cwd': str(second), 'tool_input': {'file_path': str(second / 'outside/note.md')}},
-+            roots=second)
-+    assert result.returncode == 0, result.stderr
-+    assert server.requests == []
+ def _main() -> int:
+     failures = 0
+     for name, function in sorted(globals().items()):
+diff --git a/tests/test_project_key_resolution.py b/tests/test_project_key_resolution.py
+index 769a87c..b475cfc 100644
+--- a/tests/test_project_key_resolution.py
++++ b/tests/test_project_key_resolution.py
+@@ -111,12 +111,14 @@ def test_consumers_use_the_resolver_for_their_migration_phase() -> None:
+ 
+     deferred_consumers = (
+         "hooks/reservation-common.sh",
+-        "hooks/cleanup-child-agent.sh",
+     )
+     for relative in deferred_consumers:
+         text = (ROOT / relative).read_text(encoding="utf-8")
+         assert ". \"$PROJECT_CONTEXT_LIB\"" in text, relative
+         assert "agentstack_resolve_project_key" in text, relative
++    cleanup = (ROOT / "hooks/cleanup-child-agent.sh").read_text(encoding="utf-8")
++    assert "ags_apply_owned_workspace" in cleanup
++    assert "agentstack_resolve_project_key" not in cleanup
+     await_reply = (ROOT / "bin" / "agentstack-await-reply").read_text(
+         encoding="utf-8"
+     )
