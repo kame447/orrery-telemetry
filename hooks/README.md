@@ -47,10 +47,10 @@ context API below derives default protected roots without activating consumers.
 
 The existing `agentstack_resolve_project_key`, `agentstack_resolve_protected_roots`,
 `agentstack_installed_env_value` and their existing CLI commands keep their old
-behavior in this slice. No current launcher or hook consumer calls the new
-selector yet. Therefore this preparatory change does not by itself fix
-cross-project registration, and existing launch/install instructions do not
-change. Tests and this contract ship with the resolver rather than being deferred.
+behavior in this slice. Top-level launchers now consume the workspace context API through
+`bin/lib/agentstack-launch.sh`; see `docs/launchers.md`. Standalone bootstrap,
+registration/session ownership, delegated children, watchers and Dashboard
+still require their separate migrations. End-to-end isolation is not complete. Tests and this contract ship with the resolver rather than being deferred.
 
 For a library call, source `hooks/project-context.sh` and call the function above.
 For a read-only command-line check, run
@@ -95,8 +95,8 @@ reserved-child ownership validation belong to their consumer migration. A
 validated child context must not be reselected as a top-level invocation, and a
 bare AGENTSTACK_PROJECT_CONTEXT=1 marker is never proof of ownership.
 
-This layer changes only the shared library, its focused tests and this API
-contract. Top-level launchers, bootstrap, hooks, watcher, Dashboard, installer
-and generated AGENTS.md instructions are not migrated here. User-facing install
-and launch documentation remains unchanged because those paths still use their
-legacy behavior; cross-project registration is not fixed until they migrate.
+The context layer itself remains read-only. Its top-level launcher adapter
+validates representability before exporting a complete tuple, does not eval
+JSON, and never treats a context marker as delegated ownership proof. Other
+consumers, installer diagnostics and generated instructions are not migrated
+yet; see the explicit remaining boundaries in `docs/launchers.md`.
