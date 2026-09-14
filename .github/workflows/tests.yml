@@ -1,79 +1,64 @@
-name: tests
-
+name: prepare isolated issue33 launcher candidate
 on:
   push:
-  pull_request:
-
+    branches: [work/issue33-top-level-launchers]
+permissions:
+  contents: write
 concurrency:
-  group: tests-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
+  group: issue33-launcher-preparation
+  cancel-in-progress: false
 jobs:
-  portable-startup:
-    # These regressions cover portable components, not a full Windows install.
-    runs-on: windows-latest
-    name: portable startup (Windows)
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: python -m pip install pytest pytest-timeout -e ./packages/agentstack_mail
-      - name: Check checkout bytes, long Mail paths, and dashboard HTTP startup
-        env:
-          PYTHONPATH: .
-          PYTHONUTF8: "1"
-        run: >-
-          python -m pytest -q tests/windows/ tests/test_mail_fixture_line_endings.py
-          tests/test_dashboard_startup.py tests/test_codex_app_runtime_provider.py
-          tests/test_dashboard_quotas.py tests/test_dashboard_quota_http.py
-          tests/test_dashboard_quota_adapters.py
-
-  tests:
-    # 対応 OS は macOS（README「対応環境」）。ubuntu で回すと launchd / launchctl /
-    # mailctl の rehearsal が環境不在で落ち、対応外の失敗と本物の回帰が混ざる。
-    # 2026-09-03 の公開まで ubuntu で 22 run 連続赤だったのはこれ。
+  prepare:
+    if: github.repository == 'kame447/orrery-telemetry'
     runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # README が「3.11 以上」と書く以上、両端を機械で押さえる。"3.x" 単独だと
-        # 下限は誰も踏まないし、新しい Python が出た日に上限が黙って動く。
-        # 3.10 は 2026-09-04 に対応から外した（import は通るが mail のテストが 38 件落ちる）。
-        python-version: ["3.11", "3.12", "3.14"]
-    name: tests (python ${{ matrix.python-version }})
     steps:
       - uses: actions/checkout@v4
         with:
-          # approved_base is accepted only when a persistent branch, remote, or
-          # tag reaches it; shallow history would make that gate inconclusive.
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-      # tmux: agents run inside it and tests exercise the real binary.
-      # uv: the installer provisions ORRERY Mail with it and fails preflight without it.
-      - name: Install tmux and uv
-        run: brew install tmux uv
-      - name: Install test and package-build tools
-        run: python3 -m pip install pytest pytest-timeout pytest-xdist build -e ./packages/agentstack_mail
-      # `tests/` だけを指定していた間、integrations/codex_app/tests/ の 111 件は
-      # 一度も CI で実行されていなかった。テストの置き場所が増えるたびに黙って
-      # 対象から外れるので、ディレクトリは明示して数を数えられるようにする。
-      - name: Run tests (pytest — `python3 file.py` 直実行は pytest 形式のテストを 0 件実行で緑にしてしまう)
+          python-version: '3.12'
+      - run: brew install tmux uv
+      - run: python3 -m pip install pytest pytest-asyncio pytest-timeout pytest-xdist -e ./packages/agentstack_mail
+      - name: Apply only the launcher slice to its pinned dependency
         run: |
           set -euo pipefail
-          # tests/windows/ is the community Windows lane; its conftest already skips collection off win32,
-          # and --ignore keeps that explicit here.
-          # -n auto: the suite is a long tail of process-spawning rehearsals (12 min serial on
-          # this runner); --dist loadfile keeps one file's tests on one worker, since files
-          # share fixtures and fake homes.
-          PYTHONPATH=.:packages/agentstack_mail/src python3 -m pytest -q -n auto --dist loadfile tests/ --ignore=tests/windows integrations/ packages/agentstack_mail/tests/
-      - name: Build and inspect agentstack-mail distribution
+          git show "$GITHUB_SHA:scripts/prepare-issue33-launchers.py" > "$RUNNER_TEMP/prepare-launchers.py"
+          git checkout --detach b4d9cbe8586e4cb3f694a3ff422cc00c0c37e689
+          git show "$GITHUB_SHA:bin/lib/agentstack-launch.sh" > bin/lib/agentstack-launch.sh
+          git show "$GITHUB_SHA:tests/test_top_level_project_context.py" > tests/test_top_level_project_context.py
+          python3 "$RUNNER_TEMP/prepare-launchers.py"
+          git diff --check
+          for f in bin/agent-start bin/agent-start-codex bin/agent-start-gemini bin/lib/agentstack-launch.sh; do bash -n "$f"; done
+      - name: Focused and existing launcher regressions
         run: |
           set -euo pipefail
-          python3 -m build packages/agentstack_mail --outdir /tmp/agentstack-mail-dist
-          python3 packages/agentstack_mail/tests/verify_artifact.py /tmp/agentstack-mail-dist/agentstack_mail-0.0.0-py3-none-any.whl
-          python3 packages/agentstack_mail/tests/verify_artifact.py /tmp/agentstack-mail-dist/agentstack_mail-0.0.0.tar.gz
-          python3 -m pip install --force-reinstall --no-deps /tmp/agentstack-mail-dist/agentstack_mail-0.0.0-py3-none-any.whl
-          python3 packages/agentstack_mail/tests/verify_installed_contract.py
+          PYTHONPATH=.:packages/agentstack_mail/src python3 -m pytest -q -n auto --dist loadfile \
+            tests/test_top_level_project_context.py tests/test_identity_isolation.py \
+            tests/test_invocation_context.py tests/test_invocation_project_key.py \
+            tests/test_repository_identity.py tests/test_project_key_resolution.py \
+            tests/test_service_label_isolation.py tests/test_bash32_local_selfref.py \
+            tests/test_runtime_defaults.py tests/test_docs_consistency.py tests/test_gemini*.py
+      - name: Publish a clean candidate without preparation tooling
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import subprocess
+          expected = {'bin/agent-start', 'bin/agent-start-codex', 'bin/agent-start-gemini',
+                      'bin/lib/agentstack-launch.sh', 'hooks/README.md', 'docs/launchers.md',
+                      'docs/launchers.en.md', 'tests/test_identity_isolation.py',
+                      'tests/test_top_level_project_context.py'}
+          actual = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          actual.update(subprocess.check_output(['git', 'ls-files', '--others', '--exclude-standard'], text=True).splitlines())
+          assert actual == expected, (actual, expected)
+          PY
+          git config user.name 'kame447'
+          git config user.email '76802107+kame447@users.noreply.github.com'
+          git add -- bin/agent-start bin/agent-start-codex bin/agent-start-gemini bin/lib/agentstack-launch.sh \
+            hooks/README.md docs/launchers.md docs/launchers.en.md tests/test_identity_isolation.py \
+            tests/test_top_level_project_context.py
+          git commit -m 'fix(launch): bind top-level invocations to resolved project context' \
+            -m 'Depends on b4d9cbe8 (fork #36). Migrate only top-level launch and session handoff; preserve delegated consumers and defer ownership/session-index migration. Focused and existing launcher regressions ran on macOS Python 3.12 before this commit. Full exact-head matrix CI is still required. Refs gyroid-eth/orrery-telemetry#33.'
+          git push origin HEAD:refs/heads/fix/issue33-top-level-launchers
+          git rev-parse HEAD >> "$GITHUB_STEP_SUMMARY"
+          git diff --stat HEAD^ >> "$GITHUB_STEP_SUMMARY"
