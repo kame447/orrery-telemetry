@@ -118,23 +118,11 @@ agentstack_same_repository() {
     [ -n "$left_key" ] && [ "$left_key" = "$right_key" ]
 }
 
-# Select a top-level invocation's key from explicit inputs, never ambient
-# PROJECT_KEY / AGENTSTACK_PROJECT_KEY or installed env.sh. The caller may
-# pass its configured non-Git fallback separately after reading it safely.
-# This selects a namespace; it does not authenticate a delegated identity.
-agentstack_resolve_invocation_project_key() {
-    local target="${1:-}"
-    local explicit_key="${2:-}"
-    local non_git_fallback="${3:-}"
-    local target_dir="" repository="" probe_dir="" parent_dir="" failure=""
-    target_dir="$(agentstack_physical_dir "$target")" || {
-        printf 'agentstack: invocation target must be an existing directory\n' >&2
-        return 1
-    }
-    if [ -n "$explicit_key" ]; then
-        agentstack_normalize_project_key "$explicit_key"
-        return $?
-    fi
+# Internal tri-state probe: 0 = repository (stdout key), 2 = verified non-Git,
+# 1 = inspection failure. Callers must distinguish 2 from all other failures.
+_agentstack_probe_invocation_repository() {
+    local target_dir="$1"
+    local repository="" probe_dir="" parent_dir="" failure=""
     command -v git >/dev/null 2>&1 || {
         printf 'agentstack: git is required to resolve invocation context\n' >&2
         return 1
@@ -173,11 +161,101 @@ agentstack_resolve_invocation_project_key() {
         [ "$parent_dir" != "$probe_dir" ] || break
         probe_dir="$parent_dir"
     done
-    if [ -n "$non_git_fallback" ]; then
+    return 2
+}
+
+# Select only from explicit inputs and the already inspected repository.
+_agentstack_invocation_key_from_repository() {
+    local target_dir="$1"
+    local repository="$2"
+    local explicit_key="${3:-}"
+    local non_git_fallback="${4:-}"
+    if [ -n "$explicit_key" ]; then
+        agentstack_normalize_project_key "$explicit_key"
+    elif [ -n "$repository" ]; then
+        printf '%s\n' "$repository"
+    elif [ -n "$non_git_fallback" ]; then
         agentstack_normalize_project_key "$non_git_fallback"
     else
         printf '%s\n' "$target_dir"
     fi
+}
+
+# Select a top-level invocation's key, never an inherited session identity.
+# Preserve the key-only API's explicit selection without Git discovery.
+agentstack_resolve_invocation_project_key() {
+    local target="${1:-}"
+    local explicit_key="${2:-}"
+    local non_git_fallback="${3:-}"
+    local target_dir="" repository="" probe_status=0
+    target_dir="$(agentstack_physical_dir "$target")" || {
+        printf 'agentstack: invocation target must be an existing directory\n' >&2
+        return 1
+    }
+    if [ -n "$explicit_key" ]; then
+        agentstack_normalize_project_key "$explicit_key"
+        return $?
+    fi
+    if repository="$(_agentstack_probe_invocation_repository "$target_dir")"; then
+        :
+    else
+        probe_status=$?
+        [ "$probe_status" -eq 2 ] || return 1
+        repository=""
+    fi
+    _agentstack_invocation_key_from_repository "$target_dir" "$repository" "" "$non_git_fallback"
+}
+
+# Read-only top-level workspace context. This is not a delegated ownership
+# validator and must never export or attest AGENTSTACK_PROJECT_CONTEXT.
+agentstack_resolve_invocation_context() {
+    if [ "$#" -lt 1 ] || [ "$#" -gt 3 ]; then
+        printf 'usage: resolve-invocation-context TARGET [EXPLICIT_KEY [NON_GIT_FALLBACK]]\n' >&2
+        return 2
+    fi
+    local target="${1:-}"
+    local explicit_key="${2:-}"
+    local non_git_fallback="${3:-}"
+    local work_dir="" repository="" worktree_root="" root_repository=""
+    local project_key="" probe_status=0
+    work_dir="$(agentstack_physical_dir "$target")" || {
+        printf 'agentstack: invocation target must be an existing directory\n' >&2
+        return 1
+    }
+    if repository="$(_agentstack_probe_invocation_repository "$work_dir")"; then
+        worktree_root="$(agentstack_git_worktree_root "$work_dir")" || {
+            printf 'agentstack: invocation context requires an inspectable Git worktree\n' >&2
+            return 1
+        }
+        root_repository="$(agentstack_repository_key "$worktree_root")" || return 1
+        [ "$root_repository" = "$repository" ] || {
+            printf 'agentstack: invocation worktree and repository identity disagree\n' >&2
+            return 1
+        }
+    else
+        probe_status=$?
+        [ "$probe_status" -eq 2 ] || return 1
+        repository=""
+    fi
+    project_key="$(_agentstack_invocation_key_from_repository \
+        "$work_dir" "$repository" "$explicit_key" "$non_git_fallback")" || return 1
+    "${AGENTSTACK_PYTHON:-python3}" - "$project_key" "$repository" "$work_dir" "$worktree_root" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+project_key, repository, work_dir, worktree_root = sys.argv[1:]
+if worktree_root and not Path(work_dir).is_relative_to(Path(worktree_root)):
+    print("agentstack: invocation target is outside its Git worktree", file=sys.stderr)
+    raise SystemExit(1)
+print(json.dumps({
+    "project_key": project_key,
+    "repository_key": repository or None,
+    "work_dir": work_dir,
+    "worktree_root": worktree_root or None,
+    "protected_roots": [worktree_root or work_dir],
+}))
+PY
 }
 
 # Priority: live AGENTSTACK_PROJECT_KEY, live PROJECT_KEY, installed env, cwd.
@@ -227,6 +305,10 @@ agentstack_resolve_protected_roots() {
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     case "${1:-}" in
+        resolve-invocation-context)
+            shift
+            agentstack_resolve_invocation_context "$@"
+            ;;
         resolve-invocation-project-key)
             shift
             if [ "$#" -lt 1 ] || [ "$#" -gt 3 ]; then
@@ -244,7 +326,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
             agentstack_installed_env_value "${1:-}" "${2:-}"
             ;;
         *)
-            printf 'usage: project-context.sh {resolve-invocation-project-key TARGET [EXPLICIT_KEY [NON_GIT_FALLBACK]]|resolve-project-key FALLBACK [ENV_FILE [USE_CWD]]|installed-env-value NAME [ENV_FILE]}\n' >&2
+            printf 'usage: project-context.sh {resolve-invocation-context TARGET [EXPLICIT_KEY [NON_GIT_FALLBACK]]|resolve-invocation-project-key TARGET [EXPLICIT_KEY [NON_GIT_FALLBACK]]|resolve-project-key FALLBACK [ENV_FILE [USE_CWD]]|installed-env-value NAME [ENV_FILE]}\n' >&2
             exit 2
             ;;
     esac
