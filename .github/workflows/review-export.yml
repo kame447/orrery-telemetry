@@ -7,7 +7,7 @@ permissions:
 jobs:
   source:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -16,27 +16,27 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - name: Export Git objects without local config or credentials
+      - name: Export current upstream history for read-only integration review
         run: |
           set -eu
-          git bundle create /tmp/orrery-phase4-history.bundle refs/remotes/origin/fix/issue33-session-activation
-          git bundle verify /tmp/orrery-phase4-history.bundle
-          sha256sum /tmp/orrery-phase4-history.bundle
+          git fetch https://github.com/gyroid-eth/orrery-telemetry.git master:refs/remotes/review-upstream/master
+          git bundle create /tmp/orrery-upstream-history.bundle refs/remotes/review-upstream/master
+          git bundle verify /tmp/orrery-upstream-history.bundle
       - uses: actions/upload-artifact@v4
         with:
-          name: orrery-phase4-history
-          path: /tmp/orrery-phase4-history.bundle
+          name: orrery-upstream-history
+          path: /tmp/orrery-upstream-history.bundle
           retention-days: 1
-      - name: Build offline test dependencies for Linux Python 3.13
+      - name: Supply missing isolated tmux libraries and asynchronous test plugin
         run: |
           set -eu
-          mkdir -p /tmp/orrery-wheels
-          python3 -m pip wheel --wheel-dir /tmp/orrery-wheels ./packages/agentstack_mail pytest pytest-timeout pytest-xdist build hatchling editables
-          cd /tmp/orrery-wheels
-          apt-get download tmux
+          mkdir -p /tmp/orrery-extra-dependencies
+          cd /tmp/orrery-extra-dependencies
+          apt-get download libevent-core-2.1-7t64 libutempter0
+          python3 -m pip wheel --wheel-dir . pytest-asyncio
           sha256sum * > checksums.sha256
       - uses: actions/upload-artifact@v4
         with:
-          name: orrery-linux-test-dependencies
-          path: /tmp/orrery-wheels/
+          name: orrery-extra-dependencies
+          path: /tmp/orrery-extra-dependencies/
           retention-days: 1
