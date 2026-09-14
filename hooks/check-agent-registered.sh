@@ -34,7 +34,19 @@ except:
     print('')
 " 2>/dev/null)
 
-LOOKUP_PROJECT="$(agentstack_resolve_project_key "${HOOK_CWD:-$(pwd -P)}")"
+LOOKUP_CONTEXT="$(agentstack_resolve_invocation_context \
+    "${HOOK_CWD:-$(pwd -P)}" 2>/dev/null || true)"
+if [ -z "$LOOKUP_CONTEXT" ]; then
+    echo "AGENT PROJECT CONTEXT UNRESOLVED: cannot validate this tool call's workspace." >&2
+    exit 2
+fi
+LOOKUP_PROJECT="$(agentstack_context_field "$LOOKUP_CONTEXT" project_key)"
+LOOKUP_REPOSITORY="$(agentstack_context_field "$LOOKUP_CONTEXT" repository_key)"
+LOOKUP_WORK_DIR="$(agentstack_context_field "$LOOKUP_CONTEXT" work_dir)"
+AGENTSTACK_LOOKUP_PROJECT_KEY="$LOOKUP_PROJECT"
+AGENTSTACK_LOOKUP_REPOSITORY_KEY="$LOOKUP_REPOSITORY"
+AGENTSTACK_LOOKUP_WORK_DIR="$LOOKUP_WORK_DIR"
+export AGENTSTACK_LOOKUP_PROJECT_KEY AGENTSTACK_LOOKUP_REPOSITORY_KEY AGENTSTACK_LOOKUP_WORK_DIR
 
 # Three questions, in this order, and none of them is skipped for a session
 # that merely has a name:
@@ -52,9 +64,34 @@ if [ -f "$POLICY_LIB" ] && [ -n "$SESSION_ID" ]; then
     # shellcheck disable=SC1090
     . "$POLICY_LIB"
 
-    if [ "$(agentstack_session_binding_conflict "$SESSION_ID" "$LOOKUP_PROJECT" "${AGENT_NAME:-}")" = "conflict" ]; then
+    if [ "$(agentstack_session_binding_conflict "$SESSION_ID" "$LOOKUP_PROJECT" \
+        "${AGENT_NAME:-}" "$LOOKUP_REPOSITORY" "$LOOKUP_WORK_DIR")" = "conflict" ]; then
         agentstack_conflict_message "check-agent-registered"
         exit 2
+    fi
+
+    # A durable owner record is stronger than an ambient launcher name. Check
+    # it before probing Mail: a workspace/token mismatch must not make even a
+    # health request under an identity that belongs somewhere else.
+    NAME_OWNER_VALID=0
+    if [ -n "${AGENT_NAME:-}" ] && ! agentstack_is_placeholder_name "$AGENT_NAME"; then
+        REGISTER_LIB="${AGENTSTACK_REGISTER_LIB:-$HOOKS_DIR_FOR_RESOLVER/../bin/lib/agentstack-register.sh}"
+        if [ -f "$REGISTER_LIB" ]; then
+            # shellcheck disable=SC1090
+            . "$REGISTER_LIB"
+            OWNER_TOKEN="${CHILD_REGISTRATION_TOKEN:-}"
+            [ -n "$OWNER_TOKEN" ] || OWNER_TOKEN="$(ags_load_registration_token "$AGENT_NAME" 2>/dev/null || true)"
+            if ags_registration_owner_exists_for_name "$AGENT_NAME"; then
+                if [ -n "$OWNER_TOKEN" ] && \
+                   ags_registration_owner_context "$AGENT_NAME" "$OWNER_TOKEN" "$LOOKUP_WORK_DIR" >/dev/null 2>&1; then
+                    NAME_OWNER_VALID=1
+                else
+                    echo "AGENT OWNERSHIP MISMATCH: persisted ownership for '$AGENT_NAME' does not match this token/workspace." >&2
+                    echo "Refusing before contacting ORRERY Mail; do not adopt another name. Relaunch with the correct workspace or restore this identity's owner token." >&2
+                    exit 2
+                fi
+            fi
+        fi
     fi
 
     TRANSPORT_STATE="$(agentstack_mail_transport_state)"
@@ -91,10 +128,8 @@ fi
 # scan already refuse these; this is the third place that had its own idea.
 if [ -n "$AGENT_NAME" ] && [ -f "$POLICY_LIB" ]; then
     if ! agentstack_is_placeholder_name "$AGENT_NAME"; then
-        exit 0
+        [ "${NAME_OWNER_VALID:-0}" = "1" ] && exit 0
     fi
-elif [ -n "$AGENT_NAME" ]; then
-    exit 0
 fi
 
 [ -z "$SESSION_ID" ] && exit 0  # Can't identify session — fail open

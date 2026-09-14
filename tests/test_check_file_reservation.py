@@ -166,8 +166,9 @@ class ReservationHookTests(unittest.TestCase):
                 "PATH": f"{fake_bin}:{env.get('PATH', '')}",
             }
         )
+        # Claude Code sends the session cwd with every hook payload.
         payload = json.dumps(
-            {"tool_input": {"file_path": str(workspace / "note.md")}}
+            {"cwd": str(workspace), "tool_input": {"file_path": str(workspace / "note.md")}}
         )
         return subprocess.run(
             ["/bin/bash", str(HOOK)],
@@ -193,7 +194,10 @@ class ReservationHookTests(unittest.TestCase):
         resolver_bytes: bytes | None = None,
         tmux_session_agent: str | None = None,
         file_path: Path | None = None,
+        payload_cwd: str | None = "",
     ) -> subprocess.CompletedProcess[str]:
+        """payload_cwd: "" (default) is the session working in root, the normal
+        Claude Code payload; None omits cwd; any other value is sent as given."""
         runtime = root / "runtime"
         hooks = root / "isolated-hooks"
         runtime.mkdir(exist_ok=True)
@@ -241,9 +245,12 @@ class ReservationHookTests(unittest.TestCase):
             )
             fake_tmux.chmod(0o755)
             env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
-        payload = json.dumps(
-            {"tool_input": {"file_path": str(file_path or root / "note.md")}}
-        )
+        document: dict[str, Any] = {
+            "tool_input": {"file_path": str(file_path or root / "note.md")}
+        }
+        if payload_cwd is not None:
+            document["cwd"] = payload_cwd or str(root)
+        payload = json.dumps(document)
         return subprocess.run(
             ["/bin/bash", str(HOOK)],
             input=payload,
@@ -281,6 +288,22 @@ class ReservationHookTests(unittest.TestCase):
         arguments = request["json"]["params"]["arguments"]
         self.assertNotIn("registration_token", arguments)
         self.assertEqual(request["json"]["params"]["name"], "renew_file_reservations")
+
+    def test_absent_or_invalid_hook_cwd_blocks_before_any_request(self) -> None:
+        """Without the session's actual workspace the guard cannot tell which
+        project a protected file belongs to, so it refuses instead of guessing
+        from the hook process's own directory."""
+        for label, cwd in (("absent", None), ("deleted", "missing-worktree")):
+            with self.subTest(cwd=label), tempfile.TemporaryDirectory() as directory, _Server(
+                lambda _count: (200, _mcp_result(1))
+            ) as server:
+                root = Path(directory)
+                payload_cwd = None if cwd is None else str(root / cwd)
+                result = self.run_hook(server.url, root, payload_cwd=payload_cwd)
+
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("AGENT PROJECT CONTEXT UNRESOLVED", result.stderr)
+                self.assertEqual(server.requests, [])
 
     def test_reachable_server_without_bearer_can_confirm_reservation(self) -> None:
         with tempfile.TemporaryDirectory() as directory, _Server(

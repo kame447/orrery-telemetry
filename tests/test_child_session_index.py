@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import http.server
 import json
+import os
+import stat
 import subprocess
 import threading
 from pathlib import Path
@@ -25,7 +27,7 @@ CHILD = "CozyPlanck"
 
 
 class _Mail(http.server.BaseHTTPRequestHandler):
-    """health_check, ensure_project and register_agent, nothing else."""
+    """health_check, whois, ensure_project and register_agent, nothing else."""
 
     calls: list[str] = []
 
@@ -37,6 +39,14 @@ class _Mail(http.server.BaseHTTPRequestHandler):
         _Mail.calls.append(name)
         if name == "health_check":
             result = {"structuredContent": {"status": "ok"}}
+        elif name == "whois":
+            # A legacy child is authenticated with its owner token before any
+            # side effect; answer only the token the child state holds.
+            args = params.get("arguments") or {}
+            if args.get("registration_token") == "tok-child":
+                result = {"structuredContent": {"name": args.get("agent_name")}}
+            else:
+                result = None
         elif name == "ensure_project":
             result = {"structuredContent": {"id": 1}}
         elif name == "register_agent":
@@ -82,19 +92,40 @@ def mail() -> object:
         server.server_close()
 
 
+def _git_repository(path: Path) -> Path:
+    env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(path.parent),
+           "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    subprocess.run(["git", "init", "-q", str(path)], env=env, check=True,
+                   capture_output=True, timeout=30)
+    return path.resolve()
+
+
 def _run_child_session_start(
-    tmp_path: Path, mcp_url: str, *, with_transcript: bool = True, extra_env: dict | None = None
+    tmp_path: Path, mcp_url: str, *, with_transcript: bool = True, extra_env: dict | None = None,
+    cwd_alias: bool = False,
 ):
     runtime = tmp_path / "runtime"
     runtime.mkdir()
-    # spawn_child.sh leaves the child's owner token here before the session starts.
-    (runtime / f"agent_token_{CHILD}").write_text("tok-child\n", encoding="utf-8")
-    project = tmp_path / "project"
-    project.mkdir()
+    # A real repository: Phase4 binds the child's project to its actual workspace.
+    project = _git_repository(tmp_path / "project")
+    # spawn_child.sh leaves the child's owner token and legacy child state
+    # (name, project, token; no repository provenance) before the session starts.
+    token_file = runtime / f"agent_token_{CHILD}"
+    token_file.write_text("tok-child\n", encoding="utf-8")
+    token_file.chmod(0o600)  # owner tokens are only read from private files
+    state = runtime / "child-agents" / f"{CHILD}.json"
+    state.parent.mkdir()
+    state.write_text(json.dumps({"agent_name": CHILD, "project_key": str(project),
+                                 "registration_token": "tok-child"}), encoding="utf-8")
+    state.chmod(0o600)
+    session_cwd = project
+    if cwd_alias:
+        session_cwd = tmp_path / "alias-to-project"
+        session_cwd.symlink_to(project, target_is_directory=True)
     transcript = tmp_path / "claude" / "projects" / "-p" / "abc123.jsonl"
     transcript.parent.mkdir(parents=True)
     transcript.write_text("{}\n", encoding="utf-8")
-    payload = {"session_id": "sess-child-1", "hook_event_name": "SessionStart", "cwd": str(project)}
+    payload = {"session_id": "sess-child-1", "hook_event_name": "SessionStart", "cwd": str(session_cwd)}
     if with_transcript:
         payload["transcript_path"] = str(transcript)
     env = {
@@ -117,7 +148,7 @@ def _run_child_session_start(
         capture_output=True, text=True, timeout=60, env=env,
     )
     assert result.returncode == 0, result.stderr
-    return result, runtime, transcript
+    return result, runtime, transcript, project
 
 
 def test_shell_registration_keeps_the_model_the_parent_chose(mail: str, tmp_path: Path) -> None:
@@ -135,19 +166,49 @@ def test_shell_registration_without_a_handed_model_still_names_the_program(mail:
 
 
 def test_shell_registration_writes_the_session_index(mail: str, tmp_path: Path) -> None:
-    result, runtime, transcript = _run_child_session_start(tmp_path, mail)
+    result, runtime, transcript, project = _run_child_session_start(tmp_path, mail)
     assert "register_agent" in _Mail.calls, _Mail.calls
     assert "already registered" in result.stdout, result.stdout
     record = json.loads((runtime / "session_index" / f"{AGENT_ID}.json").read_text(encoding="utf-8"))
     assert record["agent_name"] == CHILD
     assert record["session_id"] == "sess-child-1"
     assert record["transcript_path"] == str(transcript)
-    assert record["schema_version"] == 2 and record["binding_kind"] == "self"
+    assert record["schema_version"] == 3 and record["binding_kind"] == "self"
     assert record["registered_by"] == CHILD, "the child bound itself, not a parent"
+    assert record["project_key"] == str(project)
+    assert record["repository_key"] == str(project)
+    assert record["work_dir"] == record["cwd"] == str(project)
+    assert record["protected_roots"] == [str(project)]
+
+
+def test_same_repository_legacy_child_is_authenticated_and_upgraded(mail: str, tmp_path: Path) -> None:
+    """Legacy child state has no repository provenance. It is honoured only
+    because its project is the child's actual repository and Mail accepted its
+    owner token; the successful resume then records a strong owner."""
+    _, runtime, _, project = _run_child_session_start(tmp_path, mail)
+    assert _Mail.calls.index("whois") < _Mail.calls.index("ensure_project"), _Mail.calls
+    assert _Mail.register_args[-1]["project_key"] == str(project)
+    owner_file = runtime / f"agent_owner_{CHILD}.json"
+    assert owner_file.is_file()
+    assert stat.S_IMODE(owner_file.stat().st_mode) & 0o077 == 0
+    owner = json.loads(owner_file.read_text(encoding="utf-8"))
+    assert owner["agent_name"] == CHILD
+    assert owner["project_key"] == str(project)
+    assert owner["repository_key"] == str(project)
+    assert "tok-child" not in owner_file.read_text(encoding="utf-8")
+
+
+def test_an_aliased_session_cwd_binds_the_physical_workspace(mail: str, tmp_path: Path) -> None:
+    """Claude may report a symlinked cwd (macOS /tmp, a user link). The same
+    workspace must still bind, and the index stores the physical path."""
+    _, runtime, _, project = _run_child_session_start(tmp_path, mail, cwd_alias=True)
+    record = json.loads((runtime / "session_index" / f"{AGENT_ID}.json").read_text(encoding="utf-8"))
+    assert record["schema_version"] == 3
+    assert record["cwd"] == record["work_dir"] == str(project)
 
 
 def test_the_index_is_exact_authority_for_the_dashboard(mail: str, tmp_path: Path, monkeypatch) -> None:
-    _, runtime, transcript = _run_child_session_start(tmp_path, mail)
+    _, runtime, transcript, _ = _run_child_session_start(tmp_path, mail)
     import dashboard.server as server
 
     monkeypatch.setattr(server, "SESSION_INDEX_DIR", str(runtime / "session_index"))
@@ -159,6 +220,6 @@ def test_no_transcript_path_means_no_false_index(mail: str, tmp_path: Path) -> N
     """The null case: a payload without a transcript writes a record that
     names no file, and the dashboard then falls back rather than resuming
     a path that does not exist."""
-    _, runtime, _ = _run_child_session_start(tmp_path, mail, with_transcript=False)
+    _, runtime, _, _ = _run_child_session_start(tmp_path, mail, with_transcript=False)
     record = json.loads((runtime / "session_index" / f"{AGENT_ID}.json").read_text(encoding="utf-8"))
     assert record["transcript_path"] == ""

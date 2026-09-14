@@ -98,14 +98,22 @@ def test_missing_installed_env_falls_back_to_cwd(tmp_path: pathlib.Path) -> None
     assert _resolve(home, cwd) == str(cwd)
 
 
-def test_all_five_consumers_call_the_shared_resolver() -> None:
-    shell_consumers = (
-        "hooks/reservation-common.sh",
+def test_consumers_use_the_resolver_for_their_migration_phase() -> None:
+    phase4_consumers = (
         "hooks/check-agent-registered.sh",
         "hooks/session-start-reminder.sh",
+    )
+    for relative in phase4_consumers:
+        text = (ROOT / relative).read_text(encoding="utf-8")
+        assert ". \"$PROJECT_CONTEXT_LIB\"" in text, relative
+        assert "agentstack_resolve_invocation_context" in text, relative
+        assert "agentstack_resolve_project_key" not in text, relative
+
+    deferred_consumers = (
+        "hooks/reservation-common.sh",
         "hooks/cleanup-child-agent.sh",
     )
-    for relative in shell_consumers:
+    for relative in deferred_consumers:
         text = (ROOT / relative).read_text(encoding="utf-8")
         assert ". \"$PROJECT_CONTEXT_LIB\"" in text, relative
         assert "agentstack_resolve_project_key" in text, relative

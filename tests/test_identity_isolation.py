@@ -21,18 +21,34 @@ def _read(relative: str) -> str:
 
 
 def _run_bash(script: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    run_env = os.environ.copy()
-    if env:
-        run_env.update(env)
-    return subprocess.run(
-        ["bash", "-c", script],
-        cwd=_ROOT,
-        env=run_env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=True,
-    )
+    with tempfile.TemporaryDirectory() as isolation:
+        isolated = pathlib.Path(isolation)
+        run_env = os.environ.copy()
+        run_env.update(
+            {
+                "HOME": str(isolated / "home"),
+                "AGENTSTACK_RUNTIME_DIR": str(isolated / "runtime"),
+                "AGENTSTACK_MCP_URL": "http://127.0.0.1:1/mcp",
+                "AGENTSTACK_SCIENTISTS_JSON": str(
+                    _ROOT / "dashboard" / "scientist_portraits.json"
+                ),
+            }
+        )
+        if env:
+            run_env.update(env)
+        pathlib.Path(run_env["HOME"]).mkdir(parents=True, exist_ok=True)
+        pathlib.Path(run_env["AGENTSTACK_RUNTIME_DIR"]).mkdir(
+            parents=True, exist_ok=True
+        )
+        return subprocess.run(
+            ["bash", "-c", script],
+            cwd=_ROOT,
+            env=run_env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
 
 
 def test_top_level_launchers_override_tmux_identity_environment():
@@ -56,34 +72,55 @@ def test_top_level_launchers_override_tmux_identity_environment():
 
 def test_bootstrap_ignores_unmarked_stale_identity_and_preserves_marked_reserved_identity():
     bootstrap = _ROOT / "bin" / "agentstack-codex-bootstrap"
-    common = {
-        "AGENTSTACK_PROJECT_KEY": "",
-        "AGENTSTACK_MANAGED_AGENTS_FILE": "",
-        "AGENTSTACK_RESERVED_IDENTITY": "",
-        "AGENT_NAME": "Stale-Dirac",
-        "PARENT_AGENT": "Stale-Parent",
-        "CHILD_REGISTRATION_TOKEN": "stale-owner-token",
-        "TMUX": "",
-    }
-    command = (
-        f'source "{bootstrap}" . >/dev/null 2>&1; '
-        "printf '%s|%s|%s\\n' \"${AGENT_NAME:-}\" "
-        "\"${PARENT_AGENT:-}\" \"${CHILD_REGISTRATION_TOKEN:-}\""
-    )
-    top_level = _run_bash(command, common).stdout.strip().split("|")
-    assert top_level[0] and top_level[0] != "Stale-Dirac", top_level
-    assert top_level[1:] == ["", ""], top_level
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = pathlib.Path(tmp)
+        (tmpdir / "home").mkdir()
+        (tmpdir / "runtime").mkdir()
+        common = {
+            "HOME": str(tmpdir / "home"),
+            "AGENTSTACK_RUNTIME_DIR": str(tmpdir / "runtime"),
+            "AGENTSTACK_MCP_URL": "http://127.0.0.1:1/mcp",
+            "AGENTSTACK_SCIENTISTS_JSON": str(
+                _ROOT / "dashboard" / "scientist_portraits.json"
+            ),
+            "AGENTSTACK_PROJECT_KEY": "",
+            "AGENTSTACK_MANAGED_AGENTS_FILE": "",
+            "AGENTSTACK_RESERVED_IDENTITY": "",
+            "AGENT_NAME": "Stale-Dirac",
+            "PARENT_AGENT": "Stale-Parent",
+            "CHILD_REGISTRATION_TOKEN": "stale-owner-token",
+            "TMUX": "",
+        }
+        command = (
+            f'source "{bootstrap}" . >/dev/null 2>&1; '
+            "printf '%s|%s|%s\\n' \"${AGENT_NAME:-}\" "
+            "\"${PARENT_AGENT:-}\" \"${CHILD_REGISTRATION_TOKEN:+set}\""
+        )
+        top_level = _run_bash(command, common).stdout.strip().split("|")
+        assert top_level[0] and top_level[0] != "Stale-Dirac", top_level
+        assert top_level[1:] == ["", ""], top_level
 
-    reserved_env = dict(common)
-    reserved_env["AGENTSTACK_RESERVED_IDENTITY"] = "1"
-    reserved = _run_bash(command, reserved_env).stdout.strip().split("|")
-    assert reserved == ["Stale-Dirac", "Stale-Parent", "stale-owner-token"], reserved
+        register_lib = _ROOT / "bin" / "lib" / "agentstack-register.sh"
+        prepare_owner = f'''
+source "{register_lib}"
+context="$(agentstack_resolve_invocation_context "$WORK")"
+ags_store_registration_token Stale-Dirac stale-owner-token "$context" identity-test
+'''
+        _run_bash(prepare_owner, {**common, "WORK": str(_ROOT)})
+
+        reserved_env = dict(common)
+        reserved_env["AGENTSTACK_RESERVED_IDENTITY"] = "1"
+        reserved = _run_bash(command, reserved_env).stdout.strip().split("|")
+        assert reserved == ["Stale-Dirac", "Stale-Parent", "set"], reserved
 
 
 def test_candidate_registration_rejects_ambient_owner_token():
     register_lib = _ROOT / "bin" / "lib" / "agentstack-register.sh"
     with tempfile.TemporaryDirectory() as tmp:
-        capture = pathlib.Path(tmp) / "register-args"
+        tmpdir = pathlib.Path(tmp)
+        capture = tmpdir / "register-args"
+        work = tmpdir / "work"
+        work.mkdir()
         script = f'''
 source "{register_lib}"
 ags_mcp_call() {{
@@ -95,15 +132,24 @@ ags_mcp_call() {{
     printf '%s\\n' '{{"result":{{"structuredContent":{{}}}}}}'
   fi
 }}
-ags_agent_exists() {{ return 1; }}
+ags_agent_name_status() {{ printf '%s\\n' available; }}
 ags_generate_registration_token() {{ printf '%s\\n' fresh-owner-token; }}
-ags_store_registration_token() {{ return 0; }}
 ags_apply_contact_policy() {{ return 0; }}
 CHILD_REGISTRATION_TOKEN=stale-owner-token
 export CHILD_REGISTRATION_TOKEN CAPTURE
-ags_register_session /project codex model cx /work Fresh-Dirac candidate >/dev/null
+context="$(agentstack_resolve_invocation_context "$WORK")"
+transport="$(agentstack_build_invocation_transport "$context" "")"
+ags_register_session "$WORK" codex model cx "$WORK" Fresh-Dirac candidate "$transport" >/dev/null
 '''
-        _run_bash(script, {"CAPTURE": str(capture)})
+        _run_bash(
+            script,
+            {
+                "CAPTURE": str(capture),
+                "WORK": str(work),
+                "HOME": str(tmpdir / "home"),
+                "AGENTSTACK_RUNTIME_DIR": str(tmpdir / "runtime"),
+            },
+        )
         args = capture.read_text(encoding="utf-8")
         assert "registration_token=fresh-owner-token" in args, args
         assert "stale-owner-token" not in args, args
@@ -123,20 +169,16 @@ ags_mcp_call() {{
   fi
 }}
 ags_generate_registration_token() {{ printf '%s\\n' requested-owner-token; }}
-ags_store_registration_token() {{ printf '%s|%s\\n' "$1" "$2"; }}
+ags_agent_name_status() {{ printf '%s\\n' available; }}
 ags_apply_contact_policy() {{ :; }}
-for _ in 1 2; do
-  ags_register_session /project codex model cx /work Frosty-Pasteur candidate >/dev/null
-  printf 'registered=%s token=%s substituted=%s requested=%s returned=%s\\n' \
-    "$AGS_REGISTERED_AGENT_NAME" "$AGS_REGISTERED_REGISTRATION_TOKEN" \
-    "$AGS_AGENT_NAME_SUBSTITUTED" "$AGS_REQUESTED_AGENT_NAME" \
-    "$AGS_SERVER_RETURNED_AGENT_NAME"
-done
+ags_register_session "" codex model cx "$PWD" Frosty-Pasteur candidate >/dev/null
+printf 'registered=%s token=%s substituted=%s requested=%s returned=%s\\n' \
+  "$AGS_REGISTERED_AGENT_NAME" "$AGS_REGISTERED_REGISTRATION_TOKEN" \
+  "$AGS_AGENT_NAME_SUBSTITUTED" "$AGS_REQUESTED_AGENT_NAME" \
+  "$AGS_SERVER_RETURNED_AGENT_NAME"
 '''
     result = _run_bash(script)
     assert result.stdout.splitlines() == [
-        "registered=FrostyPasteur token=stable-owner-token substituted=1 "
-        "requested=Frosty-Pasteur returned=FrostyPasteur",
         "registered=FrostyPasteur token=stable-owner-token substituted=1 "
         "requested=Frosty-Pasteur returned=FrostyPasteur",
     ]
@@ -148,16 +190,20 @@ def test_reserved_identity_refuses_a_server_substitution():
     script = f'''
 source "{register_lib}"
 ags_mcp_call() {{
-  if [[ "$1" == "register_agent" ]]; then
+  if [[ "$1" == "whois" ]]; then
+    printf '%s\\n' '{{"result":{{"structuredContent":{{"name":"Reserved-Curie"}}}}}}'
+  elif [[ "$1" == "register_agent" ]]; then
     printf '%s\\n' '{{"result":{{"structuredContent":{{"name":"OtherAgent","registration_token":"other-token"}}}}}}'
   else
     printf '%s\\n' '{{"result":{{"structuredContent":{{}}}}}}'
   fi
 }}
+context="$(agentstack_resolve_invocation_context "$PWD")"
+ags_store_registration_token Reserved-Curie reserved-owner-token "$context" identity-test
 CHILD_REGISTRATION_TOKEN=reserved-owner-token
 export CHILD_REGISTRATION_TOKEN
 set +e
-ags_register_session /project codex model cx /work Reserved-Curie reserved >/dev/null
+ags_register_session "" codex model cx "$PWD" Reserved-Curie reserved >/dev/null
 status=$?
 printf 'status=%s registered=%s substituted=%s requested=%s returned=%s\\n' \
   "$status" "$AGS_REGISTERED_AGENT_NAME" "$AGS_AGENT_NAME_SUBSTITUTED" \
@@ -266,7 +312,8 @@ def test_reserved_child_marker_and_rename_failure_are_explicit():
     assert "agent registration skipped" in bootstrap
     assert "tmux rename-session failed: current session" in bootstrap
     assert '"$TMUX_IDENTITY_MATCHED" == "1"' in bootstrap
-    assert 'source $(printf \'%q\' "$BOOTSTRAP") $(printf \'%q\' "$DIR") && $CODEX_CMD' in launcher
+    assert "source $BOOTSTRAP_COMMAND && $CODEX_CMD" in launcher
+    assert "--top-level --expected-context" in launcher
 
 
 def test_doctor_and_hook_do_not_print_owner_token_value():
