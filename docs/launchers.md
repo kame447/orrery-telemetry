@@ -241,3 +241,8 @@ repository にある11件の hook / helper の発火タイミング、caller、b
 - [Dashboard](dashboard.md)
 - [設定](configuration.md)
 - [トラブルシューティング](troubleshooting.md)
+
+
+### Child cleanup ownership
+
+子agentの終了処理は、明示されたagent名・private token・実workspaceに一致するowner recordを検証してから予約解除とretireを行います。古いproject環境変数や他repositoryからの同名cleanupは権限の根拠になりません。通信中にownerが変わった場合はlocal stateを削除せず、正常時はchild固有stateの後にowner recordを削除します。

@@ -111,12 +111,14 @@ def test_consumers_use_the_resolver_for_their_migration_phase() -> None:
 
     deferred_consumers = (
         "hooks/reservation-common.sh",
-        "hooks/cleanup-child-agent.sh",
     )
     for relative in deferred_consumers:
         text = (ROOT / relative).read_text(encoding="utf-8")
         assert ". \"$PROJECT_CONTEXT_LIB\"" in text, relative
         assert "agentstack_resolve_project_key" in text, relative
+    cleanup = (ROOT / "hooks/cleanup-child-agent.sh").read_text(encoding="utf-8")
+    assert "ags_apply_owned_workspace" in cleanup
+    assert "agentstack_resolve_project_key" not in cleanup
     await_reply = (ROOT / "bin" / "agentstack-await-reply").read_text(
         encoding="utf-8"
     )

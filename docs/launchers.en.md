@@ -239,3 +239,8 @@ See [Hooks and operational helpers](hooks.en.md) for the trigger timing, caller,
 - [Dashboard](dashboard.en.md)
 - [Configuration](configuration.en.md)
 - [Troubleshooting](troubleshooting.en.md)
+
+
+### Child cleanup ownership
+
+Child cleanup validates the explicit agent identity, private credential, and actual workspace against its durable owner before release/retire. An ambient project key cannot authorize cleanup from another repository. If ownership changes during the network operation, local state is retained; otherwise the owner record is removed last, after child-specific artifacts.
