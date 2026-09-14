@@ -168,3 +168,7 @@ Codex Desktop はさらに別の plugin hook / Bridge lifecycle を使います�
 - [Codex App 統合](codex-app.md)
 - [設定](configuration.md)
 - [トラブルシューティング](troubleshooting.md)
+
+### 予約の workspace 境界
+
+予約の更新・解除は、hook payload の `cwd` から検証した project と保護対象 root を使います。installed environment の古い root で先に対象外と判定しません。相対 file path も hook プロセスの cwd ではなく payload の cwd を基準に物理パスへ解決します。同一 repository の linked worktree は Mail namespace を共有し、保護範囲は各 worktree です。cwd が不明・無効なら編集を拒否し、予約変更を送りません。

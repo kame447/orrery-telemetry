@@ -163,3 +163,7 @@ Codex Desktop uses a further, separate plugin hook / Bridge lifecycle. See [Code
 - [Codex App integration](codex-app.en.md)
 - [Configuration](configuration.en.md)
 - [Troubleshooting](troubleshooting.en.md)
+
+### Reservation workspace boundary
+
+Reservation renewal/release uses the project and protected root validated from the hook payload `cwd`, never an early outside-root decision based on installed roots. Relative file paths are resolved physically against that payload cwd, not the hook process cwd. Linked worktrees share the Mail namespace but retain their own protected root. Missing or invalid cwd refuses the edit and sends no reservation mutation.
