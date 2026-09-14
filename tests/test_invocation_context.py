@@ -32,6 +32,7 @@ class InvocationContextTests(unittest.TestCase):
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_TERMINAL_PROMPT": "0", "AGENTSTACK_PYTHON": sys.executable,
             "AGENTSTACK_HOME": str(self.home / ".agentstack"),
+            "AGENTSTACK_LABEL_PREFIX": f"org.agentstack.invocation-context.{self.root.name}",
         }
         self.repo = self.root / "repo A"
         self.other = self.root / "repo B"
@@ -194,6 +195,7 @@ class InvocationContextTests(unittest.TestCase):
 
     def test_submodule_and_nested_repository_are_not_parent_workspace(self) -> None:
         self.git("-c", "protocol.file.allow=always", "submodule", "add", "-q",
+                 str(self.other), "submodule", "add", "-q",
                  str(self.other), "submodule", cwd=self.repo)
         nested = self.repo / "nested"
         self.make_repo(nested)
