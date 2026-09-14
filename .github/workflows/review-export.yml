@@ -1,0 +1,25 @@
+name: issue33 review source
+on:
+  push:
+    branches: [work/issue33-review-source]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Archive tracked source only, without credentials or runtime
+        run: |
+          set -eu
+          git archive --format=tar.gz 14f43ab6a78cb19d8346d42d1359c87dffb0a554 > /tmp/orrery-phase4-source.tar.gz
+          sha256sum /tmp/orrery-phase4-source.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orrery-phase4-source
+          path: /tmp/orrery-phase4-source.tar.gz
+          retention-days: 1
