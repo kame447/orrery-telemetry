@@ -402,7 +402,9 @@ class ReleaseHookTests(unittest.TestCase):
             self.assertEqual(request["params"]["name"], "release_file_reservations")
             self.assertEqual(
                 request["params"]["arguments"],
-                {"project_key": str(project), "agent_name": "PluckyEinstein"},
+                # The project is resolved from the session's actual workspace,
+                # so it is the physical path (e.g. /private/tmp for /tmp).
+                {"project_key": str(project.resolve()), "agent_name": "PluckyEinstein"},
             )
 
     def test_template_wires_all_release_hooks(self) -> None:
