@@ -100,3 +100,7 @@ validates representability before exporting a complete tuple, does not eval
 JSON, and never treats a context marker as delegated ownership proof. Other
 consumers, installer diagnostics and generated instructions are not migrated
 yet; see the explicit remaining boundaries in `docs/launchers.md`.
+
+## Registration ownership primitives (non-activating prerequisite)
+
+The shared registration library now exposes explicit invocation transport validation, token-backed local ownership, and folded-name claims. These definitions do not change existing registration or hook consumers in this prerequisite. Session/bootstrap activation and schema writer/reader migration remain one dependent change; an environment marker alone is not a new authorization mechanism.
