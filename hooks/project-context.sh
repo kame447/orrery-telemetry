@@ -258,6 +258,216 @@ print(json.dumps({
 PY
 }
 
+# Wrap a resolved workspace context for the launcher/bootstrap boundary.  The
+# explicit human namespace is deliberately kept outside the resolved context:
+# repository identity and filesystem protection must never be inferred from a
+# logical Mail key.  This value is transport, not authority; consumers must
+# call agentstack_validate_invocation_transport against their actual target.
+agentstack_build_invocation_transport() {
+    local context_json="${1:-}"
+    local explicit_key="${2:-}"
+    "${AGENTSTACK_PYTHON:-python3}" - "$context_json" "$explicit_key" <<'PY'
+import json
+import sys
+
+try:
+    context = json.loads(sys.argv[1])
+except (TypeError, ValueError):
+    print("agentstack: invalid invocation context JSON", file=sys.stderr)
+    raise SystemExit(1)
+if not isinstance(context, dict):
+    print("agentstack: invalid invocation context object", file=sys.stderr)
+    raise SystemExit(1)
+explicit = sys.argv[2]
+if any(ord(char) < 32 or ord(char) == 127 for char in explicit):
+    print("agentstack: control characters cannot be transported", file=sys.stderr)
+    raise SystemExit(1)
+print(json.dumps({
+    "schema_version": 1,
+    "kind": "top-level-invocation",
+    "explicit_project_key": explicit or None,
+    "context": context,
+}, separators=(",", ":")))
+PY
+}
+
+# Validate a launcher transport by re-resolving the complete tuple from TARGET.
+# A marker or a copied set of environment variables never reaches the success
+# path: the version, kind, explicit namespace and every resolved field must
+# agree with a fresh repository/worktree inspection.
+agentstack_validate_invocation_transport() {
+    local transport_json="${1:-}"
+    local target="${2:-}"
+    local decoded="" explicit_json="" explicit_key="" expected="" actual=""
+    decoded="$("${AGENTSTACK_PYTHON:-python3}" - "$transport_json" <<'PY'
+import json
+import sys
+
+try:
+    value = json.loads(sys.argv[1])
+except (TypeError, ValueError):
+    print("agentstack: invalid invocation transport JSON", file=sys.stderr)
+    raise SystemExit(1)
+if not isinstance(value, dict) or value.get("schema_version") != 1:
+    print("agentstack: unsupported invocation transport schema", file=sys.stderr)
+    raise SystemExit(1)
+if value.get("kind") != "top-level-invocation":
+    print("agentstack: invocation transport has the wrong kind", file=sys.stderr)
+    raise SystemExit(1)
+explicit = value.get("explicit_project_key")
+if explicit is not None and not isinstance(explicit, str):
+    print("agentstack: invalid explicit project namespace", file=sys.stderr)
+    raise SystemExit(1)
+if isinstance(explicit, str) and any(
+    ord(char) < 32 or ord(char) == 127 for char in explicit
+):
+    print("agentstack: control characters cannot be transported", file=sys.stderr)
+    raise SystemExit(1)
+context = value.get("context")
+if not isinstance(context, dict):
+    print("agentstack: invocation transport has no context", file=sys.stderr)
+    raise SystemExit(1)
+print(json.dumps(explicit or ""))
+print(json.dumps(context, separators=(",", ":"), sort_keys=True))
+PY
+)" || return 1
+    case "$decoded" in
+        *$'\n'*) ;;
+        *) return 1 ;;
+    esac
+    explicit_json="${decoded%%$'\n'*}"
+    expected="${decoded#*$'\n'}"
+    explicit_key="$("${AGENTSTACK_PYTHON:-python3}" - "$explicit_json" <<'PY'
+import json
+import sys
+
+value = json.loads(sys.argv[1])
+if not isinstance(value, str):
+    raise SystemExit(1)
+print(value, end="")
+PY
+)" || return 1
+    actual="$(agentstack_resolve_invocation_context "$target" "$explicit_key")" \
+        || return 1
+    "${AGENTSTACK_PYTHON:-python3}" - "$expected" "$actual" <<'PY'
+import json
+import sys
+
+try:
+    expected = json.loads(sys.argv[1])
+    actual = json.loads(sys.argv[2])
+except (TypeError, ValueError):
+    raise SystemExit(1)
+if expected != actual:
+    print("agentstack: invocation transport does not match the target context", file=sys.stderr)
+    raise SystemExit(1)
+print(json.dumps(actual, separators=(",", ":")))
+PY
+}
+
+agentstack_contexts_equal() {
+    local left="${1:-}" right="${2:-}"
+    "${AGENTSTACK_PYTHON:-python3}" - "$left" "$right" <<'PY'
+import json
+import sys
+
+try:
+    left = json.loads(sys.argv[1])
+    right = json.loads(sys.argv[2])
+except (TypeError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if left == right else 1)
+PY
+}
+
+agentstack_context_field() {
+    local context_json="${1:-}" field="${2:-}"
+    "${AGENTSTACK_PYTHON:-python3}" - "$context_json" "$field" <<'PY'
+import json
+import sys
+
+allowed = {"project_key", "repository_key", "work_dir", "worktree_root"}
+if sys.argv[2] not in allowed:
+    raise SystemExit(1)
+try:
+    value = json.loads(sys.argv[1])[sys.argv[2]]
+except (KeyError, TypeError, ValueError):
+    raise SystemExit(1)
+if value is None:
+    print("")
+elif isinstance(value, str):
+    print(value)
+else:
+    raise SystemExit(1)
+PY
+}
+
+# Export one already-resolved context atomically.  AGENTSTACK_PROJECT_CONTEXT is
+# retained as compatibility metadata, but its value is produced only after this
+# structural validation and is never accepted as proof by the ownership layer.
+agentstack_export_context_json() {
+    local context_json="${1:-}"
+    local decoded="" value=""
+    local fields=()
+    decoded="$("${AGENTSTACK_PYTHON:-python3}" - "$context_json" <<'PY'
+import json
+import pathlib
+import sys
+
+try:
+    data = json.loads(sys.argv[1])
+    project = data["project_key"]
+    repository = data["repository_key"]
+    work_dir = data["work_dir"]
+    worktree = data["worktree_root"]
+    roots = data["protected_roots"]
+except (KeyError, TypeError, ValueError):
+    raise SystemExit(1)
+if not isinstance(project, str) or not project:
+    raise SystemExit(1)
+if repository is not None and not isinstance(repository, str):
+    raise SystemExit(1)
+if worktree is not None and not isinstance(worktree, str):
+    raise SystemExit(1)
+values = [project, repository or "", work_dir, worktree or ""]
+if not isinstance(work_dir, str) or not work_dir:
+    raise SystemExit(1)
+if not isinstance(roots, list) or not roots or not all(
+    isinstance(root, str) and root for root in roots
+):
+    raise SystemExit(1)
+if any(any(ord(char) < 32 or ord(char) == 127 for char in item)
+       for item in values + roots):
+    raise SystemExit(1)
+if any(":" in root for root in roots):
+    print("agentstack: protected roots containing ':' cannot use the legacy environment", file=sys.stderr)
+    raise SystemExit(1)
+work_path = pathlib.Path(work_dir)
+if worktree and not work_path.is_relative_to(pathlib.Path(worktree)):
+    raise SystemExit(1)
+if roots != [worktree or work_dir]:
+    raise SystemExit(1)
+print("\n".join(values + [":".join(roots)]))
+PY
+)" || return 1
+    while IFS= read -r value; do fields+=("$value"); done <<< "$decoded"
+    [ "${#fields[@]}" -eq 5 ] || return 1
+
+    # Assign only after every field has been decoded and validated.
+    AGENTSTACK_PROJECT_KEY="${fields[0]}"
+    PROJECT_KEY="${fields[0]}"
+    AGENTSTACK_PROJECT_REPOSITORY="${fields[1]}"
+    AGENTSTACK_PROJECT_WORK_DIR="${fields[2]}"
+    AGENTSTACK_PROJECT_WORKTREE_ROOT="${fields[3]}"
+    AGENTSTACK_PROTECTED_ROOTS="${fields[4]}"
+    AGENTSTACK_PROJECT_CONTEXT_JSON="$context_json"
+    AGENTSTACK_PROJECT_CONTEXT=1
+    export AGENTSTACK_PROJECT_KEY PROJECT_KEY AGENTSTACK_PROJECT_REPOSITORY
+    export AGENTSTACK_PROJECT_WORK_DIR AGENTSTACK_PROJECT_WORKTREE_ROOT
+    export AGENTSTACK_PROTECTED_ROOTS AGENTSTACK_PROJECT_CONTEXT_JSON
+    export AGENTSTACK_PROJECT_CONTEXT
+}
+
 # Priority: live AGENTSTACK_PROJECT_KEY, live PROJECT_KEY, installed env, cwd.
 agentstack_resolve_project_key() {
     local fallback="${1:-}"
@@ -317,6 +527,14 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
             fi
             agentstack_resolve_invocation_project_key "$1" "${2:-}" "${3:-}"
             ;;
+        validate-invocation-transport)
+            shift
+            if [ "$#" -ne 2 ]; then
+                printf 'usage: project-context.sh validate-invocation-transport JSON TARGET\n' >&2
+                exit 2
+            fi
+            agentstack_validate_invocation_transport "$1" "$2"
+            ;;
         resolve-project-key)
             shift
             agentstack_resolve_project_key "${1:-}" "${2:-}" "${3:-1}"
@@ -326,7 +544,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
             agentstack_installed_env_value "${1:-}" "${2:-}"
             ;;
         *)
-            printf 'usage: project-context.sh {resolve-invocation-context TARGET [EXPLICIT_KEY [NON_GIT_FALLBACK]]|resolve-invocation-project-key TARGET [EXPLICIT_KEY [NON_GIT_FALLBACK]]|resolve-project-key FALLBACK [ENV_FILE [USE_CWD]]|installed-env-value NAME [ENV_FILE]}\n' >&2
+            printf 'usage: project-context.sh {resolve-invocation-context TARGET [EXPLICIT_KEY [NON_GIT_FALLBACK]]|resolve-invocation-project-key TARGET [EXPLICIT_KEY [NON_GIT_FALLBACK]]|validate-invocation-transport JSON TARGET|resolve-project-key FALLBACK [ENV_FILE [USE_CWD]]|installed-env-value NAME [ENV_FILE]}\n' >&2
             exit 2
             ;;
     esac
