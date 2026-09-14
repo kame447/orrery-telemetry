@@ -38,12 +38,21 @@ RENEW_SECONDS="${FILE_RESERVATION_RENEW_SECONDS:-900}"
 RETRY_DELAY_SECONDS="${FILE_RESERVATION_RETRY_DELAY_SECONDS:-0.5}"
 
 TOOL_INPUT=$(cat)
-reservation_resolve_tool_context "$TOOL_INPUT" || exit 0
+reservation_resolve_tool_context "$TOOL_INPUT"
+RESOLVE_STATUS=$?
+if [ "$RESOLVE_STATUS" -eq 1 ]; then
+    exit 0
+fi
+if [ "$RESOLVE_STATUS" -ne 0 ]; then
+    echo "AGENT PROJECT CONTEXT UNRESOLVED: cannot validate this protected-file operation's workspace." >&2
+    exit 2
+fi
 # Asked before anything decides which identity wins: the precedence resolver
 # returns on AGENT_NAME alone, so asking it about conflicts left named sessions
 # unchecked.
 if [ -f "$POLICY_LIB_EARLY" ] \
-    && [ "$(agentstack_session_binding_conflict "$SESSION_ID" "$RESERVATION_PROJECT_KEY" "${AGENT_NAME:-}")" = "conflict" ]; then
+    && [ "$(agentstack_session_binding_conflict "$SESSION_ID" "$AGENTSTACK_LOOKUP_PROJECT_KEY" \
+        "${AGENT_NAME:-}" "$AGENTSTACK_LOOKUP_REPOSITORY_KEY" "$AGENTSTACK_LOOKUP_WORK_DIR")" = "conflict" ]; then
     agentstack_conflict_message "check-file-reservation"
     exit 2
 fi

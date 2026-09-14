@@ -127,6 +127,13 @@ ags_prepare_top_level_context() {
   esac
   context="$(bash "$BIN_DIR/../hooks/project-context.sh" \
     resolve-invocation-context "$target" "$explicit_key")" || return 1
+  # Keep the launcher assertion in a non-exported shell variable.  The caller
+  # must pass it as an explicit bootstrap/registration argument; an inherited
+  # environment value would be indistinguishable from stale ambient state.
+  AGS_INVOCATION_CONTEXT_JSON="$(
+    bash -c 'source "$1"; agentstack_build_invocation_transport "$2" "$3"' \
+      agentstack-launch "$BIN_DIR/../hooks/project-context.sh" "$context" "$explicit_key"
+  )" || return 1
   decoded="$("${AGENTSTACK_PYTHON:-python3}" - "$context" <<'PY'
 import json
 import sys
@@ -161,8 +168,10 @@ PY
   AGENTSTACK_PROJECT_WORK_DIR="${fields[2]}"
   AGENTSTACK_PROJECT_WORKTREE_ROOT="${fields[3]}"
   AGENTSTACK_PROTECTED_ROOTS="${fields[4]}"
+  AGENTSTACK_PROJECT_CONTEXT_JSON="$context"
   export AGENTSTACK_PROJECT_KEY PROJECT_KEY AGENTSTACK_PROJECT_REPOSITORY
   export AGENTSTACK_PROJECT_WORK_DIR AGENTSTACK_PROJECT_WORKTREE_ROOT AGENTSTACK_PROTECTED_ROOTS
+  export AGENTSTACK_PROJECT_CONTEXT_JSON
   # These outputs describe a workspace; they do not authenticate an identity.
   unset AGENTSTACK_PROJECT_CONTEXT AGENTSTACK_LOOKUP_PROJECT_KEY
   unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR
@@ -173,7 +182,8 @@ PY
 ags_tmux_project_options() {
   local name
   for name in AGENTSTACK_PROJECT_KEY PROJECT_KEY AGENTSTACK_PROJECT_REPOSITORY \
-    AGENTSTACK_PROJECT_WORK_DIR AGENTSTACK_PROJECT_WORKTREE_ROOT AGENTSTACK_PROTECTED_ROOTS; do
+    AGENTSTACK_PROJECT_WORK_DIR AGENTSTACK_PROJECT_WORKTREE_ROOT AGENTSTACK_PROTECTED_ROOTS \
+    AGENTSTACK_PROJECT_CONTEXT_JSON; do
     printf -- '-e %q ' "$name=${!name}"
   done
   printf '%s' '-e AGENTSTACK_PROJECT_CONTEXT= -e AGENTSTACK_LOOKUP_PROJECT_KEY='
@@ -184,5 +194,6 @@ ags_tmux_project_options() {
 ags_clear_client_project_context() {
   unset AGENTSTACK_PROJECT_KEY PROJECT_KEY AGENTSTACK_PROJECT_REPOSITORY
   unset AGENTSTACK_PROJECT_WORK_DIR AGENTSTACK_PROJECT_WORKTREE_ROOT AGENTSTACK_PROTECTED_ROOTS
+  unset AGENTSTACK_PROJECT_CONTEXT_JSON AGS_INVOCATION_CONTEXT_JSON
   unset AGENTSTACK_PROJECT_CONTEXT AGENTSTACK_LOOKUP_PROJECT_KEY
 }

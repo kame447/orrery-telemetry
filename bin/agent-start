@@ -56,13 +56,20 @@ if [[ -n "$CANDIDATE_AGENT_NAME" ]]; then
   AGENT_NAME="$CANDIDATE_AGENT_NAME"
   SESSION="$AGENT_NAME"
 fi
+preselected_identity_is_locally_safe() {
+  [[ -z "${AGENT_NAME:-}" ]] && return 0
+  ! ags_local_agent_name_conflicts "$PROJECT_KEY" "$AGENT_NAME" candidate
+}
 
 if [[ -n "$PROJECT_KEY" ]]; then
   ags_mail_load_token
+  if ! preselected_identity_is_locally_safe; then
+    ags_die "preselected identity '${AGENT_NAME:-}' already has conflicting local ownership"
+  fi
   if ags_mcp_call "health_check" >/dev/null 2>&1; then
     ags_start_mail_watcher "$TMUX_BIN" "$HOOKS_DIR"
     REGISTERED_AGENT_NAME=""
-    if ags_register_session "$PROJECT_KEY" "claude-code" "$CLAUDE_MODEL" "cc" "$DIR" "$CANDIDATE_AGENT_NAME" "candidate" >/dev/null 2>&1; then
+    if ags_register_session "$PROJECT_KEY" "claude-code" "$CLAUDE_MODEL" "cc" "$DIR" "$CANDIDATE_AGENT_NAME" "candidate" "$AGS_INVOCATION_CONTEXT_JSON" "agent-start" >/dev/null 2>&1; then
       REGISTERED_AGENT_NAME="${AGS_REGISTERED_AGENT_NAME:-}"
     fi
     if [[ -n "$REGISTERED_AGENT_NAME" ]]; then
@@ -71,8 +78,17 @@ if [[ -n "$PROJECT_KEY" ]]; then
       if [[ "${AGS_AGENT_NAME_SUBSTITUTED:-0}" == "1" ]]; then
         echo "warning: ORRERY Mail changed requested identity '${AGS_REQUESTED_AGENT_NAME:-$CANDIDATE_AGENT_NAME}' to '$REGISTERED_AGENT_NAME'; the tmux session will use the server-returned name" >&2
       fi
+    elif [[ "${AGS_REGISTRATION_FAILURE_KIND:-}" == "mail-unavailable" ]]; then
+      if [[ -n "${AGS_REQUESTED_AGENT_NAME:-}" ]]; then
+        AGENT_NAME="$AGS_REQUESTED_AGENT_NAME"
+        CANDIDATE_AGENT_NAME="$AGS_REQUESTED_AGENT_NAME"
+      fi
+      if ! preselected_identity_is_locally_safe; then
+        ags_die "registration lost Mail connectivity, but '${AGENT_NAME:-}' now conflicts with local ownership"
+      fi
+      echo "warning: ORRERY Mail became unreachable during registration; launching Claude with locally safe preselected AGENT_NAME=${AGENT_NAME:-}" >&2
     else
-      echo "warning: agent registration failed; launching Claude with preselected AGENT_NAME=${AGENT_NAME:-}" >&2
+      ags_die "agent registration refused (${AGS_REGISTRATION_FAILURE_KIND:-unknown}); refusing to start Claude under unverified AGENT_NAME=${AGENT_NAME:-}"
     fi
   else
     echo "warning: ORRERY Mail unreachable at $MCP_URL; launching Claude with preselected AGENT_NAME=${AGENT_NAME:-}" >&2

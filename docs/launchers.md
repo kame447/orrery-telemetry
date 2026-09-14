@@ -33,9 +33,9 @@ agent-start
 
 `work_dir` は指定した subdirectory を維持し、protected roots はその worktree 全体を保護します。explicit key は namespace であり、保護対象のパスではありません。Git metadata や別の main checkout を追加の保護 root として自動採用しません。Git 調査失敗、壊れた metadata、bare repository、既存のコロン区切り形式で表せない root は、別 project への fallback で隠さず起動前に拒否します。
 
-新しい tmux session には解決済みの値を `new-session -e` で明示し、新規 server の global environment には今回の project を埋め込みません。既存 pane 内では CLI と bootstrap の process environment を更新しますが、他 pane に影響する session-wide project metadata の移行はまだ行いません。`AGENTSTACK_PROJECT_CONTEXT=1` を ownership の証拠にはしません。予約済み child の context を top-level の override として渡してはいけません。
+新しい tmux session には解決済みの値を `new-session -e` で明示し、新規 server の global environment には今回の project を埋め込みません。launcher は同じ context を bootstrap の明示 argv（`--top-level`、必要なら `--project-key`、検算用 `--expected-context`）でも渡し、bootstrap は実際の target から tuple 全体を再解決します。既存 pane 内では CLI と bootstrap の process environment を更新しますが、他 pane に影響する session-wide project metadata の移行はまだ行いません。`AGENTSTACK_PROJECT_CONTEXT=1`、env JSON、tmux environment は transport / hint であり ownership の証拠ではありません。予約済み child の context を top-level の override として渡してはいけません。
 
-この段階で移行するのは top-level launcher の入口と引き渡しまでです。standalone bootstrap、registration/session index、delegated child、watcher、Dashboard の project ownership は後続の独立修正です。installed AGENTS.md が StudyPlanner 等の固定 key を指示する既存問題も残っているため、この段階だけで multi-project の end-to-end isolation が完成したとは扱いません。repository の instruction renderer 修正と、ユーザーの既存設定の再生成・再インストールは別作業です。
+argv なしの standalone bootstrap も ambient / installed key を採用せず、実際の target から既定 namespace を解決します。予約済み / resumed identity は後述の owner record で検証します。delegated child の reservation・handoff・cleanup と protected-root propagation、watcher、Dashboard、doctor、generated instructions / proxy の移行は後続 phase です。
 
 Gemini の `--dry-run` は context と予定コマンドだけを表示し、tmux・Mail・CLI を起動しません。model/effort、Codex の sandbox/approval と OAuth、Gemini が REPL 終了後に shell を残す動作は維持します。
 
@@ -91,7 +91,7 @@ launcher は CLI を起動する前に ORRERY Mail へ identity を登録しま�
 5. 要求名と返された canonical name を比較。不一致なら top-level は明示して tmux session を返却名へ rename、reserved identity は停止
 6. managed agent list と clipboard を更新
 
-top-level launcher は project context を先に確定します。ORRERY Mail が到達不能な場合は従来どおり preselected name で CLI を起動しますが、coordination は利用できません。直接呼び出す standalone bootstrap の legacy な key 解決は、この段階では変更しません。
+top-level launcher と standalone bootstrap は project context を先に確定します。所有権の矛盾は `ensure_project`、owner token の送信、登録 state の書き込みより前に拒否します。ORRERY Mail が到達不能な場合も、preselected name に local conflict がない場合だけ CLI を起動します。server refusal、context failure、owner mismatch、persistence failure は hard stop です。
 
 Claude Code hook は session 内登録も記録します。Codex は Claude Code の hook system を持たないため、`agentstack-codex-bootstrap` が起動前の登録と tmux rename を担当します。
 
@@ -102,6 +102,14 @@ Claude Code hook は session 内登録も記録します。Codex は Claude Code
 ```text
 ${AGENTSTACK_RUNTIME_DIR:-$HOME/.agentstack/runtime}/agent_token_<name>
 ```
+
+同じ directory には mode `0600` の強い owner record も保存されます。
+
+```text
+${AGENTSTACK_RUNTIME_DIR:-$HOME/.agentstack/runtime}/agent_owner_<name>.json
+```
+
+record は namespace、Git repository identity（または non-Git root）、token の SHA-256 digest、作成経路を結び付けます。raw token は含みません。再登録時には実際の cwd から repository / worktree / protected roots を再解決します。同じ repository の linked worktree は継続できますが、独立 clone、別 repository、digest 不一致は Mail へ token を送る前に拒否します。non-Git owner は記録済みの物理 root 内だけで有効です。
 
 delegated child はさらに:
 
@@ -120,11 +128,10 @@ pre-registered child へ親 token は渡しません。dashboard spawn は child
 ## 再登録
 
 ```bash
-AGENTSTACK_PROJECT_KEY=/path/to/project \
-  ~/.agentstack/bin/agentstack-reregister "$AGENT_NAME"
+~/.agentstack/bin/agentstack-reregister "$AGENT_NAME"
 ```
 
-helper は owner token を runtime state から読み、同名 identity を復元します。同名登録に失敗しても別名を作らないでください。別名は inbox、thread、reservation、監査履歴を分断します。
+helper は owner token と強い owner record を runtime state から読み、同名 identity を復元します。ambient / installed project key と bare `AGENT_NAME` は Bash / write の authorization に使いません。Phase 4 より前の child state は、記録した project と実際の cwd が同じ Git repository で、token 付き `whois` が成功した場合だけ強い record へ upgrade します。SessionStart も Mail の health / registration より先に同じ復旧を行います。未登録 session から Mail の `register_agent` tool を呼ぶ経路自体は維持します。cross-repository / 曖昧な legacy state は明示 namespace での再起動が必要です。同名登録に失敗しても別名を作らないでください。
 
 ## `CLAUDECODE` guard
 

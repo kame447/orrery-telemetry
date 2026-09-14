@@ -9,7 +9,7 @@ RUNTIME_DIR="${AGENTSTACK_RUNTIME_DIR:-$HOME/.agentstack/runtime}"
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/reservation-common.sh"
 
 TOOL_INPUT=$(cat)
-reservation_extract_session_id "$TOOL_INPUT"
+reservation_extract_session_id "$TOOL_INPUT" || exit 0
 AGENT_RESULT="$(resolve_agent_name)"
 AGENT_SRC="${AGENT_RESULT%%|*}"
 AGENT="${AGENT_RESULT#*|}"

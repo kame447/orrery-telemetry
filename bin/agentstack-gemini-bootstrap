@@ -4,6 +4,8 @@
 #
 # USAGE: source this script inside the target tmux session, before exec'ing agy:
 #   source agentstack-gemini-bootstrap [WORK_DIR]
+#   source agentstack-gemini-bootstrap --top-level [--project-key KEY] \
+#     [--expected-context JSON] WORK_DIR
 #
 # Env (normally provided by ~/.agentstack/env.sh):
 #   AGENTSTACK_PROJECT_KEY          ORRERY Mail project key
@@ -13,12 +15,63 @@
 #   AGENTSTACK_HOOKS_DIR            mail watcher directory (optional)
 #   AGENTSTACK_GEMINI_MODEL         model label to register
 
-WORK_DIR="${1:-.}"
+BOOTSTRAP_TOP_LEVEL=0
+ARGV_EXPLICIT_PROJECT_KEY=""
+ARGV_EXPECTED_CONTEXT=""
+WORK_DIR=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --top-level)
+      [[ "$BOOTSTRAP_TOP_LEVEL" == "0" ]] || {
+        echo "agentstack-gemini-bootstrap: --top-level specified more than once" >&2
+        return 2 2>/dev/null || exit 2
+      }
+      BOOTSTRAP_TOP_LEVEL=1
+      shift ;;
+    --project-key)
+      [[ $# -ge 2 && -n "${2:-}" && -z "$ARGV_EXPLICIT_PROJECT_KEY" ]] || {
+        echo "agentstack-gemini-bootstrap: --project-key requires one non-empty value" >&2
+        return 2 2>/dev/null || exit 2
+      }
+      ARGV_EXPLICIT_PROJECT_KEY="$2"
+      shift 2 ;;
+    --expected-context)
+      [[ $# -ge 2 && -n "${2:-}" && -z "$ARGV_EXPECTED_CONTEXT" ]] || {
+        echo "agentstack-gemini-bootstrap: --expected-context requires one value" >&2
+        return 2 2>/dev/null || exit 2
+      }
+      ARGV_EXPECTED_CONTEXT="$2"
+      shift 2 ;;
+    --)
+      shift
+      [[ $# -le 1 ]] || {
+        echo "agentstack-gemini-bootstrap: expected one work directory" >&2
+        return 2 2>/dev/null || exit 2
+      }
+      WORK_DIR="${1:-}"
+      shift $# ;;
+    -*)
+      echo "agentstack-gemini-bootstrap: unknown option: $1" >&2
+      return 2 2>/dev/null || exit 2 ;;
+    *)
+      [[ -z "$WORK_DIR" ]] || {
+        echo "agentstack-gemini-bootstrap: expected one work directory" >&2
+        return 2 2>/dev/null || exit 2
+      }
+      WORK_DIR="$1"
+      shift ;;
+  esac
+done
+WORK_DIR="${WORK_DIR:-.}"
+if [[ "$BOOTSTRAP_TOP_LEVEL" != "1" && \
+      ( -n "$ARGV_EXPLICIT_PROJECT_KEY" || -n "$ARGV_EXPECTED_CONTEXT" ) ]]; then
+  echo "agentstack-gemini-bootstrap: --project-key/--expected-context require --top-level" >&2
+  return 2 2>/dev/null || exit 2
+fi
 if [ -n "${BASH_SOURCE:-}" ]; then _ags_bootstrap_src="${BASH_SOURCE[0]}"; else _ags_bootstrap_src="$0"; fi
 SCRIPT_DIR="$(cd "$(dirname "$_ags_bootstrap_src")" && pwd)"
-if [ -z "${AGENTSTACK_PROJECT_KEY:-}" ] && [ -f "$SCRIPT_DIR/../env.sh" ]; then . "$SCRIPT_DIR/../env.sh"; fi
+if [ -f "$SCRIPT_DIR/../env.sh" ]; then . "$SCRIPT_DIR/../env.sh"; fi
 
-PROJECT_KEY="${AGENTSTACK_PROJECT_KEY:-}"
 MCP_URL="${AGENTSTACK_MCP_URL:-http://127.0.0.1:18765/mcp}"
 MAIL_ENV="${AGENTSTACK_MAIL_ENV:-}"
 MANAGED_FILE="${AGENTSTACK_MANAGED_AGENTS_FILE:-}"
@@ -26,13 +79,72 @@ HOOKS_DIR="${AGENTSTACK_HOOKS_DIR:-}"
 GEMINI_MODEL="${AGENTSTACK_GEMINI_MODEL:-gemini-3.8-flash-high}"
 RESERVED_IDENTITY="${AGENTSTACK_RESERVED_IDENTITY:-}"
 REQUESTED_AGENT_NAME=""
-if [[ "$RESERVED_IDENTITY" == "1" && -n "${AGENT_NAME:-}" ]]; then
-  REQUESTED_AGENT_NAME="$AGENT_NAME"
-else
-  unset AGENT_NAME PARENT_AGENT CHILD_REGISTRATION_TOKEN AGENTSTACK_RESERVED_IDENTITY 2>/dev/null || true
-fi
 # shellcheck source=lib/agentstack-register.sh
 . "$SCRIPT_DIR/lib/agentstack-register.sh"
+
+PROJECT_CONTEXT_LIB="$SCRIPT_DIR/../hooks/project-context.sh"
+if [[ ! -f "$PROJECT_CONTEXT_LIB" ]]; then
+  echo "agentstack-gemini-bootstrap: missing project context helper: $PROJECT_CONTEXT_LIB" >&2
+  return 1 2>/dev/null || exit 1
+fi
+# shellcheck disable=SC1090
+. "$PROJECT_CONTEXT_LIB"
+
+CONTEXT_JSON=""
+REGISTRATION_TRANSPORT=""
+if [[ "$BOOTSTRAP_TOP_LEVEL" == "1" ]]; then
+  CONTEXT_JSON="$(agentstack_resolve_invocation_context \
+    "$WORK_DIR" "$ARGV_EXPLICIT_PROJECT_KEY")" || {
+    echo "agentstack-gemini-bootstrap: could not resolve top-level project context for $WORK_DIR" >&2
+    return 1 2>/dev/null || exit 1
+  }
+  if [[ -n "$ARGV_EXPECTED_CONTEXT" ]]; then
+    VALIDATED_EXPECTED="$(agentstack_validate_invocation_transport \
+      "$ARGV_EXPECTED_CONTEXT" "$WORK_DIR")" || {
+      echo "agentstack-gemini-bootstrap: launcher context does not match $WORK_DIR" >&2
+      return 1 2>/dev/null || exit 1
+    }
+    agentstack_contexts_equal "$VALIDATED_EXPECTED" "$CONTEXT_JSON" || {
+      echo "agentstack-gemini-bootstrap: launcher and bootstrap project contexts disagree" >&2
+      return 1 2>/dev/null || exit 1
+    }
+  fi
+  REGISTRATION_TRANSPORT="$(agentstack_build_invocation_transport \
+    "$CONTEXT_JSON" "$ARGV_EXPLICIT_PROJECT_KEY")" || {
+    return 1 2>/dev/null || exit 1
+  }
+  unset AGENT_NAME PARENT_AGENT CHILD_REGISTRATION_TOKEN AGENTSTACK_RESERVED_IDENTITY 2>/dev/null || true
+  RESERVED_IDENTITY=""
+elif [[ "$RESERVED_IDENTITY" == "1" && -n "${AGENT_NAME:-}" ]]; then
+  REQUESTED_AGENT_NAME="$AGENT_NAME"
+  RESERVED_TOKEN="${CHILD_REGISTRATION_TOKEN:-}"
+  if [[ -z "$RESERVED_TOKEN" ]]; then
+    RESERVED_TOKEN="$(ags_load_registration_token "$REQUESTED_AGENT_NAME" 2>/dev/null || true)"
+  fi
+  [[ -n "$RESERVED_TOKEN" ]] || {
+    echo "agentstack-gemini-bootstrap: reserved identity '$REQUESTED_AGENT_NAME' has no owner token" >&2
+    return 1 2>/dev/null || exit 1
+  }
+  CONTEXT_JSON="$(ags_resolve_registration_context "" \
+    "$WORK_DIR" "$REQUESTED_AGENT_NAME" reserved "$RESERVED_TOKEN")" || {
+    echo "agentstack-gemini-bootstrap: reserved identity ownership does not match $WORK_DIR; relaunch with an explicit project namespace" >&2
+    return 1 2>/dev/null || exit 1
+  }
+  CHILD_REGISTRATION_TOKEN="$RESERVED_TOKEN"
+  export CHILD_REGISTRATION_TOKEN
+else
+  unset AGENT_NAME PARENT_AGENT CHILD_REGISTRATION_TOKEN AGENTSTACK_RESERVED_IDENTITY 2>/dev/null || true
+  RESERVED_IDENTITY=""
+  CONTEXT_JSON="$(agentstack_resolve_invocation_context "$WORK_DIR")" || {
+    echo "agentstack-gemini-bootstrap: could not resolve project context for $WORK_DIR" >&2
+    return 1 2>/dev/null || exit 1
+  }
+fi
+agentstack_export_context_json "$CONTEXT_JSON" || {
+  echo "agentstack-gemini-bootstrap: could not export validated project context for $WORK_DIR" >&2
+  return 1 2>/dev/null || exit 1
+}
+PROJECT_KEY="$AGENTSTACK_PROJECT_KEY"
 
 TMUX_BIN="$(command -v tmux 2>/dev/null || true)"
 if [[ -z "$TMUX_BIN" ]]; then
@@ -65,6 +177,11 @@ if [[ -n "${TMUX:-}" && -n "$TMUX_BIN" && -n "${AGENT_NAME:-}" ]]; then
 fi
 
 TMUX_IDENTITY_MATCHED=0
+preselected_identity_is_locally_safe() {
+  [[ "$REGISTER_MODE" == "reserved" || -z "${AGENT_NAME:-}" ]] && return 0
+  ! ags_local_agent_name_conflicts "$PROJECT_KEY" "$AGENT_NAME" candidate
+}
+
 finalize_agent_name() {
   local current_session="" renamed_session=""
   if [[ -n "${TMUX:-}" && -n "$TMUX_BIN" && -n "${AGENT_NAME:-}" ]]; then
@@ -103,6 +220,10 @@ if [[ -z "$PROJECT_KEY" ]]; then
 fi
 
 ags_mail_load_token
+if ! preselected_identity_is_locally_safe; then
+  echo "warning: preselected identity '${AGENT_NAME:-}' already has conflicting local ownership; refusing to contact ORRERY Mail or start Antigravity under that name." >&2
+  return 1 2>/dev/null || exit 1
+fi
 if ! ags_mcp_call "health_check" >/dev/null 2>&1; then
   echo "warning: ORRERY Mail unreachable at $MCP_URL; launching Antigravity with preselected AGENT_NAME=${AGENT_NAME:-}." >&2
   finalize_agent_name
@@ -117,7 +238,7 @@ ags_start_mail_watcher "$TMUX_BIN" "$HOOKS_DIR"
 REGISTERED_AGENT_NAME=""
 REGISTER_STATUS=1
 if [[ "$TMUX_PREFLIGHT_CONFLICT" != "1" ]]; then
-  if ags_register_session "$PROJECT_KEY" "antigravity" "$GEMINI_MODEL" "agy" "$WORK_DIR" "$CANDIDATE_AGENT_NAME" "$REGISTER_MODE" >/dev/null 2>&1; then
+  if ags_register_session "$PROJECT_KEY" "antigravity" "$GEMINI_MODEL" "agy" "$WORK_DIR" "$CANDIDATE_AGENT_NAME" "$REGISTER_MODE" "$REGISTRATION_TRANSPORT" >/dev/null 2>&1; then
     REGISTER_STATUS=0
     REGISTERED_AGENT_NAME="${AGS_REGISTERED_AGENT_NAME:-}"
   else
@@ -137,8 +258,20 @@ if [[ -n "$REGISTERED_AGENT_NAME" ]]; then
   fi
 elif [[ "$TMUX_PREFLIGHT_CONFLICT" == "1" ]]; then
   echo "warning: agent registration skipped because the target tmux session name is already in use." >&2
+  return 1 2>/dev/null || exit 1
+elif [[ "${AGS_REGISTRATION_FAILURE_KIND:-}" == "mail-unavailable" && "$REGISTER_MODE" == "candidate" ]]; then
+  if [[ -n "${AGS_REQUESTED_AGENT_NAME:-}" ]]; then
+    AGENT_NAME="$AGS_REQUESTED_AGENT_NAME"
+    CANDIDATE_AGENT_NAME="$AGS_REQUESTED_AGENT_NAME"
+  fi
+  if ! preselected_identity_is_locally_safe; then
+    echo "warning: registration lost Mail connectivity, but '${AGENT_NAME:-}' now conflicts with local ownership; refusing to start Antigravity." >&2
+    return 1 2>/dev/null || exit 1
+  fi
+  echo "warning: ORRERY Mail became unreachable during registration; launching Antigravity with locally safe preselected AGENT_NAME=${AGENT_NAME:-}." >&2
 else
-  echo "warning: agent registration failed; launching Antigravity with preselected AGENT_NAME=${AGENT_NAME:-}." >&2
+  echo "warning: agent registration refused (${AGS_REGISTRATION_FAILURE_KIND:-unknown}); refusing to start Antigravity under unverified AGENT_NAME=${AGENT_NAME:-}." >&2
+  return 1 2>/dev/null || exit 1
 fi
 
 finalize_agent_name

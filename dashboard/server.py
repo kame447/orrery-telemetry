@@ -2155,7 +2155,10 @@ def _indexed_transcript(name: str) -> str | None:
     # somebody else -- a parent's transcript once appeared on a child's card
     # this way. Falling back to the heuristic is better than showing the wrong
     # session with certainty.
-    if o.get("schema_version") != 2 or o.get("binding_kind") != "self":
+    # Schema 3 adds validated repository/workspace provenance. Schema 2 stays
+    # readable here for historical transcript display; identity hooks accept
+    # it only with their stricter project/cwd repository corroboration.
+    if o.get("schema_version") not in (2, 3) or o.get("binding_kind") != "self":
         return None
     if o.get("agent_name") != name:
         return None
