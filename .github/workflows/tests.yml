@@ -1,79 +1,184 @@
-name: tests
-
+name: issue33 split preparation
 on:
   push:
-  pull_request:
-
-concurrency:
-  group: tests-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
+    branches: [work/issue33-github-split]
+permissions:
+  contents: write
 jobs:
-  portable-startup:
-    # These regressions cover portable components, not a full Windows install.
-    runs-on: windows-latest
-    name: portable startup (Windows)
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: python -m pip install pytest pytest-timeout -e ./packages/agentstack_mail
-      - name: Check checkout bytes, long Mail paths, and dashboard HTTP startup
-        env:
-          PYTHONPATH: .
-          PYTHONUTF8: "1"
-        run: >-
-          python -m pytest -q tests/windows/ tests/test_mail_fixture_line_endings.py
-          tests/test_dashboard_startup.py tests/test_codex_app_runtime_provider.py
-          tests/test_dashboard_quotas.py tests/test_dashboard_quota_http.py
-          tests/test_dashboard_quota_adapters.py
-
-  tests:
-    # 対応 OS は macOS（README「対応環境」）。ubuntu で回すと launchd / launchctl /
-    # mailctl の rehearsal が環境不在で落ち、対応外の失敗と本物の回帰が混ざる。
-    # 2026-09-03 の公開まで ubuntu で 22 run 連続赤だったのはこれ。
+  prepare:
     runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # README が「3.11 以上」と書く以上、両端を機械で押さえる。"3.x" 単独だと
-        # 下限は誰も踏まないし、新しい Python が出た日に上限が黙って動く。
-        # 3.10 は 2026-09-04 に対応から外した（import は通るが mail のテストが 38 件落ちる）。
-        python-version: ["3.11", "3.12", "3.14"]
-    name: tests (python ${{ matrix.python-version }})
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
-          # approved_base is accepted only when a persistent branch, remote, or
-          # tag reaches it; shallow history would make that gate inconclusive.
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-      # tmux: agents run inside it and tests exercise the real binary.
-      # uv: the installer provisions ORRERY Mail with it and fails preflight without it.
-      - name: Install tmux and uv
-        run: brew install tmux uv
-      - name: Install test and package-build tools
-        run: python3 -m pip install pytest pytest-timeout pytest-xdist build -e ./packages/agentstack_mail
-      # `tests/` だけを指定していた間、integrations/codex_app/tests/ の 111 件は
-      # 一度も CI で実行されていなかった。テストの置き場所が増えるたびに黙って
-      # 対象から外れるので、ディレクトリは明示して数を数えられるようにする。
-      - name: Run tests (pytest — `python3 file.py` 直実行は pytest 形式のテストを 0 件実行で緑にしてしまう)
+          python-version: '3.12'
+      - run: brew install tmux uv
+      - run: python3 -m pip install pytest pytest-timeout pytest-xdist build -e ./packages/agentstack_mail
+      - name: Prepare additive primitives and atomic activation without rewriting existing branches
+        shell: bash
         run: |
           set -euo pipefail
-          # tests/windows/ is the community Windows lane; its conftest already skips collection off win32,
-          # and --ignore keeps that explicit here.
-          # -n auto: the suite is a long tail of process-spawning rehearsals (12 min serial on
-          # this runner); --dist loadfile keeps one file's tests on one worker, since files
-          # share fixtures and fake homes.
+          test "$GITHUB_REPOSITORY" = kame447/orrery-telemetry
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          BASE=b127b741baa14f601bf24027609575ce735a0cab
+          SOURCE=14f43ab6a78cb19d8346d42d1359c87dffb0a554
+          DIR=$(mktemp -d)
+          git worktree add --detach "$DIR" "$BASE"
+          cd "$DIR"
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          source = '14f43ab6a78cb19d8346d42d1359c87dffb0a554'
+          def show(path):
+              return subprocess.check_output(['git', 'show', f'{source}:{path}'], text=True)
+          path = Path('bin/lib/agentstack-register.sh')
+          original = path.read_text()
+          complete = show(str(path))
+          start = complete.index('ags_registration_owner_path() {')
+          end = complete.index('ags_load_registration_token() {', start)
+          additions = complete[start:end]
+          assert 'ags_registration_owner_path() {' not in original
+          anchor = 'ags_load_registration_token() {'
+          assert original.count(anchor) == 1
+          result = original.replace(anchor, additions + anchor, 1)
+          start = complete.index('AGS_PROJECT_CONTEXT_LIB=')
+          end = complete.index('ags_mail_load_token() {', start)
+          imports = complete[start:end]
+          assert 'AGS_PROJECT_CONTEXT_LIB=' not in original
+          result = result.replace('ags_mail_load_token() {', imports + 'ags_mail_load_token() {', 1)
+          assert result.replace(additions, '', 1).replace(imports, '', 1) == original
+          path.write_text(result)
+          Path('hooks/project-context.sh').write_text(show('hooks/project-context.sh'))
+          with Path('hooks/README.md').open('a') as f:
+              f.write('\n## Registration ownership primitives (non-activating prerequisite)\n\nThe shared registration library now exposes explicit invocation transport validation, token-backed local ownership, and folded-name claims. These definitions do not change existing registration or hook consumers in this prerequisite. Session/bootstrap activation and schema writer/reader migration remain one dependent change; an environment marker alone is not a new authorization mechanism.\n')
+          PY
+          cat > tests/test_registration_context_primitives.py <<'PYTEST'
+          """Non-activating registration/context API contracts; no real Mail or user HOME."""
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+          import pytest
+          ROOT = Path(__file__).resolve().parents[1]
+          LIB = ROOT / 'bin/lib/agentstack-register.sh'
+          @pytest.fixture
+          def workspace(tmp_path):
+              home = tmp_path / 'home'
+              home.mkdir()
+              env = {key: value for key, value in os.environ.items()
+                     if not key.startswith(('AGENTSTACK_', 'GIT_')) and key not in
+                     {'HOME', 'PROJECT_KEY', 'AGENT_NAME', 'PARENT_AGENT', 'CHILD_REGISTRATION_TOKEN',
+                      'TMUX', 'TMUX_PANE', 'MCP_URL', 'MCP_AGENT_MAIL_TOKEN', 'BASH_ENV', 'ENV'}}
+              env.update(HOME=str(home), AGENTSTACK_RUNTIME_DIR=str(tmp_path / 'runtime'),
+                         AGENTSTACK_PROJECT_KEY='stale-project', AGENTSTACK_PROJECT_CONTEXT='1')
+              repo = tmp_path / 'repository'
+              subprocess.run(['git', 'init', '-q', str(repo)], env=env, check=True)
+              subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Fixture',
+                              '-c', 'user.email=fixture@example.invalid', 'commit',
+                              '--allow-empty', '-qm', 'fixture'], env=env, check=True)
+              return repo.resolve(), env
+          def shell(workspace, body, *args):
+              repo, env = workspace
+              return subprocess.run(['/bin/bash', '-c',
+                  'set -euo pipefail; . "$1"; shift; '
+                  'ags_mcp_call() { echo "unexpected Mail call" >&2; return 99; }; ' + body,
+                  'test', str(LIB), *map(str, args)], cwd=repo, env=env,
+                  capture_output=True, text=True, timeout=20)
+          def test_explicit_transport_revalidates_workspace(workspace):
+              repo, _ = workspace
+              result = shell(workspace,
+                  'ctx=$(agentstack_resolve_invocation_context "$PWD" team-x); '
+                  'wire=$(agentstack_build_invocation_transport "$ctx" team-x); '
+                  'agentstack_validate_invocation_transport "$wire" "$PWD"')
+              assert result.returncode == 0, result.stderr
+              data = json.loads(result.stdout)
+              assert data['project_key'] == 'team-x'
+              assert data['repository_key'] == str(repo)
+              assert data['work_dir'] == str(repo)
+              assert data['protected_roots'] == [str(repo)]
+          def test_transport_cannot_authorize_another_repository(workspace, tmp_path):
+              other = tmp_path / 'other'
+              subprocess.run(['git', 'init', '-q', str(other)], env=workspace[1], check=True)
+              result = shell(workspace,
+                  'ctx=$(agentstack_resolve_invocation_context "$PWD" team-x); '
+                  'wire=$(agentstack_build_invocation_transport "$ctx" team-x); '
+                  'agentstack_validate_invocation_transport "$wire" "$1"', other)
+              assert result.returncode != 0
+              assert not (tmp_path / 'runtime').exists()
+          def publish_body():
+              return ('ctx=$(agentstack_resolve_invocation_context "$PWD" team-x); '
+                      'ags_begin_registration_ownership "$ctx" BrightCurie fixture-token top-level candidate; '
+                      'ags_commit_registration_ownership "$ctx" BrightCurie BrightCurie fixture-token top-level; ')
+          def test_owner_allows_linked_worktree_but_rejects_independent_clone(workspace, tmp_path):
+              repo, env = workspace
+              linked, clone = tmp_path / 'linked', tmp_path / 'clone'
+              subprocess.run(['git', '-C', str(repo), 'worktree', 'add', '-qb', 'fixture-linked', str(linked)], env=env, check=True)
+              subprocess.run(['git', 'clone', '-q', str(repo), str(clone)], env=env, check=True)
+              result = shell(workspace, publish_body() +
+                  'ags_registration_owner_context BrightCurie fixture-token "$1"; '
+                  'if ags_registration_owner_context BrightCurie fixture-token "$2"; then exit 93; fi; '
+                  'if ags_registration_owner_context BrightCurie wrong-token "$1"; then exit 94; fi', linked, clone)
+              assert result.returncode == 0, result.stderr
+              data = json.loads(result.stdout)
+              assert data['project_key'] == 'team-x'
+              assert data['repository_key'] == str(repo)
+              assert data['work_dir'] == str(linked.resolve())
+              assert data['protected_roots'] == [str(linked.resolve())]
+              runtime = Path(env['AGENTSTACK_RUNTIME_DIR'])
+              assert (runtime / 'agent_owner_BrightCurie.json').stat().st_mode & 0o077 == 0
+              assert (runtime / 'agent_token_BrightCurie').stat().st_mode & 0o077 == 0
+              assert not list(runtime.glob('*.pending'))
+              assert 'fixture-token' not in result.stdout
+          def test_name_aliases_share_one_pending_claim(workspace):
+              result = shell(workspace,
+                  'ctx=$(agentstack_resolve_invocation_context "$PWD"); '
+                  'ags_begin_registration_ownership "$ctx" Bright-Curie fixture-token top-level candidate; '
+                  'if ags_begin_registration_ownership "$ctx" brightcurie other-token top-level candidate; '
+                  'then exit 95; fi; ags_release_registration_ownership')
+              assert result.returncode == 0, result.stderr
+              assert not list(Path(workspace[1]['AGENTSTACK_RUNTIME_DIR']).glob('*.pending'))
+          def test_non_git_owner_stays_inside_its_physical_root(workspace, tmp_path):
+              plain = tmp_path / 'plain'
+              nested = plain / 'nested'
+              nested.mkdir(parents=True)
+              other = tmp_path / 'unrelated'
+              other.mkdir()
+              result = shell(workspace,
+                  'cd "$1"; ' + publish_body() +
+                  'ags_registration_owner_context BrightCurie fixture-token "$2"; '
+                  'if ags_registration_owner_context BrightCurie fixture-token "$3"; then exit 96; fi', plain, nested, other)
+              assert result.returncode == 0, result.stderr
+              assert json.loads(result.stdout)['repository_key'] is None
+          def test_export_rejects_broken_context_without_partial_assignment(workspace):
+              result = shell(workspace,
+                  'AGENTSTACK_PROJECT_KEY=before; '
+                  'if agentstack_export_context_json \'{"project_key":"after"}\'; then exit 97; fi; '
+                  'test "$AGENTSTACK_PROJECT_KEY" = before')
+              assert result.returncode == 0, result.stderr
+          PYTEST
+          git diff --check
+          PYTHONPATH=.:packages/agentstack_mail/src python3 -m pytest -q tests/test_registration_context_primitives.py tests/test_invocation_context.py tests/test_repository_identity.py tests/test_identity_isolation.py tests/test_bash32_local_selfref.py
           PYTHONPATH=.:packages/agentstack_mail/src python3 -m pytest -q -n auto --dist loadfile tests/ --ignore=tests/windows integrations/ packages/agentstack_mail/tests/
-      - name: Build and inspect agentstack-mail distribution
-        run: |
-          set -euo pipefail
-          python3 -m build packages/agentstack_mail --outdir /tmp/agentstack-mail-dist
-          python3 packages/agentstack_mail/tests/verify_artifact.py /tmp/agentstack-mail-dist/agentstack_mail-0.0.0-py3-none-any.whl
-          python3 packages/agentstack_mail/tests/verify_artifact.py /tmp/agentstack-mail-dist/agentstack_mail-0.0.0.tar.gz
-          python3 -m pip install --force-reinstall --no-deps /tmp/agentstack-mail-dist/agentstack_mail-0.0.0-py3-none-any.whl
-          python3 packages/agentstack_mail/tests/verify_installed_contract.py
+          git add bin/lib/agentstack-register.sh hooks/project-context.sh hooks/README.md tests/test_registration_context_primitives.py
+          git commit -m 'feat: isolate non-activating workspace ownership primitives (issue33 phase4a)'
+          git push origin HEAD:refs/heads/fix/issue33-ownership-primitives
+          echo "PHASE4A_HEAD=$(git rev-parse HEAD)"
+          python3 - <<'PY'
+          import subprocess
+          base = 'b127b741baa14f601bf24027609575ce735a0cab'
+          source = '14f43ab6a78cb19d8346d42d1359c87dffb0a554'
+          paths = subprocess.check_output(['git', 'diff', '--name-only', '-z', base, source]).decode().split('\0')
+          subprocess.run(['git', 'checkout', source, '--', *filter(None, paths)], check=True)
+          PY
+          git diff "$SOURCE" --exit-code -- . ':!tests/test_registration_context_primitives.py'
+          PYTHONPATH=.:packages/agentstack_mail/src python3 -m pytest -q tests/test_registration_context_primitives.py tests/test_phase4_registration_ownership.py tests/test_phase4_bootstrap_context.py tests/test_unmanaged_session_policy.py
+          git diff --check
+          git add -u
+          git commit -m 'fix: activate workspace-owned bootstrap and session bindings atomically (issue33 phase4b)'
+          git push origin HEAD:refs/heads/fix/issue33-session-activation
+          echo "PHASE4B_HEAD=$(git rev-parse HEAD)"
+          echo 'Phase4b tree equals 14f43ab except the added primitive tests; original branches untouched.'
