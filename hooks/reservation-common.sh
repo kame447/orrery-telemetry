@@ -60,10 +60,9 @@ resolve_agent_name() {
     return 0
 }
 
-# Bind session-index reads to the hook invocation's actual workspace. The
-# reservation namespace/root calculation above is intentionally unchanged in
-# Phase 4; these fields are only the provenance readers need to distinguish a
-# valid same-repository binding from stale ambient state.
+# Bind session-index reads and reservation mutations to the hook invocation's
+# actual workspace. A strong owner may replace only the human namespace; the
+# repository/work_dir remain freshly resolved from the payload cwd.
 reservation_resolve_lookup_context() {
     local tool_document="$1" hook_cwd="" context_json="" owner_context=""
     local identity_result="" identity_source="" identity_name=""
@@ -85,6 +84,7 @@ except Exception:
     AGENTSTACK_LOOKUP_REPOSITORY_KEY="$(agentstack_context_field "$context_json" repository_key 2>/dev/null || true)"
     AGENTSTACK_LOOKUP_WORK_DIR="$(agentstack_context_field "$context_json" work_dir 2>/dev/null || true)"
     [ -n "$AGENTSTACK_LOOKUP_PROJECT_KEY" ] && [ -n "$AGENTSTACK_LOOKUP_WORK_DIR" ] || return 2
+    RESERVATION_PROJECT_KEY="$AGENTSTACK_LOOKUP_PROJECT_KEY"
     export AGENTSTACK_LOOKUP_PROJECT_KEY AGENTSTACK_LOOKUP_REPOSITORY_KEY AGENTSTACK_LOOKUP_WORK_DIR
 
     # The fresh tuple above owns all workspace facts, but an already-resolved
@@ -111,6 +111,7 @@ except Exception:
                 AGENTSTACK_LOOKUP_REPOSITORY_KEY="$(agentstack_context_field "$context_json" repository_key 2>/dev/null || true)"
                 AGENTSTACK_LOOKUP_WORK_DIR="$(agentstack_context_field "$context_json" work_dir 2>/dev/null || true)"
                 [ -n "$AGENTSTACK_LOOKUP_PROJECT_KEY" ] && [ -n "$AGENTSTACK_LOOKUP_WORK_DIR" ] || return 2
+                RESERVATION_PROJECT_KEY="$AGENTSTACK_LOOKUP_PROJECT_KEY"
                 export AGENTSTACK_LOOKUP_PROJECT_KEY AGENTSTACK_LOOKUP_REPOSITORY_KEY AGENTSTACK_LOOKUP_WORK_DIR
             fi
         fi
@@ -216,7 +217,6 @@ except Exception:
     if [[ "$REL_PATH" == "$FILE_PATH" ]]; then
         REL_PATH="$(basename "$FILE_PATH")"
     fi
-    RESERVATION_PROJECT_KEY="${PROJECT_KEY:-$MATCHED_ROOT}"
     reservation_resolve_lookup_context "$tool_document"
     [ "$?" -eq 0 ] || return 2
     return 0
@@ -235,7 +235,6 @@ except Exception:
     # Identity lookup must use this hook payload's session, not a stale value
     # inherited by the hook process.
     reservation_resolve_lookup_context "$tool_document" || return 1
-    RESERVATION_PROJECT_KEY="$PROJECT_KEY"
 }
 
 reservation_failure_log() {

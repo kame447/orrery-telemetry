@@ -123,16 +123,25 @@ legacy state requires an explicit relaunch.
 namespace, repository, physical work directory, worktree root and protected
 roots. `mark-agent-registered.sh` compares the tool's project input with a
 context re-resolved from the hook cwd; model-supplied or installed project keys
-cannot choose a binding. A schema 2 self-binding remains identity/conflict
-evidence only when its path-valued project matches the derived project, its
-recorded cwd independently resolves to the same Git repository (or exact
-non-Git workspace), and no strong owner record contradicts it. Missing,
-logical, cross-repository or ambiguous legacy provenance is ignored until a
-successful re-registration upgrades the session to schema 3.
+cannot choose a binding. A schema 3 binding may use the freshly derived default
+namespace without an owner record. A different human namespace is authoritative
+only when the matching mode-safe owner record and separately persisted token
+validate its digest, namespace and actual repository/non-Git workspace. An
+existing owner that is unreadable, contradictory or has a bad token digest
+disqualifies the binding even when it names the default namespace. This also
+lets an index-only resumed session recover a valid custom namespace without
+trusting ambient project variables. A schema 2 self-binding remains
+identity/conflict evidence only when its path-valued project matches the
+derived project, its recorded cwd independently resolves to the same Git
+repository (or exact non-Git workspace), and no strong owner record contradicts
+it. Missing, logical, cross-repository or ambiguous legacy provenance is
+ignored until a successful re-registration upgrades the session to schema 3.
 
 The registration and reservation guards derive this lookup tuple from the
 hook payload's physical cwd. A validated strong owner may preserve its custom
-namespace, but ambient project variables cannot replace the workspace facts.
+namespace, and that validated namespace is the project used by actual
+renew/release mutations; ambient project variables cannot replace either the
+namespace or workspace facts.
 An invalid protected-file cwd is refused before Mail; release/invalidation
 hooks skip mutations when that context cannot be resolved. A bare `AGENT_NAME`
 does not bypass registration, while the `register_agent` MCP call remains

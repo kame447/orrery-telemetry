@@ -411,6 +411,7 @@ agentstack_session_binding_conflict() {
     AGENTSTACK_CONFLICT_DIR="$AGENTSTACK_POLICY_RUNTIME_DIR/session_index" \
     python3 - <<'CONFLICTPY' 2>/dev/null || printf 'none\n'
 import json
+import hashlib
 import os
 import pathlib
 import stat
@@ -440,37 +441,50 @@ def repository_key(value):
     path = pathlib.Path(os.path.realpath(path))
     return str(path.parent if path.name == ".git" else path)
 
-def strong_owner_contradicts(record, directory, repository, work_dir):
+def strong_owner_state(record, directory, repository, work_dir):
     name = record.get("agent_name")
     if not isinstance(name, str) or not name:
-        return True
+        return "invalid"
     safe = "".join(
         char if char.isascii() and (char.isalnum() or char in "_.-") else "_"
         for char in name
     )
     path = directory.parent / f"agent_owner_{safe}.json"
+    token_path = directory.parent / f"agent_token_{safe}"
     if not path.exists() and not path.is_symlink():
-        return False
-    if path.is_symlink():
-        return True
+        return "absent"
+    if path.is_symlink() or token_path.is_symlink() or not token_path.is_file():
+        return "invalid"
     try:
         if stat.S_IMODE(path.stat().st_mode) & 0o077:
-            return True
+            return "invalid"
+        if stat.S_IMODE(token_path.stat().st_mode) & 0o077:
+            return "invalid"
         owner = json.loads(path.read_text(encoding="utf-8"))
+        token_raw = token_path.read_bytes()
+        if len(token_raw) > 4097:
+            return "invalid"
+        token = token_raw.decode("utf-8").rstrip("\n")
     except Exception:
-        return True
+        return "invalid"
     if not isinstance(owner, dict) or owner.get("schema") != 1 or owner.get("agent_name") != name:
-        return True
+        return "invalid"
+    if owner.get("name_key", name.replace("-", "").casefold()) != name.replace("-", "").casefold():
+        return "invalid"
+    if not token or owner.get("token_sha256") != hashlib.sha256(token.encode("utf-8")).hexdigest():
+        return "invalid"
     if normalize_key(owner.get("project_key")) != normalize_key(record.get("project_key")):
-        return True
+        return "invalid"
     if repository:
-        return owner.get("repository_key") != repository
+        if owner.get("repository_key") != repository or owner.get("non_git_root") is not None:
+            return "invalid"
+        return "valid"
     root = owner.get("non_git_root")
     try:
         pathlib.Path(work_dir).relative_to(pathlib.Path(root))
     except (TypeError, ValueError):
-        return True
-    return owner.get("repository_key") is not None
+        return "invalid"
+    return "valid" if owner.get("repository_key") is None else "invalid"
 
 wanted = os.environ.get("AGENTSTACK_CONFLICT_SESSION", "")
 project = os.environ.get("AGENTSTACK_CONFLICT_PROJECT", "")
@@ -504,6 +518,14 @@ if directory.is_dir():
                     continue
             else:
                 continue
+            owner_state = strong_owner_state(record, directory, repository, work_dir)
+            if owner_state == "invalid":
+                continue
+            default_project = repository or work_dir
+            if owner_state != "valid" and normalize_key(
+                record.get("project_key")
+            ) != normalize_key(default_project):
+                continue
         elif schema == 2:
             if normalize_key(record.get("project_key")) != normalize_key(project):
                 continue
@@ -517,7 +539,7 @@ if directory.is_dir():
                 and os.path.realpath(legacy_cwd) == work_dir
             ):
                 continue
-            if strong_owner_contradicts(record, directory, repository, work_dir):
+            if strong_owner_state(record, directory, repository, work_dir) == "invalid":
                 continue
         else:
             continue

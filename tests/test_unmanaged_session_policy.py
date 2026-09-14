@@ -1317,6 +1317,206 @@ def test_release_after_edit_is_not_scheduled_under_a_conflicting_identity(
         assert not state.exists() or not any(state.iterdir())
 
 
+# --- schema-3 bindings carry a namespace that must be proven (#857) -------
+#
+# A schema-3 record names the project it was registered in. Matching the
+# repository is not enough: a record in a custom namespace is authority only
+# when that namespace is the lookup's, or a strong owner record (token digest +
+# repository provenance) proves it. Every reservation mutation then uses the
+# proven namespace, never a derived default or a stale ambient key.
+
+
+@pytest.fixture()
+def renewing_endpoint():
+    """A Mail double that confirms every renewal and records the arguments."""
+    import http.server
+    import threading
+
+    calls: list[dict] = []
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802 - stdlib naming
+            request = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+            calls.append(request.get("params") or {})
+            body = json.dumps({"jsonrpc": "2.0", "id": request.get("id"),
+                               "result": {"isError": False,
+                                          "structuredContent": {"renewed": 1, "released": 1}}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):  # noqa: N802 - stdlib naming
+            self.send_response(405)
+            self.end_headers()
+
+        do_HEAD = do_GET
+
+        def log_message(self, *_args):
+            return
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        host, port = server.server_address[:2]
+        yield f"http://{host}:{port}/mcp", calls
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _schema3_binding(tmp_path: Path, agent_id: int, session_id: str, name: str,
+                     project_key: str, repo: Path) -> None:
+    _write_raw_index_record(tmp_path, agent_id, {
+        "agent_id": agent_id, "agent_name": name, "session_id": session_id,
+        "transcript_path": "", "cwd": str(repo), "project_key": project_key,
+        "repository_key": str(repo), "work_dir": str(repo), "worktree_root": str(repo),
+        "protected_roots": [str(repo)], "registered_by": "", "schema_version": 3,
+        "binding_kind": "self", "ts": "2026-09-14T00:00:00",
+    })
+
+
+def _check_file(tmp_path: Path, repo: Path, session_id: str, endpoint: str, **env: str):
+    target = repo / "note.md"
+    target.write_text("x", encoding="utf-8")
+    return _run(
+        RESERVATION_GUARD, _edit_payload_in(session_id, target, repo), tmp_path, cwd=repo,
+        AGENTSTACK_PROTECTED_ROOTS=str(repo), AGENTSTACK_MCP_URL=endpoint,
+        AGENTSTACK_MAIL_HTTP_BEARER_MODE="disabled", FILE_RESERVATION_RETRY_DELAY_SECONDS="0",
+        **env,
+    )
+
+
+def _mail_project_keys(calls: list[dict]) -> list[str]:
+    return [call.get("arguments", {}).get("project_key") for call in calls]
+
+
+def test_a_default_schema3_binding_identifies_and_renews_in_its_project(
+    tmp_path: Path, renewing_endpoint
+) -> None:
+    endpoint, calls = renewing_endpoint
+    repo = _git_project(tmp_path / "repo")
+    _schema3_binding(tmp_path, 41, "s3-default", "DefaultAgent", str(repo), repo)
+    assert _resolve(tmp_path, "s3-default", workspace=str(repo)) == "DefaultAgent|session-index"
+    result = _check_file(tmp_path, repo, "s3-default", endpoint)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert [call.get("arguments", {}).get("agent_name") for call in calls] == ["DefaultAgent"]
+    assert _mail_project_keys(calls) == [str(repo)]
+
+
+def test_an_unowned_custom_schema3_binding_is_not_authority(
+    tmp_path: Path, renewing_endpoint
+) -> None:
+    endpoint, calls = renewing_endpoint
+    repo = _git_project(tmp_path / "repo")
+    _schema3_binding(tmp_path, 41, "s3-unowned", "CustomAgent", "team-x", repo)
+    assert _resolve(tmp_path, "s3-unowned", workspace=str(repo)) == "|none"
+    result = _check_file(tmp_path, repo, "s3-unowned", endpoint)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert calls == [], "an unowned custom binding renewed in the derived project"
+
+
+@pytest.mark.parametrize("stale_project", ["", "stale-namespace"], ids=["no-ambient", "stale-ambient"])
+@pytest.mark.parametrize("identity", ["env-name", "index-only"])
+def test_an_owned_custom_schema3_binding_mutates_only_in_its_owned_namespace(
+    tmp_path: Path, renewing_endpoint, stale_project: str, identity: str
+) -> None:
+    """A valid strong owner lets the record cross from the freshly derived
+    workspace lookup into its own namespace (the /clear recovery path), and
+    every renew/release then uses that namespace."""
+    endpoint, calls = renewing_endpoint
+    repo = _git_project(tmp_path / "repo")
+    _own_namespace(tmp_path, "CustomAgent", repo, "team-x")
+    _schema3_binding(tmp_path, 41, "s3-owned", "CustomAgent", "team-x", repo)
+    assert _resolve(tmp_path, "s3-owned", workspace=str(repo)) == "CustomAgent|session-index"
+
+    ambient: dict[str, str] = {}
+    if identity == "env-name":
+        ambient["AGENT_NAME"] = "CustomAgent"
+    if stale_project:
+        ambient.update(AGENTSTACK_PROJECT_KEY=stale_project, PROJECT_KEY=stale_project)
+    renewed = _check_file(tmp_path, repo, "s3-owned", endpoint, **ambient)
+    assert renewed.returncode == 0, renewed.stdout + renewed.stderr
+    assert calls and _mail_project_keys(calls) == ["team-x"] * len(calls), calls
+    assert {call.get("arguments", {}).get("agent_name") for call in calls} == {"CustomAgent"}
+
+    calls.clear()
+    released = _run(
+        REPO_ROOT / "hooks" / "release-file-reservation.sh",
+        json.dumps({"session_id": "s3-owned", "hook_event_name": "PostToolUse", "cwd": str(repo),
+                    "tool_name": "Edit", "tool_input": {"file_path": str(repo / "note.md")},
+                    "tool_response": {"success": True}}),
+        tmp_path, cwd=repo, AGENTSTACK_PROTECTED_ROOTS=str(repo), AGENTSTACK_MCP_URL=endpoint,
+        AGENTSTACK_MAIL_HTTP_BEARER_MODE="disabled", AGENTSTACK_RELEASE_GRACE_SECONDS="0",
+        **ambient,
+    )
+    assert released.returncode == 0, released.stderr
+    assert calls and _mail_project_keys(calls) == ["team-x"] * len(calls), calls
+
+
+@pytest.mark.parametrize("record_project", ["custom", "default"])
+@pytest.mark.parametrize("defect", ["bad-digest", "wrong-project"])
+def test_a_schema3_binding_with_a_disqualifying_owner_is_refused(
+    tmp_path: Path, renewing_endpoint, record_project: str, defect: str
+) -> None:
+    """An owner record that exists but does not prove the binding disqualifies
+    it, even when the record's project is the freshly derived default."""
+    endpoint, calls = renewing_endpoint
+    repo = _git_project(tmp_path / "repo")
+    project = "team-x" if record_project == "custom" else str(repo)
+    if defect == "bad-digest":
+        _own_namespace(tmp_path, "CustomAgent", repo, project)
+        token = tmp_path / "runtime" / "agent_token_CustomAgent"
+        token.write_text("someone-elses-token", encoding="utf-8")
+        token.chmod(0o600)
+    else:
+        _own_namespace(tmp_path, "CustomAgent", repo, "team-y")
+    _schema3_binding(tmp_path, 41, "s3-disqualified", "CustomAgent", project, repo)
+    assert _resolve(tmp_path, "s3-disqualified", workspace=str(repo)) == "|none"
+    calls.clear()
+    index_only = _check_file(tmp_path, repo, "s3-disqualified", endpoint)
+    assert index_only.returncode == 2, index_only.stdout + index_only.stderr
+    assert calls == []
+
+    calls.clear()
+    named = _check_file(tmp_path, repo, "s3-disqualified", endpoint, AGENT_NAME="CustomAgent")
+    if defect == "bad-digest":
+        # The named owner cannot prove itself either.
+        assert named.returncode == 2, named.stdout + named.stderr
+        assert calls == []
+    else:
+        # The launcher name is validly owned in team-y: that identity may work,
+        # but only in its proven namespace, never the binding's.
+        assert named.returncode == 0, named.stdout + named.stderr
+        assert calls and _mail_project_keys(calls) == ["team-y"] * len(calls), calls
+
+
+def test_an_env_name_disagreeing_with_an_owned_custom_binding_fails_closed(
+    tmp_path: Path, renewing_endpoint
+) -> None:
+    endpoint, calls = renewing_endpoint
+    repo = _git_project(tmp_path / "repo")
+    _own_namespace(tmp_path, "CustomAgent", repo, "team-x")
+    _schema3_binding(tmp_path, 41, "s3-envconflict", "CustomAgent", "team-x", repo)
+    result = _check_file(tmp_path, repo, "s3-envconflict", endpoint, AGENT_NAME="OtherAgent")
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert calls == []
+
+
+@pytest.mark.parametrize("owned", [False, True], ids=["unowned-custom", "owned-custom"])
+def test_mixed_namespace_bindings_for_one_session(tmp_path: Path, owned: bool) -> None:
+    """An unproven custom binding cannot manufacture or hide a conflict; two
+    proven self-bindings naming different agents are a conflict."""
+    repo = _git_project(tmp_path / "repo")
+    if owned:
+        _own_namespace(tmp_path, "CustomAgent", repo, "team-x")
+    _schema3_binding(tmp_path, 41, "s3-mixed", "DefaultAgent", str(repo), repo)
+    _schema3_binding(tmp_path, 77, "s3-mixed", "CustomAgent", "team-x", repo)
+    expected = "|identity-conflict" if owned else "DefaultAgent|session-index"
+    assert _resolve(tmp_path, "s3-mixed", workspace=str(repo)) == expected
+
+
 def test_the_writer_does_not_record_a_registration_made_for_someone_else(
     tmp_path: Path,
 ) -> None:

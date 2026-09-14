@@ -24,6 +24,7 @@ Reads the PostToolUse hook payload (JSON) on stdin. Never raises — a failure
 here must not disturb registration.
 """
 import json
+import hashlib
 import os
 import pathlib
 import stat
@@ -149,42 +150,55 @@ def _binding_matches_context(record, context):
     return False
 
 
-def _strong_owner_contradicts(record, context, runtime_dir):
+def _strong_owner_state(record, context, runtime_dir):
     name = record.get("agent_name")
     if not isinstance(name, str) or not name:
-        return True
+        return "invalid"
     safe_name = "".join(
         char if char.isascii() and (char.isalnum() or char in "_.-") else "_"
         for char in name
     )
     owner_path = pathlib.Path(runtime_dir) / f"agent_owner_{safe_name}.json"
+    token_path = pathlib.Path(runtime_dir) / f"agent_token_{safe_name}"
     if not owner_path.exists() and not owner_path.is_symlink():
-        return False
-    if owner_path.is_symlink():
-        return True
+        return "absent"
+    if owner_path.is_symlink() or token_path.is_symlink() or not token_path.is_file():
+        return "invalid"
     try:
         if stat.S_IMODE(owner_path.stat().st_mode) & 0o077:
-            return True
+            return "invalid"
+        if stat.S_IMODE(token_path.stat().st_mode) & 0o077:
+            return "invalid"
         owner = json.loads(owner_path.read_text(encoding="utf-8"))
+        token_raw = token_path.read_bytes()
+        if len(token_raw) > 4097:
+            return "invalid"
+        token = token_raw.decode("utf-8").rstrip("\n")
     except Exception:
-        return True
+        return "invalid"
     if not isinstance(owner, dict) or owner.get("schema") != 1:
-        return True
+        return "invalid"
     if owner.get("agent_name") != name:
-        return True
+        return "invalid"
+    if owner.get("name_key", name.replace("-", "").casefold()) != name.replace("-", "").casefold():
+        return "invalid"
+    if not token or owner.get("token_sha256") != hashlib.sha256(token.encode("utf-8")).hexdigest():
+        return "invalid"
     if _normalize_project_key(owner.get("project_key")) != _normalize_project_key(
         record.get("project_key")
     ):
-        return True
+        return "invalid"
     repository = context.get("repository_key")
     if repository:
-        return owner.get("repository_key") != repository
+        if owner.get("repository_key") != repository or owner.get("non_git_root") is not None:
+            return "invalid"
+        return "valid"
     root = owner.get("non_git_root")
     try:
         pathlib.Path(context.get("work_dir")).relative_to(pathlib.Path(root))
     except (TypeError, ValueError):
-        return True
-    return owner.get("repository_key") is not None
+        return "invalid"
+    return "valid" if owner.get("repository_key") is None else "invalid"
 
 
 def _bindings_for(out_dir, session_id, context):
@@ -213,12 +227,17 @@ def _bindings_for(out_dir, session_id, context):
             continue
         if not _binding_matches_context(record, context):
             continue
+        owner_state = _strong_owner_state(record, context, os.path.dirname(out_dir))
+        if owner_state == "invalid":
+            continue
+        if record.get("schema_version") == 3:
+            default_project = context.get("repository_key") or context.get("work_dir")
+            if owner_state != "valid" and _normalize_project_key(
+                record.get("project_key")
+            ) != _normalize_project_key(default_project):
+                continue
         name = record.get("agent_name")
         if isinstance(name, str) and name:
-            if record.get("schema_version") == 2 and _strong_owner_contradicts(
-                record, context, os.path.dirname(out_dir)
-            ):
-                continue
             names.add(name)
     return names
 
