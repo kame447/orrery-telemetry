@@ -37,7 +37,45 @@ BASE_ENV = {
 }
 
 
-def _run(guard: Path, payload: str, tmp_path: Path, **env: str) -> subprocess.CompletedProcess:
+def _git_project(path: Path) -> Path:
+    """A real Git repository: project ownership is validated against it."""
+    if not (path / ".git").exists():
+        path.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["git", "init", "-q", str(path)],
+            env={**BASE_ENV, "HOME": str(path.parent), "GIT_CONFIG_GLOBAL": os.devnull,
+                 "GIT_CONFIG_NOSYSTEM": "1"},
+            check=True, capture_output=True, timeout=30,
+        )
+    return path.resolve()
+
+
+def _context(target: Path) -> str:
+    """The context the product resolves for an actual workspace."""
+    return subprocess.run(
+        ["/bin/bash", str(REPO_ROOT / "hooks" / "project-context.sh"),
+         "resolve-invocation-context", str(target)],
+        env={**BASE_ENV, "HOME": str(target.parent)},
+        check=True, capture_output=True, text=True, timeout=30,
+    ).stdout.strip()
+
+
+def _own(tmp_path: Path, agent_name: str, workspace: Path) -> None:
+    """Persist a strong owner record through the real registration library."""
+    workspace.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["/bin/bash", "-c",
+         '. "$1"; ags_store_registration_token "$2" "$3" "$4" top-level',
+         "own", str(REPO_ROOT / "bin" / "lib" / "agentstack-register.sh"),
+         agent_name, f"owner-token-{agent_name}", _context(workspace)],
+        env={**BASE_ENV, "HOME": str(tmp_path / "home"),
+             "AGENTSTACK_RUNTIME_DIR": str(tmp_path / "runtime")},
+        check=True, capture_output=True, text=True, timeout=60,
+    )
+
+
+def _run(guard: Path, payload: str, tmp_path: Path, cwd: Path | None = None,
+         **env: str) -> subprocess.CompletedProcess:
     # Every guard decision starts with "is the mail service answering", so a
     # test that does not say which service it means is really testing whatever
     # is running on the developer's machine. Nine of these went green and then
@@ -53,6 +91,13 @@ def _run(guard: Path, payload: str, tmp_path: Path, **env: str) -> subprocess.Co
     Path(environment["HOME"]).mkdir(parents=True, exist_ok=True)
     Path(environment["TMPDIR"]).mkdir(parents=True, exist_ok=True)
     environment.update(env)
+    # Guards resolve the workspace from the payload cwd or their own cwd. Run
+    # them from the test's project (or a private workspace), never from the
+    # checkout pytest happens to run in.
+    if cwd is None:
+        project = env.get("AGENTSTACK_PROJECT_KEY", "")
+        cwd = Path(project) if project and Path(project).is_dir() else tmp_path / "workspace"
+    cwd.mkdir(parents=True, exist_ok=True)
     return subprocess.run(
         ["/bin/bash", str(guard)],
         input=payload,
@@ -60,6 +105,7 @@ def _run(guard: Path, payload: str, tmp_path: Path, **env: str) -> subprocess.Co
         text=True,
         timeout=60,
         env=environment,
+        cwd=cwd,
     )
 
 
@@ -71,9 +117,12 @@ def _registration_payload(session_id: str) -> str:
 
 
 def _edit_payload(session_id: str, file_path: Path) -> str:
+    # Claude Code always reports the session cwd; the hooks resolve the actual
+    # workspace from it. Here the session works in the edited file's directory.
     return (
-        '{"session_id": "%s", "hook_event_name": "PreToolUse", '
-        '"tool_name": "Edit", "tool_input": {"file_path": "%s"}}' % (session_id, file_path)
+        '{"session_id": "%s", "hook_event_name": "PreToolUse", "cwd": "%s", '
+        '"tool_name": "Edit", "tool_input": {"file_path": "%s"}}'
+        % (session_id, Path(file_path).parent, file_path)
     )
 
 
@@ -326,6 +375,8 @@ def test_a_registered_session_is_allowed(tmp_path: Path, answering_endpoint: str
 
 
 def test_an_agent_name_still_passes_immediately(tmp_path: Path, answering_endpoint: str) -> None:
+    # A name is an identity once it is owned by this workspace (Phase4).
+    _own(tmp_path, "IcyGauss", tmp_path / "workspace")
     result = _run(
         REGISTRATION_GUARD,
         _registration_payload("named-1"),
@@ -456,6 +507,7 @@ def _record_registration(
     was broken. Fixtures describe what the reader accepts; only the writer
     describes what it will actually be handed.
     """
+    workspace = _git_project(Path(project_key))
     payload = json.dumps(
         {
             "session_id": session_id,
@@ -468,6 +520,8 @@ def _record_registration(
     environment = dict(BASE_ENV)
     environment["HOME"] = str(tmp_path / "home")
     environment["AGENTSTACK_RUNTIME_DIR"] = str(tmp_path / "runtime")
+    # What mark-agent-registered.sh hands the writer after re-resolving cwd.
+    environment["AGENTSTACK_VALIDATED_CONTEXT_JSON"] = _context(workspace)
     if caller:
         # What mark-agent-registered.sh passes once it has resolved the caller.
         environment["AGENTSTACK_REGISTERING_AGENT"] = caller
@@ -495,8 +549,13 @@ def _write_raw_index_record(tmp_path: Path, agent_id: int, record: dict) -> None
     (index / f"{agent_id}.json").write_text(json.dumps(record), encoding="utf-8")
 
 
-def _resolve(tmp_path: Path, session_id: str, **env: str) -> str:
-    """Ask resolve-agent-name.sh who this session is."""
+def _resolve(tmp_path: Path, session_id: str, workspace: str | None = None, **env: str) -> str:
+    """Ask resolve-agent-name.sh who this session is.
+
+    Product callers hand the resolver the context of the workspace they are
+    about to act on (project, repository, work dir). `workspace` does the same;
+    without it the lookup has no workspace, as for a caller that never said.
+    """
     # The id travels in the environment, never inside the shell string: a
     # hostile value has to reach the code under test, not break the harness.
     script = (
@@ -507,6 +566,11 @@ def _resolve(tmp_path: Path, session_id: str, **env: str) -> str:
     environment["HOME"] = str(tmp_path / "home")
     environment["AGENTSTACK_RUNTIME_DIR"] = str(tmp_path / "runtime")
     environment["AGENTSTACK_SESSION_ID"] = session_id
+    if workspace is not None:
+        context = json.loads(_context(_git_project(Path(workspace))))
+        environment["AGENTSTACK_LOOKUP_PROJECT_KEY"] = context["project_key"]
+        environment["AGENTSTACK_LOOKUP_REPOSITORY_KEY"] = context["repository_key"] or ""
+        environment["AGENTSTACK_LOOKUP_WORK_DIR"] = context["work_dir"]
     environment.update(env)
     return subprocess.run(
         ["/bin/bash", "-c", script],
@@ -524,7 +588,7 @@ def test_a_registered_session_without_tmux_is_identified(tmp_path: Path) -> None
     call register_agent, and the reservation guard has no name to check.
     """
     _record_registration(tmp_path, "acp-1", 41, "IcyGauss", str(tmp_path / "project"))
-    assert _resolve(tmp_path, "acp-1") == "IcyGauss|session-index"
+    assert _resolve(tmp_path, "acp-1", workspace=str(tmp_path / "project")) == "IcyGauss|session-index"
 
 
 def test_an_unknown_session_stays_unresolved(tmp_path: Path) -> None:
@@ -533,13 +597,20 @@ def test_an_unknown_session_stays_unresolved(tmp_path: Path) -> None:
     assert _resolve(tmp_path, "acp-other") == "|none"
 
 
-def _bind(tmp_path: Path, agent_id: int, session_id: str, name: str, project: str) -> None:
+def _bind(tmp_path: Path, agent_id: int, session_id: str, name: str, project: str,
+          cwd: str | None = None) -> None:
     """A binding that already exists, however it got there.
 
     The writer refuses to create a second one (see the test below), but two can
     still exist from concurrent writes or from a machine that ran an older
     version, and the readers have to cope with what is on disk.
+
+    These are legacy schema-2 records exactly as the pre-Phase4 writer produced
+    them (project_key from the call, cwd from the hook). They stay schema 2 on
+    purpose: a same-repository legacy binding must keep its conflict/identity
+    authority across the upgrade, so these tests guard that migration.
     """
+    _git_project(Path(project))
     _write_raw_index_record(
         tmp_path,
         agent_id,
@@ -547,6 +618,7 @@ def _bind(tmp_path: Path, agent_id: int, session_id: str, name: str, project: st
             "agent_id": agent_id,
             "agent_name": name,
             "session_id": session_id,
+            "cwd": project if cwd is None else cwd,
             "project_key": project,
             "registered_by": "",
             "schema_version": 2,
@@ -566,7 +638,7 @@ def test_two_identities_for_one_session_is_a_conflict(tmp_path: Path) -> None:
     project = str(tmp_path / "project")
     _bind(tmp_path, 41, "acp-2", "OldName", project)
     _bind(tmp_path, 77, "acp-2", "NewName", project)
-    assert _resolve(tmp_path, "acp-2") == "|identity-conflict"
+    assert _resolve(tmp_path, "acp-2", workspace=project) == "|identity-conflict"
 
 
 @pytest.mark.parametrize("hostile", ["../../etc/passwd", "a/b", "x;y", "a b", "'"])
@@ -630,7 +702,7 @@ def test_what_the_writer_writes_is_what_the_reader_reads(tmp_path: Path) -> None
     project = str(tmp_path / "project")
     _record_registration(tmp_path, "prod-1", 41, "IcyGauss", project)
     assert (
-        _resolve(tmp_path, "prod-1", AGENTSTACK_LOOKUP_PROJECT_KEY=project)
+        _resolve(tmp_path, "prod-1", workspace=project)
         == "IcyGauss|session-index"
     )
 
@@ -647,7 +719,7 @@ def test_an_anonymous_caller_cannot_claim_a_session_that_is_already_bound(
     assert _record_registration(tmp_path, "prod-2", 41, "FirstName", project) == 0
     assert _record_registration(tmp_path, "prod-2", 77, "SecondName", project) == 5
     assert (
-        _resolve(tmp_path, "prod-2", AGENTSTACK_LOOKUP_PROJECT_KEY=project)
+        _resolve(tmp_path, "prod-2", workspace=project)
         == "FirstName|session-index"
     )
 
@@ -656,7 +728,7 @@ def test_registering_a_child_does_not_rename_the_parent_session(tmp_path: Path) 
     """A session that registers somebody else has not become them."""
     project = str(tmp_path / "project")
     _record_registration(tmp_path, "parent-1", 41, "ChildAgent", project, caller="ParentAgent")
-    assert _resolve(tmp_path, "parent-1", AGENTSTACK_LOOKUP_PROJECT_KEY=project) == "|none"
+    assert _resolve(tmp_path, "parent-1", workspace=project) == "|none"
 
 
 def test_a_binding_from_another_project_is_not_authority_here(tmp_path: Path) -> None:
@@ -664,8 +736,8 @@ def test_a_binding_from_another_project_is_not_authority_here(tmp_path: Path) ->
     project_a = str(tmp_path / "a")
     project_b = str(tmp_path / "b")
     _record_registration(tmp_path, "cross-1", 41, "CrossName", project_a)
-    assert _resolve(tmp_path, "cross-1", AGENTSTACK_LOOKUP_PROJECT_KEY=project_a) == "CrossName|session-index"
-    assert _resolve(tmp_path, "cross-1", AGENTSTACK_LOOKUP_PROJECT_KEY=project_b) == "|none"
+    assert _resolve(tmp_path, "cross-1", workspace=project_a) == "CrossName|session-index"
+    assert _resolve(tmp_path, "cross-1", workspace=project_b) == "|none"
 
 
 def test_a_registered_session_with_no_binding_is_refused_not_waved_through(
@@ -757,6 +829,492 @@ def test_a_record_that_cannot_prove_it_is_a_binding_is_ignored(
     """Accepting the ambiguous ones is how a wrong record gains authority."""
     _write_raw_index_record(tmp_path, 41, record)
     assert _resolve(tmp_path, "schema-1") == "|none", label
+
+
+# --- legacy schema-2 bindings across the Phase4 upgrade ------------------
+#
+# Migration decision: schema 3 is the only record the writer produces. A
+# schema-2 self binding written before the upgrade keeps identity and conflict
+# authority only while it can still be corroborated: its path project_key and
+# its recorded cwd must both belong to the same actual Git repository as the
+# workspace being checked, and no strong owner record may contradict it.
+# Anything else (another repository, no cwd, a different or logical project) is
+# ignored rather than trusted; the session recovers by registering again, which
+# writes schema 3.
+
+
+def test_a_same_repository_legacy_binding_still_identifies_the_session(tmp_path: Path) -> None:
+    project = str(tmp_path / "project")
+    _bind(tmp_path, 41, "legacy-ok", "LegacyAgent", project)
+    assert _resolve(tmp_path, "legacy-ok", workspace=project) == "LegacyAgent|session-index"
+
+
+def test_a_legacy_binding_is_honoured_from_a_linked_worktree_of_its_repository(tmp_path: Path) -> None:
+    project = _git_project(tmp_path / "project")
+    subprocess.run(
+        ["git", "-C", str(project), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+         "commit", "--allow-empty", "-qm", "base"],
+        env={**BASE_ENV, "HOME": str(tmp_path), "GIT_CONFIG_GLOBAL": os.devnull}, check=True,
+        capture_output=True, timeout=30,
+    )
+    linked = tmp_path / "linked"
+    subprocess.run(
+        ["git", "-C", str(project), "worktree", "add", "-q", "--detach", str(linked)],
+        env={**BASE_ENV, "HOME": str(tmp_path), "GIT_CONFIG_GLOBAL": os.devnull}, check=True,
+        capture_output=True, timeout=30,
+    )
+    _bind(tmp_path, 41, "legacy-linked", "LegacyAgent", str(project))
+    assert _resolve(tmp_path, "legacy-linked", workspace=str(linked)) == "LegacyAgent|session-index"
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ["cwd-in-another-repository", "no-cwd", "project-of-another-repository", "logical-project"],
+)
+def test_a_legacy_binding_that_cannot_be_corroborated_is_ignored(tmp_path: Path, variant: str) -> None:
+    project = str(_git_project(tmp_path / "project"))
+    other = str(_git_project(tmp_path / "other"))
+    record = {
+        "agent_id": 41, "agent_name": "LegacyAgent", "session_id": "legacy-bad",
+        "cwd": project, "project_key": project, "registered_by": "",
+        "schema_version": 2, "binding_kind": "self", "ts": "2026-08-22T00:00:00",
+    }
+    if variant == "cwd-in-another-repository":
+        record["cwd"] = other
+    elif variant == "no-cwd":
+        del record["cwd"]
+    elif variant == "project-of-another-repository":
+        record["project_key"] = other
+    else:
+        record["project_key"] = "team-namespace"
+    _write_raw_index_record(tmp_path, 41, record)
+    assert _resolve(tmp_path, "legacy-bad", workspace=project) == "|none", variant
+
+
+@pytest.mark.parametrize("same_cwd", [True, False], ids=["exact-cwd", "different-cwd"])
+def test_a_non_git_legacy_binding_needs_its_exact_workspace(tmp_path: Path, same_cwd: bool) -> None:
+    """Non-Git has no repository to corroborate, so a legacy binding counts only
+    when its project and its recorded cwd are exactly the workspace checked."""
+    plain = tmp_path / "plain"
+    sibling = tmp_path / "plain" / "sub"
+    sibling.mkdir(parents=True)
+    plain = plain.resolve()
+    context = json.loads(_context(plain))
+    assert context["repository_key"] is None, "fixture must not be inside a Git repository"
+    _write_raw_index_record(tmp_path, 41, {
+        "agent_id": 41, "agent_name": "PlainAgent", "session_id": "plain-legacy",
+        "cwd": str(plain if same_cwd else sibling.resolve()), "project_key": str(plain),
+        "registered_by": "", "schema_version": 2, "binding_kind": "self",
+        "ts": "2026-08-22T00:00:00",
+    })
+    result = _resolve(
+        tmp_path, "plain-legacy",
+        AGENTSTACK_LOOKUP_PROJECT_KEY=context["project_key"],
+        AGENTSTACK_LOOKUP_REPOSITORY_KEY="",
+        AGENTSTACK_LOOKUP_WORK_DIR=context["work_dir"],
+    )
+    assert result == ("PlainAgent|session-index" if same_cwd else "|none")
+
+
+def test_a_legacy_binding_contradicted_by_a_strong_owner_is_ignored(tmp_path: Path) -> None:
+    project = str(tmp_path / "project")
+    elsewhere = _git_project(tmp_path / "elsewhere")
+    _own(tmp_path, "LegacyAgent", elsewhere)
+    _bind(tmp_path, 41, "legacy-owned", "LegacyAgent", project)
+    assert _resolve(tmp_path, "legacy-owned", workspace=project) == "|none"
+
+
+def test_two_legacy_bindings_are_still_a_conflict_for_the_bash_guard(
+    tmp_path: Path, answering_endpoint: str
+) -> None:
+    project = str(tmp_path / "project")
+    _bind(tmp_path, 41, "legacy-pair", "FirstName", project)
+    _bind(tmp_path, 77, "legacy-pair", "SecondName", project)
+    result = _run(REGISTRATION_GUARD, _registration_payload("legacy-pair"), tmp_path,
+                  AGENTSTACK_PROJECT_KEY=project, AGENTSTACK_MCP_URL=answering_endpoint)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "AGENT IDENTITY CONFLICT" in result.stderr
+
+
+def test_a_legacy_and_a_current_binding_naming_different_agents_conflict(tmp_path: Path) -> None:
+    project = str(tmp_path / "project")
+    assert _record_registration(tmp_path, "mixed-1", 41, "CurrentName", project) == 0
+    _bind(tmp_path, 77, "mixed-1", "LegacyName", project)
+    assert _resolve(tmp_path, "mixed-1", workspace=project) == "|identity-conflict"
+
+
+def test_a_bare_agent_name_without_ownership_is_not_an_identity(
+    tmp_path: Path, answering_endpoint: str
+) -> None:
+    """Phase4: an inherited AGENT_NAME alone is ambient, not proof of ownership."""
+    result = _run(
+        REGISTRATION_GUARD,
+        _registration_payload("bare-name"),
+        tmp_path,
+        AGENT_NAME="IcyGauss",
+        AGENTSTACK_MCP_URL=answering_endpoint,
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "AGENT NOT REGISTERED" in result.stderr
+
+
+def test_registering_is_never_behind_the_registration_guard() -> None:
+    """The recovery for a refused session is register_agent over the mail MCP,
+    so the guard that refuses it must not also cover that tool."""
+    settings = json.loads((REPO_ROOT / "hooks" / "settings.template.json").read_text(encoding="utf-8"))
+    for entry in settings["hooks"]["PreToolUse"]:
+        commands = " ".join(hook.get("command", "") for hook in entry.get("hooks", []))
+        if "check-agent-registered.sh" in commands:
+            assert "register_agent" not in entry["matcher"], entry["matcher"]
+
+
+@pytest.fixture()
+def registering_mail():
+    """An ORRERY Mail double that authenticates one legacy owner token."""
+    import http.server
+    import threading
+
+    calls: list[str] = []
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802 - stdlib naming
+            request = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+            params = request.get("params") or {}
+            tool, args = params.get("name"), params.get("arguments") or {}
+            calls.append(tool)
+            if tool == "health_check":
+                result = {"structuredContent": {"status": "ok"}}
+            elif tool == "whois" and args.get("registration_token") == "legacy-token":
+                result = {"structuredContent": {"name": args.get("agent_name")}}
+            elif tool == "ensure_project":
+                result = {"structuredContent": {"id": 1}}
+            elif tool == "register_agent" and args.get("registration_token") == "legacy-token":
+                result = {"structuredContent": {"id": 55, "name": args.get("name"),
+                                                "registration_token": "legacy-token"}}
+            else:
+                result = None
+            body = json.dumps({"jsonrpc": "2.0", "id": request.get("id"), "result": result}
+                              if result is not None else
+                              {"jsonrpc": "2.0", "id": request.get("id"),
+                               "error": {"code": -32000, "message": "refused"}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):  # noqa: N802 - stdlib naming
+            self.send_response(405)
+            self.end_headers()
+
+        do_HEAD = do_GET
+
+        def log_message(self, *_args):
+            return
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        host, port = server.server_address[:2]
+        yield f"http://{host}:{port}/mcp", calls
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_legacy_child_recovers_after_clear_by_re_registering(
+    tmp_path: Path, registering_mail
+) -> None:
+    """/clear recovery: the named child is refused until it proves ownership,
+    and SessionStart proves it with the same-repository legacy token."""
+    endpoint, calls = registering_mail
+    project = _git_project(tmp_path / "project")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    token = runtime / "agent_token_LegacyChild"
+    token.write_text("legacy-token", encoding="utf-8")
+    token.chmod(0o600)
+    state = runtime / "child-agents" / "LegacyChild.json"
+    state.parent.mkdir()
+    state.write_text(json.dumps({"agent_name": "LegacyChild", "project_key": str(project),
+                                 "registration_token": "legacy-token"}), encoding="utf-8")
+    state.chmod(0o600)
+    named = dict(AGENT_NAME="LegacyChild", AGENTSTACK_RESERVED_IDENTITY="1",
+                 AGENTSTACK_MCP_URL=endpoint, AGENTSTACK_MAIL_HTTP_BEARER_MODE="disabled")
+
+    before = _run(REGISTRATION_GUARD, _registration_payload("cleared-1"), tmp_path, cwd=project, **named)
+    assert before.returncode == 2, before.stdout + before.stderr
+
+    environment = dict(BASE_ENV)
+    environment.update(named)
+    environment["HOME"] = str(tmp_path / "home")
+    environment["AGENTSTACK_RUNTIME_DIR"] = str(runtime)
+    environment["AGENTSTACK_HOOKS_DIR"] = str(REPO_ROOT / "hooks")
+    environment["AGENTSTACK_REGISTER_LIB"] = str(REPO_ROOT / "bin" / "lib" / "agentstack-register.sh")
+    start = subprocess.run(
+        ["/bin/bash", str(SESSION_START)],
+        input=json.dumps({"session_id": "cleared-1", "hook_event_name": "SessionStart",
+                          "source": "clear", "cwd": str(project)}),
+        capture_output=True, text=True, timeout=60, env=environment, cwd=project,
+    )
+    assert start.returncode == 0, start.stderr
+    assert "whois" in calls and "register_agent" in calls, calls
+    assert (runtime / "agent_owner_LegacyChild.json").is_file()
+
+    after = _run(REGISTRATION_GUARD, _registration_payload("cleared-1"), tmp_path, cwd=project, **named)
+    assert after.returncode == 0, after.stdout + after.stderr
+    assert "legacy-token" not in before.stderr + start.stdout + start.stderr + after.stderr
+
+
+# --- the reservation hooks read identity through the actual workspace -----
+#
+# Phase4 consumer adaptation: check-file-reservation, release-all and
+# invalidate resolve session-index identity from the hook payload's actual cwd.
+# A deliberate human namespace survives only through a validated strong owner
+# record; a cwd that cannot be resolved is refused (guard) or changes nothing
+# (release/invalidate), never read as "outside every protected root".
+
+RELEASE_ALL = REPO_ROOT / "hooks" / "release-all-reservations.sh"
+INVALIDATE = REPO_ROOT / "hooks" / "invalidate-release-debounce.sh"
+
+
+def _own_namespace(tmp_path: Path, agent_name: str, workspace: Path, namespace: str) -> None:
+    """A strong owner of an explicit namespace, written by the real library."""
+    context = subprocess.run(
+        ["/bin/bash", str(REPO_ROOT / "hooks" / "project-context.sh"),
+         "resolve-invocation-context", str(workspace), namespace],
+        env={**BASE_ENV, "HOME": str(tmp_path)}, check=True, capture_output=True,
+        text=True, timeout=30,
+    ).stdout.strip()
+    subprocess.run(
+        ["/bin/bash", "-c", '. "$1"; ags_store_registration_token "$2" "$3" "$4" top-level',
+         "own", str(REPO_ROOT / "bin" / "lib" / "agentstack-register.sh"),
+         agent_name, f"owner-token-{agent_name}", context],
+        env={**BASE_ENV, "HOME": str(tmp_path / "home"),
+             "AGENTSTACK_RUNTIME_DIR": str(tmp_path / "runtime")},
+        check=True, capture_output=True, text=True, timeout=60,
+    )
+
+
+def _edit_payload_in(session_id: str, file_path: Path, cwd: Path) -> str:
+    return json.dumps({"session_id": session_id, "hook_event_name": "PreToolUse",
+                       "cwd": str(cwd), "tool_name": "Edit",
+                       "tool_input": {"file_path": str(file_path)}})
+
+
+@pytest.fixture()
+def recording_endpoint():
+    """An answering Mail endpoint that records every request it receives."""
+    import http.server
+    import threading
+
+    requests: list[str] = []
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802 - stdlib naming
+            body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            requests.append(body.decode("utf-8", "replace"))
+            payload = b'{"jsonrpc":"2.0","id":"1","result":{"structuredContent":{}}}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self):  # noqa: N802 - stdlib naming
+            self.send_response(405)
+            self.end_headers()
+
+        do_HEAD = do_GET
+
+        def log_message(self, *_args):
+            return
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        host, port = server.server_address[:2]
+        yield f"http://{host}:{port}/mcp", requests
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_an_owned_custom_namespace_keeps_its_session_conflicts(
+    tmp_path: Path, answering_endpoint: str
+) -> None:
+    """Deriving the default project would hide bindings made in the owner's
+    namespace; the validated owner selects it, so the conflict is still seen."""
+    project = _git_project(tmp_path / "project")
+    target = project / "note.md"
+    target.write_text("x", encoding="utf-8")
+    _own_namespace(tmp_path, "CustomAgent", project, "team-x")
+    for agent_id, name in ((41, "CustomAgent"), (77, "Intruder")):
+        _write_raw_index_record(tmp_path, agent_id, {
+            "agent_id": agent_id, "agent_name": name, "session_id": "custom-conflict",
+            "cwd": str(project), "project_key": "team-x", "registered_by": "",
+            "schema_version": 2, "binding_kind": "self", "ts": "2026-08-22T00:00:00",
+        })
+    result = _run(
+        RESERVATION_GUARD, _edit_payload_in("custom-conflict", target, project), tmp_path,
+        cwd=project, AGENT_NAME="CustomAgent", AGENTSTACK_PROJECT_KEY="team-x",
+        AGENTSTACK_PROTECTED_ROOTS=str(project), AGENTSTACK_MCP_URL=answering_endpoint,
+        AGENTSTACK_MAIL_HTTP_BEARER_MODE="disabled",
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "AGENT IDENTITY CONFLICT" in result.stderr
+
+
+def test_a_custom_namespace_binding_without_an_owner_is_not_authority(tmp_path: Path) -> None:
+    """The null case: the same custom bindings with no strong owner are ignored."""
+    project = _git_project(tmp_path / "project")
+    _write_raw_index_record(tmp_path, 41, {
+        "agent_id": 41, "agent_name": "CustomAgent", "session_id": "custom-unowned",
+        "cwd": str(project), "project_key": "team-x", "registered_by": "",
+        "schema_version": 2, "binding_kind": "self", "ts": "2026-08-22T00:00:00",
+    })
+    assert _resolve(tmp_path, "custom-unowned", workspace=str(project)) == "|none"
+
+
+@pytest.mark.parametrize("variant", ["missing-cwd", "broken-git-metadata"])
+def test_the_edit_guard_refuses_a_workspace_it_cannot_resolve(
+    tmp_path: Path, recording_endpoint, variant: str
+) -> None:
+    endpoint, requests = recording_endpoint
+    project = _git_project(tmp_path / "project")
+    target = project / "note.md"
+    target.write_text("x", encoding="utf-8")
+    if variant == "missing-cwd":
+        cwd = tmp_path / "deleted-worktree"
+    else:
+        cwd = tmp_path / "broken"
+        cwd.mkdir()
+        (cwd / ".git").write_text("gitdir: /nonexistent/worktrees/gone\n", encoding="utf-8")
+    result = _run(
+        RESERVATION_GUARD, _edit_payload_in("bad-cwd", target, cwd), tmp_path,
+        cwd=project, AGENTSTACK_PROTECTED_ROOTS=str(project),
+        AGENTSTACK_PROJECT_KEY=str(project), AGENTSTACK_MCP_URL=endpoint,
+        AGENTSTACK_MAIL_HTTP_BEARER_MODE="disabled",
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "AGENT PROJECT CONTEXT UNRESOLVED" in result.stderr
+    assert requests == [], "a Mail request was made for an unresolvable workspace"
+
+
+def test_the_edit_guard_refuses_a_strong_owner_that_does_not_match(
+    tmp_path: Path, recording_endpoint
+) -> None:
+    endpoint, requests = recording_endpoint
+    project = _git_project(tmp_path / "project")
+    elsewhere = _git_project(tmp_path / "elsewhere")
+    target = project / "note.md"
+    target.write_text("x", encoding="utf-8")
+    _own(tmp_path, "MovedAgent", elsewhere)
+    result = _run(
+        RESERVATION_GUARD, _edit_payload_in("owner-mismatch", target, project), tmp_path,
+        cwd=project, AGENT_NAME="MovedAgent", AGENTSTACK_PROTECTED_ROOTS=str(project),
+        AGENTSTACK_PROJECT_KEY=str(project), AGENTSTACK_MCP_URL=endpoint,
+        AGENTSTACK_MAIL_HTTP_BEARER_MODE="disabled",
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "AGENT PROJECT CONTEXT UNRESOLVED" in result.stderr
+    assert requests == []
+
+
+@pytest.mark.parametrize("valid", [True, False], ids=["valid-cwd-control", "missing-cwd"])
+def test_release_all_changes_nothing_for_an_unresolvable_workspace(
+    tmp_path: Path, recording_endpoint, valid: bool
+) -> None:
+    endpoint, requests = recording_endpoint
+    project = _git_project(tmp_path / "project")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    pane_meta = runtime / "agent_name__7"
+    pane_meta.write_text("ReleaseAgent\n", encoding="utf-8")
+    cwd = project if valid else tmp_path / "deleted-worktree"
+    payload = json.dumps({"session_id": "release-1", "hook_event_name": "SessionEnd",
+                          "cwd": str(cwd)})
+    result = _run(
+        RELEASE_ALL, payload, tmp_path, cwd=project, AGENT_NAME="ReleaseAgent",
+        TMUX_PANE="%7", AGENTSTACK_PROTECTED_ROOTS=str(project),
+        AGENTSTACK_PROJECT_KEY=str(project), AGENTSTACK_MCP_URL=endpoint,
+        AGENTSTACK_MAIL_HTTP_BEARER_MODE="disabled",
+    )
+    assert result.returncode == 0, result.stderr
+    if valid:
+        assert requests, "control: a resolvable session did not release"
+        assert not pane_meta.exists(), "control: pane metadata was not cleared"
+    else:
+        assert requests == [], "an unresolvable workspace released reservations"
+        assert pane_meta.read_text(encoding="utf-8") == "ReleaseAgent\n"
+
+
+@pytest.mark.parametrize("valid", [True, False], ids=["valid-cwd-control", "missing-cwd"])
+def test_invalidate_changes_nothing_for_an_unresolvable_workspace(
+    tmp_path: Path, valid: bool
+) -> None:
+    import hashlib
+
+    project = _git_project(tmp_path / "project")
+    state_dir = tmp_path / "runtime" / "file_release_debounce"
+    state_dir.mkdir(parents=True)
+    armed = state_dir / hashlib.sha1(b"DebounceAgent\0note.md").hexdigest()
+    armed.write_text("armed", encoding="utf-8")
+    cwd = project if valid else tmp_path / "deleted-worktree"
+    payload = json.dumps({"session_id": "invalidate-1", "hook_event_name": "PreToolUse",
+                          "cwd": str(cwd), "tool_name": "mcp__orrery-mail__file_reservation_paths",
+                          "tool_input": {"paths": ["note.md"]}})
+    result = _run(
+        INVALIDATE, payload, tmp_path, cwd=project, AGENT_NAME="DebounceAgent",
+        AGENTSTACK_PROTECTED_ROOTS=str(project), AGENTSTACK_PROJECT_KEY=str(project),
+        AGENTSTACK_MCP_URL=UNREACHABLE,
+    )
+    assert result.returncode == 0, result.stderr
+    if valid:
+        assert not armed.exists(), "control: a resolvable session did not invalidate"
+    else:
+        assert armed.read_text(encoding="utf-8") == "armed"
+
+
+RELEASE_FILE = REPO_ROOT / "hooks" / "release-file-reservation.sh"
+
+
+@pytest.mark.parametrize("schema", [3, 2])
+@pytest.mark.parametrize("env_name", ["BoundName", "OtherName"], ids=["matching-control", "disagreeing-env"])
+def test_release_after_edit_is_not_scheduled_under_a_conflicting_identity(
+    tmp_path: Path, recording_endpoint, schema: int, env_name: str
+) -> None:
+    """A session bound as one agent while its environment names another must
+    not release reservations under either name; the matching case still does."""
+    endpoint, requests = recording_endpoint
+    project = _git_project(tmp_path / "project")
+    target = project / "note.md"
+    target.write_text("x", encoding="utf-8")
+    if schema == 3:
+        assert _record_registration(tmp_path, "release-conflict", 41, "BoundName", str(project)) == 0
+    else:
+        _bind(tmp_path, 41, "release-conflict", "BoundName", str(project))
+    payload = json.dumps({
+        "session_id": "release-conflict", "hook_event_name": "PostToolUse",
+        "cwd": str(project), "tool_name": "Edit",
+        "tool_input": {"file_path": str(target)},
+        "tool_response": {"filePath": str(target), "success": True},
+    })
+    result = _run(
+        RELEASE_FILE, payload, tmp_path, cwd=project, AGENT_NAME=env_name,
+        AGENTSTACK_PROTECTED_ROOTS=str(project), AGENTSTACK_PROJECT_KEY=str(project),
+        AGENTSTACK_MCP_URL=endpoint, AGENTSTACK_MAIL_HTTP_BEARER_MODE="disabled",
+        AGENTSTACK_RELEASE_GRACE_SECONDS="0",
+    )
+    assert result.returncode == 0, result.stderr
+    failures = tmp_path / "runtime" / "release-failures.log"
+    if env_name == "BoundName":
+        assert requests, "control: a consistent identity did not release"
+    else:
+        assert requests == [], "a release was sent under a conflicting identity"
+        assert "identity-conflict" in failures.read_text(encoding="utf-8")
+        state = tmp_path / "runtime" / "file_release_debounce"
+        assert not state.exists() or not any(state.iterdir())
 
 
 def test_the_writer_does_not_record_a_registration_made_for_someone_else(
@@ -971,6 +1529,7 @@ def test_a_binding_that_cannot_be_written_does_not_register_the_session(
     payload = json.dumps(
         {
             "session_id": session_id,
+            "cwd": str(tmp_path),
             "tool_input": {"name": "SoloAgent", "project_key": str(tmp_path)},
             "tool_response": {"id": 93, "name": "SoloAgent"},
         }
@@ -1007,7 +1566,8 @@ def test_the_session_start_reminder_finds_an_existing_binding(tmp_path: Path) ->
     Path(environment["HOME"]).mkdir(parents=True, exist_ok=True)
     result = subprocess.run(
         ["/bin/bash", str(SESSION_START)],
-        input=json.dumps({"session_id": "resume-1", "hook_event_name": "SessionStart"}),
+        input=json.dumps({"session_id": "resume-1", "hook_event_name": "SessionStart",
+                          "cwd": project}),
         capture_output=True,
         text=True,
         timeout=60,
@@ -1029,7 +1589,8 @@ def test_the_reminder_does_not_invent_an_identity(tmp_path: Path) -> None:
     Path(environment["HOME"]).mkdir(parents=True, exist_ok=True)
     result = subprocess.run(
         ["/bin/bash", str(SESSION_START)],
-        input=json.dumps({"session_id": "somebody-else", "hook_event_name": "SessionStart"}),
+        input=json.dumps({"session_id": "somebody-else", "hook_event_name": "SessionStart",
+                          "cwd": project}),
         capture_output=True,
         text=True,
         timeout=60,
@@ -1287,6 +1848,8 @@ def test_a_named_session_still_works_when_the_policy_allows_it(
     A channels bot has AGENT_NAME and no flag; it must still be able to run
     Bash, or it cannot re-register itself after a /clear.
     """
+    # A name is an identity once it is owned by this workspace (Phase4).
+    _own(tmp_path, "IcyGauss", tmp_path / "workspace")
     result = _run(
         REGISTRATION_GUARD,
         _registration_payload("named-healthy"),
@@ -1511,6 +2074,8 @@ def test_a_launcher_name_that_agrees_is_not_a_conflict(
     """The null case: the ordinary child agent must keep working."""
     project = str(tmp_path / "project")
     _record_registration(tmp_path, "env-matches", 41, "SameName", project)
+    # An ordinary child registered through the Phase4 library owns its name.
+    _own(tmp_path, "SameName", Path(project))
     result = _run(
         REGISTRATION_GUARD,
         _registration_payload("env-matches"),
@@ -1640,6 +2205,8 @@ def test_a_placeholder_name_does_not_exempt_a_session_from_registering(
 
 def test_a_real_name_still_exempts(tmp_path: Path, answering_endpoint: str) -> None:
     """The null case: the exemption the bots actually rely on."""
+    # A name is an identity once it is owned by this workspace (Phase4).
+    _own(tmp_path, "ProOpus", tmp_path / "workspace")
     result = _run(
         REGISTRATION_GUARD,
         _registration_payload("real-exempt"),
@@ -1906,7 +2473,7 @@ def test_a_placeholder_env_does_not_hide_a_registered_identity(tmp_path: Path) -
             tmp_path,
             "placeholder-binding",
             AGENT_NAME="pending-1234",
-            AGENTSTACK_LOOKUP_PROJECT_KEY=project,
+            workspace=project,
         )
         == "BoundAgent|session-index"
     )

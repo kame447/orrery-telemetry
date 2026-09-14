@@ -12,11 +12,14 @@ PROJECT_CONTEXT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/project-conte
 . "$PROJECT_CONTEXT_LIB"
 MCP_URL="${AGENTSTACK_MCP_URL:-${MCP_URL:-http://127.0.0.1:18765/mcp}}"
 HEALTH_URL="${AGENTSTACK_MCP_HEALTH_URL:-${MCP_AGENT_MAIL_HEALTH_URL:-}}"
-PROJECT_KEY="$(agentstack_resolve_project_key "$(pwd -P)")"
+PROJECT_KEY=""
+SESSION_CONTEXT_JSON=""
 RESOLVED_AGENT=""
 RESOLVED_AGENT_SRC="none"
 SHELL_REGISTERED_AGENT=""
 SHELL_REGISTRATION_ERROR=""
+SHELL_OWNERSHIP_PREPARED=0
+SESSION_IDENTITY_CONFLICT=0
 
 if [ -z "$HEALTH_URL" ]; then
     case "$MCP_URL" in
@@ -133,9 +136,35 @@ except Exception:
     export AGENTSTACK_SESSION_ID
 fi
 
+HOOK_CWD="$(printf '%s' "${SESSION_START_INPUT:-}" | python3 -c '
+import json, sys
+try:
+    value = json.loads(sys.stdin.read(262144) or "{}").get("cwd", "")
+except Exception:
+    value = ""
+print(value if isinstance(value, str) else "")
+' 2>/dev/null || echo "")"
+[ -n "$HOOK_CWD" ] || HOOK_CWD="$(pwd -P)"
+BASE_CONTEXT_JSON="$(agentstack_resolve_invocation_context "$HOOK_CWD" 2>/dev/null || true)"
+if [ -n "$BASE_CONTEXT_JSON" ]; then
+    PROJECT_KEY="$(agentstack_context_field "$BASE_CONTEXT_JSON" project_key 2>/dev/null || true)"
+    AGENTSTACK_LOOKUP_PROJECT_KEY="$PROJECT_KEY"
+    AGENTSTACK_LOOKUP_REPOSITORY_KEY="$(agentstack_context_field "$BASE_CONTEXT_JSON" repository_key 2>/dev/null || true)"
+    AGENTSTACK_LOOKUP_WORK_DIR="$(agentstack_context_field "$BASE_CONTEXT_JSON" work_dir 2>/dev/null || true)"
+    export AGENTSTACK_LOOKUP_PROJECT_KEY AGENTSTACK_LOOKUP_REPOSITORY_KEY AGENTSTACK_LOOKUP_WORK_DIR
+fi
+
 if [ -f "$HOOKS_DIR/resolve-agent-name.sh" ]; then
     # shellcheck disable=SC1091
     source "$HOOKS_DIR/resolve-agent-name.sh"
+fi
+if [ "$RESOLVED_AGENT_SRC" = "identity-conflict" ]; then
+    SESSION_IDENTITY_CONFLICT=1
+elif [ -n "${AGENTSTACK_SESSION_ID:-}" ] && \
+     command -v agentstack_session_binding_conflict >/dev/null 2>&1 && \
+     [ "$(agentstack_session_binding_conflict "$AGENTSTACK_SESSION_ID" "$AGENTSTACK_LOOKUP_PROJECT_KEY" \
+        "${AGENT_NAME:-}" "$AGENTSTACK_LOOKUP_REPOSITORY_KEY" "$AGENTSTACK_LOOKUP_WORK_DIR")" = "conflict" ]; then
+    SESSION_IDENTITY_CONFLICT=1
 fi
 
 find_register_lib() {
@@ -170,15 +199,13 @@ child_uses_mcp_proxy() {
     return 1
 }
 
-shell_register_resolved_agent() {
-    local register_lib restored_token work_dir model
+prepare_resolved_agent_ownership() {
+    local register_lib restored_token work_dir resolved_context
     [ -n "$RESOLVED_AGENT" ] || return 1
-    [ -n "$PROJECT_KEY" ] || return 1
     register_lib="$(find_register_lib)" || return 1
     # shellcheck disable=SC1090
     . "$register_lib" || return 1
 
-    ags_mail_load_token
     restored_token="${CHILD_REGISTRATION_TOKEN:-}"
     if [ -z "$restored_token" ]; then
         restored_token="$(ags_load_registration_token "$RESOLVED_AGENT" 2>/dev/null || true)"
@@ -187,13 +214,32 @@ shell_register_resolved_agent() {
 
     CHILD_REGISTRATION_TOKEN="$restored_token"
     export CHILD_REGISTRATION_TOKEN
-    work_dir="${PWD:-$PROJECT_KEY}"
+    work_dir="$HOOK_CWD"
+    resolved_context="$(ags_resolve_registration_context "" "$work_dir" \
+        "$RESOLVED_AGENT" reserved "$restored_token")" || {
+        SHELL_REGISTRATION_ERROR="persisted ownership for '$RESOLVED_AGENT' does not match workspace '$work_dir'; relaunch with an explicit project namespace"
+        return 1
+    }
+    PROJECT_KEY="$(ags_registration_context_project_key "$resolved_context")" || return 1
+    SESSION_CONTEXT_JSON="$resolved_context"
+    agentstack_export_context_json "$SESSION_CONTEXT_JSON" || return 1
+    SHELL_OWNERSHIP_PREPARED=1
+    return 0
+}
+
+shell_register_resolved_agent() {
+    local model work_dir
+    [ "$SHELL_OWNERSHIP_PREPARED" = "1" ] || return 1
+    [ -n "$RESOLVED_AGENT" ] || return 1
+    [ -n "$PROJECT_KEY" ] || return 1
+    work_dir="$HOOK_CWD"
+    ags_mail_load_token
     # spawn_child.sh hands the child its model as CLAUDE_CHILD_MODEL; without
     # it this re-registration overwrote the pre-registered model with the
     # program name, and the dashboard lost the provider (no logo, chip said
     # "CLAUDE-CODE" — seen on WSL2, where no pane model is parsed either).
     model="${AGENTSTACK_CLAUDE_MODEL:-${CLAUDE_CHILD_MODEL:-claude-code}}"
-    ags_register_session "$PROJECT_KEY" "claude-code" "$model" "cc" "$work_dir" "$RESOLVED_AGENT" "reserved" >/dev/null 2>&1
+    ags_register_session "$PROJECT_KEY" "claude-code" "$model" "cc" "$work_dir" "$RESOLVED_AGENT" "reserved" "" "session-start" >/dev/null 2>&1
     register_status=$?
     if [ "$register_status" -ne 0 ]; then
         if [ "$register_status" -eq 2 ] && [ "${AGS_AGENT_NAME_SUBSTITUTED:-0}" = "1" ]; then
@@ -223,17 +269,19 @@ try:
     start = json.loads(os.environ.get("AGS_START_INPUT") or "{}")
 except Exception:
     start = {}
-agent_id, name, project_key = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+agent_id, name, project_key, work_dir = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
 print(json.dumps({
     "session_id": start.get("session_id", ""),
     "transcript_path": start.get("transcript_path", ""),
-    "cwd": start.get("cwd", ""),
+    "cwd": work_dir,
     "tool_response": {"id": agent_id, "name": name},
     "tool_input": {"project_key": project_key, "name": name},
 }))
-' "$AGS_REGISTERED_AGENT_ID" "$SHELL_REGISTERED_AGENT" "$PROJECT_KEY" 2>/dev/null |
+' "$AGS_REGISTERED_AGENT_ID" "$SHELL_REGISTERED_AGENT" "$PROJECT_KEY" \
+    "$(agentstack_context_field "$SESSION_CONTEXT_JSON" work_dir)" 2>/dev/null |
     AGENTSTACK_REGISTERING_SOURCE="${RESOLVED_AGENT_SRC:-env}" \
     AGENTSTACK_REGISTERING_AGENT="$SHELL_REGISTERED_AGENT" \
+    AGENTSTACK_VALIDATED_CONTEXT_JSON="$SESSION_CONTEXT_JSON" \
     AGENTSTACK_RUNTIME_DIR="$RUNTIME_DIR" \
         python3 "$HOOKS_DIR/record-session-index.py" >/dev/null 2>&1 || true
 }
@@ -251,7 +299,17 @@ printf '%s src=%s resolved=%q AGENT_NAME=%q TMUX_PANE=%q TMUX=%s sess=%q\n' \
     "${CURRENT_SESSION:-}" \
     >> "$RUNTIME_DIR/session-start-resolve.log" 2>/dev/null
 
-if mail_server_is_answering; then
+if [ "$SESSION_IDENTITY_CONFLICT" = "1" ]; then
+    echo "ORRERY Mail registration was not attempted because more than one identity claims this session."
+    echo "ERROR: resolve the session-index/launcher identity conflict before resuming; do not generate or adopt another name."
+elif [ -n "$RESOLVED_AGENT" ] && ! prepare_resolved_agent_ownership; then
+    echo "ORRERY Mail registration was not attempted because this identity could not be validated locally."
+    if [ -n "$SHELL_REGISTRATION_ERROR" ]; then
+        echo "ERROR: $SHELL_REGISTRATION_ERROR。identity split を避けるため停止しました。別名を生成・採用せず、この不一致を operator に報告してください。"
+    else
+        echo "ERROR: persisted token/ownership for '${RESOLVED_AGENT}' is unavailable or unsafe. 別名を生成・採用せず、この identity の復旧を operator に依頼してください。"
+    fi
+elif mail_server_is_answering; then
     if [ -n "$RESOLVED_AGENT" ] && shell_register_resolved_agent; then
         echo "ORRERY Mail server is running. This session is already registered."
         echo "あなたは「${SHELL_REGISTERED_AGENT}」です（既存 identity・source: ${RESOLVED_AGENT_SRC}）。shell hook で登録済みです。"

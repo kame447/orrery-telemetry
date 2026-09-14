@@ -13,7 +13,6 @@ PROG="agentstack-reregister"
 die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 load_env_file() {
   local envf="$1"
   # shellcheck disable=SC1090
@@ -33,14 +32,19 @@ REGISTER_LIB="${AGENTSTACK_REGISTER_LIB:-$SCRIPT_DIR/lib/agentstack-register.sh}
 load_child_state_token() {
   local agent_name="$1" state_file runtime_dir
   runtime_dir="$(ags_registration_runtime_dir)"
-  state_file="$runtime_dir/child-agents/$agent_name.json"
-  [[ -f "$state_file" ]] || return 1
-  python3 - "$state_file" <<'PY'
+  state_file="$(ags_legacy_registration_owner_file "$agent_name")" || return 1
+  [[ -f "$state_file" && ! -L "$state_file" ]] || return 1
+  "${AGENTSTACK_PYTHON:-python3}" - "$state_file" <<'PY'
 import json
+import pathlib
+import stat
 import sys
 
 try:
-    data = json.load(open(sys.argv[1], encoding="utf-8"))
+    path = pathlib.Path(sys.argv[1])
+    if stat.S_IMODE(path.stat().st_mode) & 0o077:
+        raise ValueError("unsafe state permissions")
+    data = json.loads(path.read_text(encoding="utf-8"))
 except Exception:
     sys.exit(1)
 token = data.get("registration_token")
@@ -70,8 +74,7 @@ case "$program" in
 esac
 model="${3:-${AGENTSTACK_REREGISTER_MODEL:-$default_model}}"
 
-project_key="${AGENTSTACK_PROJECT_KEY:-${PROJECT_KEY:-}}"
-[[ -n "$project_key" ]] || die "AGENTSTACK_PROJECT_KEY is required"
+project_key=""
 
 ags_mail_load_token
 
@@ -94,7 +97,8 @@ fi
 CHILD_REGISTRATION_TOKEN="$registration_token"
 export CHILD_REGISTRATION_TOKEN
 
-if ags_register_session "$project_key" "$program" "$model" "$prefix" "${PWD:-$project_key}" "$agent_name" "reserved" >/dev/null 2>&1; then
+work_dir="${PWD:-.}"
+if ags_register_session "$project_key" "$program" "$model" "$prefix" "$work_dir" "$agent_name" "reserved" "" "reregister" >/dev/null 2>&1; then
   printf 'agentstack-reregister: registered %s\n' "${AGS_REGISTERED_AGENT_NAME:-$agent_name}"
 else
   register_status=$?

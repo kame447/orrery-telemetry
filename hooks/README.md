@@ -41,16 +41,19 @@ a fallback. Explicit selection does not require Git discovery.
 
 This is a top-level selection API, not an ownership/authentication check. A
 caller must not forward an inherited delegated key as an explicit override just
-because a context marker exists. Validated parent/child ownership and consistent context propagation remain
-responsibilities of the later launcher/registration migration. The workspace
-context API below derives default protected roots without activating consumers.
+because a context marker exists. Top-level launchers wrap a freshly resolved
+context with `agentstack_build_invocation_transport` and pass it to bootstrap
+as an explicit argument. Bootstrap calls `agentstack_validate_invocation_transport`
+against its actual target. The same JSON copied through the environment has no
+authority.
 
 The existing `agentstack_resolve_project_key`, `agentstack_resolve_protected_roots`,
 `agentstack_installed_env_value` and their existing CLI commands keep their old
-behavior in this slice. Top-level launchers now consume the workspace context API through
-`bin/lib/agentstack-launch.sh`; see `docs/launchers.md`. Standalone bootstrap,
-registration/session ownership, delegated children, watchers and Dashboard
-still require their separate migrations. End-to-end isolation is not complete. Tests and this contract ship with the resolver rather than being deferred.
+behavior for consumers not yet migrated. Top-level launchers, standalone Codex
+and Gemini bootstrap, registration/reregistration, SessionStart identity, and
+session-index writing now use the workspace context and ownership APIs. Child
+spawn/reservation/handoff/cleanup, watchers, Dashboard and installer-generated
+instructions remain separate migrations; see `docs/launchers.md`.
 
 For a library call, source `hooks/project-context.sh` and call the function above.
 For a read-only command-line check, run
@@ -97,6 +100,40 @@ bare AGENTSTACK_PROJECT_CONTEXT=1 marker is never proof of ownership.
 
 The context layer itself remains read-only. Its top-level launcher adapter
 validates representability before exporting a complete tuple, does not eval
-JSON, and never treats a context marker as delegated ownership proof. Other
-consumers, installer diagnostics and generated instructions are not migrated
-yet; see the explicit remaining boundaries in `docs/launchers.md`.
+JSON, and never treats a context marker as delegated ownership proof.
+
+## Registration ownership and session bindings
+
+`bin/lib/agentstack-register.sh` publishes
+`runtime/agent_owner_<name>.json` with mode `0600` only after registration
+succeeds. It binds the project namespace to the actual Git repository (shared
+across linked worktrees) or a non-Git physical root and to a SHA-256 digest of
+the owner token. The raw token remains in `agent_token_<name>`. A separate
+`.pending` claim prevents local races but is not accepted as ownership and is
+removed on failure.
+
+Readers re-resolve the actual target. A contradictory strong record, an
+independent clone, another repository, or a token digest mismatch fails before
+`ensure_project` or token transmission. Legacy `child-agents/<name>.json` state
+is accepted only for the same Git repository and only after token-authenticated
+`whois`; successful registration upgrades it. Cross-repository or ambiguous
+legacy state requires an explicit relaunch.
+
+`record-session-index.py` writes schema 3 self-bindings containing the validated
+namespace, repository, physical work directory, worktree root and protected
+roots. `mark-agent-registered.sh` compares the tool's project input with a
+context re-resolved from the hook cwd; model-supplied or installed project keys
+cannot choose a binding. A schema 2 self-binding remains identity/conflict
+evidence only when its path-valued project matches the derived project, its
+recorded cwd independently resolves to the same Git repository (or exact
+non-Git workspace), and no strong owner record contradicts it. Missing,
+logical, cross-repository or ambiguous legacy provenance is ignored until a
+successful re-registration upgrades the session to schema 3.
+
+The registration and reservation guards derive this lookup tuple from the
+hook payload's physical cwd. A validated strong owner may preserve its custom
+namespace, but ambient project variables cannot replace the workspace facts.
+An invalid protected-file cwd is refused before Mail; release/invalidation
+hooks skip mutations when that context cannot be resolved. A bare `AGENT_NAME`
+does not bypass registration, while the `register_agent` MCP call remains
+available so an unmanaged session can establish a binding.

@@ -23,9 +23,12 @@ from service_teardown import TEST_LABEL_PREFIX  # noqa: E402
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
 _HELPER = _ROOT / "bin" / "agentstack-preregister-child"
 
-# Stands in for bin/lib/agentstack-register.sh so the test exercises the
-# helper's real control flow without touching a live ORRERY Mail server.
+# Wraps the real bin/lib/agentstack-register.sh: project/workspace context and
+# local ownership stay real (Phase4 validates them before any Mail call), while
+# every function that would reach ORRERY Mail or pick a random name is replaced
+# so the helper's control flow runs without touching a live server.
 _FAKE_LIB = r"""
+. "$TEST_REAL_REGISTER_LIB"
 ags_mail_load_token() { :; }
 ags_pick_available_agent_name() { echo "PICKER_CALLED" >&2; printf 'Picked-Curie\n'; }
 ags_has_scientist_suffix() {
@@ -54,7 +57,6 @@ ags_mcp_call() {
 ags_mcp_has_error() { return 1; }
 ags_extract_agent_name() { python3 -c 'import json,sys; print(json.load(sys.stdin).get("name",""))'; }
 ags_extract_registration_token() { printf '\n'; }
-ags_store_registration_token() { :; }
 ags_apply_contact_policy() { :; }
 ags_record_name_substitution() { :; }
 """
@@ -66,19 +68,33 @@ def _run(args: list[str], env: dict[str, str] | None = None
         tmpdir = pathlib.Path(tmp)
         lib = tmpdir / "fake-register.sh"
         lib.write_text(_FAKE_LIB, encoding="utf-8")
+        # The child's project and workspace are a real repository: the helper
+        # now binds the namespace to --work-dir before registering.
+        project = (tmpdir / "project").resolve()
+        git_env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+            git_env.pop(name, None)
+        subprocess.run(["git", "init", "-q", str(project)], env=git_env, check=True,
+                       capture_output=True, timeout=30)
+        project = project.resolve()
         run_env = os.environ.copy()
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+            run_env.pop(name, None)
         run_env.update({
             "AGENTSTACK_REGISTER_LIB": str(lib),
+            "TEST_REAL_REGISTER_LIB": str(_ROOT / "bin" / "lib" / "agentstack-register.sh"),
             "AGENTSTACK_ENV_FILE": "",
             "AGENTSTACK_HOME": str(tmpdir),
+            "AGENTSTACK_RUNTIME_DIR": str(tmpdir / "runtime"),
             "AGENTSTACK_LABEL_PREFIX": TEST_LABEL_PREFIX,
-            "AGENTSTACK_PROJECT_KEY": "/p",
+            "AGENTSTACK_PROJECT_KEY": str(project),
             "AGENTSTACK_STRICT_AGENT_NAMES": "",
         })
         if env:
             run_env.update(env)
         return subprocess.run(
-            [str(_HELPER), "--token-file-out", str(tmpdir / "tok"), *args],
+            [str(_HELPER), "--token-file-out", str(tmpdir / "tok"),
+             "--project-key", str(project), "--work-dir", str(project), *args],
             cwd=_ROOT, env=run_env, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
         )

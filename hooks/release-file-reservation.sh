@@ -56,7 +56,8 @@ print("false" if failed else "true")
 reservation_resolve_tool_context "$TOOL_OUTPUT" || exit 0
 
 if [ -f "$POLICY_LIB_EARLY" ] \
-    && [ "$(agentstack_session_binding_conflict "$SESSION_ID" "$RESERVATION_PROJECT_KEY" "${AGENT_NAME:-}")" = "conflict" ]; then
+    && [ "$(agentstack_session_binding_conflict "$SESSION_ID" "$AGENTSTACK_LOOKUP_PROJECT_KEY" \
+        "${AGENT_NAME:-}" "$AGENTSTACK_LOOKUP_REPOSITORY_KEY" "$AGENTSTACK_LOOKUP_WORK_DIR")" = "conflict" ]; then
     reservation_failure_log "release session=${SESSION_ID:-<none>} path=$REL_PATH error=identity-conflict"
     exit 0
 fi

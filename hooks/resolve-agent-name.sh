@@ -118,9 +118,67 @@ if [ -z "$RESOLVED_AGENT" ] && [ "$RESOLVED_AGENT_SRC" != "identity-conflict" ] 
 import json
 import os
 import pathlib
+import stat
+import subprocess
+
+def normalize_key(value):
+    if not isinstance(value, str) or not value:
+        return ""
+    return os.path.realpath(value) if os.path.isabs(value) or os.path.isdir(value) else value
+
+def repository_key(value):
+    if not isinstance(value, str) or not os.path.isdir(value):
+        return ""
+    env = os.environ.copy()
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+        env.pop(key, None)
+    try:
+        common = subprocess.check_output(
+            ["git", "-C", value, "rev-parse", "--git-common-dir"],
+            text=True, stderr=subprocess.DEVNULL, env=env,
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    path = pathlib.Path(common)
+    if not path.is_absolute():
+        path = pathlib.Path(value) / path
+    path = pathlib.Path(os.path.realpath(path))
+    return str(path.parent if path.name == ".git" else path)
+
+def strong_owner_contradicts(record, directory, repository, work_dir):
+    name = record.get("agent_name")
+    safe = "".join(
+        char if char.isascii() and (char.isalnum() or char in "_.-") else "_"
+        for char in name
+    )
+    path = directory.parent / f"agent_owner_{safe}.json"
+    if not path.exists() and not path.is_symlink():
+        return False
+    if path.is_symlink():
+        return True
+    try:
+        if stat.S_IMODE(path.stat().st_mode) & 0o077:
+            return True
+        owner = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return True
+    if not isinstance(owner, dict) or owner.get("schema") != 1 or owner.get("agent_name") != name:
+        return True
+    if normalize_key(owner.get("project_key")) != normalize_key(record.get("project_key")):
+        return True
+    if repository:
+        return owner.get("repository_key") != repository
+    root = owner.get("non_git_root")
+    try:
+        pathlib.Path(work_dir).relative_to(pathlib.Path(root))
+    except (TypeError, ValueError):
+        return True
+    return owner.get("repository_key") is not None
 
 wanted = os.environ.get("AGENTSTACK_LOOKUP_SESSION", "")
 project = os.environ.get("AGENTSTACK_LOOKUP_PROJECT_KEY", "")
+repository = os.environ.get("AGENTSTACK_LOOKUP_REPOSITORY_KEY", "")
+work_dir = os.environ.get("AGENTSTACK_LOOKUP_WORK_DIR", "")
 directory = pathlib.Path(os.environ.get("AGENTSTACK_LOOKUP_DIR", ""))
 names = set()
 if wanted and directory.is_dir():
@@ -142,8 +200,6 @@ if wanted and directory.is_dir():
         # a session binding a self-registration produced. Anything older,
         # malformed, or of another kind is ignored rather than half-trusted:
         # a loose read here is what lets a wrong record decide who may write.
-        if record.get("schema_version") != 2:
-            continue
         if record.get("binding_kind") != "self":
             continue
         caller = record.get("registered_by")
@@ -151,12 +207,33 @@ if wanted and directory.is_dir():
             continue
         if caller and caller != name:
             continue
-        if project:
-            recorded = record.get("project_key")
-            # A record from before project keys were stored cannot prove it
-            # belongs here, and a record from elsewhere proves it does not.
-            if not isinstance(recorded, str) or recorded != project:
+        schema = record.get("schema_version")
+        if schema == 3:
+            if repository:
+                if record.get("repository_key") != repository:
+                    continue
+            elif work_dir:
+                if record.get("repository_key") is not None or record.get("work_dir") != work_dir:
+                    continue
+            else:
                 continue
+        elif schema == 2:
+            if normalize_key(record.get("project_key")) != normalize_key(project):
+                continue
+            legacy_cwd = record.get("cwd")
+            if repository:
+                if repository_key(legacy_cwd) != repository:
+                    continue
+            elif not (
+                isinstance(legacy_cwd, str)
+                and os.path.isdir(legacy_cwd)
+                and os.path.realpath(legacy_cwd) == work_dir
+            ):
+                continue
+            if strong_owner_contradicts(record, directory, repository, work_dir):
+                continue
+        else:
+            continue
         names.add(name)
 if len(names) == 1:
     print("ok:" + names.pop())

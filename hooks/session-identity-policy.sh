@@ -372,6 +372,7 @@ agentstack_invalid_endpoint_message() {
 # Prints "ok", "conflict", or "none".
 agentstack_session_binding_conflict() {
     local session_id="$1" project="$2" env_name="$3"
+    local repository="${4:-}" work_dir="${5:-}"
     case "$session_id" in
         ""|*[!a-zA-Z0-9_-]*) printf 'none\n'; return 0 ;;
     esac
@@ -404,15 +405,77 @@ agentstack_session_binding_conflict() {
     AGENTSTACK_CONFLICT_PANE_META="$pane_meta" \
     AGENTSTACK_CONFLICT_SESSION="$session_id" \
     AGENTSTACK_CONFLICT_PROJECT="$project" \
+    AGENTSTACK_CONFLICT_REPOSITORY="$repository" \
+    AGENTSTACK_CONFLICT_WORK_DIR="$work_dir" \
     AGENTSTACK_CONFLICT_ENV_NAME="$env_name" \
     AGENTSTACK_CONFLICT_DIR="$AGENTSTACK_POLICY_RUNTIME_DIR/session_index" \
     python3 - <<'CONFLICTPY' 2>/dev/null || printf 'none\n'
 import json
 import os
 import pathlib
+import stat
+import subprocess
+
+def normalize_key(value):
+    if not isinstance(value, str) or not value:
+        return ""
+    return os.path.realpath(value) if os.path.isabs(value) or os.path.isdir(value) else value
+
+def repository_key(value):
+    if not isinstance(value, str) or not os.path.isdir(value):
+        return ""
+    env = os.environ.copy()
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+        env.pop(key, None)
+    try:
+        common = subprocess.check_output(
+            ["git", "-C", value, "rev-parse", "--git-common-dir"],
+            text=True, stderr=subprocess.DEVNULL, env=env,
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    path = pathlib.Path(common)
+    if not path.is_absolute():
+        path = pathlib.Path(value) / path
+    path = pathlib.Path(os.path.realpath(path))
+    return str(path.parent if path.name == ".git" else path)
+
+def strong_owner_contradicts(record, directory, repository, work_dir):
+    name = record.get("agent_name")
+    if not isinstance(name, str) or not name:
+        return True
+    safe = "".join(
+        char if char.isascii() and (char.isalnum() or char in "_.-") else "_"
+        for char in name
+    )
+    path = directory.parent / f"agent_owner_{safe}.json"
+    if not path.exists() and not path.is_symlink():
+        return False
+    if path.is_symlink():
+        return True
+    try:
+        if stat.S_IMODE(path.stat().st_mode) & 0o077:
+            return True
+        owner = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return True
+    if not isinstance(owner, dict) or owner.get("schema") != 1 or owner.get("agent_name") != name:
+        return True
+    if normalize_key(owner.get("project_key")) != normalize_key(record.get("project_key")):
+        return True
+    if repository:
+        return owner.get("repository_key") != repository
+    root = owner.get("non_git_root")
+    try:
+        pathlib.Path(work_dir).relative_to(pathlib.Path(root))
+    except (TypeError, ValueError):
+        return True
+    return owner.get("repository_key") is not None
 
 wanted = os.environ.get("AGENTSTACK_CONFLICT_SESSION", "")
 project = os.environ.get("AGENTSTACK_CONFLICT_PROJECT", "")
+repository = os.environ.get("AGENTSTACK_CONFLICT_REPOSITORY", "")
+work_dir = os.environ.get("AGENTSTACK_CONFLICT_WORK_DIR", "")
 env_name = os.environ.get("AGENTSTACK_CONFLICT_ENV_NAME", "")
 directory = pathlib.Path(os.environ.get("AGENTSTACK_CONFLICT_DIR", ""))
 names = set()
@@ -426,15 +489,38 @@ if directory.is_dir():
             continue
         if not isinstance(record, dict) or record.get("session_id") != wanted:
             continue
-        if record.get("schema_version") != 2 or record.get("binding_kind") != "self":
+        if record.get("binding_kind") != "self":
             continue
         caller = record.get("registered_by")
         if not isinstance(caller, str) or (caller and caller != record.get("agent_name")):
             continue
-        if project:
-            recorded = record.get("project_key")
-            if not isinstance(recorded, str) or recorded != project:
+        schema = record.get("schema_version")
+        if schema == 3:
+            if repository:
+                if record.get("repository_key") != repository:
+                    continue
+            elif work_dir:
+                if record.get("repository_key") is not None or record.get("work_dir") != work_dir:
+                    continue
+            else:
                 continue
+        elif schema == 2:
+            if normalize_key(record.get("project_key")) != normalize_key(project):
+                continue
+            legacy_cwd = record.get("cwd")
+            if repository:
+                if repository_key(legacy_cwd) != repository:
+                    continue
+            elif not (
+                isinstance(legacy_cwd, str)
+                and os.path.isdir(legacy_cwd)
+                and os.path.realpath(legacy_cwd) == work_dir
+            ):
+                continue
+            if strong_owner_contradicts(record, directory, repository, work_dir):
+                continue
+        else:
+            continue
         name = record.get("agent_name")
         if isinstance(name, str) and name:
             names.add(name)
