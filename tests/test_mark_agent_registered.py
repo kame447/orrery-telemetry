@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import uuid
 from pathlib import Path
@@ -20,15 +21,24 @@ def _invoke_hook(
     session_id = f"identity-contract-{uuid.uuid4().hex}"
     flag = Path(f"/tmp/.claude-agent-registered-{session_id}")
     flag.unlink(missing_ok=True)
-    payload = {"session_id": session_id, **payload}
+    workspace = _workspace(tmp_path)
+    tool_input = payload.get("tool_input")
+    if isinstance(tool_input, dict):
+        payload = {**payload, "tool_input": {**tool_input, "project_key": str(workspace)}}
+    payload = {"session_id": session_id, "cwd": str(workspace), **payload}
     runtime_dir = tmp_path / "runtime"
     hooks_dir = tmp_path / "hooks"
     hooks_dir.mkdir()
+    # Phase4 validates the registered project against the hook's actual cwd,
+    # so the real context resolver and register library must be reachable.
+    # record-session-index.py stays absent: these tests cover the flag contract.
+    shutil.copy2(ROOT / "hooks" / "project-context.sh", hooks_dir / "project-context.sh")
     env = os.environ.copy()
     env.update(
         {
             "AGENTSTACK_HOOKS_DIR": str(hooks_dir),
             "AGENTSTACK_RUNTIME_DIR": str(runtime_dir),
+            "AGENTSTACK_REGISTER_LIB": str(ROOT / "bin" / "lib" / "agentstack-register.sh"),
         }
     )
     completed = subprocess.run(
@@ -42,6 +52,17 @@ def _invoke_hook(
     return completed, flag, runtime_dir
 
 
+def _workspace(tmp_path: Path) -> Path:
+    """A real repository whose resolved project key is the registered project."""
+    workspace = (tmp_path / "workspace").resolve()
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+        env.pop(name, None)
+    subprocess.run(["git", "init", "-q", str(workspace)], env=env, check=True,
+                   capture_output=True, timeout=30)
+    return workspace.resolve()
+
+
 def _run_hook(
     tmp_path: Path,
     *,
@@ -52,7 +73,8 @@ def _run_hook(
     response_has_embedded_error: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     tool_input: dict[str, str] = {
-        "project_key": "/tmp/identity-contract",
+        # Replaced by the actual workspace key in _invoke_hook.
+        "project_key": "",
         "program": "claude-code",
         "model": "fixture-model",
     }
@@ -137,6 +159,68 @@ def test_matching_structured_and_text_projections_mark_success(tmp_path: Path) -
     try:
         assert completed.returncode == 0, completed.stderr
         assert flag.is_file()
+    finally:
+        flag.unlink(missing_ok=True)
+
+
+def test_aliased_cwd_and_project_of_the_same_workspace_mark_success(tmp_path: Path) -> None:
+    """A symlinked cwd (macOS /tmp, a user link) is still the same workspace."""
+    workspace = _workspace(tmp_path)
+    alias = tmp_path / "alias-to-workspace"
+    alias.symlink_to(workspace, target_is_directory=True)
+    session_id = f"identity-contract-{uuid.uuid4().hex}"
+    flag = Path(f"/tmp/.claude-agent-registered-{session_id}")
+    hooks_dir = tmp_path / "alias-hooks"
+    hooks_dir.mkdir()
+    shutil.copy2(ROOT / "hooks" / "project-context.sh", hooks_dir / "project-context.sh")
+    env = os.environ.copy()
+    env.update({
+        "AGENTSTACK_HOOKS_DIR": str(hooks_dir),
+        "AGENTSTACK_RUNTIME_DIR": str(tmp_path / "runtime"),
+        "AGENTSTACK_REGISTER_LIB": str(ROOT / "bin" / "lib" / "agentstack-register.sh"),
+    })
+    payload = {
+        "session_id": session_id,
+        "cwd": str(alias),
+        "tool_input": {"name": "ProOpus", "project_key": str(alias)},
+        "tool_response": json.dumps({"id": 7, "name": "ProOpus"}),
+    }
+    try:
+        completed = subprocess.run(["/bin/bash", str(HOOK)], input=json.dumps(payload),
+                                   text=True, capture_output=True, env=env, check=False)
+        assert completed.returncode == 0, completed.stderr
+        assert flag.is_file()
+    finally:
+        flag.unlink(missing_ok=True)
+
+
+def test_project_of_another_workspace_is_not_marked(tmp_path: Path) -> None:
+    """The null case for the alias test: a real mismatch is still refused."""
+    other = tmp_path / "other"
+    other.mkdir()
+    session_id = f"identity-contract-{uuid.uuid4().hex}"
+    flag = Path(f"/tmp/.claude-agent-registered-{session_id}")
+    hooks_dir = tmp_path / "mismatch-hooks"
+    hooks_dir.mkdir()
+    shutil.copy2(ROOT / "hooks" / "project-context.sh", hooks_dir / "project-context.sh")
+    env = os.environ.copy()
+    env.update({
+        "AGENTSTACK_HOOKS_DIR": str(hooks_dir),
+        "AGENTSTACK_RUNTIME_DIR": str(tmp_path / "runtime"),
+        "AGENTSTACK_REGISTER_LIB": str(ROOT / "bin" / "lib" / "agentstack-register.sh"),
+    })
+    payload = {
+        "session_id": session_id,
+        "cwd": str(_workspace(tmp_path)),
+        "tool_input": {"name": "ProOpus", "project_key": str(other.resolve())},
+        "tool_response": json.dumps({"id": 7, "name": "ProOpus"}),
+    }
+    try:
+        completed = subprocess.run(["/bin/bash", str(HOOK)], input=json.dumps(payload),
+                                   text=True, capture_output=True, env=env, check=False)
+        assert completed.returncode != 0
+        assert not flag.exists()
+        assert "project namespace is not owned" in completed.stderr
     finally:
         flag.unlink(missing_ok=True)
 

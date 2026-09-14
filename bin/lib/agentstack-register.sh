@@ -32,18 +32,19 @@ ags_mcp_call() {
   local tool="$1"; shift
   local mcp_url="${AGENTSTACK_MCP_URL:-${MCP_URL:-http://127.0.0.1:18765/mcp}}"
   local args_json payload
-  args_json="$(python3 - "$@" <<'PY'
+  args_json="$(printf '%s\0' "$@" | python3 -c '
 import json
 import sys
 
 args = {}
-for item in sys.argv[1:]:
-    key, value = item.split("=", 1)
+for raw in sys.stdin.buffer.read().split(b"\0"):
+    if not raw:
+        continue
+    key, value = raw.decode("utf-8").split("=", 1)
     args[key] = value
 print(json.dumps(args, separators=(",", ":")))
-PY
-)"
-  payload="$(python3 - "$tool" "$args_json" <<'PY'
+')"
+  payload="$(printf '%s' "$args_json" | python3 -c '
 import json
 import sys
 
@@ -51,10 +52,9 @@ print(json.dumps({
     "jsonrpc": "2.0",
     "id": "1",
     "method": "tools/call",
-    "params": {"name": sys.argv[1], "arguments": json.loads(sys.argv[2])},
+    "params": {"name": sys.argv[1], "arguments": json.load(sys.stdin)},
 }, separators=(",", ":")))
-PY
-)"
+' "$tool")"
   local auth=()
   [[ -n "${MCP_AGENT_MAIL_TOKEN:-}" ]] && auth=(-H "Authorization: Bearer $MCP_AGENT_MAIL_TOKEN")
   # `${auth[@]+"${auth[@]}"}` — macOS bash 3.2 treats a plain `"${auth[@]}"` on
@@ -1012,15 +1012,33 @@ PY
 ags_load_registration_token() {
   local agent_name="$1" token_file token
   token_file="$(ags_registration_token_file "$agent_name")" || return 1
-  [[ -f "$token_file" ]] || return 1
+  [[ -f "$token_file" && ! -L "$token_file" ]] || return 1
+  "${AGENTSTACK_PYTHON:-python3}" - "$token_file" <<'PY' >/dev/null 2>&1 || return 1
+import pathlib
+import stat
+import sys
+
+mode = stat.S_IMODE(pathlib.Path(sys.argv[1]).stat().st_mode)
+raise SystemExit(0 if not mode & 0o077 else 1)
+PY
   IFS= read -r token < "$token_file" || true
   [[ -n "$token" ]] || return 1
   printf '%s\n' "$token"
 }
 
 ags_store_registration_token() {
-  local agent_name="$1" registration_token="$2" runtime_dir token_file
+  local agent_name="$1" registration_token="$2" context_json="${3:-}"
+  local ownership_kind="${4:-top-level}" runtime_dir token_file
   [[ -n "$agent_name" && -n "$registration_token" ]] || return 0
+  if [[ -n "$context_json" ]]; then
+    if [[ -z "${AGS_REGISTRATION_OWNER_FILE:-}" ]]; then
+      ags_begin_registration_ownership "$context_json" "$agent_name" \
+        "$registration_token" "$ownership_kind" reserved || return 1
+    fi
+    ags_commit_registration_ownership "$context_json" "$agent_name" \
+      "$agent_name" "$registration_token" "$ownership_kind"
+    return $?
+  fi
   runtime_dir="$(ags_registration_runtime_dir)"
   token_file="$(ags_registration_token_file "$agent_name")" || return 1
   mkdir -p "$runtime_dir" || return 1
@@ -1169,6 +1187,10 @@ ags_pick_available_agent_name() {
   local unknowns=0
 
   if [[ -n "$preferred_name" ]]; then
+    if ags_local_agent_name_conflicts "$project_key" "$preferred_name" candidate; then
+      echo "agentstack: local identity '$preferred_name' is already owned by another project or session." >&2
+      return 1
+    fi
     name_status="$(ags_agent_name_status "$project_key" "$preferred_name")"
     if [[ "$name_status" == "available" ]]; then
       ags_note_scientist_used "$preferred_name" || true
@@ -1183,6 +1205,9 @@ ags_pick_available_agent_name() {
 
   for ((i = 0; i < attempts; i++)); do
     candidate="$(ags_pick_adjective_scientist_name)" || return 1
+    if ags_local_agent_name_conflicts "$project_key" "$candidate" candidate; then
+      continue
+    fi
     name_status="$(ags_agent_name_status "$project_key" "$candidate")"
     case "$name_status" in
       available)
@@ -1205,6 +1230,9 @@ ags_pick_available_agent_name() {
     adjective="$(ags_pick_adjective)" || return 1
     scientist="$(ags_pick_scientist)" || return 1
     candidate="${adjective}-${i}-${scientist}"
+    if ags_local_agent_name_conflicts "$project_key" "$candidate" candidate; then
+      continue
+    fi
     name_status="$(ags_agent_name_status "$project_key" "$candidate")"
     case "$name_status" in
       available)
@@ -1228,12 +1256,14 @@ ags_pick_available_agent_name() {
 
 ags_register_session() {
   local project_key="$1" program="$2" model="$3" prefix="$4" work_dir="$5" requested_name="${6:-}" requested_mode="${7:-reserved}"
+  local invocation_transport="${8:-}" ownership_kind="${9:-}"
   AGS_REGISTERED_AGENT_NAME=""
   AGS_REGISTERED_AGENT_ID=""
   AGS_REGISTERED_REGISTRATION_TOKEN=""
   AGS_REQUESTED_AGENT_NAME=""
   AGS_SERVER_RETURNED_AGENT_NAME=""
   AGS_AGENT_NAME_SUBSTITUTED=0
+  AGS_REGISTRATION_FAILURE_KIND=""
 
   local task_description="Agent session in $work_dir"
   case "$program" in
@@ -1241,31 +1271,93 @@ ags_register_session() {
     codex) task_description="Codex session in $work_dir" ;;
   esac
 
-  local agent_name="$requested_name"
-  if [[ -z "$agent_name" ]]; then
-    agent_name="$(ags_pick_available_agent_name "$project_key" "$prefix")" || return 1
-  elif [[ "$requested_mode" == "candidate" ]]; then
-    agent_name="$(ags_pick_available_agent_name "$project_key" "$prefix" "$agent_name")" || return 1
-  fi
-  AGS_REQUESTED_AGENT_NAME="$agent_name"
-
-  ags_mcp_call "ensure_project" "human_key=$project_key" >/dev/null
-
-  # Ambient owner credentials are valid only for an explicitly verified
-  # reserved identity. Candidate/top-level registration must not adopt a token
-  # inherited from another tmux session.
-  local registration_token=""
+  # Resolve and validate project ownership before name availability probes,
+  # ensure_project, token writes, or any other Mail/local side effect.
+  local registration_token="" context_json=""
   if [[ "$requested_mode" == "reserved" && -n "$requested_name" ]]; then
     registration_token="${CHILD_REGISTRATION_TOKEN:-}"
     if [[ -z "$registration_token" ]]; then
-      registration_token="$(ags_load_registration_token "$agent_name" 2>/dev/null || true)"
+      registration_token="$(ags_load_registration_token "$requested_name" 2>/dev/null || true)"
+    fi
+    [[ -n "$registration_token" ]] || {
+      AGS_REGISTRATION_FAILURE_KIND="ownership"
+      echo "agentstack: registration token not available for reserved identity '$requested_name'." >&2
+      return 1
+    }
+  fi
+  context_json="$(ags_resolve_registration_context "$project_key" "$work_dir" \
+    "$requested_name" "$requested_mode" "$registration_token" "$invocation_transport")" \
+    || { AGS_REGISTRATION_FAILURE_KIND="context"; return 1; }
+  # ags_resolve_registration_context ran in a command substitution, so its
+  # exported AGS_* variables belonged to that subshell. Derive from the value
+  # it returned; a stale caller variable must never replace validated context.
+  project_key="$(ags_registration_context_project_key "$context_json")" \
+    || { AGS_REGISTRATION_FAILURE_KIND="context"; return 1; }
+
+  # A legacy/token-only resume has no independent strong provenance. Its
+  # namespace/workspace relationship was checked above; authenticate the same
+  # owner token with Mail before ensure_project or any local ownership write.
+  if [[ "$requested_mode" == "reserved" ]] && \
+     ! ags_registration_owner_exists_for_name "$requested_name"; then
+    if ! ags_verify_registration_owner_with_mail \
+      "$project_key" "$requested_name" "$registration_token"; then
+      echo "agentstack: could not authenticate legacy owner '$requested_name' in '$project_key'; relaunch with an explicit project namespace." >&2
+      AGS_REGISTRATION_FAILURE_KIND="ownership"
+      return 1
     fi
   fi
+  [[ -n "$ownership_kind" ]] || {
+    if [[ "$requested_mode" == "candidate" ]]; then
+      ownership_kind="top-level"
+    else
+      ownership_kind="preserve"
+    fi
+  }
+
+  local agent_name="$requested_name"
+  if [[ -z "$agent_name" ]]; then
+    agent_name="$(ags_pick_available_agent_name "$project_key" "$prefix")" \
+      || { AGS_REGISTRATION_FAILURE_KIND="name-selection"; return 1; }
+  elif [[ "$requested_mode" == "candidate" ]]; then
+    agent_name="$(ags_pick_available_agent_name "$project_key" "$prefix" "$agent_name")" \
+      || { AGS_REGISTRATION_FAILURE_KIND="name-selection"; return 1; }
+  fi
+  AGS_REQUESTED_AGENT_NAME="$agent_name"
+
   # Mint a fresh owner token only for a name the server positively reports as
   # free. An 'unknown' answer must not mint one: that is how an unverified name
   # used to get claimed on top of a live agent.
   if [[ -z "$registration_token" ]] && ags_agent_name_available "$project_key" "$agent_name"; then
     registration_token="$(ags_generate_registration_token)" || return 1
+  fi
+  [[ -n "$registration_token" ]] || {
+    AGS_REGISTRATION_FAILURE_KIND="name-selection"
+    echo "agentstack: no verified owner token is available for '$agent_name'." >&2
+    return 1
+  }
+
+  if ags_local_agent_name_conflicts "$project_key" "$agent_name" "$requested_mode"; then
+    AGS_REGISTRATION_FAILURE_KIND="local-ownership"
+    echo "agentstack: local identity '$agent_name' conflicts with another project or session; refusing registration." >&2
+    return 1
+  fi
+  if ! ags_begin_registration_ownership "$context_json" "$agent_name" \
+    "$registration_token" "$ownership_kind" "$requested_mode"; then
+    AGS_REGISTRATION_FAILURE_KIND="local-ownership"
+    echo "agentstack: could not establish local ownership for '$agent_name'; refusing registration." >&2
+    return 1
+  fi
+
+  local ensure_result
+  ensure_result="$(ags_mcp_call "ensure_project" "human_key=$project_key")" || {
+    AGS_REGISTRATION_FAILURE_KIND="mail-unavailable"
+    ags_release_registration_ownership
+    return 1
+  }
+  if printf '%s' "$ensure_result" | ags_mcp_has_error; then
+    AGS_REGISTRATION_FAILURE_KIND="server-refusal"
+    ags_release_registration_ownership
+    return 1
   fi
 
   local register_args=(
@@ -1278,12 +1370,22 @@ ags_register_session() {
   [[ -n "$registration_token" ]] && register_args+=("registration_token=$registration_token")
 
   local result registered registered_token
-  result="$(ags_mcp_call "register_agent" "${register_args[@]}")" || return 1
+  result="$(ags_mcp_call "register_agent" "${register_args[@]}")" || {
+    AGS_REGISTRATION_FAILURE_KIND="mail-unavailable"
+    ags_release_registration_ownership
+    return 1
+  }
   if printf '%s' "$result" | ags_mcp_has_error; then
+    AGS_REGISTRATION_FAILURE_KIND="server-refusal"
+    ags_release_registration_ownership
     return 1
   fi
   registered="$(printf '%s' "$result" | ags_extract_agent_name)"
-  [[ -n "$registered" ]] || return 1
+  if [[ -z "$registered" ]]; then
+    AGS_REGISTRATION_FAILURE_KIND="server-refusal"
+    ags_release_registration_ownership
+    return 1
+  fi
   AGS_SERVER_RETURNED_AGENT_NAME="$registered"
   if [[ "$registered" != "$agent_name" ]]; then
     AGS_AGENT_NAME_SUBSTITUTED=1
@@ -1293,20 +1395,47 @@ ags_register_session() {
     # paths may reconcile their not-yet-started tmux session to the read-back,
     # but an existing identity must fail closed.
     if [[ "$requested_mode" == "reserved" ]]; then
+      AGS_REGISTRATION_FAILURE_KIND="identity-substitution"
+      ags_release_registration_ownership
       return 2
+    fi
+    if ags_local_agent_name_conflicts "$project_key" "$registered" substitution; then
+      AGS_REGISTRATION_FAILURE_KIND="local-ownership"
+      ags_release_registration_ownership
+      echo "agentstack: server-returned identity '$registered' conflicts with local ownership; refusing to overwrite it." >&2
+      return 1
     fi
   fi
   registered_token="$(printf '%s' "$result" | ags_extract_registration_token)"
-  [[ -n "$registered_token" ]] || registered_token="$registration_token"
-  if [[ -n "$registered_token" ]]; then
-    CHILD_REGISTRATION_TOKEN="$registered_token"
-    AGS_REGISTERED_REGISTRATION_TOKEN="$registered_token"
-    export CHILD_REGISTRATION_TOKEN
-    ags_store_registration_token "$registered" "$registered_token" || true
-    ags_apply_contact_policy "$project_key" "$registered" "$registered_token"
+  if [[ "$requested_mode" == "reserved" && -n "$registered_token" && \
+        "$registered_token" != "$registration_token" ]]; then
+    AGS_REGISTRATION_FAILURE_KIND="ownership"
+    ags_release_registration_ownership
+    echo "agentstack: ORRERY Mail returned a different owner token for reserved identity '$agent_name'." >&2
+    return 1
   fi
+  [[ -n "$registered_token" ]] || registered_token="$registration_token"
+  [[ -n "$registered_token" ]] || {
+    AGS_REGISTRATION_FAILURE_KIND="server-refusal"
+    ags_release_registration_ownership
+    return 1
+  }
+  if ! ags_commit_registration_ownership "$context_json" "$agent_name" \
+    "$registered" "$registered_token" "$ownership_kind"; then
+    AGS_REGISTRATION_FAILURE_KIND="persistence"
+    ags_release_registration_ownership
+    return 1
+  fi
+  if [[ "$registered" != "$agent_name" ]]; then
+    ags_record_name_substitution "$registered" "$agent_name" || true
+  fi
+  CHILD_REGISTRATION_TOKEN="$registered_token"
+  AGS_REGISTERED_REGISTRATION_TOKEN="$registered_token"
+  export CHILD_REGISTRATION_TOKEN
+  ags_apply_contact_policy "$project_key" "$registered" "$registered_token"
   AGS_REGISTERED_AGENT_NAME="$registered"
   AGS_REGISTERED_AGENT_ID="$(printf '%s' "$result" | ags_extract_agent_id)"
+  AGS_REGISTRATION_FAILURE_KIND=""
   printf '%s\n' "$registered"
 }
 

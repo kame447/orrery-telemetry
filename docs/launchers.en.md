@@ -33,9 +33,9 @@ Use `agent-start-codex --project-key KEY DIR` for an explicit namespace; all thr
 
 `work_dir` preserves a selected subdirectory, while protected roots cover its whole worktree. An explicit key is a namespace, not a protected pathname. Git metadata and another main checkout are not added as protection roots automatically. Git inspection failures, broken metadata, bare repositories, and roots the legacy colon-delimited format cannot represent are rejected before launch, not hidden by a fallback to another project.
 
-A fresh tmux session receives the resolved values through `new-session -e`, without seeding a new server's global environment with this project. Inside an existing pane, the CLI/bootstrap process environment is updated; migrating session-wide project metadata that could affect other panes is deferred. `AGENTSTACK_PROJECT_CONTEXT=1` is not ownership proof. Never forward a reserved child's context as a top-level override.
+A fresh tmux session receives the resolved values through `new-session -e`, without seeding a new server's global environment with this project. The launcher also passes the context to bootstrap through explicit argv (`--top-level`, optional `--project-key`, and `--expected-context` for cross-checking); bootstrap re-resolves the complete tuple from the actual target. Inside an existing pane, the CLI/bootstrap process environment is updated; migrating session-wide project metadata that could affect other panes is deferred. `AGENTSTACK_PROJECT_CONTEXT=1`, environment JSON, and tmux environment are transport or hints, never ownership proof. Never forward a reserved child's context as a top-level override.
 
-This slice migrates only top-level entry and handoff. Standalone bootstrap, registration/session indexes, delegated children, watchers, and Dashboard project ownership remain separate follow-up work. Installed AGENTS.md instructions that name a fixed project such as StudyPlanner are still an open problem, so this slice is not end-to-end multi-project isolation. Repository instruction-renderer changes and regeneration/reinstallation of a user's existing settings are separate operations.
+A standalone bootstrap without argv also ignores ambient and installed keys and derives its default namespace from the actual target. A reserved or resumed identity is validated with the owner record described below. Delegated-child reservation, handoff, cleanup and protected-root propagation, plus watcher, Dashboard, doctor, generated-instruction and proxy migration remain later phases.
 
 Gemini `--dry-run` prints the context and planned command without starting tmux, Mail, or the CLI. Model/effort settings, Codex sandbox/approval and OAuth behavior, and Gemini's post-REPL shell lifecycle are unchanged.
 
@@ -91,7 +91,7 @@ The launcher registers an identity with ORRERY Mail before starting the CLI.
 5. Compare the requested name with the returned canonical name. On a mismatch, a top-level launch reports it and renames the tmux session to the returned name; a reserved identity stops
 6. Update the managed agent list and clipboard
 
-Top-level launchers first establish project context. When ORRERY Mail is unreachable, the CLI still starts with the preselected name as before, but coordination is unavailable. Legacy key selection in a directly invoked standalone bootstrap is unchanged in this slice.
+Top-level launchers and standalone bootstrap establish project context first. An ownership contradiction is refused before `ensure_project`, before an owner token is sent, and before registration state is written. When ORRERY Mail is unreachable, the CLI still starts with a preselected name only after that name is locally conflict-free; a server refusal, context failure, owner mismatch, or persistence failure is a hard stop.
 
 Claude Code hooks also record registration inside the session. Because Codex does not have Claude Code's hook system, `agentstack-codex-bootstrap` handles registration and tmux renaming before startup.
 
@@ -102,6 +102,14 @@ Reregistering an existing identity requires that identity's `registration_token`
 ```text
 ${AGENTSTACK_RUNTIME_DIR:-$HOME/.agentstack/runtime}/agent_token_<name>
 ```
+
+A strong mode-`0600` owner record is stored beside it:
+
+```text
+${AGENTSTACK_RUNTIME_DIR:-$HOME/.agentstack/runtime}/agent_owner_<name>.json
+```
+
+The record binds the namespace, Git repository identity (or non-Git root), SHA-256 digest of the owner token, and creation path; it never contains the raw token. Reregistration re-resolves repository, worktree and protected roots from the actual cwd. Linked worktrees of the same repository are accepted, while an independent clone, another repository, or a digest mismatch is refused before the token is sent to Mail. A non-Git owner is valid only within its recorded physical root.
 
 A delegated child additionally has child-owned state at:
 
@@ -118,11 +126,10 @@ The default `/delegate` path is `--pre-registered --embed-task --task-file <path
 ## Reregistration
 
 ```bash
-AGENTSTACK_PROJECT_KEY=/path/to/project \
-  ~/.agentstack/bin/agentstack-reregister "$AGENT_NAME"
+~/.agentstack/bin/agentstack-reregister "$AGENT_NAME"
 ```
 
-The helper reads the owner token from runtime state and restores the identity with the same name. Do not create a different name when same-name registration fails. A different name separates the inbox, thread, reservations, and audit history.
+The helper reads the owner token and strong owner record from runtime state and restores the identity with the same name. Ambient and installed project keys are not authorization, and a bare `AGENT_NAME` does not grant Bash/write access. A pre-Phase-4 child state is upgraded only when its recorded project and actual cwd are in the same Git repository and token-authenticated `whois` succeeds. SessionStart performs the same recovery before Mail health/registration; the Mail `register_agent` tool itself remains available to an otherwise unregistered session. Cross-repository or ambiguous legacy state must be relaunched with an explicit namespace. Do not create a different name when same-name registration fails.
 
 ## `CLAUDECODE` guard
 

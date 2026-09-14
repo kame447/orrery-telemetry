@@ -116,11 +116,92 @@ if [ -z "$RESOLVED_AGENT" ] && [ "$RESOLVED_AGENT_SRC" != "identity-conflict" ] 
                     AGENTSTACK_LOOKUP_DIR="$SESSION_INDEX_DIR" \
                     python3 - <<'INDEXPY' 2>/dev/null
 import json
+import hashlib
 import os
 import pathlib
+import stat
+import subprocess
+
+def normalize_key(value):
+    if not isinstance(value, str) or not value:
+        return ""
+    return os.path.realpath(value) if os.path.isabs(value) or os.path.isdir(value) else value
+
+def repository_key(value):
+    if not isinstance(value, str) or not os.path.isdir(value):
+        return ""
+    env = os.environ.copy()
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+        env.pop(key, None)
+    try:
+        common = subprocess.check_output(
+            ["git", "-C", value, "rev-parse", "--git-common-dir"],
+            text=True, stderr=subprocess.DEVNULL, env=env,
+        ).strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    path = pathlib.Path(common)
+    if not path.is_absolute():
+        path = pathlib.Path(value) / path
+    path = pathlib.Path(os.path.realpath(path))
+    return str(path.parent if path.name == ".git" else path)
+
+def strong_owner_state(record, directory, repository, work_dir):
+    """Return absent, valid, or invalid for this record's durable owner.
+
+    A custom Mail namespace is not implied by sharing a repository.  It is
+    authority only when the owner record and the separately persisted token
+    prove the same name, namespace and actual workspace.  An existing but bad
+    owner is a contradiction even for the default namespace.
+    """
+    name = record.get("agent_name")
+    if not isinstance(name, str) or not name:
+        return "invalid"
+    safe = "".join(
+        char if char.isascii() and (char.isalnum() or char in "_.-") else "_"
+        for char in name
+    )
+    path = directory.parent / f"agent_owner_{safe}.json"
+    token_path = directory.parent / f"agent_token_{safe}"
+    if not path.exists() and not path.is_symlink():
+        return "absent"
+    if path.is_symlink() or token_path.is_symlink() or not token_path.is_file():
+        return "invalid"
+    try:
+        if stat.S_IMODE(path.stat().st_mode) & 0o077:
+            return "invalid"
+        if stat.S_IMODE(token_path.stat().st_mode) & 0o077:
+            return "invalid"
+        owner = json.loads(path.read_text(encoding="utf-8"))
+        token_raw = token_path.read_bytes()
+        if len(token_raw) > 4097:
+            return "invalid"
+        token = token_raw.decode("utf-8").rstrip("\n")
+    except Exception:
+        return "invalid"
+    if not isinstance(owner, dict) or owner.get("schema") != 1 or owner.get("agent_name") != name:
+        return "invalid"
+    if owner.get("name_key", name.replace("-", "").casefold()) != name.replace("-", "").casefold():
+        return "invalid"
+    if not token or owner.get("token_sha256") != hashlib.sha256(token.encode("utf-8")).hexdigest():
+        return "invalid"
+    if normalize_key(owner.get("project_key")) != normalize_key(record.get("project_key")):
+        return "invalid"
+    if repository:
+        if owner.get("repository_key") != repository or owner.get("non_git_root") is not None:
+            return "invalid"
+        return "valid"
+    root = owner.get("non_git_root")
+    try:
+        pathlib.Path(work_dir).relative_to(pathlib.Path(root))
+    except (TypeError, ValueError):
+        return "invalid"
+    return "valid" if owner.get("repository_key") is None else "invalid"
 
 wanted = os.environ.get("AGENTSTACK_LOOKUP_SESSION", "")
 project = os.environ.get("AGENTSTACK_LOOKUP_PROJECT_KEY", "")
+repository = os.environ.get("AGENTSTACK_LOOKUP_REPOSITORY_KEY", "")
+work_dir = os.environ.get("AGENTSTACK_LOOKUP_WORK_DIR", "")
 directory = pathlib.Path(os.environ.get("AGENTSTACK_LOOKUP_DIR", ""))
 names = set()
 if wanted and directory.is_dir():
@@ -142,8 +223,6 @@ if wanted and directory.is_dir():
         # a session binding a self-registration produced. Anything older,
         # malformed, or of another kind is ignored rather than half-trusted:
         # a loose read here is what lets a wrong record decide who may write.
-        if record.get("schema_version") != 2:
-            continue
         if record.get("binding_kind") != "self":
             continue
         caller = record.get("registered_by")
@@ -151,12 +230,45 @@ if wanted and directory.is_dir():
             continue
         if caller and caller != name:
             continue
-        if project:
-            recorded = record.get("project_key")
-            # A record from before project keys were stored cannot prove it
-            # belongs here, and a record from elsewhere proves it does not.
-            if not isinstance(recorded, str) or recorded != project:
+        schema = record.get("schema_version")
+        if schema == 3:
+            if repository:
+                if record.get("repository_key") != repository:
+                    continue
+            elif work_dir:
+                if record.get("repository_key") is not None or record.get("work_dir") != work_dir:
+                    continue
+            else:
                 continue
+            owner_state = strong_owner_state(record, directory, repository, work_dir)
+            if owner_state == "invalid":
+                continue
+            # The only owner-free namespace is the one freshly implied by the
+            # actual repository/non-Git workspace.  A valid strong owner may
+            # deliberately supply a different human namespace, including for
+            # index-only recovery after /clear.
+            default_project = repository or work_dir
+            if owner_state != "valid" and normalize_key(
+                record.get("project_key")
+            ) != normalize_key(default_project):
+                continue
+        elif schema == 2:
+            if normalize_key(record.get("project_key")) != normalize_key(project):
+                continue
+            legacy_cwd = record.get("cwd")
+            if repository:
+                if repository_key(legacy_cwd) != repository:
+                    continue
+            elif not (
+                isinstance(legacy_cwd, str)
+                and os.path.isdir(legacy_cwd)
+                and os.path.realpath(legacy_cwd) == work_dir
+            ):
+                continue
+            if strong_owner_state(record, directory, repository, work_dir) == "invalid":
+                continue
+        else:
+            continue
         names.add(name)
 if len(names) == 1:
     print("ok:" + names.pop())

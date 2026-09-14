@@ -260,8 +260,20 @@ def test_runtime_fallbacks_live_under_install_root(tmp_path):
 
 def test_session_index_writer_uses_install_root_runtime(tmp_path):
     env = _clean_env(tmp_path)
+    # The writer binds a registration to the actual workspace the caller
+    # (mark-agent-registered.sh) re-resolved from the hook cwd.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    context = subprocess.run(
+        ["/bin/bash", str(ROOT / "hooks" / "project-context.sh"),
+         "resolve-invocation-context", str(workspace)],
+        env=env, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    env["AGENTSTACK_VALIDATED_CONTEXT_JSON"] = context
     payload = {
         "session_id": "session-1",
+        "cwd": str(workspace),
+        "tool_input": {"name": "WiseFaraday", "project_key": json.loads(context)["project_key"]},
         "tool_response": {"id": 42, "name": "WiseFaraday"},
     }
     subprocess.run(

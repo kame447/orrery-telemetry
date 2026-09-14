@@ -13,7 +13,7 @@ TOOL_INPUT=$(cat)
 STATE_DIR="$RUNTIME_DIR/file_release_debounce"
 [ -d "$STATE_DIR" ] || exit 0
 
-reservation_extract_session_id "$TOOL_INPUT"
+reservation_extract_session_id "$TOOL_INPUT" || exit 0
 AGENT_RESULT="$(resolve_agent_name)"
 AGENT_SRC="${AGENT_RESULT%%|*}"
 AGENT="${AGENT_RESULT#*|}"

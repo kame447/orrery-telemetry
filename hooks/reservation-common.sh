@@ -60,6 +60,65 @@ resolve_agent_name() {
     return 0
 }
 
+# Bind session-index reads and reservation mutations to the hook invocation's
+# actual workspace. A strong owner may replace only the human namespace; the
+# repository/work_dir remain freshly resolved from the payload cwd.
+reservation_resolve_lookup_context() {
+    local tool_document="$1" hook_cwd="" context_json="" owner_context=""
+    local identity_result="" identity_source="" identity_name=""
+    local register_lib="" owner_token=""
+    hook_cwd=$(printf '%s' "$tool_document" | python3 -c '
+import json, sys
+try:
+    value = json.loads(sys.stdin.read()).get("cwd", "")
+    print(value if isinstance(value, str) else "")
+except Exception:
+    print("")
+' 2>/dev/null || echo "")
+    # Hook cwd is the only invocation fact available here. Missing or invalid
+    # input must not be replaced with the hook process's ambient directory.
+    [ -n "$hook_cwd" ] && [ -d "$hook_cwd" ] || return 2
+    context_json="$(agentstack_resolve_invocation_context "$hook_cwd" 2>/dev/null || true)"
+    [ -n "$context_json" ] || return 2
+    AGENTSTACK_LOOKUP_PROJECT_KEY="$(agentstack_context_field "$context_json" project_key 2>/dev/null || true)"
+    AGENTSTACK_LOOKUP_REPOSITORY_KEY="$(agentstack_context_field "$context_json" repository_key 2>/dev/null || true)"
+    AGENTSTACK_LOOKUP_WORK_DIR="$(agentstack_context_field "$context_json" work_dir 2>/dev/null || true)"
+    [ -n "$AGENTSTACK_LOOKUP_PROJECT_KEY" ] && [ -n "$AGENTSTACK_LOOKUP_WORK_DIR" ] || return 2
+    RESERVATION_PROJECT_KEY="$AGENTSTACK_LOOKUP_PROJECT_KEY"
+    export AGENTSTACK_LOOKUP_PROJECT_KEY AGENTSTACK_LOOKUP_REPOSITORY_KEY AGENTSTACK_LOOKUP_WORK_DIR
+
+    # The fresh tuple above owns all workspace facts, but an already-resolved
+    # identity may own a deliberate human namespace. Only its strong record and
+    # token may replace the derived project key; AGENT_NAME/tmux/index merely
+    # tell us which record to validate.
+    identity_result="$(resolve_agent_name)"
+    identity_source="${identity_result%%|*}"
+    identity_name="${identity_result#*|}"
+    if [ "$identity_source" != "identity-conflict" ] && [ -n "$identity_name" ]; then
+        register_lib="${AGENTSTACK_REGISTER_LIB:-$HOOKS_DIR/../bin/lib/agentstack-register.sh}"
+        if [ -f "$register_lib" ]; then
+            # shellcheck disable=SC1090
+            . "$register_lib"
+            if ags_registration_owner_exists_for_name "$identity_name"; then
+                owner_token="${CHILD_REGISTRATION_TOKEN:-}"
+                [ -n "$owner_token" ] || owner_token="$(ags_load_registration_token "$identity_name" 2>/dev/null || true)"
+                [ -n "$owner_token" ] || return 2
+                owner_context="$(ags_registration_owner_context \
+                    "$identity_name" "$owner_token" "$AGENTSTACK_LOOKUP_WORK_DIR" 2>/dev/null || true)"
+                [ -n "$owner_context" ] || return 2
+                context_json="$owner_context"
+                AGENTSTACK_LOOKUP_PROJECT_KEY="$(agentstack_context_field "$context_json" project_key 2>/dev/null || true)"
+                AGENTSTACK_LOOKUP_REPOSITORY_KEY="$(agentstack_context_field "$context_json" repository_key 2>/dev/null || true)"
+                AGENTSTACK_LOOKUP_WORK_DIR="$(agentstack_context_field "$context_json" work_dir 2>/dev/null || true)"
+                [ -n "$AGENTSTACK_LOOKUP_PROJECT_KEY" ] && [ -n "$AGENTSTACK_LOOKUP_WORK_DIR" ] || return 2
+                RESERVATION_PROJECT_KEY="$AGENTSTACK_LOOKUP_PROJECT_KEY"
+                export AGENTSTACK_LOOKUP_PROJECT_KEY AGENTSTACK_LOOKUP_REPOSITORY_KEY AGENTSTACK_LOOKUP_WORK_DIR
+            fi
+        fi
+    fi
+    return 0
+}
+
 get_legacy_http_bearer() {
     if [[ -n "${MCP_AGENT_MAIL_TOKEN:-}" ]]; then
         printf '%s' "$MCP_AGENT_MAIL_TOKEN"
@@ -158,8 +217,8 @@ except Exception:
     if [[ "$REL_PATH" == "$FILE_PATH" ]]; then
         REL_PATH="$(basename "$FILE_PATH")"
     fi
-    RESERVATION_PROJECT_KEY="${PROJECT_KEY:-$MATCHED_ROOT}"
-    export AGENTSTACK_LOOKUP_PROJECT_KEY="$RESERVATION_PROJECT_KEY"
+    reservation_resolve_lookup_context "$tool_document"
+    [ "$?" -eq 0 ] || return 2
     return 0
 }
 
@@ -173,8 +232,9 @@ except Exception:
     print("")
 ' 2>/dev/null || echo "")
     export AGENTSTACK_SESSION_ID="$SESSION_ID"
-    RESERVATION_PROJECT_KEY="$PROJECT_KEY"
-    export AGENTSTACK_LOOKUP_PROJECT_KEY="$RESERVATION_PROJECT_KEY"
+    # Identity lookup must use this hook payload's session, not a stale value
+    # inherited by the hook process.
+    reservation_resolve_lookup_context "$tool_document" || return 1
 }
 
 reservation_failure_log() {
