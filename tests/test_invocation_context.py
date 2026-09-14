@@ -195,7 +195,6 @@ class InvocationContextTests(unittest.TestCase):
 
     def test_submodule_and_nested_repository_are_not_parent_workspace(self) -> None:
         self.git("-c", "protocol.file.allow=always", "submodule", "add", "-q",
-                 str(self.other), "submodule", "add", "-q",
                  str(self.other), "submodule", cwd=self.repo)
         nested = self.repo / "nested"
         self.make_repo(nested)
