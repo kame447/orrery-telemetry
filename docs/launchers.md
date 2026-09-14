@@ -25,6 +25,20 @@ agent-start
 
 優先順位は明示引数、`fzf` picker、現在 directory の順です。
 
+## Top-level project context
+
+`agent-start`、`agent-start-codex`、任意導入の `agent-start-gemini` は、directory の選択後、登録や tmux session 作成より前に、その起動先から project context を解決します。親 shell、installed `env.sh`、既存 tmux server に残った project key や protected roots は、この選択の正本ではありません。
+
+明示的に namespace を指定する場合は `agent-start-codex --project-key KEY DIR` のように指定します。3種類の launcher が同じ引数を受け付けます。Git では linked worktree と main checkout が repository identity を共有し、独立 clone は分離されます。non-Git directory は物理パスが既定の key です。従来の non-Git namespace を継続するときも `--project-key` で明示してください。
+
+`work_dir` は指定した subdirectory を維持し、protected roots はその worktree 全体を保護します。explicit key は namespace であり、保護対象のパスではありません。Git metadata や別の main checkout を追加の保護 root として自動採用しません。Git 調査失敗、壊れた metadata、bare repository、既存のコロン区切り形式で表せない root は、別 project への fallback で隠さず起動前に拒否します。
+
+新しい tmux session には解決済みの値を `new-session -e` で明示し、新規 server の global environment には今回の project を埋め込みません。既存 pane 内では CLI と bootstrap の process environment を更新しますが、他 pane に影響する session-wide project metadata の移行はまだ行いません。`AGENTSTACK_PROJECT_CONTEXT=1` を ownership の証拠にはしません。予約済み child の context を top-level の override として渡してはいけません。
+
+この段階で移行するのは top-level launcher の入口と引き渡しまでです。standalone bootstrap、registration/session index、delegated child、watcher、Dashboard の project ownership は後続の独立修正です。installed AGENTS.md が StudyPlanner 等の固定 key を指示する既存問題も残っているため、この段階だけで multi-project の end-to-end isolation が完成したとは扱いません。repository の instruction renderer 修正と、ユーザーの既存設定の再生成・再インストールは別作業です。
+
+Gemini の `--dry-run` は context と予定コマンドだけを表示し、tmux・Mail・CLI を起動しません。model/effort、Codex の sandbox/approval と OAuth、Gemini が REPL 終了後に shell を残す動作は維持します。
+
 ## tmux session
 
 tmux 外から起動すると、新しい named session を作って現在の terminal tab を置き換えます。tmux 内からは current session を rename し、その場で CLI を `exec` します。
@@ -77,7 +91,7 @@ launcher は CLI を起動する前に ORRERY Mail へ identity を登録しま�
 5. 要求名と返された canonical name を比較。不一致なら top-level は明示して tmux session を返却名へ rename、reserved identity は停止
 6. managed agent list と clipboard を更新
 
-`AGENTSTACK_PROJECT_KEY` が未設定、または ORRERY Mail が到達不能でも CLI 自体は preselected name で起動します。ただし mail、reservation、project-scoped dashboard 機能は使えません。
+top-level launcher は project context を先に確定します。ORRERY Mail が到達不能な場合は従来どおり preselected name で CLI を起動しますが、coordination は利用できません。直接呼び出す standalone bootstrap の legacy な key 解決は、この段階では変更しません。
 
 Claude Code hook は session 内登録も記録します。Codex は Claude Code の hook system を持たないため、`agentstack-codex-bootstrap` が起動前の登録と tmux rename を担当します。
 

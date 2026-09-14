@@ -25,6 +25,20 @@ agent-start
 
 The precedence order is an explicit argument, the `fzf` picker, then the current directory.
 
+## Top-level project context
+
+`agent-start`, `agent-start-codex`, and the optional `agent-start-gemini` resolve the selected directory before registration or tmux session creation. Project keys and protected roots left in the parent shell, installed `env.sh`, or an existing tmux server are not authoritative inputs to that selection.
+
+Use `agent-start-codex --project-key KEY DIR` for an explicit namespace; all three launchers accept the same option. Main and linked worktrees share repository identity, while independent clones remain separate. A non-Git directory defaults to its physical path. Continuing a previous non-Git namespace also requires an explicit `--project-key`.
+
+`work_dir` preserves a selected subdirectory, while protected roots cover its whole worktree. An explicit key is a namespace, not a protected pathname. Git metadata and another main checkout are not added as protection roots automatically. Git inspection failures, broken metadata, bare repositories, and roots the legacy colon-delimited format cannot represent are rejected before launch, not hidden by a fallback to another project.
+
+A fresh tmux session receives the resolved values through `new-session -e`, without seeding a new server's global environment with this project. Inside an existing pane, the CLI/bootstrap process environment is updated; migrating session-wide project metadata that could affect other panes is deferred. `AGENTSTACK_PROJECT_CONTEXT=1` is not ownership proof. Never forward a reserved child's context as a top-level override.
+
+This slice migrates only top-level entry and handoff. Standalone bootstrap, registration/session indexes, delegated children, watchers, and Dashboard project ownership remain separate follow-up work. Installed AGENTS.md instructions that name a fixed project such as StudyPlanner are still an open problem, so this slice is not end-to-end multi-project isolation. Repository instruction-renderer changes and regeneration/reinstallation of a user's existing settings are separate operations.
+
+Gemini `--dry-run` prints the context and planned command without starting tmux, Mail, or the CLI. Model/effort settings, Codex sandbox/approval and OAuth behavior, and Gemini's post-REPL shell lifecycle are unchanged.
+
 ## tmux session
 
 When launched from outside tmux, the launcher creates a new named session and replaces the current terminal tab. From inside tmux, it renames the current session and runs the CLI in place with `exec`.
@@ -77,7 +91,7 @@ The launcher registers an identity with ORRERY Mail before starting the CLI.
 5. Compare the requested name with the returned canonical name. On a mismatch, a top-level launch reports it and renames the tmux session to the returned name; a reserved identity stops
 6. Update the managed agent list and clipboard
 
-If `AGENTSTACK_PROJECT_KEY` is unset or ORRERY Mail is unreachable, the CLI itself still starts with the preselected name. Mail, reservations, and project-scoped dashboard features are unavailable, however.
+Top-level launchers first establish project context. When ORRERY Mail is unreachable, the CLI still starts with the preselected name as before, but coordination is unavailable. Legacy key selection in a directly invoked standalone bootstrap is unchanged in this slice.
 
 Claude Code hooks also record registration inside the session. Because Codex does not have Claude Code's hook system, `agentstack-codex-bootstrap` handles registration and tmux renaming before startup.
 
