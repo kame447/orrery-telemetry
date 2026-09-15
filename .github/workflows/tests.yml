@@ -30,6 +30,7 @@ jobs:
           test "$GITHUB_REPOSITORY" = kame447/orrery-telemetry
           BASE=2e8fcc9282fc27a3f078519d5f127337c02ff5da
           BUILDER="$PWD/scripts/issue33_phase5d_prepare.py"
+          FIXER="$PWD/scripts/issue33_phase5d_fixture_fix.py"
           python3 - "$BUILDER" <<'PY'
           from pathlib import Path
           import sys
@@ -66,6 +67,7 @@ jobs:
           git worktree add --detach "$DIR" "$BASE"
           cd "$DIR"
           python3 "$BUILDER" "$DIR"
+          python3 "$FIXER" "$DIR"
           git diff --check
           bash -n hooks/spawn_gemini_preregistered.sh hooks/spawn_gemini_child.sh
           PYTHONPATH=.:packages/agentstack_mail/src python3 -m pytest -q \
@@ -83,6 +85,7 @@ jobs:
             hooks/spawn_gemini_child.sh \
             hooks/spawn_gemini_preregistered.sh \
             tests/test_gemini_launch.py \
+            tests/test_gemini_new_agent.py \
             tests/test_gemini_preregistered_cleanup.py \
             tests/test_phase5_gemini_child_ownership.py | sort)
           ACTUAL=$( { git diff --name-only; git ls-files --others --exclude-standard; } | grep -v '^$' | sort -u)
@@ -91,8 +94,8 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add docs/antigravity.en.md docs/antigravity.md \
             hooks/spawn_gemini_child.sh hooks/spawn_gemini_preregistered.sh \
-            tests/test_gemini_launch.py tests/test_gemini_preregistered_cleanup.py \
-            tests/test_phase5_gemini_child_ownership.py
+            tests/test_gemini_launch.py tests/test_gemini_new_agent.py \
+            tests/test_gemini_preregistered_cleanup.py tests/test_phase5_gemini_child_ownership.py
           git commit -m 'fix: bind Gemini child lifecycle to validated ownership (issue33 phase5d)'
           git push origin HEAD:refs/heads/fix/issue33-gemini-child-ownership
           echo "PHASE5D_HEAD=$(git rev-parse HEAD)"
