@@ -86,6 +86,7 @@ replacement = '''        "AGENTSTACK_HOME": str(home),
         "AGENTSTACK_REGISTER_LIB": str(register_lib),
         "AGENTSTACK_LABEL_PREFIX": "org.agentstack.test.gemini-adapter",
         "AGENTSTACK_HOOKS_DIR": str(hooks_home),
+        "AGENTSTACK_MAIL_HTTP_BEARER_MODE": "disabled",
 '''
 if test.count(anchor) != 1:
     raise SystemExit(f"adapter env anchor count={test.count(anchor)}")
