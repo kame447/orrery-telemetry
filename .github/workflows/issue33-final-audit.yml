@@ -46,13 +46,9 @@ jobs:
                       next_candidates.add(current + part[k:])
                       if current and part and not current.endswith(b'\n') and not part.startswith(b'\n'):
                           next_candidates.add(current + b'\n' + part[k:])
-              # Keep only plausible candidates close to the expected patch size.
-              candidates = {
-                  value for value in next_candidates
-                  if 73000 <= len(value) <= 78000
-              }
+              candidates = next_candidates
               if not candidates:
-                  raise SystemExit('no plausible staged-patch reconstruction remains')
+                  raise SystemExit('no staged-patch reconstruction remains')
 
           exact = [value for value in candidates if hashlib.sha256(value).hexdigest() == target]
           if len(exact) != 1:
