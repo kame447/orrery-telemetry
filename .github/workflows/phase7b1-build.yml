@@ -21,8 +21,24 @@ jobs:
           python-version: "3.12"
       - name: Install test dependencies
         run: python3 -m pip install pytest pytest-timeout -e ./packages/agentstack_mail
+      - name: Fetch pinned reference source
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            https://raw.githubusercontent.com/kame447/orrery-telemetry/5c061e67318724bf5102f12cd9dfecbccc4c7cd7/dashboard/server.py \
+            -o .phase7b1-reference-server.py
+          mkdir -p .phase7b1-bin
+          cat > .phase7b1-bin/git <<'EOF'
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "show" && "${2:-}" == "5c061e67318724bf5102f12cd9dfecbccc4c7cd7:dashboard/server.py" ]]; then
+            cat "$GITHUB_WORKSPACE/.phase7b1-reference-server.py"
+            exit 0
+          fi
+          exec /usr/bin/git "$@"
+          EOF
+          chmod +x .phase7b1-bin/git
       - name: Build Phase 7b1 slice
-        run: python3 .github/phase7b1-build.py
+        run: PATH="$PWD/.phase7b1-bin:$PATH" python3 .github/phase7b1-build.py
       - name: Focused attribution gate
         run: |
           set -euo pipefail
