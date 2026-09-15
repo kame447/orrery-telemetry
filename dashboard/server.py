@@ -167,6 +167,7 @@ HOOKS_DIR = _env_path("AGENTSTACK_HOOKS_DIR", "~/.agentstack/hooks")
 RUNTIME_DIR = _env_path("AGENTSTACK_RUNTIME_DIR", "~/.agentstack/runtime")
 MAIL_HOME = _env_path("AGENTSTACK_MAIL_HOME", "~/.agentstack/mail")
 SIGNALS_DIR = _env_path("AGENTSTACK_SIGNALS_DIR", os.path.join(MAIL_HOME, "signals"))
+_PROJECT_KEY_CACHE: dict = {"signature": None, "value": ""}
 MAIL_WATCHER_LABEL = f"{LABEL_PREFIX}.mail-watcher"
 NOTIFY_DAEMON_LABEL = f"{LABEL_PREFIX}.notify-daemon"
 MAIL_WATCHER_PIDFILE = _env_path(
@@ -228,6 +229,218 @@ def _resolve_version() -> str:
 
 def _project_key() -> str:
     return PROJECT_KEY or VAULT
+
+
+def _normalize_project_key_value(value: object) -> str:
+    """Normalize filesystem keys like Mail while preserving logical names."""
+    if not isinstance(value, str):
+        return ""
+    project_key = value.strip()
+    if not project_key:
+        return ""
+    expanded = os.path.expanduser(project_key)
+    if os.path.isabs(expanded) or os.path.isdir(expanded):
+        return os.path.realpath(expanded)
+    return project_key
+
+
+def _canonical_dashboard_project_key() -> str:
+    """Return the immutable configured Dashboard namespace.
+
+    An installed/configured path is a fallback, not an explicit invocation
+    argument.  Canonicalize Git paths through the shared common-directory rule
+    so a dashboard started from a linked worktree reads and writes the same
+    Mail project as NEW AGENT.  A fully bound established context may carry an
+    intentional logical key unrelated to its repository, and remains intact.
+    """
+    configured = PROJECT_KEY or VAULT
+    live_key = os.environ.get("AGENTSTACK_PROJECT_KEY", "") or os.environ.get(
+        "PROJECT_KEY", ""
+    )
+    signature = (
+        configured,
+        live_key,
+        os.environ.get("AGENTSTACK_PROJECT_CONTEXT", ""),
+        os.environ.get("AGENTSTACK_PROJECT_REPOSITORY", ""),
+        os.environ.get("AGENTSTACK_PROJECT_WORK_DIR", ""),
+    )
+    if signature == _PROJECT_KEY_CACHE.get("signature"):
+        return _PROJECT_KEY_CACHE.get("value", "")
+
+    normalized_configured = _normalize_project_key_value(configured)
+    resolved = normalized_configured
+    established = False
+    bound_work_dir = os.environ.get("AGENTSTACK_PROJECT_WORK_DIR", "").strip()
+    if (
+        configured
+        and _normalize_project_key_value(live_key) == normalized_configured
+        and os.environ.get("AGENTSTACK_PROJECT_CONTEXT") == "1"
+        and bound_work_dir
+        and os.path.isdir(os.path.expanduser(bound_work_dir))
+    ):
+        ok, bound_key = _context_helper_result(
+            "resolve-project-key",
+            os.path.realpath(os.path.expanduser(bound_work_dir)),
+            "/dev/null",
+            "0",
+            "",
+        )
+        established = ok and bound_key == normalized_configured
+        if established:
+            resolved = bound_key
+
+    if not established and configured:
+        configured_path = os.path.realpath(os.path.expanduser(configured))
+        if os.path.isdir(configured_path):
+            ok, fallback_key = _context_helper_result(
+                "resolve-project-key",
+                configured_path,
+                "/dev/null",
+                "0",
+                "",
+            )
+            # A successful non-Git resolution legitimately returns the live
+            # configured key. Operational resolver failure is different: an
+            # installed linked-worktree literal must not silently become a
+            # second Mail namespace when the required helper is unavailable.
+            resolved = fallback_key if ok and fallback_key else ""
+
+    _PROJECT_KEY_CACHE.update(signature=signature, value=resolved)
+    return resolved
+
+
+def _project_context_helper() -> str:
+    """Return the installed/shared resolver path, or an empty string.
+
+    A dashboard-only installation ships this one hook dependency explicitly;
+    source-tree execution uses the repository copy as a final equivalent path.
+    Spawning fails closed when neither exists.
+    """
+    candidates = (
+        os.path.join(os.path.dirname(HERE), "hooks", "project-context.sh"),
+        os.path.join(HOOKS_DIR, "project-context.sh"),
+        os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "hooks", "project-context.sh",
+        ),
+    )
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
+def _context_helper_result(
+        action: str, *args: str, configured_fallback: bool = False,
+) -> tuple[bool, str]:
+    helper = _project_context_helper()
+    if not helper:
+        return False, ""
+    env = os.environ.copy()
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+        env.pop(name, None)
+    if configured_fallback:
+        env["AGENTSTACK_PROJECT_KEY"] = _canonical_dashboard_project_key()
+        env["PROJECT_KEY"] = _canonical_dashboard_project_key()
+        env.pop("AGENTSTACK_PROJECT_CONTEXT", None)
+        env.pop("AGENTSTACK_PROJECT_REPOSITORY", None)
+        env.pop("AGENTSTACK_PROJECT_WORK_DIR", None)
+    try:
+        result = subprocess.run(
+            ["/bin/bash", helper, action, *args],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=env,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False, ""
+    return result.returncode == 0, getattr(result, "stdout", "").strip()
+
+
+def _context_helper_value(action: str, *args: str) -> str:
+    ok, value = _context_helper_result(action, *args)
+    return value if ok else ""
+
+
+def _resolved_work_dir_context(work_dir: str) -> tuple[dict[str, str] | None, str]:
+    """Resolve the one context used by NEW AGENT before any side effect."""
+    helper = _project_context_helper()
+    if not helper:
+        return None, "project context resolver missing; reinstall ORRERY Telemetry"
+    target = os.path.realpath(os.path.expanduser(work_dir))
+    if not os.path.isdir(target):
+        return None, f"dir does not exist: {target}"
+    resolved_ok, project_key = _context_helper_result(
+        "resolve-project-key", target, "/dev/null", "0", "",
+        configured_fallback=True,
+    )
+    if not resolved_ok or not project_key:
+        return None, "project context resolver failed for selected directory"
+    _repo_ok, repository = _context_helper_result("repository-key", target)
+    _worktree_ok, worktree = _context_helper_result("worktree-root", target)
+    if not project_key:
+        return None, "could not resolve project key"
+    roots_ok, protected_roots = _context_helper_result(
+        "resolve-runtime-protected-roots", project_key, target, "/dev/null",
+        configured_fallback=True,
+    )
+    if not roots_ok or not protected_roots:
+        return None, "project protected-root resolution failed for selected directory"
+    return {
+        "project_key": project_key,
+        "repository": repository,
+        "work_dir": worktree or target,
+        "launch_dir": target,
+        "protected_roots": protected_roots,
+    }, ""
+
+
+def _configured_workspace() -> str:
+    """Dashboard NEW AGENT default: configured workspace, never dashboard code."""
+    for value in (
+        os.environ.get("AGENTSTACK_PROJECT_WORK_DIR", ""),
+        PROJECT_KEY,
+        VAULT,
+    ):
+        expanded = os.path.realpath(os.path.expanduser(value)) if value else ""
+        if expanded and os.path.isdir(expanded):
+            return expanded
+    return ""
+
+
+def _context_matches_dashboard_project(context: dict[str, str]) -> bool:
+    """Whether a delegated target can safely inherit the dashboard project."""
+    configured = _canonical_dashboard_project_key()
+    if not configured:
+        return False
+    configured_repository = ""
+    bound_repository = os.environ.get("AGENTSTACK_PROJECT_REPOSITORY", "").strip()
+    if bound_repository and os.path.isdir(bound_repository):
+        configured_repository = os.path.realpath(bound_repository)
+    elif os.path.isdir(os.path.expanduser(configured)):
+        configured_repository = _context_helper_value(
+            "repository-key", os.path.realpath(os.path.expanduser(configured))
+        )
+    if context["repository"]:
+        return bool(configured_repository) and (
+            context["repository"] == configured_repository
+        )
+    workspace = _configured_workspace()
+    if workspace:
+        try:
+            return os.path.commonpath([context["launch_dir"], workspace]) == workspace
+        except ValueError:
+            return False
+    return context["project_key"] == configured
+
+
+def _cwd_matches_dashboard_project(cwd: str) -> bool:
+    """Fail closed unless cwd is bound to this dashboard's project."""
+    if not cwd or not os.path.isdir(cwd):
+        return False
+    context, _error = _resolved_work_dir_context(cwd)
+    return bool(context and _context_matches_dashboard_project(context))
 
 # --- Model-string normalization (read-time, non-destructive) ---------------
 # Each session registers a free-form `model` string, so the same model shows
@@ -936,6 +1149,140 @@ PENDING_RE = re.compile(r"^pending-\d+$")
 # Claude Code native binary の pane_current_command（例 "2.1.259"）
 _VERSION_CMD_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
+
+# Never equal to a normalized project key: NUL cannot occur in one.
+_DURABLE_PROJECT_CONFLICT = "\0conflicting-durable-project"
+
+
+def _runtime_name_binding_project(name: str) -> str:
+    """Return the project named by every durable ownership record for `name`.
+
+    Reads only project metadata (name binding, token `.project` sidecar, child
+    state `project_key`); never inspects owner tokens.  "" means no record
+    exists, which legacy sessions may still pass on live key/cwd evidence.
+    An existing record that is unreadable, names another agent, or carries no
+    usable project, or records that disagree after normalization, yield
+    _DURABLE_PROJECT_CONFLICT so callers reject rather than fall through.
+    """
+    if not _valid(name):
+        return ""
+    projects: set[str] = set()
+
+    binding = os.path.join(
+        RUNTIME_DIR, "name-bindings", f"{_agent_name_comparison_key(name)}.json"
+    )
+    try:
+        with open(binding, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError):
+        return _DURABLE_PROJECT_CONFLICT
+    else:
+        if not isinstance(data, dict) or data.get("agent_name") != name:
+            return _DURABLE_PROJECT_CONFLICT
+        value = _normalize_project_key_value(data.get("project_key"))
+        if not value:
+            return _DURABLE_PROJECT_CONFLICT
+        projects.add(value)
+
+    sidecar_project = _runtime_agent_token_project(name)
+    if sidecar_project == "":
+        return _DURABLE_PROJECT_CONFLICT
+    if sidecar_project is not None:
+        projects.add(sidecar_project)
+
+    state_file = os.path.join(RUNTIME_DIR, "child-agents", f"{name}.json")
+    try:
+        with open(state_file, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError):
+        return _DURABLE_PROJECT_CONFLICT
+    else:
+        if not isinstance(data, dict) or data.get("agent_name", name) != name:
+            return _DURABLE_PROJECT_CONFLICT
+        # Pre-ownership child state has no project_key; that is absence.
+        if "project_key" in data:
+            value = _normalize_project_key_value(data["project_key"])
+            if not value:
+                return _DURABLE_PROJECT_CONFLICT
+            projects.add(value)
+
+    if len(projects) > 1:
+        return _DURABLE_PROJECT_CONFLICT
+    return projects.pop() if projects else ""
+
+
+def _tmux_session_env(name: str, variable: str) -> str:
+    raw = _tmux(["show-environment", "-t", f"={name}", variable]).strip()
+    prefix = f"{variable}="
+    return raw[len(prefix):] if raw.startswith(prefix) else ""
+
+
+def _session_matches_dashboard_project(
+        name: str,
+        session: dict,
+        path_eligibility: dict[str, bool] | None = None,
+) -> bool:
+    if name in INFRA_NAMES or name in WARMUP_NAMES:
+        return True
+    project_key = _canonical_dashboard_project_key()
+    if not project_key:
+        return False
+    session_key = _tmux_session_env(name, "AGENTSTACK_PROJECT_KEY")
+    if not session_key:
+        session_key = _tmux_session_env(name, "PROJECT_KEY")
+    session_key = _normalize_project_key_value(session_key)
+    if session_key and session_key != project_key:
+        return False
+
+    durable_project = _runtime_name_binding_project(name)
+    if durable_project == _DURABLE_PROJECT_CONFLICT:
+        return False
+    if durable_project and durable_project != project_key:
+        return False
+
+    # A matching key alone is not enough when an older/inconsistent tmux
+    # session still points at another repository. Validate every available
+    # bound path, including the live pane cwd, against this Dashboard project.
+    bound_paths = [
+        _tmux_session_env(name, "AGENTSTACK_PROJECT_REPOSITORY"),
+        _tmux_session_env(name, "AGENTSTACK_PROJECT_WORK_DIR"),
+        str(session.get("cwd") or ""),
+    ]
+    checked_path = False
+    for bound_path in bound_paths:
+        if not bound_path or not os.path.isdir(bound_path):
+            continue
+        checked_path = True
+        path_key = os.path.realpath(bound_path)
+        if path_eligibility is None:
+            matches = _cwd_matches_dashboard_project(path_key)
+        elif path_key in path_eligibility:
+            matches = path_eligibility[path_key]
+        else:
+            matches = _cwd_matches_dashboard_project(path_key)
+            path_eligibility[path_key] = matches
+        if not matches:
+            return False
+
+    if session_key or durable_project:
+        return True
+    return checked_path
+
+
+def _live_session_matches_dashboard_project(name: str) -> bool:
+    """True only when an existing name is attributable to this project."""
+    session = tmux_state().get(name)
+    return bool(session and _session_matches_dashboard_project(name, session))
+
+
+def _live_session_conflicts_with_dashboard(name: str) -> bool:
+    """Detect a same-name tmux session owned by another/ambiguous project."""
+    session = tmux_state().get(name)
+    return bool(session and not _session_matches_dashboard_project(name, session))
 
 def classify(name: str, cmd: str, title: str, in_mail: bool,
              program: str | None = None,
@@ -4329,6 +4676,26 @@ def _runtime_agent_token(agent_name: str) -> str:
     except OSError:
         return ""
     return token if token and len(token) <= 4096 else ""
+
+
+def _runtime_agent_token_project(agent_name: str) -> str | None:
+    """Return the token sidecar project, or None for a legacy token."""
+    if not _valid(agent_name):
+        return ""
+    token_key = re.sub(r"[^A-Za-z0-9_.-]", "_", agent_name)
+    path = os.path.join(RUNTIME_DIR, f"agent_token_{token_key}.project")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+        with os.fdopen(fd, encoding="utf-8") as project_file:
+            value = project_file.read(4097).strip()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return ""
+    return _normalize_project_key_value(value) if value and len(value) <= 4096 else ""
 
 
 _SPAWN_LAUNCHES: dict[str, dict] = {}
