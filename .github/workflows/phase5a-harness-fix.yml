@@ -20,7 +20,7 @@ jobs:
           python-version: "3.12"
       - run: brew install tmux uv
       - run: python3 -m pip install pytest pytest-timeout pytest-xdist build -e ./packages/agentstack_mail
-      - name: Replace only the stale global-python test double and verify reservation regressions
+      - name: Preserve real context Python while faking only reservation renewal
         shell: bash
         run: |
           set -euo pipefail
@@ -29,77 +29,29 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           python3 - <<'PY'
           from pathlib import Path
-
           path = Path('tests/test_check_file_reservation.py')
           text = path.read_text()
-
-          helper_start = text.index('    def run_hook_with_unconfigured_product_environment(')
-          helper_end = text.index('    def run_hook(\n', helper_start)
-          helper = '''    def run_hook_with_unconfigured_product_environment(
-              self, root: Path, url: str
-          ) -> subprocess.CompletedProcess[str]:
-              """Run without product project selectors against a real zero-renewal endpoint."""
-              home = root / "home"
-              workspace = home / "workspace"
-              workspace.mkdir(parents=True)
-              workspace = workspace.resolve()
-
-              env = os.environ.copy()
-              for name in tuple(env):
-                  if name.startswith("AGENTSTACK_") or name in {
-                      "PROJECT_KEY",
-                      "MCP_URL",
-                      "MCP_AGENT_MAIL_TOKEN",
-                      "FILE_RESERVATION_RENEW_SECONDS",
-                      "FILE_RESERVATION_RETRY_DELAY_SECONDS",
-                      "TMUX",
-                      "TMUX_PANE",
-                  }:
-                      env.pop(name, None)
-              env.update(
-                  {
-                      "AGENT_NAME": "PluckyEinstein",
-                      "HOME": str(home),
-                      "AGENTSTACK_MCP_URL": url,
-                      "AGENTSTACK_MAIL_HTTP_BEARER_MODE": "disabled",
-                      "FILE_RESERVATION_RETRY_DELAY_SECONDS": "0",
-                  }
-              )
-              payload = json.dumps(
-                  {"cwd": str(workspace), "tool_input": {"file_path": str(workspace / "note.md")}}
-              )
-              return subprocess.run(
-                  ["/bin/bash", str(HOOK)],
-                  input=payload,
-                  text=True,
-                  capture_output=True,
-                  env=env,
-                  cwd=workspace,
-                  check=False,
-                  timeout=10,
-              )
-
+          old = '''            "cat >/dev/null\\n"
+                      "printf '%s\\\\n' 'HOOK_RENEWED: 0'\\n",
           '''
-          text = text[:helper_start] + helper + text[helper_end:]
-
-          test_start = text.index('    def test_unconfigured_defaults_protect_vault_and_block_missing_reservation(')
-          test_end = text.index('    def test_existing_reservation_passes_with_accept_and_without_owner_token', test_start)
-          test_block = '''    def test_unconfigured_defaults_protect_vault_and_block_missing_reservation(
-              self,
-          ) -> None:
-              with tempfile.TemporaryDirectory() as directory, _Server(
-                  lambda _count: (200, _mcp_result(0))
-              ) as server:
-                  result = self.run_hook_with_unconfigured_product_environment(
-                      Path(directory), server.url
-                  )
-
-              self.assertEqual(result.returncode, 2, result.stderr)
-              self.assertIn("FILE RESERVATION REQUIRED", result.stderr)
-
+          new = '''            "if [ \\\"${1-}\\\" = \\\"-\\\" ]; then\\n"
+                      "    shift\\n"
+                      "    script=$(mktemp) || exit 1\\n"
+                      "    trap 'rm -f \\\"$script\\\"' EXIT HUP INT TERM\\n"
+                      "    cat >\\\"$script\\\"\\n"
+                      "    if grep -q 'reservation-guard' \\\"$script\\\"; then\\n"
+                      "        printf '%s\\\\n' 'HOOK_RENEWED: 0'\\n"
+                      "        exit 0\\n"
+                      "    fi\\n"
+                      f"    exec {json.dumps(os.sys.executable)} - \\\"$@\\\" <\\\"$script\\\"\\n"
+                      "fi\\n"
+                      f"exec {json.dumps(os.sys.executable)} \\\"$@\\\"\\n",
           '''
-          path.write_text(text[:test_start] + test_block + text[test_end:])
+          if text.count(old) != 1:
+              raise SystemExit(f'expected shim block once, got {text.count(old)}')
+          path.write_text(text.replace(old, new, 1))
           PY
+          python3 -m py_compile tests/test_check_file_reservation.py
           git diff --check
           PYTHONPATH=.:packages/agentstack_mail/src python3 -m pytest -q \
             tests/test_check_file_reservation.py \
