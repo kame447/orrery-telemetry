@@ -28,7 +28,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = kame447/orrery-telemetry
-          BASE=dffa43f341c390c69de8445def583ca6eaaab1e9
+          BASE=0464e24930c16d3929f7cd30e36261416667eca5
           BUILDER="$PWD/scripts/issue33_phase5e_prepare_v2.py"
           DIR=$(mktemp -d)
           git worktree add --detach "$DIR" "$BASE"
