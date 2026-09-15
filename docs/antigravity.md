@@ -250,3 +250,8 @@ subsequent child.
 Those real-machine observations are evidence for the provider lifecycle. Final
 upstream-ready validation must be repeated after integrating onto the current
 upstream base.
+
+
+### Validated child ownership
+
+委譲Gemini launcherもcore launcherと同じdurable child ownership境界を使います。preregistrationはworktree作成前に対象source workspaceへ結び付け、Dashboard adapterはone-shot handoffをtoken消費前に検証します。reservation release・retire・identity削除は共通のvalidated cleanupへ委譲し、ownershipが変化していた場合はreplacementを削除せず回復用stateを残します。

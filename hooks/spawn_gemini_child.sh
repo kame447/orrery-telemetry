@@ -179,25 +179,16 @@ cleanup_failure() {
       tmux kill-session -t "=$CHILD_NAME" >/dev/null 2>&1 || true
       TMUX_STARTED=false
     fi
-    if [[ "$RESERVED" == true && -n "$CHILD_NAME" && -f "$TOKEN_FILE" && -n "$RESOURCES" ]]; then
-      mail_helper release --project-key "$PROJECT_KEY" --agent-name "$CHILD_NAME" \
-        --token-file "$TOKEN_FILE" --paths "$RESOURCES" >/dev/null 2>&1 || true
-    fi
-    if [[ "$PREREGISTERED" == true && -n "$CHILD_NAME" && -f "$TOKEN_FILE" ]]; then
-      mail_helper retire --project-key "$PROJECT_KEY" --agent-name "$CHILD_NAME" \
-        --token-file "$TOKEN_FILE" >/dev/null 2>&1 || true
-    fi
-    # agentstack-preregister-child also persists a stable per-agent token for
-    # session-bound MCP. On a failure before the child runner takes ownership,
-    # run the normal core cleanup path so that durable token/state does not
-    # survive an aborted launch.
     if [[ "$PREREGISTERED" == true && -n "$CHILD_NAME" && -x "$CLEANUP_HELPER" ]]; then
-      AGENTSTACK_PROJECT_KEY="$PROJECT_KEY" \
-      AGENTSTACK_MCP_URL="$MCP_URL" \
-      AGENTSTACK_MAIL_ENV="$MAIL_ENV" \
-      AGENTSTACK_MAIL_HTTP_BEARER_MODE="$HTTP_BEARER_MODE" \
-      AGENTSTACK_RUNTIME_DIR="$RUNTIME_DIR" \
-        "$CLEANUP_HELPER" "$CHILD_NAME" >/dev/null 2>&1 || true
+      cleanup_dir="$WORK_DIR"
+      [[ "$WORKTREE_CREATED" == true && -d "$WORKTREE_DIR" ]] && cleanup_dir="$WORKTREE_DIR"
+      if ! (cd "$cleanup_dir" && "$CLEANUP_HELPER" "$CHILD_NAME"); then
+        echo "$PROG: validated cleanup refused; preserving child state/worktree for recovery" >&2
+        return
+      fi
+    elif [[ "$PREREGISTERED" == true ]]; then
+      echo "$PROG: cleanup helper unavailable; preserving child state/worktree for recovery" >&2
+      return
     fi
     if [[ "$WORKTREE_CREATED" == true && -n "$WORKTREE_DIR" ]]; then
       git -C "$SOURCE_REPO" worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1 || true
@@ -219,7 +210,7 @@ CHILD_NAME="$(
   AGENTSTACK_MAIL_HTTP_BEARER_MODE="$HTTP_BEARER_MODE" \
     "$PREREGISTER" --project-key "$PROJECT_KEY" --program antigravity \
       --model "$MODEL" --task-description "Delegated Antigravity child" \
-      --token-file-out "$TOKEN_FILE"
+      --work-dir "$WORK_DIR" --token-file-out "$TOKEN_FILE"
 )"
 [[ -n "$CHILD_NAME" ]] || { echo "$PROG: child preregistration returned no name" >&2; exit 1; }
 PREREGISTERED=true
@@ -386,26 +377,18 @@ AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE") \
     --parent $(printf '%q' "$PARENT_NAME") --result-log $(printf '%q' "$RESULT_LOG") \
     --worktree $(printf '%q' "$WORKTREE_DIR") --runner-status "\$child_status" || true
 
-if [[ -n "\$RESOURCES" ]]; then
-  AGENTSTACK_HOME=$(printf '%q' "$AGENTSTACK_HOME_DIR") \
-  AGENTSTACK_MCP_URL=$(printf '%q' "$MCP_URL") \
-  AGENTSTACK_MAIL_ENV=$(printf '%q' "$MAIL_ENV") \
-  AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE") \
-    $(printf '%q' "$PYTHON_BIN") $(printf '%q' "$MAIL_HELPER") release --project-key $(printf '%q' "$PROJECT_KEY") \
-      --agent-name $(printf '%q' "$CHILD_NAME") --token-file $(printf '%q' "$TOKEN_FILE") \
-      --paths "\$RESOURCES" || true
+cleanup_status=0
+if [[ -x $(printf '%q' "$CLEANUP_HELPER") ]]; then
+  $(printf '%q' "$CLEANUP_HELPER") $(printf '%q' "$CHILD_NAME") || cleanup_status=\$?
+else
+  cleanup_status=1
 fi
-
-AGENTSTACK_HOME=$(printf '%q' "$AGENTSTACK_HOME_DIR") \
-AGENTSTACK_MCP_URL=$(printf '%q' "$MCP_URL") \
-AGENTSTACK_MAIL_ENV=$(printf '%q' "$MAIL_ENV") \
-AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE") \
-  $(printf '%q' "$PYTHON_BIN") $(printf '%q' "$MAIL_HELPER") retire --project-key $(printf '%q' "$PROJECT_KEY") \
-    --agent-name $(printf '%q' "$CHILD_NAME") --token-file $(printf '%q' "$TOKEN_FILE") || true
-
-[[ -x $(printf '%q' "$CLEANUP_HELPER") ]] && $(printf '%q' "$CLEANUP_HELPER") || true
-rm -f $(printf '%q' "$TASK_EVENT_FILE") $(printf '%q' "$TOKEN_FILE") $(printf '%q' "$MCP_CONFIG") \
-  $(printf '%q' "$GIT_EXCLUDES_FILE") $(printf '%q' "$RUNNER_FILE")
+if [[ "\$cleanup_status" -eq 0 ]]; then
+  rm -f $(printf '%q' "$TASK_EVENT_FILE") $(printf '%q' "$TOKEN_FILE") \
+    $(printf '%q' "$MCP_CONFIG") $(printf '%q' "$GIT_EXCLUDES_FILE") $(printf '%q' "$RUNNER_FILE")
+else
+  echo "[antigravity] validated cleanup refused; child ownership state retained for recovery" >&2
+fi
 echo "[antigravity] child finished; worktree retained at $(printf '%q' "$WORKTREE_DIR")"
 exit "\$child_status"
 EOF
