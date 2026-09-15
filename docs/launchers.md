@@ -251,3 +251,8 @@ repository にある11件の hook / helper の発火タイミング、caller、b
 ### Pre-registered handoff ownership
 
 事前登録済みchildは、private tokenと実workspaceがdurableなchild ownershipに結び付く場合だけ起動します。Dashboardのone-shot handoffでchild ownerがまだ無い場合は、親がそのworkspaceを所有し、child tokenが同じMail projectで認証できる必要があります。矛盾するchild ownerを親ownerへfallbackしません。linked worktreeではrepository ownershipを維持しつつ、tmux起動前にchildのwork directoryを更新します。
+
+
+### Direct delegated child ownership
+
+legacy direct Claude/Codex spawn pathも、Mail side effectより前に実child workspaceとparent ownershipを検証し、register前にchild nameをlocal claimし、pre-registered childと同じstrong owner recordをpublishします。linked worktreeではtmux起動前にchild workspace contextを更新し、失敗時のrelease・retire・local identity削除は共通validated cleanupへ委譲します。

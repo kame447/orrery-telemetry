@@ -249,3 +249,8 @@ Child cleanup validates the explicit agent identity, private credential, and act
 ### Pre-registered handoff ownership
 
 A pre-registered child is started only after its private token and actual workspace are tied to durable child ownership. For a Dashboard one-shot handoff with no local child owner yet, the parent must own that workspace and the child token must authenticate in the same Mail project. A contradictory child owner never falls back to the parent. Linked worktrees reuse repository ownership but refresh the child work directory before tmux starts.
+
+
+### Direct delegated child ownership
+
+The legacy direct Claude/Codex spawn path validates the parent against the actual child workspace before any Mail side effect, claims the child name locally before registration, and publishes the same strong owner record used by pre-registered children. Linked worktrees refresh the child workspace context before tmux starts. Failure cleanup delegates release, retirement, and local identity deletion to the shared validated cleanup path.
