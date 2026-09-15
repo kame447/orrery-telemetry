@@ -266,3 +266,65 @@ def test_preflight_port_skip_switch_accepts_an_unprobeable_port(tmp_path):
 
     assert "could not determine whether ORRERY Mail port" not in result.stderr
     assert "preflight: passed" in result.stdout
+
+
+def test_explicit_project_key_is_selected_before_stale_ambient_project(tmp_path):
+    env = _env_with_working_deps(tmp_path)
+    stale = tmp_path / "stale-project"
+    explicit = tmp_path / "explicit-project"
+    stale.mkdir()
+    explicit.mkdir()
+    env.update(
+        {
+            "AGENTSTACK_PROJECT_KEY": str(stale),
+            "PROJECT_KEY": str(stale),
+            "AGENTSTACK_PROTECTED_ROOTS": str(stale),
+            "AGENTSTACK_PREFLIGHT_SKIP_PORT": "1",
+        }
+    )
+
+    result = _run(
+        env,
+        "--dashboard-only",
+        "--dry-run",
+        "--project-key",
+        str(explicit),
+    )
+
+    # A later optional provisioning dependency may be absent in this minimal
+    # fixture. The project selection itself must already be deterministic.
+    assert f"project key: {explicit.resolve()}" in result.stdout
+    assert f"project key: {stale.resolve()}" not in result.stdout
+
+
+def test_installed_project_fallback_is_not_parsed_before_python_preflight(tmp_path):
+    fake_bin = _minimal_path(tmp_path, os_name="Linux")
+    _write_command(fake_bin, "git", "#!/bin/sh\nexit 0\n")
+    _write_command(fake_bin, "tmux", "#!/bin/sh\nexit 0\n")
+    old_python = _write_command(
+        fake_bin,
+        "python-old",
+        """#!/bin/sh
+case "$*" in
+  *'sys.version_info[:3]'*) printf '%s\n' 3.9.18; exit 0 ;;
+  *) exit 97 ;;
+esac
+""",
+    )
+    env = _base_env(tmp_path, fake_bin)
+    env.pop("AGENTSTACK_PROJECT_KEY", None)
+    env.pop("PROJECT_KEY", None)
+    env["AGENTSTACK_PYTHON"] = str(old_python)
+    env["AGENTSTACK_PREFLIGHT_SKIP_PORT"] = "1"
+    install = pathlib.Path(env["AGENTSTACK_HOME"])
+    install.mkdir(parents=True)
+    (install / "env.sh").write_text(
+        "export AGENTSTACK_PROJECT_KEY='/installed/project'\n",
+        encoding="utf-8",
+    )
+
+    result = _run(env, "--dry-run")
+
+    assert result.returncode != 0
+    assert "AGENTSTACK_PYTHON must be Python 3.11 or newer" in result.stderr
+    assert "project key is required on first install" not in result.stderr
