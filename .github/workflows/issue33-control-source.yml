@@ -1,0 +1,24 @@
+name: Issue 33 control source
+on:
+  push:
+    branches: [fix/issue33-dashboard-control-isolation]
+    paths: [.github/workflows/issue33-control-source.yml]
+permissions:
+  contents: read
+jobs:
+  export:
+    if: github.repository == 'kame447/orrery-telemetry'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Archive exact source
+        run: git archive HEAD | gzip > "$RUNNER_TEMP/control-source.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue33-control-source
+          path: ${{ runner.temp }}/control-source.tar.gz
+          retention-days: 1
+          compression-level: 0
