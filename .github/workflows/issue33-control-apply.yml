@@ -38,8 +38,9 @@ jobs:
               with urllib.request.urlopen(req,timeout=20) as r: out.extend(base64.b64decode(json.load(r)['content']))
           open('/tmp/control.patch','wb').write(out)
           PY
-          git apply --recount --check /tmp/control.patch
-          git apply --recount /tmp/control.patch
+          patch --dry-run --batch --fuzz=3 -p1 < /tmp/control.patch
+          patch --batch --fuzz=3 -p1 < /tmp/control.patch
+          test ! -e dashboard/server.py.rej
       - name: Focused gate
         shell: bash
         run: |
