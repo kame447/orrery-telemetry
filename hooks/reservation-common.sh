@@ -116,6 +116,26 @@ except Exception:
             fi
         fi
     fi
+
+    # Protection follows the validated invocation/owner context, never the hook
+    # process cwd or an installed/ambient AGENTSTACK_PROTECTED_ROOTS left by a
+    # different repository. Keep the list as JSON so path separators and ':'
+    # in a directory name are not reinterpreted as legacy list syntax.
+    RESERVATION_PROTECTED_ROOTS_JSON="$(
+        "${AGENTSTACK_PYTHON:-python3}" - "$context_json" <<'PY'
+import json
+import sys
+try:
+    data = json.loads(sys.argv[1])
+    roots = data["protected_roots"]
+except (KeyError, TypeError, ValueError):
+    raise SystemExit(1)
+if not isinstance(roots, list) or not roots or not all(isinstance(root, str) and root for root in roots):
+    raise SystemExit(1)
+print(json.dumps(roots, separators=(",", ":")))
+PY
+    )" || return 2
+    export RESERVATION_PROTECTED_ROOTS_JSON
     return 0
 }
 
@@ -165,7 +185,7 @@ legacy_bearer_enabled() {
 # RESERVATION_PROJECT_KEY from an Edit/Write hook document. Return 1 for the
 # intentional no-op cases (no file or a file outside all protected roots).
 reservation_resolve_tool_context() {
-    local tool_document="$1"
+    local tool_document="$1" raw_file_path="" resolved=""
     SESSION_ID=$(printf '%s' "$tool_document" | python3 -c '
 import json, sys
 try:
@@ -174,51 +194,74 @@ except Exception:
     print("")
 ' 2>/dev/null || echo "")
     export AGENTSTACK_SESSION_ID="$SESSION_ID"
-    FILE_PATH=$(printf '%s' "$tool_document" | python3 -c '
+    raw_file_path=$(printf '%s' "$tool_document" | python3 -c '
 import json, sys
 try:
     data = json.loads(sys.stdin.read())
     tool_input = data.get("tool_input", {})
-    print(tool_input.get("file_path", tool_input.get("path", "")))
+    value = tool_input.get("file_path", tool_input.get("path", ""))
+    print(value if isinstance(value, str) else "")
 except Exception:
     print("")
 ' 2>/dev/null || echo "")
-    [ -n "$FILE_PATH" ] || return 1
+    [ -n "$raw_file_path" ] || return 1
 
-    if [[ "$FILE_PATH" == /* ]]; then
-        :
-    elif [[ "$FILE_PATH" == "~/"* ]]; then
-        FILE_PATH="$HOME/${FILE_PATH:2}"
-    else
-        FILE_PATH="$(pwd)/$FILE_PATH"
-    fi
-
-    MATCHED_ROOT=""
-    if [[ -n "$PROTECTED_ROOTS" ]]; then
-        local old_ifs="$IFS"
-        local root
-        IFS=":"
-        for root in $PROTECTED_ROOTS; do
-            root="$(expand_path "$root")"
-            [[ -z "$root" ]] && continue
-            [[ "$root" != "/" ]] && root="${root%/}"
-            case "$FILE_PATH" in
-                "$root"|"$root/"*)
-                    MATCHED_ROOT="$root"
-                    break
-                    ;;
-            esac
-        done
-        IFS="$old_ifs"
-    fi
-    [ -n "$MATCHED_ROOT" ] || return 1
-
-    REL_PATH="${FILE_PATH#$MATCHED_ROOT/}"
-    if [[ "$REL_PATH" == "$FILE_PATH" ]]; then
-        REL_PATH="$(basename "$FILE_PATH")"
-    fi
+    # Resolve project/workspace ownership before deciding whether this path is
+    # protected. Doing the root check first lets an ambient root from repository
+    # A silently exempt an Edit whose hook payload actually belongs to B.
     reservation_resolve_lookup_context "$tool_document"
     [ "$?" -eq 0 ] || return 2
+
+    resolved="$(QUERY_RAW_PATH="$raw_file_path" \
+        QUERY_WORK_DIR="$AGENTSTACK_LOOKUP_WORK_DIR" \
+        QUERY_ROOTS_JSON="$RESERVATION_PROTECTED_ROOTS_JSON" \
+        QUERY_HOME="$HOME" "${AGENTSTACK_PYTHON:-python3}" - <<'PY'
+import json
+import os
+from pathlib import Path
+
+raw = os.environ["QUERY_RAW_PATH"]
+work_dir = Path(os.environ["QUERY_WORK_DIR"])
+home = Path(os.environ["QUERY_HOME"])
+try:
+    roots = [Path(value).resolve() for value in json.loads(os.environ["QUERY_ROOTS_JSON"])]
+except Exception:
+    raise SystemExit(2)
+if not roots:
+    raise SystemExit(2)
+if raw.startswith("~/"):
+    candidate = home / raw[2:]
+else:
+    path = Path(raw)
+    candidate = path if path.is_absolute() else work_dir / path
+candidate = candidate.resolve()
+for root in roots:
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError:
+        continue
+    rel = candidate.name if not relative.parts else relative.as_posix()
+    print(candidate)
+    print(root)
+    print(rel)
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+    )"
+    case "$?" in
+        0) ;;
+        1) return 1 ;;
+        *) return 2 ;;
+    esac
+    case "$resolved" in
+        *$'\n'*$'\n'*) ;;
+        *) return 2 ;;
+    esac
+    FILE_PATH="${resolved%%$'\n'*}"
+    resolved="${resolved#*$'\n'}"
+    MATCHED_ROOT="${resolved%%$'\n'*}"
+    REL_PATH="${resolved#*$'\n'}"
+    [ -n "$FILE_PATH" ] && [ -n "$MATCHED_ROOT" ] && [ -n "$REL_PATH" ] || return 2
     return 0
 }
 
