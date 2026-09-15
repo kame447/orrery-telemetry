@@ -151,9 +151,9 @@ dangerous command pattern の検査は `AGENTSTACK_MONITOR_DANGER_CHECK=1` の�
 
 ### `watch_agent_mail_signals.sh`
 
-`fswatch` があれば event watch、なければ2秒 polling を使います。signal file は server-owned dirty bit として削除せず、runtime の delivery state と短期 lease で同じ `(agent, message)` の重複注入を抑えます。30秒の periodic scan が取りこぼしを救済します。
+`fswatch` があれば event watch、なければ2秒 polling を使います。runtime の delivery state と短期 lease は `(project, agent, message)` ごとに重複注入を抑えます。配送成功後は per-message signal を削除し、旧形式の server-owned dirty bit は残します。30秒の periodic scan が取りこぼしを救済します。
 
-配送先は agent 名と完全一致する tmux session だけです。bare shell や無関係 session を避け、通知 text を literal send した後、submit を別 call の `C-m` で送ります。tmux call は timeout 付き worker に分離し、server stall が watcher 全体を止めないようにします。
+配送先は agent 名と完全一致し、signal の canonical project と persisted owner が実 workspace 上で一致する tmux session だけです。新しい signal は canonical `project_key` を持ち、旧 signal は Mail project resource から解決します。project が不明・不一致なら pane を capture / inject せず signal を残します。通知 text を literal send した後、submit を別 call の `C-m` で送り、tmux call は timeout 付き worker に分離します。
 
 ## Codex との違い
 

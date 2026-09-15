@@ -21,6 +21,7 @@ below deliberately records that remaining unobservable seam.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -1214,8 +1215,8 @@ def _instrumented_watcher_functions() -> tuple[str, str]:
         name: _extract_shell_function(source, name) for name in _WATCHER_FUNCTIONS
     }
     delivery = functions["deliver_worker"]
-    success = '    state_mark_result "$agent_name" "$msg_key" "success" "watcher"'
-    release = '    release_delivery_lease "$agent_name" "$msg_key"'
+    success = '    state_mark_result "$signal_project_key" "$agent_name" "$msg_key" "success" "watcher"'
+    release = '    release_delivery_lease "$signal_project_key" "$agent_name" "$msg_key"'
     unlink = '        rm -f "$signal_file" 2>/dev/null || true'
     assert delivery.count(success) == 1
     assert delivery.count(unlink) == 1
@@ -1247,11 +1248,11 @@ def _instrumented_watcher_functions() -> tuple[str, str]:
 
 def _watcher_shell(functions: str, *, deliver: bool) -> str:
     action = (
-        'acquire_delivery_lease "$TEST_AGENT" "$TEST_MSG_KEY"\n'
-        'deliver_worker "$TEST_SIGNAL" "$TEST_AGENT" "$TEST_MSG_KEY" '
+        'acquire_delivery_lease "$TEST_PROJECT" "$TEST_AGENT" "$TEST_MSG_KEY"\n'
+        'deliver_worker "$TEST_SIGNAL" "$TEST_PROJECT" "$TEST_AGENT" "$TEST_MSG_KEY" '
         '"GreenCastle" "D12 completion delivery" "high" "1"\n'
         if deliver
-        else 'state_should_attempt "$TEST_AGENT" "$TEST_MSG_KEY"\n'
+        else 'state_should_attempt "$TEST_PROJECT" "$TEST_AGENT" "$TEST_MSG_KEY"\n'
     )
     return f"""set -euo pipefail
 STATE_FILE="$TEST_STATE_FILE"
@@ -1259,8 +1260,10 @@ LEASE_DIR="$TEST_LEASE_DIR"
 RETRY_COOLDOWN=30
 LEASE_TTL=120
 TMUX_TIMEOUT=1
+PYTHON_BIN="${{PYTHON_BIN:-python3}}"
 mkdir -p "$LEASE_DIR"
 log() {{ :; }}
+resolve_owned_project_for_session() {{ printf '%s\n' "$TEST_PROJECT"; }}
 crash_if() {{
     if [[ "${{CRASH_POINT:-}}" == "$1" ]]; then
         kill -KILL "$$"
@@ -1280,6 +1283,7 @@ run_to() {{
             fi
             return 0
             ;;
+        display-message) printf '%s\n' "$TEST_SESSION_CWD"; return 0 ;;
         capture-pane) printf 'Claude ❯\n'; return 0 ;;
         send-keys) return 0 ;;
         *) return 98 ;;
@@ -1298,6 +1302,8 @@ def _run_watcher_state_machine(
     fail_has_session: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
     functions, _source = _instrumented_watcher_functions()
+    project = str(signal_payload.get("project_key") or signal_payload.get("project") or "")
+    assert project, "watcher state-machine fixture requires a project identity"
     agent = str(signal_payload["agent"])
     msg_key = str(signal_payload["message"]["id"])
     signal_path = root / "signals" / "agents" / agent / f"{msg_key}.signal"
@@ -1309,8 +1315,10 @@ def _run_watcher_state_machine(
     command_log = command_log or root / "fake-external-commands.log"
     environment = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "TEST_PROJECT": project,
         "TEST_AGENT": agent,
         "TEST_MSG_KEY": msg_key,
+        "TEST_SESSION_CWD": str(root),
         "TEST_SIGNAL": str(signal_path),
         "TEST_STATE_FILE": str(state_file),
         "TEST_LEASE_DIR": str(lease_dir),
@@ -1326,7 +1334,8 @@ def _run_watcher_state_machine(
         timeout=20,
         check=False,
     )
-    return completed, signal_path, state_file, lease_dir / f"{agent}-{msg_key}.lock"
+    scope = hashlib.sha256(project.encode()).hexdigest()[:16]
+    return completed, signal_path, state_file, lease_dir / f"{scope}-{agent}-{msg_key}.lock"
 
 
 def _state_should_attempt(
@@ -1338,8 +1347,10 @@ def _state_should_attempt(
         ["/bin/bash", "-c", _watcher_shell(functions, deliver=False)],
         env={
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "TEST_PROJECT": str(signal_payload.get("project_key") or signal_payload.get("project") or ""),
             "TEST_AGENT": str(signal_payload["agent"]),
             "TEST_MSG_KEY": str(signal_payload["message"]["id"]),
+            "TEST_SESSION_CWD": str(root),
             "TEST_SIGNAL": str(root / "unused.signal"),
             "TEST_STATE_FILE": str(root / "runtime" / "notify-state.json"),
             "TEST_LEASE_DIR": str(root / "runtime" / "notify-locks"),
@@ -1356,10 +1367,10 @@ def _state_should_attempt(
 def _assert_injection_commands(commands: list[str], *, expected_count: int) -> None:
     injection_sequence = []
     for command in commands:
-        if "send-keys -t BlueLake -l " in command:
+        if "send-keys -t =BlueLake -l " in command:
             assert "D12 completion delivery" in command
             injection_sequence.append("prompt")
-        elif command.endswith("send-keys -t BlueLake C-m"):
+        elif command.endswith("send-keys -t =BlueLake C-m"):
             injection_sequence.append("submit")
     assert injection_sequence == ["prompt", "submit"] * expected_count
 
@@ -1369,6 +1380,7 @@ def test_d12_selected_parity_watcher_crash_windows_are_durable_and_hermetic(
 ) -> None:
     signal_payload = {
         "project": "d12-hermetic-project",
+        "project_key": "d12-hermetic-project",
         "agent": "BlueLake",
         "message": {
             "id": 12001,
@@ -1403,14 +1415,14 @@ def test_d12_selected_parity_watcher_crash_windows_are_durable_and_hermetic(
             if state_file.exists()
             else {}
         )
-        key = f"BlueLake:{signal_payload['message']['id']}"
+        key = f"{signal_payload['project_key']}:BlueLake:{signal_payload['message']['id']}"
         assert (state.get(key, {}).get("last_result") == "success") is has_success
         commands = (
             (case_root / "fake-external-commands.log")
             .read_text(encoding="utf-8")
             .splitlines()
         )
-        assert commands[-1].endswith("send-keys -t BlueLake C-m")
+        assert commands[-1].endswith("send-keys -t =BlueLake C-m")
         _assert_injection_commands(commands, expected_count=1)
 
         if crash_point == "after_external_injection":
@@ -1446,6 +1458,7 @@ def test_d12_selected_parity_watcher_failure_cooldown_retries_without_loss(
 ) -> None:
     signal_payload = {
         "project": "d12-hermetic-project",
+        "project_key": "d12-hermetic-project",
         "agent": "BlueLake",
         "message": {
             "id": 12002,
@@ -1464,7 +1477,7 @@ def test_d12_selected_parity_watcher_failure_cooldown_retries_without_loss(
     assert signal_path.exists()
     assert not lease_path.exists()
     state = json.loads(state_file.read_text(encoding="utf-8"))
-    key = f"BlueLake:{signal_payload['message']['id']}"
+    key = f"{signal_payload['project_key']}:BlueLake:{signal_payload['message']['id']}"
     assert state[key]["last_result"] == "session_not_found"
     assert _state_should_attempt(case_root, signal_payload).returncode == 1
 
@@ -1520,15 +1533,15 @@ def test_d12_selected_parity_source_order_exposes_external_application_seam() ->
         == 1
     )
     handler = _extract_shell_function(source, "handle_signal_file")
-    should_attempt = handler.index('state_should_attempt "$agent_name" "$msg_key"')
-    acquire = handler.index('acquire_delivery_lease "$agent_name" "$msg_key"')
-    worker = handler.index('deliver_worker "$signal_file" "$agent_name" "$msg_key"')
+    should_attempt = handler.index('state_should_attempt "$signal_project_key" "$agent_name" "$msg_key"')
+    acquire = handler.index('acquire_delivery_lease "$signal_project_key" "$agent_name" "$msg_key"')
+    worker = handler.index('deliver_worker "$signal_file" "$signal_project_key" "$agent_name" "$msg_key"')
     assert should_attempt < acquire < worker
     delivery = _extract_shell_function(source, "deliver_worker")
-    submit = delivery.index('tmux send-keys -t "$session_name" C-m')
+    submit = delivery.index('tmux send-keys -t "=$session_name" C-m')
     success = delivery.index(
-        'state_mark_result "$agent_name" "$msg_key" "success" "watcher"'
+        'state_mark_result "$signal_project_key" "$agent_name" "$msg_key" "success" "watcher"'
     )
-    release = delivery.index('release_delivery_lease "$agent_name" "$msg_key"', success)
+    release = delivery.index('release_delivery_lease "$signal_project_key" "$agent_name" "$msg_key"', success)
     unlink = delivery.index('rm -f "$signal_file"', release)
     assert submit < success < release < unlink
