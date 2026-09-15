@@ -31,8 +31,9 @@ INDEX = ROOT / "dashboard" / "index.html"
 
 
 def _load_server(runtime_dir: pathlib.Path):
-    saved = {k: os.environ.get(k) for k in ("AGENTSTACK_RUNTIME_DIR",)}
+    saved = {k: os.environ.get(k) for k in ("AGENTSTACK_RUNTIME_DIR", "AGENTSTACK_PROJECT_KEY")}
     os.environ["AGENTSTACK_RUNTIME_DIR"] = str(runtime_dir)
+    os.environ["AGENTSTACK_PROJECT_KEY"] = "substitution-fixture"
     sys.path.insert(0, str(ROOT / "dashboard"))
     try:
         module_name = f"srv_subst_{runtime_dir.name}"
@@ -109,7 +110,8 @@ def test_the_shell_helper_writes_what_the_server_reads():
         )
         result = subprocess.run(
             ["bash", "-c", script],
-            env={**os.environ, "AGENTSTACK_RUNTIME_DIR": str(runtime)},
+            env={**os.environ, "AGENTSTACK_RUNTIME_DIR": str(runtime),
+                 "AGENTSTACK_PROJECT_KEY": "substitution-fixture"},
             text=True,
             capture_output=True,
         )
@@ -117,7 +119,7 @@ def test_the_shell_helper_writes_what_the_server_reads():
         store = runtime / "name-substitutions.json"
         assert store.is_file(), result.stderr
         written = json.loads(store.read_text(encoding="utf-8"))
-        assert written["GreenLake"]["requested"] == "Zesty-Einstein"
+        assert written["projects"]["substitution-fixture"]["GreenLake"]["requested"] == "Zesty-Einstein"
 
         server = _load_server(runtime)
         assert server._name_substitutions() == {"GreenLake": "Zesty-Einstein"}
@@ -132,7 +134,8 @@ def test_the_shell_helper_records_nothing_when_the_name_was_granted():
         )
         result = subprocess.run(
             ["bash", "-c", script],
-            env={**os.environ, "AGENTSTACK_RUNTIME_DIR": str(runtime)},
+            env={**os.environ, "AGENTSTACK_RUNTIME_DIR": str(runtime),
+                 "AGENTSTACK_PROJECT_KEY": "substitution-fixture"},
             text=True,
             capture_output=True,
         )
