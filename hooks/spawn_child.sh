@@ -2002,6 +2002,18 @@ if [[ "$PARENT_NAME" == "unknown" || -z "$PARENT_NAME" ]]; then
     exit 1
 fi
 
+if ! declare -F ags_apply_owned_workspace >/dev/null 2>&1; then
+    echo "Error: shared registration ownership helper is unavailable" >&2
+    exit 1
+fi
+if ! ags_apply_owned_workspace "$PARENT_NAME" "$WORK_DIR"; then
+    echo "Error: parent '$PARENT_NAME' does not own child workspace: $WORK_DIR" >&2
+    exit 1
+fi
+PROJECT_KEY="$AGENTSTACK_PROJECT_KEY"
+DIRECT_PARENT_CONTEXT_JSON="$AGENTSTACK_PROJECT_CONTEXT_JSON"
+unset AGS_OWNED_REGISTRATION_TOKEN
+
 # --- Legacy transport bearer (native ORRERY Mail deliberately has none) ---
 if legacy_http_bearer_enabled; then
     TOKEN=$(get_agentstack_token 2>/dev/null || true)
@@ -2185,7 +2197,12 @@ pick_available_child_agent_name() {
         candidate="$(ags_pick_adjective_scientist_name)" || return 1
         name_status="$(child_agent_name_status "$candidate")"
         case "$name_status" in
-            available) printf '%s\n' "$candidate"; return 0 ;;
+            available)
+                if declare -F ags_local_agent_name_conflicts >/dev/null 2>&1 &&                    ags_local_agent_name_conflicts "$PROJECT_KEY" "$candidate" candidate; then
+                    unknowns=0
+                    continue
+                fi
+                printf '%s\n' "$candidate"; return 0 ;;
             occupied)  unknowns=0 ;;
             *)
                 unknowns=$((unknowns + 1))
@@ -2203,7 +2220,12 @@ pick_available_child_agent_name() {
         candidate="${adjective}-${i}-${scientist}"
         name_status="$(child_agent_name_status "$candidate")"
         case "$name_status" in
-            available) printf '%s\n' "$candidate"; return 0 ;;
+            available)
+                if declare -F ags_local_agent_name_conflicts >/dev/null 2>&1 &&                    ags_local_agent_name_conflicts "$PROJECT_KEY" "$candidate" candidate; then
+                    unknowns=0
+                    continue
+                fi
+                printf '%s\n' "$candidate"; return 0 ;;
             occupied)  unknowns=0 ;;
             *)
                 unknowns=$((unknowns + 1))
@@ -2273,6 +2295,16 @@ TOKEN_HANDOFF_DIR="$RUNTIME_DIR/spawn-tokens"
 TOKEN_NONCE="$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
 DIRECT_ONE_SHOT_TOKEN_FILE="$TOKEN_HANDOFF_DIR/direct.$$.${TOKEN_NONCE}.token"
 generate_child_token_file "$DIRECT_ONE_SHOT_TOKEN_FILE"
+DIRECT_REGISTRATION_TOKEN="$(ags_read_private_registration_token "$DIRECT_ONE_SHOT_TOKEN_FILE")" || {
+    rm -f "$DIRECT_ONE_SHOT_TOKEN_FILE"
+    echo "Error: generated child owner token is unreadable" >&2
+    exit 1
+}
+if ! ags_begin_registration_ownership "$DIRECT_PARENT_CONTEXT_JSON"     "$CHILD_NAME_CANDIDATE" "$DIRECT_REGISTRATION_TOKEN" direct-child candidate; then
+    rm -f "$DIRECT_ONE_SHOT_TOKEN_FILE"
+    echo "Error: child identity '$CHILD_NAME_CANDIDATE' was claimed concurrently" >&2
+    exit 1
+fi
 REGISTER_ARGS=$(python3 -c '
 import json
 import pathlib
@@ -2291,11 +2323,13 @@ print(json.dumps(args))
     "$DIRECT_ONE_SHOT_TOKEN_FILE" "$CHILD_NAME_CANDIDATE")
 
 if ! REGISTER_RESULT=$(call_mcp "register_agent" "$REGISTER_ARGS"); then
+    ags_release_registration_ownership
     rm -f "$DIRECT_ONE_SHOT_TOKEN_FILE"
     echo "Error: register_agent request failed" >&2
     exit 1
 fi
 if printf '%s' "$REGISTER_RESULT" | mcp_response_has_error; then
+    ags_release_registration_ownership
     rm -f "$DIRECT_ONE_SHOT_TOKEN_FILE"
     echo "Error: register_agent returned an error" >&2
     exit 1
@@ -2304,11 +2338,26 @@ CHILD_NAME="$(printf '%s' "$REGISTER_RESULT" | mcp_extract_agent_name)"
 
 if [[ -z "$CHILD_NAME" || ! "$CHILD_NAME" =~ ^[A-Za-z0-9_.-]+$ ]]; then
     echo "Error: register_agent returned no valid child agent name" >&2
+    ags_release_registration_ownership
     rm -f "$DIRECT_ONE_SHOT_TOKEN_FILE"
     exit 1
 fi
 if [[ "$CHILD_NAME" != "$CHILD_NAME_CANDIDATE" ]]; then
     echo "[spawn_child] register_agent normalized '$CHILD_NAME_CANDIDATE' to actual identity '$CHILD_NAME'" >&2
+    if ags_local_agent_name_conflicts "$PROJECT_KEY" "$CHILD_NAME" substitution; then
+        ags_release_registration_ownership
+        rm -f "$DIRECT_ONE_SHOT_TOKEN_FILE"
+        echo "Error: server-returned child identity '$CHILD_NAME' conflicts with local ownership" >&2
+        exit 1
+    fi
+fi
+DIRECT_EFFECTIVE_TOKEN="$(printf '%s' "$REGISTER_RESULT" | ags_extract_registration_token)"
+[[ -n "$DIRECT_EFFECTIVE_TOKEN" ]] || DIRECT_EFFECTIVE_TOKEN="$DIRECT_REGISTRATION_TOKEN"
+if ! ags_commit_registration_ownership "$DIRECT_PARENT_CONTEXT_JSON"     "$CHILD_NAME_CANDIDATE" "$CHILD_NAME" "$DIRECT_EFFECTIVE_TOKEN" direct-child; then
+    ags_release_registration_ownership
+    rm -f "$DIRECT_ONE_SHOT_TOKEN_FILE"
+    echo "Error: could not publish verified ownership for '$CHILD_NAME'" >&2
+    exit 1
 fi
 
 # Adopt the token the server persisted, not the one we sent. Legacy servers
@@ -2323,6 +2372,8 @@ if ! CHILD_TOKEN_FILE="$(
             "$DIRECT_ONE_SHOT_TOKEN_FILE"
 )"; then
     rm -f "$DIRECT_ONE_SHOT_TOKEN_FILE"
+    (cd "$WORK_DIR" && CHILD_REGISTRATION_TOKEN="$DIRECT_EFFECTIVE_TOKEN" \
+        /bin/bash "$HOOKS_DIR/cleanup-child-agent.sh" "$CHILD_NAME") >/dev/null 2>&1 || true
     echo "Error: failed to persist the registered child token" >&2
     exit 1
 fi
@@ -2341,41 +2392,13 @@ cleanup_on_failure() {
         tmux kill-session -t "=$CHILD_NAME" >/dev/null 2>&1 || true
     fi
     if [[ -n "${CHILD_NAME:-}" ]]; then
-        echo "[spawn_child] cleanup: retiring $CHILD_NAME and releasing reservations" >&2
-        # 予約解放
-        if [[ -n "${RESOURCES:-}" ]]; then
-            local release_args
-            release_args=$(python3 -c "
-import json, sys
-print(json.dumps({'project_key': sys.argv[1], 'agent_name': sys.argv[2]}))
-" "$PROJECT_KEY" "$CHILD_NAME") 2>/dev/null || true
-            call_mcp "release_file_reservations" "$release_args" > /dev/null 2>&1 || true
-        fi
-        # エージェント retire
-        if [[ -s "${CHILD_TOKEN_FILE:-}" ]]; then
-            retire_agent_with_token_file "$CHILD_NAME" "$CHILD_TOKEN_FILE" > /dev/null 2>&1 || true
+        cleanup_dir="$WORK_DIR"
+        if ! (cd "$cleanup_dir" && /bin/bash "$HOOKS_DIR/cleanup-child-agent.sh" "$CHILD_NAME"); then
+            echo "[spawn_child] validated cleanup refused; preserving child state/worktree for recovery" >&2
+            return
         fi
     fi
-    # worktree も作っていれば撤去
     cleanup_worktree
-    rm -f "${CHILD_TOKEN_FILE:-}" "$CHILD_STATE_DIR/${CHILD_NAME:-}.json"
-    if [[ -n "${CHILD_NAME:-}" && -f "$MANAGED_FILE" ]]; then
-        python3 - "$MANAGED_FILE" "$CHILD_NAME" <<'PY' 2>/dev/null || true
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-name = sys.argv[2]
-try:
-    lines = path.read_text(encoding="utf-8").splitlines()
-except OSError:
-    raise SystemExit(0)
-path.write_text(
-    "\n".join(line for line in lines if line != name) + "\n",
-    encoding="utf-8",
-)
-PY
-    fi
 }
 trap cleanup_on_failure EXIT
 
@@ -2421,18 +2444,6 @@ else:
 
     if [[ "$HAS_CONFLICT" == "yes" ]]; then
         echo "Error: resource conflict detected; aborting spawn." >&2
-        # クリーンアップ: 部分成功した予約を解放 + 子エージェントを retire
-        RELEASE_ARGS=$(python3 -c "
-import json, sys
-print(json.dumps({'project_key': sys.argv[1], 'agent_name': sys.argv[2]}))
-" "$PROJECT_KEY" "$CHILD_NAME")
-        call_mcp "release_file_reservations" "$RELEASE_ARGS" > /dev/null 2>&1 || true
-        if [[ -s "${CHILD_TOKEN_FILE:-}" ]]; then
-            retire_agent_with_token_file "$CHILD_NAME" "$CHILD_TOKEN_FILE" > /dev/null 2>&1 || true
-        fi
-        echo "[spawn_child] Released reservations and retired $CHILD_NAME" >&2
-        rm -f "$CHILD_TOKEN_FILE" "$CHILD_STATE_DIR/$CHILD_NAME.json"
-        SPAWN_COMPLETED=true  # cleanup already completed explicitly above
         exit 21
     fi
 fi
@@ -2445,6 +2456,12 @@ if [[ "$USE_WORKTREE" == true ]]; then
         exit 1
     fi
     WORK_DIR="$WORKTREE_DIR"
+    if ! ags_apply_owned_workspace "$CHILD_NAME" "$WORK_DIR" "$CHILD_TOKEN_FILE"; then
+        echo "[spawn_child] created worktree does not match child ownership" >&2
+        exit 1
+    fi
+    unset AGS_OWNED_REGISTRATION_TOKEN
+    PROJECT_KEY="$AGENTSTACK_PROJECT_KEY"
     echo "[spawn_child] WORK_DIR overridden to worktree: $WORK_DIR" >&2
 fi
 
@@ -2518,7 +2535,7 @@ declare -F ags_warn_tcc_access >/dev/null 2>&1 && ags_warn_tcc_access "$WORK_DIR
 # shell exit hooks (e.g. a ~/.zshrc zshexit / bash trap that runs `tmux
 # kill-session`): without it, exiting this session can cascade-kill the tmux
 # server. Requires tmux >= 3.0.
-TMUX_ENV_ARGS=(-e "CLAUDECODE=1" -e "AGENTSTACK_RESERVED_IDENTITY=1" -e "AGENT_NAME=$CHILD_NAME" -e "PARENT_AGENT=$PARENT_NAME" -e "PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_HOOKS_DIR=$HOOKS_DIR" -e "AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR" -e "AGENTSTACK_MCP_URL=$MCP_URL" -e "AGENTSTACK_MAIL_ENV=$MAIL_ENV" -e "AGENTSTACK_MAIL_HTTP_BEARER_MODE=$HTTP_BEARER_MODE" -e "AGENTSTACK_TERMINAL=$TERMINAL_SETTING" -e "AGENTSTACK_CODEX_APPROVAL=$(codex_approval_flags)" -e "AGENTSTACK_CODEX_NETWORK_FLAGS=$(codex_network_flags)")
+TMUX_ENV_ARGS=(-e "CLAUDECODE=1" -e "AGENTSTACK_RESERVED_IDENTITY=1" -e "AGENT_NAME=$CHILD_NAME" -e "PARENT_AGENT=$PARENT_NAME" -e "PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_CONTEXT=1" -e "AGENTSTACK_PROJECT_REPOSITORY=${AGENTSTACK_PROJECT_REPOSITORY:-}" -e "AGENTSTACK_PROJECT_WORK_DIR=${AGENTSTACK_PROJECT_WORK_DIR:-}" -e "AGENTSTACK_PROJECT_WORKTREE_ROOT=${AGENTSTACK_PROJECT_WORKTREE_ROOT:-}" -e "AGENTSTACK_PROTECTED_ROOTS=${AGENTSTACK_PROTECTED_ROOTS:-}" -e "AGENTSTACK_PROJECT_CONTEXT_JSON=${AGENTSTACK_PROJECT_CONTEXT_JSON:-}" -e "AGENTSTACK_HOOKS_DIR=$HOOKS_DIR" -e "AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR" -e "AGENTSTACK_MCP_URL=$MCP_URL" -e "AGENTSTACK_MAIL_ENV=$MAIL_ENV" -e "AGENTSTACK_MAIL_HTTP_BEARER_MODE=$HTTP_BEARER_MODE" -e "AGENTSTACK_TERMINAL=$TERMINAL_SETTING" -e "AGENTSTACK_CODEX_APPROVAL=$(codex_approval_flags)" -e "AGENTSTACK_CODEX_NETWORK_FLAGS=$(codex_network_flags)")
 if [[ -n "$AGENTSTACK_HOME_DIR" ]]; then
     TMUX_ENV_ARGS+=(-e "AGENTSTACK_HOME=$AGENTSTACK_HOME_DIR")
 fi
