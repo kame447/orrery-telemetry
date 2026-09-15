@@ -4,7 +4,8 @@
 # Usage:
 #   agentstack-preregister-child --project-key <path> [--name <agent>] \
 #     --program <claude-code|codex> --model <model> \
-#     --task-description <text> --token-file-out <path> [--work-dir <path>]
+#     --task-description <text> --token-file-out <path> [--work-dir <path>] \
+#     [--parent <agent>]
 #
 # Stdout contains only the registered child name. The generated token is written
 # to the requested token file with mode 0600.
@@ -36,17 +37,23 @@ usage() {
   cat >&2 <<'EOF'
 Usage: agentstack-preregister-child --project-key <path> [--name <agent>] \
   --program <claude-code|codex> --model <model> \
-  --task-description <text> --token-file-out <path> [--work-dir <path>]
+  --task-description <text> --token-file-out <path> [--work-dir <path>] \
+  [--parent <agent>]
 
 --name is optional: omitted, a free Adjective-Scientist name is picked (same
 picker as top-level registration). A supplied name that does not end in a
 known scientist warns, because the dashboard shows no portrait for it; set
 AGENTSTACK_STRICT_AGENT_NAMES=1 to make that an error instead.
+
+--parent is optional. When supplied, the parent's persisted strong ownership
+must match --work-dir and --project-key before any child registration side
+effect. Standalone callers omit it and resolve the child workspace directly.
 EOF
 }
 
 project_key=""
 agent_name=""
+parent_name=""
 program="claude-code"
 model="${AGENTSTACK_CLAUDE_MODEL:-claude-code}"
 task_description="Delegated child agent"
@@ -61,6 +68,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --name)
       agent_name="${2:-}"
+      shift 2
+      ;;
+    --parent)
+      parent_name="${2:-}"
       shift 2
       ;;
     --program)
@@ -100,14 +111,28 @@ done
 [[ -n "$token_file_out" ]] || die "--token-file-out is required"
 [[ -n "$work_dir" && -d "$work_dir" ]] || die "--work-dir must name an existing directory"
 
-context_json="$(agentstack_resolve_invocation_context "$work_dir" "$project_key")" \
-  || die "could not resolve child workspace context"
-invocation_transport="$(agentstack_build_invocation_transport "$context_json" "$project_key")" \
-  || die "could not bind child project namespace to its workspace"
-context_json="$(agentstack_validate_invocation_transport "$invocation_transport" "$work_dir")" \
-  || die "child project namespace does not match its workspace"
-project_key="$(ags_registration_context_project_key "$context_json")" \
-  || die "could not read validated child project namespace"
+if [[ -n "$parent_name" ]]; then
+  [[ "$parent_name" =~ ^[A-Za-z0-9_.-]+$ ]] || die "--parent has an invalid agent name"
+  ags_apply_owned_workspace "$parent_name" "$work_dir" \
+    || die "parent '$parent_name' does not own the requested child workspace"
+  context_json="${AGENTSTACK_PROJECT_CONTEXT_JSON:-}"
+  [[ -n "$context_json" ]] || die "parent ownership did not produce project context"
+  owned_project="$(ags_registration_context_project_key "$context_json")" \
+    || die "could not read parent-owned project namespace"
+  ags_project_keys_equal "$project_key" "$owned_project" \
+    || die "requested project namespace does not match parent-owned workspace"
+  project_key="$owned_project"
+  unset AGS_OWNED_REGISTRATION_TOKEN
+else
+  context_json="$(agentstack_resolve_invocation_context "$work_dir" "$project_key")" \
+    || die "could not resolve child workspace context"
+  invocation_transport="$(agentstack_build_invocation_transport "$context_json" "$project_key")" \
+    || die "could not bind child project namespace to its workspace"
+  context_json="$(agentstack_validate_invocation_transport "$invocation_transport" "$work_dir")" \
+    || die "child project namespace does not match its workspace"
+  project_key="$(ags_registration_context_project_key "$context_json")" \
+    || die "could not read validated child project namespace"
+fi
 
 ags_mail_load_token
 
