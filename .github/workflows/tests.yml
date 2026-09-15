@@ -30,19 +30,21 @@ jobs:
           test "$GITHUB_REPOSITORY" = kame447/orrery-telemetry
           BASE=984d1b8b72927068a8aecc5c28a6b930c027c37e
           BUILDER="$PWD/scripts/issue33_phase5c_prepare.py"
+          FIXER="$PWD/scripts/issue33_phase5c_fixture_fix.py"
           DIR=$(mktemp -d)
           git worktree add --detach "$DIR" "$BASE"
           cd "$DIR"
           python3 "$BUILDER" "$DIR"
+          python3 "$FIXER" "$DIR"
           git diff --check
           bash -n bin/lib/agentstack-register.sh hooks/spawn_child.sh hooks/cleanup-child-agent.sh
           PYTHONPATH=.:packages/agentstack_mail/src python3 -m pytest -q \
             tests/test_phase5_preregistered_handoff.py \
             tests/test_spawn_child_embed_task.py \
+            tests/test_spawn_child_readiness.py \
             tests/test_cleanup_child_agent.py \
             tests/test_preregister_child_naming.py \
             tests/test_project_key_resolution.py \
-            tests/test_spawn_child_readiness.py \
             tests/test_bash32_local_selfref.py
           EXPECTED=$(printf '%s\n' \
             bin/lib/agentstack-register.sh \
@@ -51,14 +53,16 @@ jobs:
             hooks/spawn_child.sh \
             skills/delegate/SKILL.md \
             tests/test_phase5_preregistered_handoff.py \
-            tests/test_spawn_child_embed_task.py | sort)
+            tests/test_spawn_child_embed_task.py \
+            tests/test_spawn_child_readiness.py | sort)
           ACTUAL=$(git diff --name-only | sort)
           test "$ACTUAL" = "$EXPECTED" || { printf 'Unexpected diff:\n%s\n' "$ACTUAL"; exit 1; }
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add bin/lib/agentstack-register.sh docs/launchers.en.md docs/launchers.md \
             hooks/spawn_child.sh skills/delegate/SKILL.md \
-            tests/test_phase5_preregistered_handoff.py tests/test_spawn_child_embed_task.py
+            tests/test_phase5_preregistered_handoff.py tests/test_spawn_child_embed_task.py \
+            tests/test_spawn_child_readiness.py
           git commit -m 'fix: validate pre-registered child handoff ownership (issue33 phase5c)'
           git push origin HEAD:refs/heads/fix/issue33-preregistered-handoff
           echo "PHASE5C_HEAD=$(git rev-parse HEAD)"
