@@ -250,3 +250,8 @@ subsequent child.
 Those real-machine observations are evidence for the provider lifecycle. Final
 upstream-ready validation must be repeated after integrating onto the current
 upstream base.
+
+
+### Validated child ownership
+
+Delegated Gemini launchers use the same durable child ownership boundary as the core launchers. Preregistration is bound to the intended source workspace before a worktree is created; the Dashboard adapter validates its one-shot handoff before consuming the token. Reservation release, retirement, and identity deletion are delegated to the shared validated cleanup path. If ownership changes, cleanup fails closed and retains recovery state instead of deleting the replacement.

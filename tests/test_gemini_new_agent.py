@@ -1186,6 +1186,24 @@ def _adapter_run(tmp_path: pathlib.Path, resources: str, block_reserve: bool = F
                  links: dict[str, str] | None = None, root_escape: bool = True):
     repo = _make_repo(tmp_path, links, root_escape)
     home = tmp_path / "home"
+    register_lib = home / "bin" / "lib" / "agentstack-register.sh"
+    register_lib.parent.mkdir(parents=True, exist_ok=True)
+    register_lib.write_bytes((ROOT / "bin" / "lib" / "agentstack-register.sh").read_bytes())
+    with register_lib.open("a", encoding="utf-8") as handle:
+        handle.write("\nags_verify_registration_owner_with_mail() { return 0; }\n")
+    scientists = home / "bin" / "lib" / "agentstack-scientists.sh"
+    scientists.write_bytes((ROOT / "bin" / "lib" / "agentstack-scientists.sh").read_bytes())
+    hooks_home = home / "hooks"
+    hooks_home.mkdir(parents=True, exist_ok=True)
+    for hook_name in (
+        "project-context.sh",
+        "cleanup-child-agent.sh",
+        "resolve-agent-name.sh",
+        "session-identity-policy.sh",
+    ):
+        target = hooks_home / hook_name
+        target.write_bytes((ROOT / "hooks" / hook_name).read_bytes())
+        target.chmod(0o755)
     _executable(home / "bin" / "agentstack-gemini-child-mail", _FAKE_MAIL_HELPER)
     _executable(home / "bin" / "agentstack-gemini-stream", "#!/bin/sh\n")
     _executable(home / "bin" / "agentstack-gemini-mcp", "#!/bin/sh\n")
@@ -1196,6 +1214,24 @@ def _adapter_run(tmp_path: pathlib.Path, resources: str, block_reserve: bool = F
     runtime.mkdir()
     token = runtime / "one-shot.token"
     token.write_text("child-token", encoding="utf-8")
+    token.chmod(0o600)
+    owner = {
+        "schema": 1,
+        "agent_name": "Parent",
+        "name_key": "parent",
+        "project_key": "/project",
+        "repository_key": str(repo.resolve()),
+        "non_git_root": None,
+        "created_by": "top-level",
+        "token_sha256": __import__("hashlib").sha256(b"parent-token").hexdigest(),
+        "updated_at": "2026-09-15T00:00:00Z",
+    }
+    owner_file = runtime / "agent_owner_Parent.json"
+    owner_file.write_text(json.dumps(owner) + "\n", encoding="utf-8")
+    owner_file.chmod(0o600)
+    parent_token = runtime / "agent_token_Parent"
+    parent_token.write_text("parent-token", encoding="utf-8")
+    parent_token.chmod(0o600)
     task = runtime / "task.txt"
     task.write_text("full task", encoding="utf-8")
     marker = tmp_path / "reserve-started"
@@ -1208,8 +1244,10 @@ def _adapter_run(tmp_path: pathlib.Path, resources: str, block_reserve: bool = F
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "HOME": str(tmp_path),
         "AGENTSTACK_HOME": str(home),
+        "AGENTSTACK_REGISTER_LIB": str(register_lib),
         "AGENTSTACK_LABEL_PREFIX": "org.agentstack.test.gemini-adapter",
-        "AGENTSTACK_HOOKS_DIR": str(tmp_path / "hooks"),
+        "AGENTSTACK_HOOKS_DIR": str(hooks_home),
+        "AGENTSTACK_MAIL_HTTP_BEARER_MODE": "disabled",
         "AGENTSTACK_RUNTIME_DIR": str(runtime),
         "AGENTSTACK_WORKTREE_ROOT": str(tmp_path / "worktrees"),
         "AGENTSTACK_PROJECT_KEY": "/project",
@@ -1271,7 +1309,7 @@ def test_adapter_rejects_case_variant_globs_covering_worktree_gitdir_file(tmp_pa
     _stdout, stderr = run.proc.communicate(timeout=60)
     assert run.proc.returncode == 2, stderr
     assert f"resource must not cover git metadata: {resource} (.git)" in stderr
-    assert _mail_calls(run) == ["retire"]
+    assert _mail_calls(run) == []
     assert not run.worktree.exists()
     assert "exp/Child" not in _git("branch", "--list", cwd=run.repo)
     assert not run.task.exists()
@@ -1283,7 +1321,7 @@ def test_adapter_rejects_worktree_symlink_escape_before_reservation(tmp_path):
     _stdout, stderr = run.proc.communicate(timeout=60)
     assert run.proc.returncode == 2, stderr
     assert "resource escapes the worktree through a symlink: escape/**" in stderr
-    assert _mail_calls(run) == ["retire"]
+    assert _mail_calls(run) == []
     assert not run.worktree.exists()
     assert "exp/Child" not in _git("branch", "--list", cwd=run.repo)
     assert not run.task.exists()
@@ -1296,7 +1334,7 @@ def test_adapter_rejects_globs_covering_worktree_git_metadata(tmp_path, resource
     _stdout, stderr = run.proc.communicate(timeout=60)
     assert run.proc.returncode == 2, stderr
     assert f"resource must not cover git metadata: {resource} (.git)" in stderr
-    assert _mail_calls(run) == ["retire"]
+    assert _mail_calls(run) == []
     assert not run.worktree.exists()
     assert not run.task.exists()
     assert not (run.runtime / "agent_token_Child").exists()
@@ -1308,7 +1346,7 @@ def test_adapter_rejects_symlink_aliases_of_worktree_gitdir_file(tmp_path, resou
     _stdout, stderr = run.proc.communicate(timeout=60)
     assert run.proc.returncode == 2, stderr
     assert f"resource must not cover git metadata: {resource} (src/meta)" in stderr
-    assert _mail_calls(run) == ["retire"]
+    assert _mail_calls(run) == []
     assert not run.worktree.exists()
     assert "exp/Child" not in _git("branch", "--list", cwd=run.repo)
     assert not run.task.exists()
@@ -1327,7 +1365,7 @@ def test_adapter_rejects_deep_worktree_symlink_escape(tmp_path, resource, links,
     assert (
         f"resource escapes the worktree through a symlink: {resource} ({where})" in stderr
     )
-    assert _mail_calls(run) == ["retire"]
+    assert _mail_calls(run) == []
     assert not run.worktree.exists()
 
 
@@ -1344,7 +1382,7 @@ def test_adapter_accepts_deep_internal_symlinks_and_reaches_reservation(tmp_path
     os.killpg(run.proc.pid, signal.SIGTERM)
     _stdout, stderr = run.proc.communicate(timeout=30)
     assert "resource" not in stderr, stderr
-    assert _mail_calls(run) == ["reserve", "retire"]
+    assert _mail_calls(run) == ["reserve"]
     assert not run.worktree.exists()
 
 
@@ -1357,7 +1395,7 @@ def test_adapter_termination_cleans_up_launch_artifacts(tmp_path):
     os.killpg(run.proc.pid, signal.SIGTERM)
     _stdout, stderr = run.proc.communicate(timeout=30)
     assert run.proc.returncode == 143, stderr
-    assert _mail_calls(run) == ["reserve", "retire"]
+    assert _mail_calls(run) == ["reserve"]
     assert not run.worktree.exists()
     assert not run.task.exists()
     assert not (run.runtime / "agent_token_Child").exists()

@@ -124,6 +124,7 @@ def test_bootstrap_registers_antigravity_runtime_and_model() -> None:
 def test_delegated_child_uses_worktree_stream_input_and_preregistered_identity() -> None:
     text = _CHILD.read_text(encoding="utf-8")
     assert '"$PREREGISTER" --project-key "$PROJECT_KEY" --program antigravity' in text
+    assert '--work-dir "$WORK_DIR" --token-file-out "$TOKEN_FILE"' in text
     assert 'git -C "$SOURCE_REPO" worktree add -b "$BRANCH_NAME" "$WORKTREE_DIR" "$BASE_REV"' in text
     assert '--input-format stream-json --output-format stream-json' in text
     assert 'cat $(printf \'%q\' "$TASK_EVENT_FILE")' in text
@@ -149,10 +150,12 @@ def test_both_child_routes_hide_owner_token_path_from_workspace_mcp_config() -> 
 def test_delegated_child_lifecycle_is_launcher_owned() -> None:
     text = _CHILD.read_text(encoding="utf-8")
     assert 'mail_helper reserve --project-key "$PROJECT_KEY"' in text
-    assert '$(printf \'%q\' "$MAIL_HELPER") report --project-key' in text
-    assert '$(printf \'%q\' "$MAIL_HELPER") release --project-key' in text
-    assert '$(printf \'%q\' "$MAIL_HELPER") retire --project-key' in text
-    assert 'rm -f $(printf \'%q\' "$TASK_EVENT_FILE") $(printf \'%q\' "$TOKEN_FILE")' in text
+    assert "MAIL_HELPER" in text
+    assert " report --project-key" in text
+    runner = text[text.index('cat > "$RUNNER_FILE" <<EOF'):text.index('chmod 700 "$RUNNER_FILE"')]
+    assert "CLEANUP_HELPER" in runner
+    assert " release --project-key" not in runner
+    assert " retire --project-key" not in runner
     helper = _CHILD_MAIL.read_text(encoding="utf-8")
     assert 'registration_token=token' in helper
     assert 'subject_state = "complete" if status == "SUCCESS" else "incomplete"' in helper

@@ -290,6 +290,22 @@ print(",".join(canonical))
 PY
 }
 RESOURCES="$(validate_resources)" || exit 2
+REGISTER_LIB="${AGENTSTACK_REGISTER_LIB:-$AGENTSTACK_HOME_DIR/bin/lib/agentstack-register.sh}"
+[[ -f "$REGISTER_LIB" ]] || { echo "$PROG: shared registration helper is missing" >&2; exit 1; }
+# shellcheck disable=SC1090
+. "$REGISTER_LIB"
+
+if ! ags_prepare_preregistered_handoff "$CHILD_NAME" "$WORK_DIR" \
+    "$CHILD_TOKEN_FILE" "$PARENT_AGENT" "$PROJECT_KEY"; then
+  echo "$PROG: pre-registered child handoff does not own this workspace/project" >&2
+  exit 1
+fi
+HANDOFF_CONTEXT_JSON="$AGS_PREREGISTERED_CONTEXT_JSON"
+HANDOFF_TOKEN="$AGS_PREREGISTERED_REGISTRATION_TOKEN"
+HANDOFF_OWNER_PREEXISTED="$AGS_PREREGISTERED_OWNER_PREEXISTED"
+unset AGS_PREREGISTERED_CONTEXT_JSON AGS_PREREGISTERED_REGISTRATION_TOKEN
+unset AGS_PREREGISTERED_OWNER_PREEXISTED
+PROJECT_KEY="$AGENTSTACK_PROJECT_KEY"
 
 SOURCE_REPO="$(git -C "$WORK_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
 [[ -n "$SOURCE_REPO" ]] || { echo "$PROG: Gemini dashboard launch requires a git repository" >&2; exit 1; }
@@ -303,7 +319,8 @@ fi
 mkdir -p "$RUNTIME_DIR" "$WORKTREE_ROOT"
 chmod 700 "$RUNTIME_DIR" 2>/dev/null || true
 TOKEN_KEY="$(printf '%s' "$CHILD_NAME" | LC_ALL=C tr -c 'A-Za-z0-9_.-' '_')"
-DURABLE_TOKEN="$RUNTIME_DIR/agent_token_$TOKEN_KEY"
+DURABLE_TOKEN="$(ags_registration_token_file "$CHILD_NAME")" || { echo "$PROG: invalid child identity" >&2; exit 1; }
+OWNER_READY=false
 WORKTREE_DIR="$WORKTREE_ROOT/$CHILD_NAME"
 BRANCH_NAME="exp/$CHILD_NAME"
 MCP_CONFIG=""
@@ -331,19 +348,22 @@ cleanup_failure() {
       tmux kill-session -t "=$CHILD_NAME" >/dev/null 2>&1 || true
       TMUX_STARTED=false
     fi
-    if [[ "$RESERVED" == true && -s "$DURABLE_TOKEN" ]]; then
-      mail_helper release --project-key "$PROJECT_KEY" --agent-name "$CHILD_NAME" \
-        --token-file "$DURABLE_TOKEN" --paths "$RESOURCES" >/dev/null 2>&1 || true
-    fi
-    if [[ -s "$DURABLE_TOKEN" ]]; then
-      mail_helper retire --project-key "$PROJECT_KEY" --agent-name "$CHILD_NAME" \
-        --token-file "$DURABLE_TOKEN" >/dev/null 2>&1 || true
+    if [[ "$OWNER_READY" == true && -n "$CHILD_NAME" && -x "$CLEANUP_HELPER" ]]; then
+      cleanup_dir="$WORK_DIR"
+      [[ "$WORKTREE_CREATED" == true && -d "$WORKTREE_DIR" ]] && cleanup_dir="$WORKTREE_DIR"
+      if ! (cd "$cleanup_dir" && "$CLEANUP_HELPER" "$CHILD_NAME"); then
+        echo "$PROG: validated cleanup refused; preserving child state/worktree for recovery" >&2
+        return
+      fi
+    elif [[ "$OWNER_READY" == true ]]; then
+      echo "$PROG: cleanup helper unavailable; preserving child state/worktree for recovery" >&2
+      return
     fi
     if [[ "$WORKTREE_CREATED" == true ]]; then
       git -C "$SOURCE_REPO" worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1 || true
       git -C "$SOURCE_REPO" branch -D "$BRANCH_NAME" >/dev/null 2>&1 || true
     fi
-    rm -f "$TASK_EVENT_FILE" "$RUNNER_FILE" "$MCP_CONFIG" "$DURABLE_TOKEN" "$GIT_EXCLUDES_FILE" "$TASK_FILE"
+    rm -f "$TASK_EVENT_FILE" "$RUNNER_FILE" "$MCP_CONFIG" "$GIT_EXCLUDES_FILE" "$TASK_FILE"
   fi
 }
 trap cleanup_failure EXIT
@@ -353,12 +373,17 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# Consume the one-shot token into the stable per-agent runtime path expected by
-# the MCP wrapper. The token value and token-file path are not embedded in the
-# workspace MCP config.
-( umask 077 && cat "$CHILD_TOKEN_FILE" > "$DURABLE_TOKEN" )
-chmod 600 "$DURABLE_TOKEN"
-rm -f "$CHILD_TOKEN_FILE"
+# Publish the validated one-shot handoff as the same durable owner format used
+# by Claude/Codex. Existing strong owners were already validated above.
+if [[ "$HANDOFF_OWNER_PREEXISTED" != "1" ]]; then
+  ags_store_registration_token "$CHILD_NAME" "$HANDOFF_TOKEN" \
+    "$HANDOFF_CONTEXT_JSON" preregister-child || {
+      echo "$PROG: could not publish durable child ownership" >&2; exit 1; }
+fi
+OWNER_READY=true
+if [[ "$CHILD_TOKEN_FILE" != "$DURABLE_TOKEN" ]]; then
+  rm -f "$CHILD_TOKEN_FILE"
+fi
 
 [[ ! -e "$WORKTREE_DIR" ]] || { echo "$PROG: worktree path already exists: $WORKTREE_DIR" >&2; exit 1; }
 if git -C "$SOURCE_REPO" show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
@@ -367,6 +392,15 @@ if git -C "$SOURCE_REPO" show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; th
 fi
 git -C "$SOURCE_REPO" worktree add -b "$BRANCH_NAME" "$WORKTREE_DIR" "$BASE_REV" >/dev/null
 WORKTREE_CREATED=true
+
+if ! ags_apply_owned_workspace "$CHILD_NAME" "$WORKTREE_DIR" \
+    "$DURABLE_TOKEN" "$HANDOFF_TOKEN"; then
+  echo "$PROG: created worktree does not match child ownership" >&2
+  exit 1
+fi
+HANDOFF_CONTEXT_JSON="$AGENTSTACK_PROJECT_CONTEXT_JSON"
+PROJECT_KEY="$AGENTSTACK_PROJECT_KEY"
+unset AGS_OWNED_REGISTRATION_TOKEN
 
 # Linked worktrees share .git/info/exclude. Use a child-owned excludes file
 # injected only into the Antigravity runner instead of mutating shared repo
@@ -439,6 +473,12 @@ export AGENT_NAME=$(printf '%q' "$CHILD_NAME")
 export PARENT_AGENT=$(printf '%q' "$PARENT_AGENT")
 export AGENTSTACK_RESERVED_IDENTITY=1
 export AGENTSTACK_PROJECT_KEY=$(printf '%q' "$PROJECT_KEY")
+export AGENTSTACK_PROJECT_CONTEXT=1
+export AGENTSTACK_PROJECT_REPOSITORY=$(printf '%q' "${AGENTSTACK_PROJECT_REPOSITORY:-}")
+export AGENTSTACK_PROJECT_WORK_DIR=$(printf '%q' "${AGENTSTACK_PROJECT_WORK_DIR:-}")
+export AGENTSTACK_PROJECT_WORKTREE_ROOT=$(printf '%q' "${AGENTSTACK_PROJECT_WORKTREE_ROOT:-}")
+export AGENTSTACK_PROTECTED_ROOTS=$(printf '%q' "${AGENTSTACK_PROTECTED_ROOTS:-}")
+export AGENTSTACK_PROJECT_CONTEXT_JSON=$(printf '%q' "${AGENTSTACK_PROJECT_CONTEXT_JSON:-}")
 export AGENTSTACK_HOME=$(printf '%q' "$AGENTSTACK_HOME_DIR")
 export AGENTSTACK_HOOKS_DIR=$(printf '%q' "$HOOKS_DIR")
 export AGENTSTACK_RUNTIME_DIR=$(printf '%q' "$RUNTIME_DIR")
@@ -479,22 +519,19 @@ AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE") \
     --agent-name $(printf '%q' "$CHILD_NAME") --token-file $(printf '%q' "$DURABLE_TOKEN") \
     --parent $(printf '%q' "$PARENT_AGENT") --result-log $(printf '%q' "$RESULT_LOG") \
     --worktree $(printf '%q' "$WORKTREE_DIR") --runner-status "\$child_status" || true
-AGENTSTACK_HOME=$(printf '%q' "$AGENTSTACK_HOME_DIR") \
-AGENTSTACK_MCP_URL=$(printf '%q' "$MCP_URL") \
-AGENTSTACK_MAIL_ENV=$(printf '%q' "$MAIL_ENV") \
-AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE") \
-  $(printf '%q' "$PYTHON_BIN") $(printf '%q' "$MAIL_HELPER") release --project-key $(printf '%q' "$PROJECT_KEY") \
-    --agent-name $(printf '%q' "$CHILD_NAME") --token-file $(printf '%q' "$DURABLE_TOKEN") \
-    --paths $(printf '%q' "$RESOURCES") || true
-AGENTSTACK_HOME=$(printf '%q' "$AGENTSTACK_HOME_DIR") \
-AGENTSTACK_MCP_URL=$(printf '%q' "$MCP_URL") \
-AGENTSTACK_MAIL_ENV=$(printf '%q' "$MAIL_ENV") \
-AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE") \
-  $(printf '%q' "$PYTHON_BIN") $(printf '%q' "$MAIL_HELPER") retire --project-key $(printf '%q' "$PROJECT_KEY") \
-    --agent-name $(printf '%q' "$CHILD_NAME") --token-file $(printf '%q' "$DURABLE_TOKEN") || true
-[[ -x $(printf '%q' "$CLEANUP_HELPER") ]] && $(printf '%q' "$CLEANUP_HELPER") || true
-rm -f $(printf '%q' "$TASK_EVENT_FILE") $(printf '%q' "$DURABLE_TOKEN") $(printf '%q' "$MCP_CONFIG") \
-  $(printf '%q' "$GIT_EXCLUDES_FILE") $(printf '%q' "$RUNNER_FILE")
+
+cleanup_status=0
+if [[ -x $(printf '%q' "$CLEANUP_HELPER") ]]; then
+  $(printf '%q' "$CLEANUP_HELPER") $(printf '%q' "$CHILD_NAME") || cleanup_status=\$?
+else
+  cleanup_status=1
+fi
+if [[ "\$cleanup_status" -eq 0 ]]; then
+  rm -f $(printf '%q' "$TASK_EVENT_FILE") $(printf '%q' "$MCP_CONFIG") \
+    $(printf '%q' "$GIT_EXCLUDES_FILE") $(printf '%q' "$RUNNER_FILE")
+else
+  echo "[antigravity] validated cleanup refused; child ownership state retained for recovery" >&2
+fi
 echo "[antigravity] child finished; worktree retained at $(printf '%q' "$WORKTREE_DIR")"
 exit "\$child_status"
 EOF
