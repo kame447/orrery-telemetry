@@ -1583,6 +1583,19 @@ if [[ -n "$PRE_REGISTERED" ]]; then
         exit 1
     fi
 
+    PRE_REGISTERED_SOURCE_TOKEN_FILE="$CHILD_TOKEN_FILE"
+    if ! ags_prepare_preregistered_handoff "$CHILD_NAME" "$WORK_DIR" \
+        "$PRE_REGISTERED_SOURCE_TOKEN_FILE" "$PARENT_NAME" "$PROJECT_KEY"; then
+        echo "Error: pre-registered child handoff does not own this workspace/project" >&2
+        exit 1
+    fi
+    PRE_REGISTERED_CONTEXT_JSON="$AGS_PREREGISTERED_CONTEXT_JSON"
+    PRE_REGISTERED_HANDOFF_TOKEN="$AGS_PREREGISTERED_REGISTRATION_TOKEN"
+    PRE_REGISTERED_OWNER_PREEXISTED="$AGS_PREREGISTERED_OWNER_PREEXISTED"
+    unset AGS_PREREGISTERED_CONTEXT_JSON AGS_PREREGISTERED_REGISTRATION_TOKEN
+    unset AGS_PREREGISTERED_OWNER_PREEXISTED
+    PROJECT_KEY="$AGENTSTACK_PROJECT_KEY"
+
     EMBEDDED_TASK_PROMPT=""
     if [[ "$EMBED_TASK" == true ]]; then
         SPAWNED_AT="$(date '+%Y-%m-%dT%H:%M %Z')"
@@ -1608,27 +1621,17 @@ if [[ -n "$PRE_REGISTERED" ]]; then
         if [[ "$PRE_REGISTERED_SESSION_STARTED" == true ]]; then
             tmux kill-session -t "=$CHILD_NAME" >/dev/null 2>&1 || true
         fi
-        if [[ "$PRE_REGISTERED_TOKEN_CREATED" == true ]]; then
-            rm -f "$CHILD_TOKEN_FILE" "$CHILD_STATE_DIR/$CHILD_NAME.json"
+        if [[ -n "${PRE_REGISTERED_HANDOFF_TOKEN:-}" ]]; then
+            if ! (
+                cd "$WORK_DIR" && \
+                CHILD_REGISTRATION_TOKEN="$PRE_REGISTERED_HANDOFF_TOKEN" \
+                /bin/bash "$HOOKS_DIR/cleanup-child-agent.sh" "$CHILD_NAME"
+            ); then
+                echo "[spawn_child/pre-reg] cleanup ownership changed; leaving child state/worktree for recovery" >&2
+                return
+            fi
         fi
         cleanup_worktree
-        if [[ -f "$MANAGED_FILE" ]]; then
-            python3 - "$MANAGED_FILE" "$CHILD_NAME" <<'PY' 2>/dev/null || true
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-name = sys.argv[2]
-try:
-    lines = path.read_text(encoding="utf-8").splitlines()
-except OSError:
-    raise SystemExit(0)
-path.write_text(
-    "\n".join(line for line in lines if line != name) + "\n",
-    encoding="utf-8",
-)
-PY
-        fi
     }
     trap cleanup_preregister_failure EXIT
 
@@ -1656,6 +1659,15 @@ PY
         fi
     fi
 
+    if [[ "$PRE_REGISTERED_OWNER_PREEXISTED" != "1" ]]; then
+        if ! ags_store_registration_token "$CHILD_NAME" \
+            "$PRE_REGISTERED_HANDOFF_TOKEN" "$PRE_REGISTERED_CONTEXT_JSON" \
+            preregister-child; then
+            echo "Error: could not publish durable ownership for pre-registered child $CHILD_NAME" >&2
+            exit 1
+        fi
+    fi
+
     # --worktree が指定されていれば worktree を作って WORK_DIR を上書き
     if [[ "$USE_WORKTREE" == true ]]; then
         if ! maybe_create_worktree "$CHILD_NAME" "$WORK_DIR"; then
@@ -1663,6 +1675,14 @@ PY
         exit 1
     fi
         WORK_DIR="$WORKTREE_DIR"
+        if ! ags_apply_owned_workspace "$CHILD_NAME" "$WORK_DIR"; then
+            echo "Error: created worktree is not owned by pre-registered child $CHILD_NAME" >&2
+            exit 1
+        fi
+        PRE_REGISTERED_CONTEXT_JSON="$AGENTSTACK_PROJECT_CONTEXT_JSON"
+        PRE_REGISTERED_HANDOFF_TOKEN="$AGS_OWNED_REGISTRATION_TOKEN"
+        unset AGS_OWNED_REGISTRATION_TOKEN
+        PROJECT_KEY="$AGENTSTACK_PROJECT_KEY"
         echo "[spawn_child/pre-reg] WORK_DIR overridden to worktree: $WORK_DIR" >&2
     fi
 
@@ -1680,7 +1700,7 @@ PY
     # shell exit hooks (e.g. a ~/.zshrc zshexit / bash trap that runs `tmux
     # kill-session`): without it, exiting this session can cascade-kill the whole
     # tmux server. Requires tmux >= 3.0.
-    TMUX_ENV_ARGS=(-e "CLAUDECODE=1" -e "AGENTSTACK_RESERVED_IDENTITY=1" -e "AGENT_NAME=$CHILD_NAME" -e "PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_HOOKS_DIR=$HOOKS_DIR" -e "AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR" -e "AGENTSTACK_MCP_URL=$MCP_URL" -e "AGENTSTACK_MAIL_ENV=$MAIL_ENV" -e "AGENTSTACK_MAIL_HTTP_BEARER_MODE=$HTTP_BEARER_MODE" -e "AGENTSTACK_TERMINAL=$TERMINAL_SETTING" -e "AGENTSTACK_CODEX_APPROVAL=$(codex_approval_flags)" -e "AGENTSTACK_CODEX_NETWORK_FLAGS=$(codex_network_flags)")
+    TMUX_ENV_ARGS=(-e "CLAUDECODE=1" -e "AGENTSTACK_RESERVED_IDENTITY=1" -e "AGENT_NAME=$CHILD_NAME" -e "PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_CONTEXT=1" -e "AGENTSTACK_PROJECT_REPOSITORY=${AGENTSTACK_PROJECT_REPOSITORY:-}" -e "AGENTSTACK_PROJECT_WORK_DIR=${AGENTSTACK_PROJECT_WORK_DIR:-}" -e "AGENTSTACK_PROJECT_WORKTREE_ROOT=${AGENTSTACK_PROJECT_WORKTREE_ROOT:-}" -e "AGENTSTACK_PROTECTED_ROOTS=${AGENTSTACK_PROTECTED_ROOTS:-}" -e "AGENTSTACK_PROJECT_CONTEXT_JSON=${AGENTSTACK_PROJECT_CONTEXT_JSON:-}" -e "AGENTSTACK_HOOKS_DIR=$HOOKS_DIR" -e "AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR" -e "AGENTSTACK_MCP_URL=$MCP_URL" -e "AGENTSTACK_MAIL_ENV=$MAIL_ENV" -e "AGENTSTACK_MAIL_HTTP_BEARER_MODE=$HTTP_BEARER_MODE" -e "AGENTSTACK_TERMINAL=$TERMINAL_SETTING" -e "AGENTSTACK_CODEX_APPROVAL=$(codex_approval_flags)" -e "AGENTSTACK_CODEX_NETWORK_FLAGS=$(codex_network_flags)")
     if [[ "$STANDALONE" != true ]]; then
         TMUX_ENV_ARGS+=(-e "PARENT_AGENT=$PARENT_NAME")
     fi

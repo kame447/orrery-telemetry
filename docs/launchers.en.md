@@ -244,3 +244,8 @@ See [Hooks and operational helpers](hooks.en.md) for the trigger timing, caller,
 ### Child cleanup ownership
 
 Child cleanup validates the explicit agent identity, private credential, and actual workspace against its durable owner before release/retire. An ambient project key cannot authorize cleanup from another repository. If ownership changes during the network operation, local state is retained; otherwise the owner record is removed last, after child-specific artifacts.
+
+
+### Pre-registered handoff ownership
+
+A pre-registered child is started only after its private token and actual workspace are tied to durable child ownership. For a Dashboard one-shot handoff with no local child owner yet, the parent must own that workspace and the child token must authenticate in the same Mail project. A contradictory child owner never falls back to the parent. Linked worktrees reuse repository ownership but refresh the child work directory before tmux starts.
