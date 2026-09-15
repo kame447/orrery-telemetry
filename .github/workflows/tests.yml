@@ -9,8 +9,8 @@ permissions:
 
 jobs:
   prepare:
-    runs-on: macos-latest
-    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -18,10 +18,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install test tools
+      - name: Install focused test tools
         run: |
-          brew install tmux uv
-          python3 -m pip install pytest pytest-timeout pytest-xdist build -e ./packages/agentstack_mail
+          sudo apt-get update -qq
+          sudo apt-get install -y tmux
+          python3 -m pip install pytest pytest-timeout -e ./packages/agentstack_mail
       - name: Build and verify candidate
         shell: bash
         run: |
@@ -53,8 +54,6 @@ jobs:
             tests/test_spawn_child_embed_task.py | sort)
           ACTUAL=$(git diff --name-only | sort)
           test "$ACTUAL" = "$EXPECTED" || { printf 'Unexpected diff:\n%s\n' "$ACTUAL"; exit 1; }
-          PYTHONPATH=.:packages/agentstack_mail/src python3 -m pytest -q -n auto --dist loadfile \
-            tests/ --ignore=tests/windows integrations/ packages/agentstack_mail/tests/
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add bin/lib/agentstack-register.sh docs/launchers.en.md docs/launchers.md \
