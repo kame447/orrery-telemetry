@@ -37,7 +37,7 @@ cd orrery-telemetry
 ./scripts/install.sh --project-key /absolute/path/to/your-project
 ```
 
-Pass the absolute path of the project where agents will work to `--project-key`, not the checkout of this repository. It is required on first install, and the installer stops without writing anything if it is omitted. Later installations inherit the previous value from `~/.agentstack/env.sh`, so it can be omitted.
+Pass the absolute path of the project where agents will work to `--project-key`, not the checkout of this repository. It is required on first install, and the installer stops without writing anything if it is omitted. Later installations inherit the previous value from `~/.agentstack/env.sh`, so it can be omitted. This value is an install-time fallback: a new agent resolves project context from the repository it actually launches in, and linked worktrees of the same repository share one project, so switching repositories does not require reinstalling.
 
 The installer previews three changes and asks for `yes` for each.
 

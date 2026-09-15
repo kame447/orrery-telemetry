@@ -82,7 +82,7 @@ export AGENTSTACK_PROJECT_KEY=/absolute/project/path
 ./scripts/install.sh
 ```
 
-DECK tmux state remains visible without this configuration. It is an intentional degraded mode where only mail edges, history / replay, and spawn are unavailable. Output still searches the cwd / Git-root `logs/` fallback.
+The page and infrastructure status remain available without a selected project. Normal agent display, annotations, terminal capture and controls, Mail, history, Graph, and spawn require a project selection. The Dashboard never falls back to another project. See [When no project key is configured](configuration.en.md#without-a-project-key).
 
 ## Output is empty or not linked
 
@@ -394,6 +394,14 @@ If it warns `child MCP proxy missing` or about an incomplete source tree, rerun 
 ## Codex App Bridge / cold wake does not work
 
 Codex Desktop integration has its own doctor, runtime state, and failure classifications separate from the core doctor. See [Common failures in Codex App integration](codex-app.en.md#common-failures). A Codex CLI session's absence from the Bridge is an intentional surface filter.
+
+## Project key and working repository disagree
+
+`agentstack-doctor` diagnoses mismatches between the current repository, project context, runtime ownership metadata, and protected roots. A main checkout and linked worktrees of the same repository count as one identity. Raw registration tokens are never printed.
+
+Even if installed, parent-shell, or tmux state from another repository remains, a new `agent-start`, `agent-start-codex`, or `agent-start-gemini` resolves the directory it actually launches in. Use `--project-key KEY` only for an explicit per-invocation namespace. The doctor does not silently move an identity that was already registered under the wrong namespace; inspect its work and start a new session from the correct repository instead.
+
+If you see `PROJECT CONTEXT UNRESOLVED`, a repository mismatch, or a protected-root mismatch, check `AGENTSTACK_PYTHON`, the target directory's Git metadata, and whether the installed `env.sh` is readable. Do not invent a different project key for each linked worktree.
 
 ## Agent appears twice on the dashboard
 

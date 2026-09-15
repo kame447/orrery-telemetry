@@ -4,7 +4,8 @@
 # Usage:
 #   agentstack-preregister-child --project-key <path> [--name <agent>] \
 #     --program <claude-code|codex> --model <model> \
-#     --task-description <text> --token-file-out <path> [--work-dir <path>]
+#     --task-description <text> --token-file-out <path> [--work-dir <path>] \
+#     [--parent <agent>]
 #
 # Stdout contains only the registered child name. The generated token is written
 # to the requested token file with mode 0600.
@@ -36,17 +37,23 @@ usage() {
   cat >&2 <<'EOF'
 Usage: agentstack-preregister-child --project-key <path> [--name <agent>] \
   --program <claude-code|codex> --model <model> \
-  --task-description <text> --token-file-out <path> [--work-dir <path>]
+  --task-description <text> --token-file-out <path> [--work-dir <path>] \
+  [--parent <agent>]
 
 --name is optional: omitted, a free Adjective-Scientist name is picked (same
 picker as top-level registration). A supplied name that does not end in a
 known scientist warns, because the dashboard shows no portrait for it; set
 AGENTSTACK_STRICT_AGENT_NAMES=1 to make that an error instead.
+
+--parent is optional. When supplied, the parent's persisted strong ownership
+must match --work-dir and --project-key before any child registration side
+effect. Standalone callers omit it and resolve the child workspace directly.
 EOF
 }
 
 project_key=""
 agent_name=""
+parent_name=""
 program="claude-code"
 model="${AGENTSTACK_CLAUDE_MODEL:-claude-code}"
 task_description="Delegated child agent"
@@ -61,6 +68,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --name)
       agent_name="${2:-}"
+      shift 2
+      ;;
+    --parent)
+      parent_name="${2:-}"
       shift 2
       ;;
     --program)
@@ -100,16 +111,39 @@ done
 [[ -n "$token_file_out" ]] || die "--token-file-out is required"
 [[ -n "$work_dir" && -d "$work_dir" ]] || die "--work-dir must name an existing directory"
 
-context_json="$(agentstack_resolve_invocation_context "$work_dir" "$project_key")" \
-  || die "could not resolve child workspace context"
-invocation_transport="$(agentstack_build_invocation_transport "$context_json" "$project_key")" \
-  || die "could not bind child project namespace to its workspace"
-context_json="$(agentstack_validate_invocation_transport "$invocation_transport" "$work_dir")" \
-  || die "child project namespace does not match its workspace"
-project_key="$(ags_registration_context_project_key "$context_json")" \
-  || die "could not read validated child project namespace"
+if [[ -n "$parent_name" ]]; then
+  [[ "$parent_name" =~ ^[A-Za-z0-9_.-]+$ ]] || die "--parent has an invalid agent name"
+  ags_apply_owned_workspace "$parent_name" "$work_dir" \
+    || die "parent '$parent_name' does not own the requested child workspace"
+  context_json="${AGENTSTACK_PROJECT_CONTEXT_JSON:-}"
+  [[ -n "$context_json" ]] || die "parent ownership did not produce project context"
+  owned_project="$(ags_registration_context_project_key "$context_json")" \
+    || die "could not read parent-owned project namespace"
+  ags_project_keys_equal "$project_key" "$owned_project" \
+    || die "requested project namespace does not match parent-owned workspace"
+  project_key="$owned_project"
+  unset AGS_OWNED_REGISTRATION_TOKEN
+else
+  context_json="$(agentstack_resolve_invocation_context "$work_dir" "$project_key")" \
+    || die "could not resolve child workspace context"
+  invocation_transport="$(agentstack_build_invocation_transport "$context_json" "$project_key")" \
+    || die "could not bind child project namespace to its workspace"
+  context_json="$(agentstack_validate_invocation_transport "$invocation_transport" "$work_dir")" \
+    || die "child project namespace does not match its workspace"
+  project_key="$(ags_registration_context_project_key "$context_json")" \
+    || die "could not read validated child project namespace"
+fi
 
 ags_mail_load_token
+
+# Ensure the namespace exists before availability lookup/claim.  This is a
+# no-op for delegated children in an existing project and is required for a
+# standalone child whose target repository has never been registered in Mail.
+ensure_result="$(ags_mcp_call "ensure_project" "human_key=$project_key")" \
+  || die "ensure_project failed"
+if ags_mcp_has_error <<<"$ensure_result"; then
+  die "ensure_project returned an error"
+fi
 
 # --name is optional. Top-level registration has always drawn names from the
 # picker, but this child helper used to REQUIRE a caller-supplied name and
@@ -145,19 +179,6 @@ child_token="$(ags_generate_registration_token)" || die "failed to generate chil
 ags_begin_registration_ownership "$context_json" "$agent_name" \
   "$child_token" "preregister-child" candidate \
   || die "could not establish local ownership for '$agent_name'"
-
-# JSON results are handed to the lib helpers with here-strings rather than
-# `printf | fn`: a helper that returns without reading stdin (as the stock
-# stubs in tests do) made printf die of SIGPIPE, and with pipefail the
-# command substitution then exited 141 (CI flake, 2026-09-05).
-ensure_result="$(ags_mcp_call "ensure_project" "human_key=$project_key")" || {
-  ags_release_registration_ownership
-  die "ensure_project failed"
-}
-if ags_mcp_has_error <<<"$ensure_result"; then
-  ags_release_registration_ownership
-  die "ensure_project returned an error"
-fi
 
 register_args=(
   "project_key=$project_key"
