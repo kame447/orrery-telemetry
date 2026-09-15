@@ -16,27 +16,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - name: Export current upstream history for read-only integration review
+      - name: Export Phase 5b fork history for read-only review
         run: |
           set -eu
-          git fetch https://github.com/gyroid-eth/orrery-telemetry.git master:refs/remotes/review-upstream/master
-          git bundle create /tmp/orrery-upstream-history.bundle refs/remotes/review-upstream/master
-          git bundle verify /tmp/orrery-upstream-history.bundle
+          git bundle create /tmp/orrery-phase5b-history.bundle refs/remotes/origin/fix/issue33-child-cleanup
+          git bundle verify /tmp/orrery-phase5b-history.bundle
+          sha256sum /tmp/orrery-phase5b-history.bundle
       - uses: actions/upload-artifact@v4
         with:
-          name: orrery-upstream-history
-          path: /tmp/orrery-upstream-history.bundle
-          retention-days: 1
-      - name: Supply missing isolated tmux libraries and asynchronous test plugin
-        run: |
-          set -eu
-          mkdir -p /tmp/orrery-extra-dependencies
-          cd /tmp/orrery-extra-dependencies
-          apt-get download libevent-core-2.1-7t64 libutempter0
-          python3 -m pip wheel --wheel-dir . pytest-asyncio
-          sha256sum * > checksums.sha256
-      - uses: actions/upload-artifact@v4
-        with:
-          name: orrery-extra-dependencies
-          path: /tmp/orrery-extra-dependencies/
+          name: orrery-phase5b-history
+          path: /tmp/orrery-phase5b-history.bundle
           retention-days: 1
