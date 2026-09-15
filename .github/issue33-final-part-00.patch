@@ -1,0 +1,292 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index af6ff54b224dfb23f8abab740df2889c16a805fc..f7fd454716c5ce9440e7b1d2efc802c690a1d57e 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -131,6 +131,16 @@ developer's — the ORRERY Mail commit, the name-enforcement mode, the database
+ schema, the file-descriptor limit — and that block answers all of those at
+ once instead of over several rounds of questions.
+ 
++## Runtime project context
++
++The install-time project key is a fallback. New launchers resolve the target
++Git repository; linked worktrees share its canonical identity and different
++repositories stay separate. Use `--project-key KEY` for a per-invocation
++override. For Mail tools and reservations, use the resolved session key from
++the launcher or SessionStart, not a path copied from an older installation.
++A delegated child retains its established parent context across linked
++worktrees. See `docs/launchers.md` and `docs/configuration.md`.
++
+ ## Reference
+ 
+ | Topic | File |
+diff --git a/claude/CLAUDE.md b/claude/CLAUDE.md
+index b65104a9aa7523143d55da87dd0640911bdefbc5..108914079d5fe3a010b637b84a2126500df47a69 100644
+--- a/claude/CLAUDE.md
++++ b/claude/CLAUDE.md
+@@ -4,9 +4,14 @@ rules before doing project work.
+ 
+ ## Session Startup
+ 
++Resolve the project context from the launcher/SessionStart output before using
++these examples. In MCP arguments, replace `$AGENTSTACK_PROJECT_KEY` with the
++actual resolved key. The install fallback below is not a fixed key for every
++repository.
++
+ First calls:
+ 
+-1. `ensure_project(human_key="__AGENTSTACK_PROJECT_KEY__")`.
++1. `ensure_project(human_key="$AGENTSTACK_PROJECT_KEY")`.
+ 2. If SessionStart says the shell hook already registered your resolved name,
+    do not call `register_agent` again. Otherwise call `register_agent` with the
+    resolved `name` (`$AGENT_NAME`, or the name printed by the SessionStart
+@@ -40,9 +45,23 @@ MCP tool session.
+ 
+ Details and exceptions for the first calls:
+ 
+-- The shared project key is `__AGENTSTACK_PROJECT_KEY__`. Use it for
+-  `ensure_project`, `register_agent`, `fetch_inbox`, and reservations. Do not
+-  infer a different project from your current directory.
++- Use the resolved project key from the launcher, SessionStart reminder, or
++  canonical embedded child task for `ensure_project`, `register_agent`,
++  `fetch_inbox`, messages, and reservations. It is exported as
++  `AGENTSTACK_PROJECT_KEY` / `PROJECT_KEY`; substitute its actual value in MCP
++  arguments, not the literal string `$AGENTSTACK_PROJECT_KEY`.
++- The install-time fallback is `__AGENTSTACK_PROJECT_KEY__`. It must not
++  override the repository selected for a new invocation. Linked worktrees
++  share their repository's canonical project key; another repository has a
++  separate key. Keep an already registered child's project from its launch
++  context, even when its worktree directory differs.
++- If the resolved key is unavailable, use the SessionStart output or the
++  canonical embedded task. For an unregistered session, the shared helper
++  `bash __AGENTSTACK_HOOKS_DIR__/project-context.sh resolve-invocation-project-key "$PWD"`
++  resolves it without sourcing installed shell code. Do not guess a key from
++  a worktree pathname or reuse the install fallback when a repository was
++  resolved. Report an existing identity/project mismatch instead of silently
++  registering the same name in another project.
+ - On SessionStart, `session-start-reminder.sh` resolves an existing identity
+   before registration (`AGENT_NAME` -> per-pane metadata -> tmux session name)
+   and reminds you to re-register with the same `name`. For cc/cx sessions that
+@@ -51,7 +70,7 @@ Details and exceptions for the first calls:
+   generate a new one.
+ - If you were launched with `agent-start`, you should already have
+   `AGENT_NAME` exported and your tmux session should be named after it. At
+-  session start, call `ensure_project(human_key="__AGENTSTACK_PROJECT_KEY__")`,
++  session start, call `ensure_project(human_key="$AGENTSTACK_PROJECT_KEY")`,
+   then call `register_agent` with `program="claude-code"` and
+   `name="$AGENT_NAME"` when `AGENT_NAME` is set. If
+   `printenv CHILD_REGISTRATION_TOKEN` is non-empty, pass that value as
+@@ -100,7 +119,7 @@ Details and exceptions for the first calls:
+   and report completion to `PARENT_AGENT` with `send_message`. There is no task
+   mail in this mode.
+ - Otherwise, always call
+-  `fetch_inbox(project_key="__AGENTSTACK_PROJECT_KEY__", agent_name="$AGENT_NAME")`
++  `fetch_inbox(project_key="$AGENTSTACK_PROJECT_KEY", agent_name="$AGENT_NAME")`
+   after registration. If `PARENT_AGENT` is set, treat the inbox request as the
+   canonical task and report completion to that parent with `send_message`.
+ - If `PARENT_AGENT` is not set and registration or inbox access is truly
+@@ -112,7 +131,7 @@ Details and exceptions for the first calls:
+ 
+ Before editing files under the project, reserve the specific paths you plan to
+ touch with `file_reservation_paths` or `macro_file_reservation_cycle` using
+-`project_key="__AGENTSTACK_PROJECT_KEY__"` and your agent name. The
++`project_key="$AGENTSTACK_PROJECT_KEY"` and your agent name. The
+ `PreToolUse` hook blocks an unreserved `Edit`/`Write` under a protected root.
+ 
+ - **`ttl_seconds` must be at least 600.** Generating the edit takes tens of
+diff --git a/codex/AGENTS.md b/codex/AGENTS.md
+index 174f91c9b8541448d7171d77bb1f4a7d0633f0bd..9d18cd98ae00e38286d2db50b9ea3c1de6eddee0 100644
+--- a/codex/AGENTS.md
++++ b/codex/AGENTS.md
+@@ -5,6 +5,11 @@ participant. Follow the rules below.
+ 
+ ## Coordination (ORRERY Mail)
+ 
++Resolve the project context from the launcher/SessionStart output before using
++these examples. In MCP arguments, replace `$AGENTSTACK_PROJECT_KEY` with the
++actual resolved key. The install fallback below is not a fixed key for every
++repository.
++
+ First calls:
+ 
+ 1. Confirm your name with `echo "$AGENT_NAME"`. If it is empty, use the
+@@ -12,7 +17,7 @@ First calls:
+    helper or `register_agent` with an empty name.
+ 2. Always try the token-safe helper first, even if bootstrap only left you with
+    `AGENT_NAME`:
+-   `AGENTSTACK_PROJECT_KEY="__AGENTSTACK_PROJECT_KEY__" __AGENTSTACK_HOME__/bin/agentstack-reregister "$AGENT_NAME"`.
++   `AGENTSTACK_PROJECT_KEY="$AGENTSTACK_PROJECT_KEY" __AGENTSTACK_HOME__/bin/agentstack-reregister "$AGENT_NAME"`.
+ 3. If that succeeds, do not call `register_agent` again.
+ 4. Tokens: **if your ORRERY Mail MCP server runs through the local proxy, you
+    never touch a token.** Spawned Codex children are configured that way (their
+@@ -42,9 +47,23 @@ MCP tool session.
+ 
+ Details and exceptions for the first calls:
+ 
+-- The shared project key is `__AGENTSTACK_PROJECT_KEY__`. Use it for
+-  `ensure_project`, `register_agent`, `fetch_inbox`, and reservations — do not
+-  infer a different project from your current directory.
++- Use the resolved project key from the launcher, SessionStart reminder, or
++  canonical embedded child task for `ensure_project`, `register_agent`,
++  `fetch_inbox`, messages, and reservations. It is exported as
++  `AGENTSTACK_PROJECT_KEY` / `PROJECT_KEY`; substitute its actual value in MCP
++  arguments, not the literal string `$AGENTSTACK_PROJECT_KEY`.
++- The install-time fallback is `__AGENTSTACK_PROJECT_KEY__`. It must not
++  override the repository selected for a new invocation. Linked worktrees
++  share their repository's canonical project key; another repository has a
++  separate key. Keep an already registered child's project from its launch
++  context, even when its worktree directory differs.
++- If the resolved key is unavailable, use the SessionStart output or the
++  canonical embedded task. For an unregistered session, the shared helper
++  `bash __AGENTSTACK_HOOKS_DIR__/project-context.sh resolve-invocation-project-key "$PWD"`
++  resolves it without sourcing installed shell code. Do not guess a key from
++  a worktree pathname or reuse the install fallback when a repository was
++  resolved. Report an existing identity/project mismatch instead of silently
++  registering the same name in another project.
+ - On SessionStart, `session-start-reminder.sh` resolves an existing identity
+   before registration (`AGENT_NAME` -> per-pane metadata -> tmux session name)
+   and reminds you to re-register with the same `name`. For cc/cx sessions that
+@@ -56,13 +75,13 @@ Details and exceptions for the first calls:
+   first run:
+ 
+   ```bash
+-  AGENTSTACK_PROJECT_KEY="__AGENTSTACK_PROJECT_KEY__" __AGENTSTACK_HOME__/bin/agentstack-reregister "$AGENT_NAME"
++  AGENTSTACK_PROJECT_KEY="$AGENTSTACK_PROJECT_KEY" __AGENTSTACK_HOME__/bin/agentstack-reregister "$AGENT_NAME"
+   ```
+ 
+   It restores the owner token from runtime state and re-registers without
+   printing the token. If that succeeds, do not call `register_agent` again;
+   continue with
+-  `fetch_inbox(project_key="__AGENTSTACK_PROJECT_KEY__", agent_name="$AGENT_NAME")`.
++  `fetch_inbox(project_key="$AGENTSTACK_PROJECT_KEY", agent_name="$AGENT_NAME")`.
+ - `agentstack-reregister` success prints `agentstack-reregister: registered
+   <name>` on stdout and exits 0. Failures print an error on stderr and exit
+   nonzero.
+@@ -73,8 +92,8 @@ Details and exceptions for the first calls:
+   of relying on sandbox-visible env. In Codex, do not try to decide whether the
+   token is set by `printenv`; the helper is the check.
+ - If `agentstack-reregister` is unavailable or fails before registration, call
+-  `ensure_project(human_key="__AGENTSTACK_PROJECT_KEY__")`, then
+-  `register_agent(project_key="__AGENTSTACK_PROJECT_KEY__", program="codex",
++  `ensure_project(human_key="$AGENTSTACK_PROJECT_KEY")`, then
++  `register_agent(project_key="$AGENTSTACK_PROJECT_KEY", program="codex",
+   name="$AGENT_NAME", ...)` when `AGENT_NAME` is set. If
+   `CHILD_REGISTRATION_TOKEN` is visible, pass it as `registration_token`; stock
+   ORRERY Mail is token-strict for existing names, so same-name re-registration
+@@ -121,7 +140,7 @@ Failure handling:
+   `ensure_project`, `register_agent`, `agentstack-reregister`, and `fetch_inbox`;
+   start the embedded task immediately and report completion with `send_message`
+   to the parent. There is no task mail in this mode. Otherwise, read the task
+-  from `fetch_inbox(project_key="__AGENTSTACK_PROJECT_KEY__",
++  from `fetch_inbox(project_key="$AGENTSTACK_PROJECT_KEY",
+   agent_name="$AGENT_NAME")` before doing anything and treat that inbox request
+   as canonical. Do not invent a task from context.
+ - If `PARENT_AGENT` is not set and registration or inbox access is truly
+@@ -158,7 +177,7 @@ Before you Edit/Write any file under the project, take a reservation so another
+ agent does not clobber it:
+ 
+ - Acquire: `macro_file_reservation_cycle` (or `file_reservation_paths`) with
+-  `project_key="__AGENTSTACK_PROJECT_KEY__"`, your agent name, and the paths
++  `project_key="$AGENTSTACK_PROJECT_KEY"`, your agent name, and the paths
+   (project-relative). **`ttl_seconds` must be at least 600**: composing the
+   edit takes tens of seconds and a shorter reservation expires before you
+   write.
+diff --git a/docs/configuration.en.md b/docs/configuration.en.md
+index 1ea753d2eaf8756e070e2509a441b944c5d6944c..ca3de6504e27e4eb6edfa64c71c0338602d4a9fa 100644
+--- a/docs/configuration.en.md
++++ b/docs/configuration.en.md
+@@ -47,23 +47,15 @@ The murmur language is selected in the order `?lang=ja` / `?lang=en`, `AGENTSTAC
+ 
+ ## Without a project key
+ 
+-The following work even when both `AGENTSTACK_PROJECT_KEY` and `AGENTSTACK_VAULT` are unset.
++When both `AGENTSTACK_PROJECT_KEY` and `AGENTSTACK_VAULT` are unset, the Dashboard has
++no selected project. It does not display normal agent sessions or allow annotation reads/writes,
++terminal capture, or control mutations. Mail, history, Graph, and NEW AGENT also require a
++selected project. It never falls back to another Mail project.
+ 
+-- DECK tmux state
+-- terminal open / local capture
+-- local annotations
+-- bundled portraits
+-- Output / deliverables (fall back to `logs/` under cwd or the Git root)
+-
+-The following do not work.
+-
+-- launcher shell-side agent registration
+-- NETWORK mail edges / drawer
+-- mail history / DIGEST REPLAY
+-- dashboard spawn
+-- project-scoped retirement
+-
+-Only mail features become `NOT CONFIGURED`; local telemetry remains available for diagnosis.
++The page itself, bundled portraits, and infrastructure / warmup status remain available for
++diagnostics. Configure the target project before displaying or controlling agents. A separately
++started top-level launcher can still resolve its own project context from the Git repository it
++actually launches in.
+ 
+ ## Output / deliverables
+ 
+@@ -95,7 +87,7 @@ export AGENTSTACK_DELIVERABLE_ROOTS="$HOME/project-a/logs:$HOME/shared logs"
+ | `AGENTSTACK_MAIL_SERVICE_VENV` | derived from candidate ID | Path used to explicitly reuse a verified candidate virtual environment |
+ | `AGENTSTACK_MAIL_HTTP_BEARER_MODE` | `disabled` | Do not use the legacy HTTP bearer |
+ | `AGENTSTACK_PROJECT_KEY` | existing `env.sh` on reinstall; required initially | Human project key. `--project-key` has highest priority |
+-| `AGENTSTACK_PROTECTED_ROOTS` | live project key, then existing `env.sh`, then resolved project key | Roots protected by the reservation hook |
++| `AGENTSTACK_PROTECTED_ROOTS` | install-time fallback | Roots protected by the reservation hook. A new Git invocation derives its runtime context from the actual worktree and does not inherit stale roots from another repository |
+ | `AGENTSTACK_RELEASE_GRACE_SECONDS` | `90` | Debounce seconds before releasing a reservation after successful Edit / Write. Legacy `FILE_RESERVATION_RELEASE_GRACE_SECONDS` is also accepted as a fallback |
+ | `AGENTSTACK_DELIVERABLE_ROOTS` | unset | `:`-separated Output-index scan roots, saved to env / service / manifest |
+ | `AGENTSTACK_LANG` | unset | `ja` / `en` murmur override; browser-selected when unset |
+@@ -111,7 +103,9 @@ export AGENTSTACK_DELIVERABLE_ROOTS="$HOME/project-a/logs:$HOME/shared logs"
+ 
+ The installer's project-key precedence is `--project-key` / process `AGENTSTACK_PROJECT_KEY` → `PROJECT_KEY` → existing `env.sh` at the install destination. If none exist on first install, it does not guess that the repository checkout is the project; it stops with exit 2 before making changes. `AGENTSTACK_PROJECT_KEY` is recommended for persistent configuration.
+ 
+-At hook and helper runtime the precedence is `AGENTSTACK_PROJECT_KEY` → `PROJECT_KEY` → `${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh` → current cwd. The installed `env.sh` is not sourced; only `AGENTSTACK_PROJECT_KEY`, and `AGENTSTACK_PROTECTED_ROOTS` when falling back for protected roots, are read literally. Thus an installed editor started from another directory uses the same project key for reservation and registration without executing arbitrary shell code from `env.sh`.
++At top-level runtime, `hooks/project-context.sh` resolves the project context from the actual launch directory. An explicit `--project-key KEY` selects the namespace; otherwise Git repository identity wins. Linked worktrees of the same repository share one identity, while another clone or repository remains separate. A stale `AGENTSTACK_PROJECT_KEY` or `AGENTSTACK_PROTECTED_ROOTS` inherited from a parent shell, installed `env.sh`, or an old tmux server is not authoritative for a new Git invocation. A delegated or resumed identity keeps its existing context only when durable ownership metadata and its workspace still agree.
++
++The installed `env.sh` remains an install-time / non-Git fallback and is parsed as literal exported data rather than sourced as shell code. For a runtime-only check use `bash ~/.agentstack/hooks/project-context.sh resolve-invocation-project-key "$PWD"`; do not invent a separate key from a linked-worktree path.
+ 
+ The installer derives `AGENTSTACK_MAIL_DB`, `AGENTSTACK_MAIL_ENV`, and `AGENTSTACK_SIGNALS_DIR` from state / render and stores the state root together with `AGENTSTACK_MAIL_HTTP_BEARER_MODE=disabled` in `env.sh`.
+ 
+diff --git a/docs/configuration.md b/docs/configuration.md
+index 44bbd91d0d2cbb1971446d7c131be1faa631a534..fc3bd9ef3c4dbc935279583f9c5e4caaffa0c133 100644
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -54,23 +54,15 @@ Murmur switch でも on / off を切り替えられ、その選択は browser 
+ 
+ ## Project key がない場合
+ 
+-`AGENTSTACK_PROJECT_KEY` と `AGENTSTACK_VAULT` の両方が未設定でも次は動きます。
++`AGENTSTACK_PROJECT_KEY` と `AGENTSTACK_VAULT` の両方が未設定の場合、Dashboard は
++project を選択していません。通常の agent session の表示・annotation の読み書き・
++capture・操作は行いません。Mail、history、Graph、NEW AGENT も project 設定が必要です。
++未知の project から別の Mail project へ fallback することはありません。
+ 
+-- DECK の tmux state
+-- terminal open / local capture
+-- local annotation
+-- bundled portrait
+-- Output / deliverables（cwd または git root の `logs/` へ fallback）
+-
+-次は動きません。
+-
+-- launcher の shell-side agent registration
+-- NETWORK の mail edge / drawer
+-- mail history / DIGEST REPLAY
+-- dashboard spawn
+-- project-scoped retire
+-
+-mail 系だけを `NOT CONFIGURED` にし、local telemetry を診断に残す設計です。
++ページ、bundled portrait、infrastructure / warmup の状態表示は診断用に利用できます。
++agent を表示・操作するには、対象 project を Dashboard に設定してください。
++別途起動する top-level launcher は Dashboard の key が未設定でも、自身の起動先 Git
++repository から project context を解決します。
+ 
+ ## Output / deliverables
+ 
+@@ -102,7 +94,7 @@ export AGENTSTACK_DELIVERABLE_ROOTS="$HOME/project-a/logs:$HOME/shared logs"
+ | `AGENTSTACK_MAIL_SERVICE_VENV` | candidate ID から導出 | 検証済み candidate venv を明示的に再利用する場合の path |
+ | `AGENTSTACK_MAIL_HTTP_BEARER_MODE` | `disabled` | legacy HTTP bearer を使用しない |
+ | `AGENTSTACK_PROJECT_KEY` | 再 install 時は既存 `env.sh`、初回は必須 | project human key。`--project-key` が最優先 |
+-| `AGENTSTACK_PROTECTED_ROOTS` | live project key、次に既存 `env.sh`、最後に resolved project key | reservation hook の保護 root |
++| `AGENTSTACK_PROTECTED_ROOTS` | install-time fallback | reservation hook の保護 root。新規 Git invocation では実 worktree から解決した context を使い、別 repository の stale roots を継承しない |
+ | `AGENTSTACK_RELEASE_GRACE_SECONDS` | `90` | 成功した Edit / Write 後、reservation を解放するまでの debounce 秒数。旧 `FILE_RESERVATION_RELEASE_GRACE_SECONDS` も fallback として利用可 |
+ | `AGENTSTACK_DELIVERABLE_ROOTS` | 未設定 | Output index の `:` 区切り走査 root。env / service / manifest へ保存 |
