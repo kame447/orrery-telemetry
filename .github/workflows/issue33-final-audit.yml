@@ -1,0 +1,56 @@
+name: Issue 33 final integration audit
+on:
+  push:
+    branches: [fix/issue33-dashboard-control-isolation]
+    paths: [.github/workflows/issue33-final-audit.yml]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Export current and reference cross-cutting files
+        shell: bash
+        run: |
+          set -euo pipefail
+          reference=5c061e67318724bf5102f12cd9dfecbccc4c7cd7
+          git fetch origin "$reference"
+          root="$RUNNER_TEMP/issue33-final-audit"
+          current="$root/current"
+          ref="$root/reference"
+          mkdir -p "$current" "$ref"
+          files=(
+            scripts/doctor.sh
+            scripts/install.sh
+            scripts/dashboard-demo.py
+            tests/test_install_agentstack_mail.py
+            tests/test_dashboard_demo.py
+            claude/CLAUDE.md
+            codex/AGENTS.md
+            AGENTS.md
+            docs/configuration.md
+            docs/configuration.en.md
+            docs/launchers.md
+            docs/launchers.en.md
+            docs/troubleshooting.md
+            docs/troubleshooting.en.md
+            docs/install.md
+            docs/install.en.md
+          )
+          for path in "${files[@]}"; do
+            mkdir -p "$current/$(dirname "$path")" "$ref/$(dirname "$path")"
+            cp "$path" "$current/$path"
+            git show "$reference:$path" > "$ref/$path"
+          done
+          git diff --no-index --stat "$current" "$ref" > "$root/stat.txt" || true
+          git diff --no-index "$current" "$ref" > "$root/full.diff" || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue33-final-audit
+          path: ${{ runner.temp }}/issue33-final-audit/
+          retention-days: 1
+          compression-level: 0
