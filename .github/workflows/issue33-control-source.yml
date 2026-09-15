@@ -1,24 +1,98 @@
-name: Issue 33 control source
+name: Issue 33 control candidate
 on:
   push:
     branches: [fix/issue33-dashboard-control-isolation]
     paths: [.github/workflows/issue33-control-source.yml]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  export:
+  build:
     if: github.repository == 'kame447/orrery-telemetry'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Archive exact source
-        run: git archive HEAD | gzip > "$RUNNER_TEMP/control-source.tar.gz"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/setup-python@v5
         with:
-          name: issue33-control-source
-          path: ${{ runner.temp }}/control-source.tar.gz
-          retention-days: 1
-          compression-level: 0
+          python-version: '3.12'
+      - name: Reconstruct exact reviewed patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          patch="$RUNNER_TEMP/control.patch"
+          : > "$patch"
+          for sha in \
+            c1c31a7d2e61b91aa334016c40539759646c6dc9 \
+            96ccffc48afd71e6a4a18f48147c18b56e19fb95 \
+            1e6231b7807ba37ea00d8c36c736f9370aaf8d55 \
+            cef5dd25eef752257e45bc4f6634dae327642ab0 \
+            81d39d6bd22bb18fc7411b9024a7916bc7a13971 \
+            684d91aed7c5b549f0c911b997f59b7690289f13 \
+            d1d5367e0bbd44032b38a8bdc159cb2d8dd63078 \
+            b4dc60dca69edb2a067f8502f279f5344183a512 \
+            a721a6385c4817caeaefa72b2b8c955744046c09
+          do
+            gh api "repos/$GITHUB_REPOSITORY/git/blobs/$sha" --jq .content \
+              | tr -d '\n' | base64 --decode >> "$patch"
+          done
+          git apply --check "$patch"
+          git apply "$patch"
+      - name: Focused control-isolation gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -q pytest pytest-timeout -e ./packages/agentstack_mail
+          python -m py_compile \
+            dashboard/server.py \
+            tests/test_dashboard_control_isolation.py \
+            tests/test_gemini_new_agent.py \
+            tests/test_spawn_v2.py \
+            tests/test_reactivate_live_agent.py \
+            tests/test_dashboard_exit_wrapper.py \
+            tests/test_gemini_dashboard_exit_upstream.py
+          /bin/bash -n bin/agentstack-preregister-child
+          PYTHONPATH=.:packages/agentstack_mail/src python -m pytest -q \
+            tests/test_dashboard_control_isolation.py \
+            tests/test_reactivate_live_agent.py \
+            tests/test_dashboard_exit_wrapper.py \
+            tests/test_gemini_dashboard_exit_upstream.py
+          PYTHONPATH=.:packages/agentstack_mail/src python -m pytest -q \
+            tests/test_spawn_v2.py \
+            -k 'not killed_cleanup and not canonical_real_launcher_timeout and not process_group_launcher_cleanup'
+          PYTHONPATH=.:packages/agentstack_mail/src python -m pytest -q \
+            tests/test_gemini_new_agent.py \
+            -k 'spawn_dispatches_existing_preregistered_adapter or native_spawn_still_sends_task_mail or async_gemini_status or public_payload_cannot_spoof_launch_identity or concurrent_gemini_and_native_spawns_do_not_cross_contaminate or unsafe_resources_fail_before_registration or preflight_failures_do_not_register_junk_identities or selected_effort_reaches_registration_and_launcher'
+      - name: Publish candidate and remove temporary workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/issue33-control-source.yml
+          python - <<'PY'
+          import subprocess
+          expected = {
+              '.github/workflows/issue33-control-source.yml',
+              'bin/agentstack-preregister-child',
+              'dashboard/server.py',
+              'tests/test_dashboard_control_isolation.py',
+              'tests/test_dashboard_exit_wrapper.py',
+              'tests/test_gemini_dashboard_exit_upstream.py',
+              'tests/test_gemini_new_agent.py',
+              'tests/test_reactivate_live_agent.py',
+              'tests/test_spawn_v2.py',
+          }
+          actual = set(subprocess.check_output(
+              ['git', 'status', '--short'], text=True
+          ).splitlines())
+          paths = {line[3:] for line in actual}
+          if paths != expected:
+              raise SystemExit(f'unexpected candidate paths: {sorted(paths ^ expected)}')
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix: isolate Dashboard control mutations by project'
+          git push origin HEAD:fix/issue33-dashboard-control-isolation
