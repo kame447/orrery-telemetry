@@ -2719,7 +2719,8 @@ def _indexed_transcript(name: str) -> str | None:
     # Schema 3 adds validated repository/workspace provenance. Schema 2 stays
     # readable here for historical transcript display; identity hooks accept
     # it only with their stricter project/cwd repository corroboration.
-    if o.get("schema_version") not in (2, 3) or o.get("binding_kind") != "self":
+    if (not isinstance(o, dict) or o.get("schema_version") not in (2, 3)
+            or o.get("binding_kind") != "self"):
         return None
     if o.get("agent_name") != name:
         return None
@@ -2853,6 +2854,8 @@ def _transcript_cwd(path: str) -> str | None:
                 try:
                     o = json.loads(line)
                 except ValueError:
+                    continue
+                if not isinstance(o, dict):
                     continue
                 c = o.get("cwd")
                 if not isinstance(c, str):
@@ -4536,14 +4539,17 @@ def _agent_name_comparison_key(name: str) -> str:
 
 
 def _spawn_name_status(name: str) -> str:
-    """Return available/occupied/unknown; database failures fail closed."""
-    if not name or not os.path.exists(DB_PATH):
+    """Return namespace occupancy; missing ownership/database fails closed."""
+    project_key = _project_key()
+    if not project_key or not name or not os.path.exists(DB_PATH):
         return "unknown"
     comparison_key = _agent_name_comparison_key(name)
     try:
         with _db() as con:
             registered_names = (
-                row[0] for row in con.execute("SELECT name FROM agents")
+                row[0] for row in con.execute(
+                    "SELECT a.name FROM agents a JOIN projects p ON a.project_id=p.id "
+                    "WHERE p.human_key=?", (project_key,))
                 if isinstance(row[0], str)
             )
             occupied = any(
@@ -4683,13 +4689,14 @@ def _spawn_scientist_statuses(
     adjective/scientist combination in Python.  This remains one SQL query even
     when the vocabulary grows beyond SQLite's traditional parameter limit.
     """
-    if not adjectives or not scientists or not os.path.exists(DB_PATH):
+    project_key = _project_key()
+    if not project_key or not adjectives or not scientists or not os.path.exists(DB_PATH):
         return {scientist: "unknown" for scientist in scientists}
     try:
         db_mtime = os.stat(DB_PATH).st_mtime_ns
     except OSError:
         return {scientist: "unknown" for scientist in scientists}
-    key = (DB_PATH, db_mtime, tuple(adjectives), tuple(scientists))
+    key = (project_key, DB_PATH, db_mtime, tuple(adjectives), tuple(scientists))
     now = time.monotonic()
     with _SPAWN_STATUS_LOCK:
         if (_SPAWN_STATUS_CACHE["key"] == key
@@ -4699,7 +4706,9 @@ def _spawn_scientist_statuses(
         with _db() as con:
             occupied = {
                 _agent_name_comparison_key(row[0])
-                for row in con.execute("SELECT name FROM agents")
+                for row in con.execute(
+                    "SELECT a.name FROM agents a JOIN projects p ON a.project_id=p.id "
+                    "WHERE p.human_key=?", (project_key,))
                 if isinstance(row[0], str)
             }
     except sqlite3.Error:
@@ -4943,13 +4952,17 @@ def _runtime_agent_token_project(agent_name: str) -> str | None:
     return _normalize_project_key_value(value) if value and len(value) <= 4096 else ""
 
 
-_SPAWN_LAUNCHES: dict[str, dict] = {}
+_SPAWN_LAUNCHES: dict[tuple[str, str], dict] = {}
 _SPAWN_LAUNCHES_LOCK = threading.Lock()
 _SPAWN_LAUNCH_RETENTION = 1800.0
 
 
-def _spawn_launch_record(name: str, result: dict) -> None:
-    """Remember the outcome of an asynchronous launch for /api/spawn-status."""
+def _spawn_launch_record(name: str, result: dict, project_key: str | None = None) -> None:
+    """Keep asynchronous results under the namespace captured at launch."""
+    selected = _normalize_project_key_value(_project_key() if project_key is None else project_key)
+    if not selected:
+        return
+    key = (selected, name)
     if result.get("pending"):
         state = "launching"
     elif result.get("ok"):
@@ -4961,8 +4974,8 @@ def _spawn_launch_record(name: str, result: dict) -> None:
         for stale in [k for k, v in _SPAWN_LAUNCHES.items()
                       if now - v["ts"] > _SPAWN_LAUNCH_RETENTION]:
             _SPAWN_LAUNCHES.pop(stale, None)
-        previous = _SPAWN_LAUNCHES.get(name)
-        _SPAWN_LAUNCHES[name] = {
+        previous = _SPAWN_LAUNCHES.get(key)
+        _SPAWN_LAUNCHES[key] = {
             "ts": now,
             "started": previous["started"] if previous else now,
             "state": state,
@@ -4971,8 +4984,9 @@ def _spawn_launch_record(name: str, result: dict) -> None:
 
 
 def spawn_launch_status(name: str) -> dict:
+    project_key = _project_key()
     with _SPAWN_LAUNCHES_LOCK:
-        entry = _SPAWN_LAUNCHES.get(name)
+        entry = _SPAWN_LAUNCHES.get((project_key, name)) if project_key else None
     if entry is None:
         return {"ok": False, "error": "no launch recorded for this name"}
     result = entry["result"]
@@ -4988,7 +5002,10 @@ def spawn_launch_status(name: str) -> dict:
 
 
 def spawn_launch_statuses() -> dict:
-    return {"ok": True, "launches": {name: spawn_launch_status(name) for name in list(_SPAWN_LAUNCHES)}}
+    project_key = _project_key()
+    with _SPAWN_LAUNCHES_LOCK:
+        names = [name for owner, name in _SPAWN_LAUNCHES if owner == project_key]
+    return {"ok": True, "launches": {name: spawn_launch_status(name) for name in names}}
 
 
 @dataclass(frozen=True)
@@ -5733,7 +5750,7 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
                 # server constants only, never from the payload.
                 "verdict_deadline_seconds": _spawn_verdict_deadline_seconds(spec),
             }
-            _spawn_launch_record(child_name, pending)
+            _spawn_launch_record(child_name, pending, project_key)
             owned_log = log_fh
             log_fh = None
 
@@ -5747,7 +5764,7 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
                 finally:
                     owned_log.close()
                     discard_handoff()
-                _spawn_launch_record(child_name, verdict)
+                _spawn_launch_record(child_name, verdict, project_key)
 
             threading.Thread(target=runner, name=f"spawn-{child_name}", daemon=True).start()
             handoff["transferred"] = True

@@ -300,3 +300,54 @@ def test_missing_resolver_fails_closed_for_a_configured_worktree(projects, monke
     assert server._project_key() == ""
     assert server.agentmail_state() == ({}, {})
     assert not server._cwd_matches_dashboard_project(str(projects.linked))
+
+
+
+def test_name_picker_queries_and_cache_never_use_foreign_registration(projects, monkeypatch):
+    with sqlite3.connect(projects.db) as con:
+        con.execute("UPDATE agents SET name='SunnyCurie' WHERE id=1")
+        con.execute("UPDATE agents SET name='ZestyCurie' WHERE id=3")
+    monkeypatch.setattr(server, "_SPAWN_STATUS_CACHE", {"ts": 0.0, "key": None, "data": {}})
+    assert server._spawn_name_status("Sunny-Curie") == "occupied"
+    assert server._spawn_name_status("Zesty-Curie") == "available"
+    assert server._spawn_scientist_statuses(["Sunny"], ["Curie"]) == {"Curie": "occupied"}
+    monkeypatch.setattr(server, "PROJECT_KEY", str(projects.other))
+    assert server._spawn_name_status("Sunny-Curie") == "available"
+    assert server._spawn_name_status("Zesty-Curie") == "occupied"
+    assert server._spawn_scientist_statuses(["Sunny"], ["Curie"]) == {"Curie": "available"}
+    monkeypatch.setattr(server, "PROJECT_KEY", "")
+    assert server._spawn_name_status("Sunny-Curie") == "unknown"
+    assert server._spawn_scientist_statuses(["Sunny"], ["Curie"]) == {"Curie": "unknown"}
+
+
+def test_async_spawn_results_use_captured_project_not_completion_environment(projects, monkeypatch):
+    monkeypatch.setattr(server, "_SPAWN_LAUNCHES", {})
+    server._spawn_launch_record("SharedAgent", {"ok": True, "pending": True})
+    monkeypatch.setattr(server, "PROJECT_KEY", str(projects.other))
+    assert not server.spawn_launch_status("SharedAgent")["ok"]
+    assert server.spawn_launch_statuses()["launches"] == {}
+    server._spawn_launch_record("SharedAgent", {"ok": False, "error": "B failure"})
+    server._spawn_launch_record("SharedAgent", {"ok": True, "detail": "A ready"}, str(projects.main))
+    assert server.spawn_launch_status("SharedAgent")["error"] == "B failure"
+    monkeypatch.setattr(server, "PROJECT_KEY", str(projects.main))
+    assert server.spawn_launch_status("SharedAgent")["detail"] == "A ready"
+    assert set(server.spawn_launch_statuses()["launches"]) == {"SharedAgent"}
+    monkeypatch.setattr(server, "PROJECT_KEY", "")
+    assert not server.spawn_launch_status("SharedAgent")["ok"]
+    assert server.spawn_launch_statuses()["launches"] == {}
+    before = dict(server._SPAWN_LAUNCHES)
+    server._spawn_launch_record("UnknownAgent", {"ok": True})
+    assert server._SPAWN_LAUNCHES == before
+
+
+@pytest.mark.parametrize("malformed", [None, [], "not-an-object"])
+def test_malformed_index_is_not_transcript_ownership(projects, malformed):
+    _index(projects, 1, projects.main)
+    (Path(server.SESSION_INDEX_DIR) / "1.json").write_text(json.dumps(malformed))
+    assert server._indexed_transcript("SharedAgent") is None
+
+
+def test_transcript_cwd_skips_non_object_json_rows(projects, tmp_path):
+    path = tmp_path / "sparse.jsonl"
+    path.write_text('null\n[]\n"noise"\n' + json.dumps({"cwd": str(projects.linked)}) + "\n")
+    assert server._transcript_matches_dashboard_project(str(path))

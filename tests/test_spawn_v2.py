@@ -126,7 +126,9 @@ def test_spawn_names_status_means_any_adjective_pair_is_free(monkeypatch, tmp_pa
     )
     db = tmp_path / "mail.sqlite3"
     with sqlite3.connect(db) as con:
-        con.execute("CREATE TABLE agents (name TEXT)")
+        con.execute("CREATE TABLE projects (id INTEGER PRIMARY KEY, human_key TEXT)")
+        con.execute("INSERT INTO projects VALUES (1, ?)", (str(tmp_path.resolve()),))
+        con.execute("CREATE TABLE agents (name TEXT, project_id INTEGER DEFAULT 1)")
         con.executemany(
             "INSERT INTO agents(name) VALUES (?)",
             [
@@ -138,6 +140,7 @@ def test_spawn_names_status_means_any_adjective_pair_is_free(monkeypatch, tmp_pa
         )
     monkeypatch.setattr(server, "SPAWN_SCIENTISTS_SCRIPT", str(script))
     monkeypatch.setattr(server, "DB_PATH", str(db))
+    monkeypatch.setattr(server, "_project_key", lambda: str(tmp_path.resolve()))
     server._SPAWN_STATUS_CACHE.update(ts=0.0, key=None, data={})
 
     names = {
