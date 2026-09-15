@@ -88,6 +88,22 @@ def _fake_launch_env(
     return env, workdir
 
 
+def _publish_child_owner(
+    env: dict[str, str], workdir: pathlib.Path, child_name: str, token: str,
+) -> None:
+    command = (
+        'set -euo pipefail; . "$1"; '
+        'ctx=$(agentstack_resolve_invocation_context "$2" /shared/project); '
+        'ags_store_registration_token "$3" "$4" "$ctx" preregister-child'
+    )
+    result = subprocess.run(
+        ["/bin/bash", "-c", command, "fixture",
+         str(ROOT / "bin/lib/agentstack-register.sh"), str(workdir), child_name, token],
+        env=env, capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_embed_task_requires_pre_registered(tmp_path: pathlib.Path) -> None:
     result = subprocess.run(
         ["/bin/bash", str(SPAWN), "--embed-task", "--unsafe-no-resources", "task"],
@@ -140,6 +156,7 @@ def test_task_file_is_embedded_literally_for_both_launch_paths(
     handoff.write_text("child-owner-token", encoding="utf-8")
     handoff.chmod(0o600)
     child_name = "EmbedCodex" if codex else "EmbedClaude"
+    _publish_child_owner(env, workdir, child_name, "child-owner-token")
 
     args = [
         "/bin/bash", str(SPAWN),

@@ -962,6 +962,57 @@ ags_apply_owned_workspace() {
   AGS_OWNED_REGISTRATION_TOKEN="$token"
 }
 
+# Validate the workspace and namespace for a child that Mail already registered.
+# Existing child ownership is authoritative and may never downgrade to the
+# parent. An ownerless one-shot handoff is accepted only when the parent owns
+# the actual workspace and Mail authenticates the child token in that namespace.
+ags_prepare_preregistered_handoff() {
+  local child_name="$1" work_dir="$2" token_file="${3:-}"
+  local parent_name="${4:-}" supplied_project="${5:-}"
+  local token="" context="" project="" local_child_state=0
+
+  [[ "$child_name" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
+  [[ -d "$work_dir" ]] || return 1
+  if ags_registration_owner_exists_for_name "$child_name" || \
+     ags_legacy_registration_owner_exists_for_name "$child_name"; then
+    local_child_state=1
+  fi
+
+  if [[ -n "$token_file" ]]; then
+    token="$(ags_read_private_registration_token "$token_file")" || return 1
+  fi
+
+  if [[ "$local_child_state" == "1" ]]; then
+    # A contradictory durable/legacy child claim is terminal: never borrow the
+    # parent's valid owner to revive a different child generation.
+    ags_apply_owned_workspace "$child_name" "$work_dir" "$token_file" "$token" \
+      || return 1
+    context="${AGENTSTACK_PROJECT_CONTEXT_JSON:-}"
+    [[ -n "$token" ]] || token="${AGS_OWNED_REGISTRATION_TOKEN:-}"
+    unset AGS_OWNED_REGISTRATION_TOKEN
+  else
+    [[ -n "$parent_name" && -n "$token" ]] || return 1
+    ags_apply_owned_workspace "$parent_name" "$work_dir" || return 1
+    context="${AGENTSTACK_PROJECT_CONTEXT_JSON:-}"
+    unset AGS_OWNED_REGISTRATION_TOKEN
+    project="$(ags_registration_context_project_key "$context")" || return 1
+    ags_verify_registration_owner_with_mail "$project" "$child_name" "$token" \
+      || return 1
+  fi
+
+  [[ -n "$context" && -n "$token" ]] || return 1
+  project="$(ags_registration_context_project_key "$context")" || return 1
+  if [[ -n "$supplied_project" ]] && \
+     ! ags_project_keys_equal "$supplied_project" "$project"; then
+    echo "agentstack: pre-registered handoff project '$supplied_project' does not match owned workspace '$project'." >&2
+    return 1
+  fi
+  agentstack_export_context_json "$context" || return 1
+  AGS_PREREGISTERED_CONTEXT_JSON="$context"
+  AGS_PREREGISTERED_REGISTRATION_TOKEN="$token"
+  AGS_PREREGISTERED_OWNER_PREEXISTED="$local_child_state"
+}
+
 ags_local_agent_name_conflicts() {
   local project_key="$1" agent_name="$2" mode="${3:-candidate}"
   local runtime_dir="" requested_key="" owner_file="" path="" local_name="" artifact_name=""

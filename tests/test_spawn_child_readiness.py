@@ -80,6 +80,19 @@ def test_fresh_workdir_trust_prompt_is_accepted_without_waiting_out_timeout(tmp_
     })
     pathlib.Path(env["HOME"]).mkdir()
 
+    publish = subprocess.run(
+        [
+            "/bin/bash", "-c",
+            'set -euo pipefail; . "$1"; '
+            'ctx=$(agentstack_resolve_invocation_context "$2" /shared/project); '
+            'ags_store_registration_token "$3" child-owner-token "$ctx" preregister-child',
+            "fixture", str(ROOT / "bin/lib/agentstack-register.sh"),
+            str(workdir), "Fresh-Curie",
+        ],
+        env=env, capture_output=True, text=True, timeout=20,
+    )
+    assert publish.returncode == 0, publish.stderr
+
     started = time.monotonic()
     result = subprocess.run(
         [

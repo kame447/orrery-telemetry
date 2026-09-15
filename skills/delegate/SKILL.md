@@ -136,9 +136,11 @@ substitute.
      --program "claude-code" \
      --model "<model-name>" \
      --task-description "<task summary>" \
+     --work-dir "<working-directory>" \
      --token-file-out "$CHILD_TOKEN_FILE")"
    ```
 
+   `--work-dir` is part of the ownership proof: pass the same workspace that will be handed to `spawn_child.sh`; do not let preregistration default to the parent's ambient cwd.
    The helper prints the registered name; use `$CHILD_NAME` from here on rather than a name you chose yourself.
    For a Codex child, pass `--program "codex" --model "<gpt-5.6-sol | gpt-5.6-terra | gpt-5.6-luna | gpt-6-astra>"`, using the full model id the user's shorthand expands to (see "How to read the arguments"). Do not pass `--name` just because the user typed a word you do not recognize.
    Do not paste the token into the inbox message, prompt text, shell history, or a command-line argument.

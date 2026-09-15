@@ -246,3 +246,8 @@ repository にある11件の hook / helper の発火タイミング、caller、b
 ### Child cleanup ownership
 
 子agentの終了処理は、明示されたagent名・private token・実workspaceに一致するowner recordを検証してから予約解除とretireを行います。古いproject環境変数や他repositoryからの同名cleanupは権限の根拠になりません。通信中にownerが変わった場合はlocal stateを削除せず、正常時はchild固有stateの後にowner recordを削除します。
+
+
+### Pre-registered handoff ownership
+
+事前登録済みchildは、private tokenと実workspaceがdurableなchild ownershipに結び付く場合だけ起動します。Dashboardのone-shot handoffでchild ownerがまだ無い場合は、親がそのworkspaceを所有し、child tokenが同じMail projectで認証できる必要があります。矛盾するchild ownerを親ownerへfallbackしません。linked worktreeではrepository ownershipを維持しつつ、tmux起動前にchildのwork directoryを更新します。
