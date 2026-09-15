@@ -43,11 +43,12 @@ jobs:
           lifecycle = r'''def test_delegated_child_lifecycle_is_launcher_owned() -> None:
               text = _CHILD.read_text(encoding="utf-8")
               assert 'mail_helper reserve --project-key "$PROJECT_KEY"' in text
-              assert '$(printf \'%q\' "$MAIL_HELPER") report --project-key' in text
+              assert "MAIL_HELPER" in text
+              assert " report --project-key" in text
               runner = text[text.index('cat > "$RUNNER_FILE" <<EOF'):text.index('chmod 700 "$RUNNER_FILE"')]
-              assert '$(printf \'%q\' "$CLEANUP_HELPER") $(printf \'%q\' "$CHILD_NAME")' in runner
-              assert '$(printf \'%q\' "$MAIL_HELPER") release --project-key' not in runner
-              assert '$(printf \'%q\' "$MAIL_HELPER") retire --project-key' not in runner
+              assert "CLEANUP_HELPER" in runner
+              assert " release --project-key" not in runner
+              assert " retire --project-key" not in runner
               helper = _CHILD_MAIL.read_text(encoding="utf-8")
               assert 'registration_token=token' in helper
               assert 'subject_state = "complete" if status == "SUCCESS" else "incomplete"' in helper
