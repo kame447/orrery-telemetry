@@ -55,7 +55,7 @@ jobs:
             tests/test_phase5_preregistered_handoff.py \
             tests/test_spawn_child_embed_task.py \
             tests/test_spawn_child_readiness.py | sort)
-          ACTUAL=$(git diff --name-only | sort)
+          ACTUAL=$( { git diff --name-only; git ls-files --others --exclude-standard; } | grep -v '^$' | sort -u)
           test "$ACTUAL" = "$EXPECTED" || { printf 'Unexpected diff:\n%s\n' "$ACTUAL"; exit 1; }
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
