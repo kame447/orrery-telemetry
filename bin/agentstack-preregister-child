@@ -136,6 +136,15 @@ fi
 
 ags_mail_load_token
 
+# Ensure the namespace exists before availability lookup/claim.  This is a
+# no-op for delegated children in an existing project and is required for a
+# standalone child whose target repository has never been registered in Mail.
+ensure_result="$(ags_mcp_call "ensure_project" "human_key=$project_key")" \
+  || die "ensure_project failed"
+if ags_mcp_has_error <<<"$ensure_result"; then
+  die "ensure_project returned an error"
+fi
+
 # --name is optional. Top-level registration has always drawn names from the
 # picker, but this child helper used to REQUIRE a caller-supplied name and
 # accepted it unchecked — so a hand-written name such as "Curious-Flory" was
@@ -170,19 +179,6 @@ child_token="$(ags_generate_registration_token)" || die "failed to generate chil
 ags_begin_registration_ownership "$context_json" "$agent_name" \
   "$child_token" "preregister-child" candidate \
   || die "could not establish local ownership for '$agent_name'"
-
-# JSON results are handed to the lib helpers with here-strings rather than
-# `printf | fn`: a helper that returns without reading stdin (as the stock
-# stubs in tests do) made printf die of SIGPIPE, and with pipefail the
-# command substitution then exited 141 (CI flake, 2026-09-05).
-ensure_result="$(ags_mcp_call "ensure_project" "human_key=$project_key")" || {
-  ags_release_registration_ownership
-  die "ensure_project failed"
-}
-if ags_mcp_has_error <<<"$ensure_result"; then
-  ags_release_registration_ownership
-  die "ensure_project returned an error"
-fi
 
 register_args=(
   "project_key=$project_key"
