@@ -21,8 +21,8 @@ AGENT="${AGENT_RESULT#*|}"
 [ -n "$AGENT" ] || exit 0
 
 QUERY_DOCUMENT="$TOOL_INPUT" QUERY_STATE_DIR="$STATE_DIR" \
-    QUERY_AGENT="$AGENT" QUERY_ROOTS="$PROTECTED_ROOTS" QUERY_CWD="$(pwd)" \
-    QUERY_HOME="$HOME" python3 - <<'PY' >/dev/null 2>&1 || true
+    QUERY_AGENT="$AGENT" QUERY_ROOTS_JSON="$RESERVATION_PROTECTED_ROOTS_JSON" \
+    QUERY_CWD="$AGENTSTACK_LOOKUP_WORK_DIR" QUERY_HOME="$HOME" python3 - <<'PY' >/dev/null 2>&1 || true
 import hashlib
 import json
 import os
@@ -45,13 +45,10 @@ if not isinstance(raw_paths, list):
 
 home = os.environ["QUERY_HOME"]
 cwd = os.environ["QUERY_CWD"]
-roots = []
-for raw_root in os.environ.get("QUERY_ROOTS", "").split(":"):
-    if raw_root.startswith("~/"):
-        raw_root = os.path.join(home, raw_root[2:])
-    raw_root = raw_root.rstrip("/") if raw_root != "/" else raw_root
-    if raw_root:
-        roots.append(raw_root)
+try:
+    roots = [str(Path(value).resolve()) for value in json.loads(os.environ["QUERY_ROOTS_JSON"])]
+except Exception:
+    raise SystemExit(0)
 
 agent = os.environ["QUERY_AGENT"]
 state_dir = Path(os.environ["QUERY_STATE_DIR"])
@@ -69,6 +66,7 @@ for raw_path in raw_paths:
         candidates = [os.path.join(root, raw_path) for root in roots]
         candidates.append(os.path.join(cwd, raw_path))
     for absolute in candidates:
+        absolute = str(Path(absolute).resolve())
         for root in roots:
             if absolute == root:
                 relative = os.path.basename(absolute)
