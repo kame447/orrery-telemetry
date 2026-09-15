@@ -116,6 +116,10 @@ except Exception:
             fi
         fi
     fi
+    # Protection and namespace come from the same validated invocation.
+    # Do this before classifying a path; installed roots are not authority.
+    agentstack_export_context_json "$context_json" || return 2
+    PROTECTED_ROOTS="$AGENTSTACK_PROTECTED_ROOTS"
     return 0
 }
 
@@ -185,13 +189,14 @@ except Exception:
 ' 2>/dev/null || echo "")
     [ -n "$FILE_PATH" ] || return 1
 
-    if [[ "$FILE_PATH" == /* ]]; then
-        :
-    elif [[ "$FILE_PATH" == "~/"* ]]; then
-        FILE_PATH="$HOME/${FILE_PATH:2}"
-    else
-        FILE_PATH="$(pwd)/$FILE_PATH"
-    fi
+    reservation_resolve_lookup_context "$tool_document" || return 2
+    FILE_PATH=$(python3 -c '
+import pathlib, sys
+path = pathlib.Path(sys.argv[1]).expanduser()
+if not path.is_absolute():
+    path = pathlib.Path(sys.argv[2]) / path
+print(path.resolve())
+' "$FILE_PATH" "$AGENTSTACK_LOOKUP_WORK_DIR") || return 2
 
     MATCHED_ROOT=""
     if [[ -n "$PROTECTED_ROOTS" ]]; then
@@ -217,8 +222,6 @@ except Exception:
     if [[ "$REL_PATH" == "$FILE_PATH" ]]; then
         REL_PATH="$(basename "$FILE_PATH")"
     fi
-    reservation_resolve_lookup_context "$tool_document"
-    [ "$?" -eq 0 ] || return 2
     return 0
 }
 

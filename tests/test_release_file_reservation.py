@@ -264,6 +264,7 @@ class ReleaseHookTests(unittest.TestCase):
 
             reserve_payload = json.dumps(
                 {
+                    "cwd": str(project),
                     "session_id": "session-1",
                     "tool_input": {
                         "agent_name": "PluckyEinstein",

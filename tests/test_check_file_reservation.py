@@ -138,11 +138,13 @@ class ReservationHookTests(unittest.TestCase):
         fake_python = fake_bin / "python3"
         fake_python.write_text(
             "#!/bin/sh\n"
-            "if [ \"${1-}\" = \"-c\" ]; then\n"
-            f"    exec {json.dumps(os.sys.executable)} \"$@\"\n"
+            "if [ -n \"${AGENTSTACK_PROBE_URL+x}\" ]; then\n"
+            "    cat >/dev/null; printf '%s\\n' reachable; exit 0\n"
             "fi\n"
-            "cat >/dev/null\n"
-            "printf '%s\\n' 'HOOK_RENEWED: 0'\n",
+            "if [ -n \"${QUERY_PROJECT_KEY-}\" ]; then\n"
+            "    cat >/dev/null; printf '%s\\n' 'HOOK_RENEWED: 0'; exit 0\n"
+            "fi\n"
+            f"exec {json.dumps(os.sys.executable)} \"$@\"\n",
             encoding="utf-8",
         )
         fake_python.chmod(0o755)
