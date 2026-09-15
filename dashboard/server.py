@@ -754,6 +754,7 @@ def tmux_state() -> dict:
             "client_tty": None,
             "cmd": "",
             "pane_pid": 0,
+            "cwd": "",
             "title": "",
         }
 
@@ -764,18 +765,23 @@ def tmux_state() -> dict:
             "#{window_active}#{pane_active}",
             "#{pane_current_command}",
             "#{pane_pid}",
+            "#{pane_current_path}",
             "#{pane_title}",
         ]
     )
     for line in _tmux(["list-panes", "-a", "-F", fmt]).splitlines():
-        parts = _split_tmux_fields(line, 4)
-        if len(parts) == 5:
+        parts = _split_tmux_fields(line, 5)
+        if len(parts) == 6:
+            name, flags, cmd, pane_pid, pane_cwd, title = parts
+        elif len(parts) == 5:
             name, flags, cmd, pane_pid, title = parts
+            pane_cwd = ""
         elif len(parts) == 4:
             # demo / older fake tmux adapters may still emit the historical
             # four-field row even when a fifth format field was requested.
             name, flags, cmd, title = parts
             pane_pid = ""
+            pane_cwd = ""
         else:
             continue
         if flags != "11":  # active window + active pane
@@ -783,6 +789,7 @@ def tmux_state() -> dict:
         if name in sessions:
             sessions[name]["cmd"] = cmd
             sessions[name]["pane_pid"] = _to_int(pane_pid)
+            sessions[name]["cwd"] = pane_cwd
             sessions[name]["title"] = title
 
     fmt = SEP.join(["#{client_session}", "#{client_tty}"])
@@ -1072,22 +1079,31 @@ def agentmail_state() -> tuple[dict, dict]:
     instr: dict[str, dict] = {}
     if not os.path.exists(DB_PATH):
         return agents, instr
+    project_key = _canonical_dashboard_project_key()
+    if not project_key:
+        return agents, instr
     con = None
     try:
         con = _db()
         con.row_factory = sqlite3.Row
         cur = con.cursor()
 
-        retired_filter = "retired_at IS NULL" if _has_retired_at() else "1=1"
+        retired_filter = "a2.retired_at IS NULL" if _has_retired_at() else "1=1"
         cur.execute(
             f"""
             SELECT a.name, a.model, a.program, a.task_description, a.last_active_ts
             FROM agents a
+            JOIN projects p ON p.id = a.project_id
             JOIN (
-                SELECT name, MAX(last_active_ts) m
-                FROM agents WHERE {retired_filter} GROUP BY name
+                SELECT a2.name, MAX(a2.last_active_ts) m
+                FROM agents a2
+                JOIN projects p2 ON p2.id = a2.project_id
+                WHERE p2.human_key = ? AND {retired_filter}
+                GROUP BY a2.name
             ) x ON a.name = x.name AND a.last_active_ts = x.m
-            """
+            WHERE p.human_key = ?
+            """,
+            (project_key, project_key),
         )
         for r in cur.fetchall():
             agents[r["name"]] = {
@@ -1105,14 +1121,19 @@ def agentmail_state() -> tuple[dict, dict]:
             FROM message_recipients mr
             JOIN agents a   ON a.id  = mr.agent_id
             JOIN messages m ON m.id  = mr.message_id
+            JOIN projects p ON p.id  = m.project_id
             JOIN agents sn  ON sn.id = m.sender_id
             JOIN (
                 SELECT mr2.agent_id, MAX(m2.created_ts) mc
                 FROM message_recipients mr2
                 JOIN messages m2 ON m2.id = mr2.message_id
+                JOIN projects p2 ON p2.id = m2.project_id
+                WHERE p2.human_key = ?
                 GROUP BY mr2.agent_id
             ) last ON last.agent_id = mr.agent_id AND last.mc = m.created_ts
-            """
+            WHERE p.human_key = ?
+            """,
+            (project_key, project_key),
         )
         for r in cur.fetchall():
             instr[r["aname"]] = {
@@ -1367,10 +1388,13 @@ def build_agents(history_days: float | None = HISTORY_DAYS_DEFAULT) -> list[dict
     codex_apps = _codex_app_runtimes()
     now = int(time.time())
     didx = _deliverables_index()  # {agent: [...]}（60秒キャッシュ）
-    retired_names = _retired_names(_project_key())
+    retired_names = _retired_names(_canonical_dashboard_project_key())
     substitutions = _name_substitutions()
     rows = []
+    path_eligibility: dict[str, bool] = {}
     for name, s in sessions.items():
+        if not _session_matches_dashboard_project(name, s, path_eligibility):
+            continue
         m = mail_agents.get(name)
         program = (m or {}).get("program") or ""
         agent_alive = (
@@ -1464,7 +1488,7 @@ def build_agents(history_days: float | None = HISTORY_DAYS_DEFAULT) -> list[dict
     # これが無いと kill 直後の retired agent が deck の showAll でも見えず、
     # 検索・resume の起点が失われる (2026-05-20 ユーザー報告)。
     seen = {r["name"] for r in rows}
-    project_key = _project_key()
+    project_key = _canonical_dashboard_project_key()
     if project_key:
         con = None
         try:
@@ -1637,22 +1661,76 @@ def _open_codex_app(name: str) -> dict:
     return {"ok": False, "error": "unknown Codex App runtime"}
 
 
-_GRAPH_CACHE: dict = {"ts": 0, "data": None}
+_GRAPH_CACHE: dict = {
+    "ts": 0, "project_key": None, "live_parents": None, "data": None,
+}
 
 
-def _raw_graph() -> dict:
+def _scoped_live_parents(sessions: dict) -> tuple[tuple[str, str], ...]:
+    """Sorted (child, parent) PARENT_AGENT pairs read now from gated sessions.
+
+    `sessions` must already have passed _session_matches_dashboard_project.
+    Each value is read fresh from that exact tmux session (by its session id
+    when known), never from graph_data's host-global parent cache, so a name
+    reused by another project's session cannot inherit an earlier parent.
+    Infra/warm-up sessions pass the gate without project evidence and never
+    qualify as children.
+    """
+    pairs = []
+    for name, session in sessions.items():
+        if name in INFRA_NAMES or name in WARMUP_NAMES:
+            continue
+        target = str(session.get("session_id") or "") or f"={name}"
+        raw = _tmux(["show-environment", "-t", target, "PARENT_AGENT"]).strip()
+        # "-PARENT_AGENT" marks the variable as removed; only NAME=VALUE counts.
+        if not raw.startswith("PARENT_AGENT="):
+            continue
+        parent = raw.split("=", 1)[1].strip()
+        if parent:
+            pairs.append((name, parent))
+    return tuple(sorted(pairs))
+
+def _raw_graph(live_parents: tuple[tuple[str, str], ...] | None = None) -> dict:
     """graph_data.build_graph() を遅延 import + 8 秒キャッシュ。
 
-    build_graph の集計をポーリングのたびに繰り返さないようにする。"""
+    build_graph の集計をポーリングのたびに繰り返さないようにする。
+    Live lineage comes only from `live_parents`, the child->parent pairs of
+    sessions passing the full Dashboard project gate; when omitted they are
+    derived here (graph_payload passes its already-gated pairs).
+    The cache is keyed by the selected project and those exact pairs."""
     now = time.time()
-    if _GRAPH_CACHE["data"] is not None and now - _GRAPH_CACHE["ts"] < 8:
+    project_key = _canonical_dashboard_project_key()
+    if live_parents is None:
+        path_eligibility: dict[str, bool] = {}
+        live_parents = _scoped_live_parents({
+            name: session for name, session in tmux_state().items()
+            if _session_matches_dashboard_project(name, session, path_eligibility)
+        })
+    else:
+        live_parents = tuple(sorted(
+            live_parents.items() if isinstance(live_parents, dict) else live_parents
+        ))
+    if (
+        _GRAPH_CACHE["data"] is not None
+        and _GRAPH_CACHE.get("project_key") == project_key
+        and _GRAPH_CACHE.get("live_parents") == live_parents
+        and now - _GRAPH_CACHE["ts"] < 8
+    ):
         return _GRAPH_CACHE["data"]
     if HERE not in sys.path:
         sys.path.insert(0, HERE)
     import graph_data  # noqa: PLC0415  (lazy: 壊れても全体は落とさない)
 
-    data = graph_data.build_graph()
-    _GRAPH_CACHE.update(ts=now, data=data)
+    # graph_data is imported lazily but its standalone default captures the raw
+    # installed environment. Pass the same canonical/established key used by
+    # every other Dashboard Mail path without mutating process or module state.
+    data = graph_data.build_graph(
+        project_human_key=project_key,
+        live_parents=live_parents,
+    )
+    _GRAPH_CACHE.update(
+        ts=now, project_key=project_key, live_parents=live_parents, data=data,
+    )
     return data
 
 
@@ -1975,7 +2053,14 @@ def graph_payload(days: float, show_all: bool) -> dict:
 
     graph_data normalizes both Rust INTEGER microseconds and legacy ISO TEXT
     to UTC epoch seconds before this recency filter runs."""
-    g = _raw_graph()
+    # The same project-attributed sessions gate both live display and which
+    # live PARENT_AGENT lineage graph_data may admit.
+    path_eligibility: dict[str, bool] = {}
+    sessions = {
+        name: session for name, session in tmux_state().items()
+        if _session_matches_dashboard_project(name, session, path_eligibility)
+    }
+    g = _raw_graph(_scoped_live_parents(sessions))
     graph_health = {
         "timestamp_diagnostics": g.get(
             "timestamp_diagnostics", {"invalid_count": 0, "fields": {}}
@@ -1991,7 +2076,6 @@ def graph_payload(days: float, show_all: bool) -> dict:
 
     mx = max((n["last_active"] for n in nodes if n["last_active"]), default=0)
     win = days * 86400
-    sessions = tmux_state()  # name -> {attached, cmd, title, activity, ...}
     codex_apps = _codex_app_runtimes()
     programs = {n["name"]: (n.get("program") or "") for n in nodes}
     process_tree = (
