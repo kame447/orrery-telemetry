@@ -38,7 +38,7 @@ jobs:
           start = text.index("old_lifecycle = '''")
           end_marker = 'launch_path.write_text(launch.replace(old_lifecycle, new_lifecycle, 1), encoding="utf-8")\n'
           end = text.index(end_marker, start) + len(end_marker)
-          replacement = '''lifecycle_start = launch.index("def test_delegated_child_lifecycle_is_launcher_owned() -> None:\\n")
+          replacement = """lifecycle_start = launch.index("def test_delegated_child_lifecycle_is_launcher_owned() -> None:\\n")
           lifecycle_end = launch.index("\\n\\ndef test_workspace_mcp_config_uses_child_local_git_exclude()", lifecycle_start)
           lifecycle = r'''def test_delegated_child_lifecycle_is_launcher_owned() -> None:
               text = _CHILD.read_text(encoding="utf-8")
@@ -58,7 +58,7 @@ jobs:
           '''
           launch = launch[:lifecycle_start] + lifecycle + launch[lifecycle_end:]
           launch_path.write_text(launch, encoding="utf-8")
-          '''
+          """
           path.write_text(text[:start] + replacement + text[end:], encoding="utf-8")
           PY
           DIR=$(mktemp -d)
