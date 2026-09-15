@@ -901,6 +901,67 @@ PY
 # True means the local host-global name cannot be claimed for PROJECT_KEY.
 # Mail identities are project-local, while tmux sessions and token paths are
 # not; candidate names therefore fail closed on any legacy/corrupt artifact.
+# Read only a private regular credential file. The secret is captured by the
+# caller, never placed in an external command's argv or an invocation context.
+ags_read_private_registration_token() {
+  local path="$1" format="${2:-token}"
+  "${AGENTSTACK_PYTHON:-python3}" - "$path" "$format" <<'PY'
+import json
+import os
+import stat
+import sys
+
+fd = os.open(sys.argv[1], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
+        raise ValueError("registration credential must be a private regular file")
+    raw = os.read(fd, 65537)
+finally:
+    os.close(fd)
+if len(raw) > 65536:
+    raise ValueError("registration credential is too large")
+value = raw.decode("utf-8").rstrip("\n")
+if sys.argv[2] == "child-state":
+    value = json.loads(value).get("registration_token")
+if not isinstance(value, str) or not value or len(value) > 4096:
+    raise ValueError("registration credential is empty or invalid")
+if any(char in value for char in "\r\n\0"):
+    raise ValueError("registration credential contains a control character")
+print(value, end="")
+PY
+}
+
+# A delegated/resumed identity selects its namespace through durable ownership,
+# not a caller's ambient key or marker. Legacy same-repository state needs the
+# existing authenticated upgrade; a contradictory strong owner never downgrades.
+ags_apply_owned_workspace() {
+  local agent_name="$1" work_dir="$2" token_file="${3:-}"
+  local expected_token="${4:-}" token="" context="" state_file=""
+  [[ "$agent_name" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
+  if [[ -n "$token_file" ]]; then
+    token="$(ags_read_private_registration_token "$token_file")" || return 1
+  else
+    token_file="$(ags_registration_token_file "$agent_name")" || return 1
+    if [[ -e "$token_file" || -L "$token_file" ]]; then
+      token="$(ags_read_private_registration_token "$token_file")" || return 1
+    else
+      state_file="$(ags_registration_runtime_dir)/child-agents/$agent_name.json"
+      token="$(ags_read_private_registration_token "$state_file" child-state)" || return 1
+    fi
+  fi
+  [[ -z "$expected_token" || "$token" == "$expected_token" ]] || return 1
+  context="$(ags_resolve_registration_context "" "$work_dir" "$agent_name" reserved "$token")" || return 1
+  if ! ags_registration_owner_exists_for_name "$agent_name"; then
+    ags_mail_load_token
+    ags_verify_registration_owner_with_mail "$(ags_registration_context_project_key "$context")" "$agent_name" "$token" || return 1
+    ags_store_registration_token "$agent_name" "$token" "$context" legacy-resume || return 1
+  fi
+  agentstack_export_context_json "$context" || return 1
+  unset AGS_OWNED_REGISTRATION_TOKEN
+  AGS_OWNED_REGISTRATION_TOKEN="$token"
+}
+
 ags_local_agent_name_conflicts() {
   local project_key="$1" agent_name="$2" mode="${3:-candidate}"
   local runtime_dir="" requested_key="" owner_file="" path="" local_name="" artifact_name=""

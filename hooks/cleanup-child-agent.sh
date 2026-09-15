@@ -17,31 +17,9 @@ PROJECT_CONTEXT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/project-conte
 . "$PROJECT_CONTEXT_LIB"
 STATE_DIR="$RUNTIME_DIR/child-agents"
 MANAGED_FILE="${AGENTSTACK_MANAGED_AGENTS_FILE:-$RUNTIME_DIR/managed_agents.txt}"
-PROJECT_KEY_DEFAULT="$(agentstack_resolve_project_key "$(pwd -P)")"
 MCP_URL="${AGENTSTACK_MCP_URL:-${MCP_URL:-http://127.0.0.1:18765/mcp}}"
 MAIL_ENV="${AGENTSTACK_MAIL_ENV:-$HOME/.agentstack/mail/.env}"
 HTTP_BEARER_MODE="${AGENTSTACK_MAIL_HTTP_BEARER_MODE:-auto}"
-
-resolve_agent_name() {
-    if [[ -f "$HOOKS_DIR/resolve-agent-name.sh" ]]; then
-        # shellcheck disable=SC1091
-        source "$HOOKS_DIR/resolve-agent-name.sh"
-        printf '%s\n' "${RESOLVED_AGENT:-}"
-        return 0
-    fi
-    if [[ -n "${AGENT_NAME:-}" ]]; then
-        printf '%s\n' "$AGENT_NAME"
-        return 0
-    fi
-    if [[ -n "${TMUX_PANE:-}" ]]; then
-        local pane_key metadata_file
-        pane_key="${TMUX_PANE//%/_}"
-        metadata_file="$RUNTIME_DIR/agent_name_${pane_key}"
-        if [[ -f "$metadata_file" ]]; then
-            tr -d '[:space:]' < "$metadata_file" 2>/dev/null
-        fi
-    fi
-}
 
 get_agentstack_token() {
     if [[ -n "${MCP_AGENT_MAIL_TOKEN:-}" ]]; then
@@ -74,9 +52,7 @@ legacy_http_bearer_enabled() {
     esac
 }
 
-RESOLVED_AGENT="$(resolve_agent_name)"
-AGENT_NAME="${1:-${RESOLVED_AGENT:-${AGENT_NAME:-}}}"
-PROJECT_KEY="${PROJECT_KEY:-$PROJECT_KEY_DEFAULT}"
+AGENT_NAME="${1:-$AGENT_NAME_ENV_AT_ENTRY}"
 
 if [[ -z "$AGENT_NAME" ]]; then
     exit 0
@@ -92,34 +68,26 @@ TOKEN_KEY="$(printf '%s' "$AGENT_NAME" | LC_ALL=C tr -c 'A-Za-z0-9_.-' '_')"
 TOKEN_FILE="$RUNTIME_DIR/agent_token_$TOKEN_KEY"
 MCP_CONFIG_FILE="$STATE_DIR/${AGENT_NAME}.mcp.json"
 CODEX_HOME_DIR="$STATE_DIR/${AGENT_NAME}.codex-home"
-if [[ -f "$STATE_FILE" ]]; then
-    if ! STATE_PROJECT_KEY=$(
-        python3 - "$STATE_FILE" 2>/dev/null <<'PYEOF'
-import json
-import sys
-
-data = json.load(open(sys.argv[1], encoding="utf-8"))
-print(data.get("project_key", ""))
-PYEOF
-    ); then
-        echo "[cleanup-child-agent] could not read child state for '$AGENT_NAME'; refusing partial cleanup" >&2
-        exit 1
-    fi
-    if [[ -n "$STATE_PROJECT_KEY" ]]; then
-        PROJECT_KEY="$STATE_PROJECT_KEY"
-    else
-        echo "[cleanup-child-agent] child state for '$AGENT_NAME' has no project key; using the configured project key if available" >&2
-    fi
-fi
-
-if [[ ! -s "$TOKEN_FILE" && ! -s "$STATE_FILE" && -z "${CHILD_REGISTRATION_TOKEN:-}" ]]; then
+OWNER_FILE="$RUNTIME_DIR/agent_owner_$TOKEN_KEY.json"
+if [[ ! -e "$TOKEN_FILE" && ! -L "$TOKEN_FILE" && ! -e "$STATE_FILE" && ! -L "$STATE_FILE" \
+      && ! -e "$OWNER_FILE" && ! -L "$OWNER_FILE" && -z "${CHILD_REGISTRATION_TOKEN:-}" ]]; then
     exit 0
 fi
 
-if [[ -z "$PROJECT_KEY" ]]; then
-    echo "[cleanup-child-agent] project key is unavailable for '$AGENT_NAME'; leaving child state intact" >&2
+# Caller identity, actual workspace and private credential must agree before any
+# Mail request or local deletion. A copied project key is not cleanup authority.
+REGISTER_LIB="${AGENTSTACK_REGISTER_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin/lib" && pwd)/agentstack-register.sh}"
+[[ -f "$REGISTER_LIB" ]] || { echo "[cleanup-child-agent] missing registration library" >&2; exit 1; }
+# shellcheck disable=SC1090
+. "$REGISTER_LIB"
+WORK_DIR="$(pwd -P)" || exit 1
+if ! ags_apply_owned_workspace "$AGENT_NAME" "$WORK_DIR" "" "${CHILD_REGISTRATION_TOKEN:-}"; then
+    echo "[cleanup-child-agent] could not read child state or verify workspace ownership for '$AGENT_NAME'; refusing partial cleanup" >&2
     exit 1
 fi
+CLEANUP_OWNER_TOKEN="$AGS_OWNED_REGISTRATION_TOKEN"
+unset AGS_OWNED_REGISTRATION_TOKEN
+CLEANUP_PROJECT_KEY="$AGENTSTACK_PROJECT_KEY"
 
 if legacy_http_bearer_enabled; then
     TOKEN=$(get_agentstack_token 2>/dev/null || true)
@@ -173,6 +141,12 @@ conn.close()
 ' "$method" "$MCP_URL"
 }
 
+cleanup_owner_still_matches() {
+    local context
+    context="$(ags_registration_owner_context "$AGENT_NAME" "$CLEANUP_OWNER_TOKEN" "$WORK_DIR")" || return 1
+    ags_project_keys_equal "$(ags_registration_context_project_key "$context")" "$CLEANUP_PROJECT_KEY"
+}
+
 release_args=$(python3 -c "
 import json, sys
 print(json.dumps({
@@ -182,33 +156,23 @@ print(json.dumps({
 " "$PROJECT_KEY" "$AGENT_NAME")
 call_mcp "release_file_reservations" "$release_args" > /dev/null 2>&1 || true
 
-retire_args=$(python3 -c '
+# Recheck after the release request before using the frozen retire credential.
+cleanup_owner_still_matches || exit 1
+retire_args=$(CLEANUP_REGISTRATION_TOKEN="$CLEANUP_OWNER_TOKEN" python3 -c '
 import json
 import os
-import pathlib
 import sys
-
-project_key, agent_name, token_file, state_file = sys.argv[1:5]
-token = ""
-if pathlib.Path(token_file).is_file():
-    token = pathlib.Path(token_file).read_text(encoding="utf-8").strip()
-elif pathlib.Path(state_file).is_file():
-    token = json.loads(
-        pathlib.Path(state_file).read_text(encoding="utf-8")
-    ).get("registration_token", "")
-else:
-    token = os.environ.get("CHILD_REGISTRATION_TOKEN", "")
-if not token:
-    raise SystemExit(1)
 print(json.dumps({
-    "project_key": project_key,
-    "agent_name": agent_name,
-    "registration_token": token,
+    "project_key": sys.argv[1],
+    "agent_name": sys.argv[2],
+    "registration_token": os.environ["CLEANUP_REGISTRATION_TOKEN"],
 }))
-' "$PROJECT_KEY" "$AGENT_NAME" "$TOKEN_FILE" "$STATE_FILE") || retire_args=""
+' "$CLEANUP_PROJECT_KEY" "$AGENT_NAME") || retire_args=""
 if [[ -n "$retire_args" ]]; then
     call_mcp "retire_agent" "$retire_args" > /dev/null 2>&1 || true
 fi
+
+cleanup_owner_still_matches || exit 1
 
 python3 - "$MANAGED_FILE" "$AGENT_NAME" <<'PYEOF' 2>/dev/null || true
 import pathlib
@@ -224,5 +188,7 @@ path.write_text("\n".join(line for line in lines if line != name) + "\n", encodi
 PYEOF
 rm -f "$STATE_FILE" "$TOKEN_FILE" "$MCP_CONFIG_FILE"
 rm -rf "$CODEX_HOME_DIR"
+# Release the durable name only after its owned runtime artifacts are gone.
+rm -f "$OWNER_FILE"
 
 exit 0
