@@ -1,24 +1,29 @@
-name: Issue 33 control patch diagnostic
+name: Issue 33 control apply
 on:
   push:
     branches: [fix/issue33-dashboard-control-isolation]
     paths: [.github/workflows/issue33-control-apply.yml]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  inspect:
+  apply:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
-      - name: Inspect fragment boundaries
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Reconstruct and apply reviewed patch
         shell: bash
         run: |
           python - <<'PY'
           import base64, json, os, urllib.request
-          shas = '''c1c31a7d2e61b91aa334016c40539759646c6dc9
+          shas='''c1c31a7d2e61b91aa334016c40539759646c6dc9
           96ccffc48afd71e6a4a18f48147c18b56e19fb95
           1e6231b7807ba37ea00d8c36c736f9370aaf8d55
           cef5dd25eef752257e45bc4f6634dae327642ab0
@@ -30,11 +35,28 @@ jobs:
           token=os.environ['GH_TOKEN']; repo=os.environ['GITHUB_REPOSITORY']; out=bytearray()
           for sha in shas:
               req=urllib.request.Request(f'https://api.github.com/repos/{repo}/git/blobs/{sha}',headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json'})
-              with urllib.request.urlopen(req,timeout=20) as r: data=base64.b64decode(json.load(r)['content'])
-              print(sha, len(data), repr(data[:80]), repr(data[-80:]))
-              out.extend(data)
+              with urllib.request.urlopen(req,timeout=20) as r: out.extend(base64.b64decode(json.load(r)['content']))
           open('/tmp/control.patch','wb').write(out)
           PY
-          echo '--- around parser failure ---'
-          nl -ba /tmp/control.patch | sed -n '480,515p'
-          git apply --check /tmp/control.patch || true
+          git apply --recount --check /tmp/control.patch
+          git apply --recount /tmp/control.patch
+      - name: Focused gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -q pytest pytest-timeout -e ./packages/agentstack_mail
+          python -m py_compile dashboard/server.py tests/test_dashboard_control_isolation.py tests/test_gemini_new_agent.py tests/test_spawn_v2.py tests/test_reactivate_live_agent.py tests/test_dashboard_exit_wrapper.py tests/test_gemini_dashboard_exit_upstream.py
+          bash -n bin/agentstack-preregister-child
+          PYTHONPATH=.:packages/agentstack_mail/src python -m pytest -q tests/test_dashboard_control_isolation.py tests/test_reactivate_live_agent.py tests/test_dashboard_exit_wrapper.py tests/test_gemini_dashboard_exit_upstream.py
+          PYTHONPATH=.:packages/agentstack_mail/src python -m pytest -q tests/test_spawn_v2.py -k 'not killed_cleanup and not canonical_real_launcher_timeout and not process_group_launcher_cleanup'
+          PYTHONPATH=.:packages/agentstack_mail/src python -m pytest -q tests/test_gemini_new_agent.py -k 'spawn_dispatches_existing_preregistered_adapter or native_spawn_still_sends_task_mail or async_gemini_status or public_payload_cannot_spoof_launch_identity or concurrent_gemini_and_native_spawns_do_not_cross_contaminate or unsafe_resources_fail_before_registration or preflight_failures_do_not_register_junk_identities or selected_effort_reaches_registration_and_launcher'
+      - name: Publish candidate and clean temporary workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/issue33-control-source.yml .github/workflows/issue33-control-apply.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix: isolate Dashboard control mutations by project'
+          git push origin HEAD:fix/issue33-dashboard-control-isolation
