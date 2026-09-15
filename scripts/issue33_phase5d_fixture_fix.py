@@ -29,6 +29,8 @@ replacement = '''    home = tmp_path / "home"
     register_lib = home / "bin" / "lib" / "agentstack-register.sh"
     register_lib.parent.mkdir(parents=True, exist_ok=True)
     register_lib.write_bytes((ROOT / "bin" / "lib" / "agentstack-register.sh").read_bytes())
+    with register_lib.open("a", encoding="utf-8") as handle:
+        handle.write("\\nags_verify_registration_owner_with_mail() { return 0; }\\n")
     scientists = home / "bin" / "lib" / "agentstack-scientists.sh"
     scientists.write_bytes((ROOT / "bin" / "lib" / "agentstack-scientists.sh").read_bytes())
     hooks_home = home / "hooks"
@@ -56,21 +58,21 @@ replacement = '''    token = runtime / "one-shot.token"
     token.chmod(0o600)
     owner = {
         "schema": 1,
-        "agent_name": "Child",
-        "name_key": "child",
+        "agent_name": "Parent",
+        "name_key": "parent",
         "project_key": "/project",
         "repository_key": str(repo.resolve()),
         "non_git_root": None,
-        "created_by": "preregister-child",
-        "token_sha256": __import__("hashlib").sha256(b"child-token").hexdigest(),
+        "created_by": "top-level",
+        "token_sha256": __import__("hashlib").sha256(b"parent-token").hexdigest(),
         "updated_at": "2026-09-15T00:00:00Z",
     }
-    owner_file = runtime / "agent_owner_Child.json"
+    owner_file = runtime / "agent_owner_Parent.json"
     owner_file.write_text(json.dumps(owner) + "\\n", encoding="utf-8")
     owner_file.chmod(0o600)
-    stable_token = runtime / "agent_token_Child"
-    stable_token.write_text("child-token", encoding="utf-8")
-    stable_token.chmod(0o600)
+    parent_token = runtime / "agent_token_Parent"
+    parent_token.write_text("parent-token", encoding="utf-8")
+    parent_token.chmod(0o600)
 '''
 if test.count(anchor) != 1:
     raise SystemExit(f"adapter token anchor count={test.count(anchor)}")
@@ -88,4 +90,17 @@ replacement = '''        "AGENTSTACK_HOME": str(home),
 if test.count(anchor) != 1:
     raise SystemExit(f"adapter env anchor count={test.count(anchor)}")
 test = test.replace(anchor, replacement, 1)
+
+# The adapter's old private mail helper no longer owns release/retire. Phase 5b
+# tests cover those remote mutations on the shared cleanup helper directly; the
+# adapter integration asserts only the adapter-owned reserve call and local
+# cleanup state. Limit this expectation migration to the real adapter section.
+marker = "# Real adapter boundary and termination"
+pos = test.index(marker)
+prefix, tail = test[:pos], test[pos:]
+tail = tail.replace('assert _mail_calls(run) == ["reserve", "retire"]',
+                    'assert _mail_calls(run) == ["reserve"]')
+tail = tail.replace('assert _mail_calls(run) == ["retire"]',
+                    'assert _mail_calls(run) == []')
+test = prefix + tail
 path.write_text(test, encoding="utf-8")
