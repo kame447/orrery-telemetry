@@ -1,0 +1,163 @@
+name: issue33 phase5a harness fix
+
+on:
+  push:
+    branches: [work/issue33-phase5a-harness-fix]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: brew install tmux uv
+      - run: python3 -m pip install pytest pytest-timeout pytest-xdist build -e ./packages/agentstack_mail
+      - name: Replace only the stale global-python test double and verify reservation regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "kame447/orrery-telemetry"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('tests/test_check_file_reservation.py')
+          text = path.read_text()
+          old = '''    def run_hook_with_unconfigured_product_environment(
+              self, root: Path
+          ) -> subprocess.CompletedProcess[str]:
+              """Run with no AgentStack product selectors and a definitive zero renewal."""
+              home = root / "home"
+              workspace = home / "workspace"
+              workspace.mkdir(parents=True)
+              workspace = workspace.resolve()
+
+              fake_bin = root / "fake-bin"
+              fake_bin.mkdir()
+              fake_python = fake_bin / "python3"
+              fake_python.write_text(
+                  "#!/bin/sh\\n"
+                  "if [ \\\"${1-}\\\" = \\\"-c\\\" ]; then\\n"
+                  f"    exec {json.dumps(os.sys.executable)} \\\"$@\\\"\\n"
+                  "fi\\n"
+                  "cat >/dev/null\\n"
+                  "printf '%s\\\\n' 'HOOK_RENEWED: 0'\\n",
+                  encoding="utf-8",
+              )
+              fake_python.chmod(0o755)
+
+              env = os.environ.copy()
+              for name in tuple(env):
+                  if name.startswith("AGENTSTACK_") or name in {
+                      "PROJECT_KEY",
+                      "MCP_URL",
+                      "MCP_AGENT_MAIL_TOKEN",
+                      "FILE_RESERVATION_RENEW_SECONDS",
+                      "FILE_RESERVATION_RETRY_DELAY_SECONDS",
+                      "TMUX",
+                      "TMUX_PANE",
+                  }:
+                      env.pop(name, None)
+              env.update(
+                  {
+                      "AGENT_NAME": "PluckyEinstein",
+                      "HOME": str(home),
+                      "PATH": f"{fake_bin}:{env.get('PATH', '')}",
+                  }
+              )
+              # Claude Code sends the session cwd with every hook payload.
+              payload = json.dumps(
+                  {"cwd": str(workspace), "tool_input": {"file_path": str(workspace / "note.md")}}
+              )
+              return subprocess.run(
+                  ["/bin/bash", str(HOOK)],
+                  input=payload,
+                  text=True,
+                  capture_output=True,
+                  env=env,
+                  cwd=workspace,
+                  check=False,
+                  timeout=10,
+              )
+          '''
+          new = '''    def run_hook_with_unconfigured_product_environment(
+              self, root: Path, url: str
+          ) -> subprocess.CompletedProcess[str]:
+              """Run without product project selectors against a real zero-renewal endpoint."""
+              home = root / "home"
+              workspace = home / "workspace"
+              workspace.mkdir(parents=True)
+              workspace = workspace.resolve()
+
+              env = os.environ.copy()
+              for name in tuple(env):
+                  if name.startswith("AGENTSTACK_") or name in {
+                      "PROJECT_KEY",
+                      "MCP_URL",
+                      "MCP_AGENT_MAIL_TOKEN",
+                      "FILE_RESERVATION_RENEW_SECONDS",
+                      "FILE_RESERVATION_RETRY_DELAY_SECONDS",
+                      "TMUX",
+                      "TMUX_PANE",
+                  }:
+                      env.pop(name, None)
+              env.update(
+                  {
+                      "AGENT_NAME": "PluckyEinstein",
+                      "HOME": str(home),
+                      "AGENTSTACK_MCP_URL": url,
+                      "AGENTSTACK_MAIL_HTTP_BEARER_MODE": "disabled",
+                      "FILE_RESERVATION_RETRY_DELAY_SECONDS": "0",
+                  }
+              )
+              payload = json.dumps(
+                  {"cwd": str(workspace), "tool_input": {"file_path": str(workspace / "note.md")}}
+              )
+              return subprocess.run(
+                  ["/bin/bash", str(HOOK)],
+                  input=payload,
+                  text=True,
+                  capture_output=True,
+                  env=env,
+                  cwd=workspace,
+                  check=False,
+                  timeout=10,
+              )
+          '''
+          if text.count(old) != 1:
+              raise SystemExit('expected helper block not found exactly once')
+          text = text.replace(old, new, 1)
+          old_test = '''        with tempfile.TemporaryDirectory() as directory:
+                      result = self.run_hook_with_unconfigured_product_environment(
+                          Path(directory)
+                      )
+          '''
+          new_test = '''        with tempfile.TemporaryDirectory() as directory, _Server(
+                      lambda _count: (200, _mcp_result(0))
+                  ) as server:
+                      result = self.run_hook_with_unconfigured_product_environment(
+                          Path(directory), server.url
+                      )
+          '''
+          if text.count(old_test) != 1:
+              raise SystemExit('expected test block not found exactly once')
+          path.write_text(text.replace(old_test, new_test, 1))
+          PY
+          git diff --check
+          PYTHONPATH=.:packages/agentstack_mail/src python3 -m pytest -q \
+            tests/test_check_file_reservation.py \
+            tests/test_release_file_reservation.py \
+            tests/test_phase5_reservation_workspace_boundary.py
+          git diff -- . ':!.github/workflows/phase5a-harness-fix.yml'
+          git add tests/test_check_file_reservation.py
+          git commit -m 'test: preserve real workspace resolution in reservation default harness'
+          git push origin HEAD:refs/heads/fix/issue33-reservation-workspace-boundary
