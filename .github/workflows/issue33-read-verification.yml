@@ -1,0 +1,50 @@
+name: Issue 33 read verification
+on:
+  push:
+    branches: [fix/issue33-dashboard-live-read-scope]
+    paths: [.github/workflows/issue33-read-verification.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    if: github.repository == 'kame447/orrery-telemetry'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Export exact current and reference sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=c876a3f02abb022e42e12779f07d9105bf2d6449
+          reference=5c061e67318724bf5102f12cd9dfecbccc4c7cd7
+          git fetch origin "$reference"
+          mkdir -p "$RUNNER_TEMP/issue33-source"
+          git archive "$base" | gzip > "$RUNNER_TEMP/issue33-source/current.tar.gz"
+          git archive "$reference" | gzip > "$RUNNER_TEMP/issue33-source/reference.tar.gz"
+          git diff "$base" "$reference" -- dashboard/server.py > "$RUNNER_TEMP/issue33-source/reference-server.diff"
+          python3 - <<'PY'
+          import ast
+          import subprocess
+          versions = {
+              'current': 'c876a3f02abb022e42e12779f07d9105bf2d6449',
+              'reference': '5c061e67318724bf5102f12cd9dfecbccc4c7cd7',
+          }
+          for label, revision in versions.items():
+              source = subprocess.check_output(['git', 'show', revision + ':dashboard/server.py'], text=True)
+              lines = source.splitlines()
+              print('\n===', label, revision, '===')
+              for node in ast.parse(source).body:
+                  if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+                      print(node.lineno, node.end_lineno, node.name)
+                      if any(word in node.name for word in ('substitution', 'annotation', 'project_store')):
+                          print('\n'.join(lines[node.lineno - 1:node.end_lineno]))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue33-exact-source
+          path: ${{ runner.temp }}/issue33-source/
+          retention-days: 1
+          compression-level: 0
