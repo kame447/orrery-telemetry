@@ -11,7 +11,7 @@ end_marker = "# Replace the hand-written failure cleanup"
 start = builder.index(start_marker)
 end = builder.index(end_marker, start)
 
-replacement = r'''# If legacy state persistence fails after strong-owner publication, run the
+replacement = r"""# If legacy state persistence fails after strong-owner publication, run the
 # same validated cleanup path rather than deleting name-keyed files directly.
 adopt_start = text.index(
     'if ! CHILD_TOKEN_FILE="$(\n',
@@ -27,8 +27,11 @@ if adopt.count(needle) != 1:
 adopt = adopt.replace(needle, patched, 1)
 text = text[:adopt_start] + adopt + text[adopt_end:]
 
-'''
+"""
 
 patched_builder = builder[:start] + replacement + builder[end:]
 sys.argv = [str(source), *sys.argv[1:]]
-exec(compile(patched_builder, str(source), "exec"), {"__name__": "__main__", "__file__": str(source)})
+exec(
+    compile(patched_builder, str(source), "exec"),
+    {"__name__": "__main__", "__file__": str(source)},
+)
