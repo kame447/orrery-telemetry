@@ -1,4 +1,4 @@
-name: Issue 33 control reject diagnostic
+name: Issue 33 control patch export
 on:
   push:
     branches: [fix/issue33-dashboard-control-isolation]
@@ -6,25 +6,34 @@ on:
 permissions:
   contents: read
 jobs:
-  inspect:
+  export:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
-      - name: Apply with rejects for diagnosis
+      - name: Reconstruct reviewed patch bytes
         shell: bash
         run: |
           python - <<'PY'
-          import base64,json,os,urllib.request
+          import base64, json, os, urllib.request
           shas='''c1c31a7d2e61b91aa334016c40539759646c6dc9 96ccffc48afd71e6a4a18f48147c18b56e19fb95 1e6231b7807ba37ea00d8c36c736f9370aaf8d55 cef5dd25eef752257e45bc4f6634dae327642ab0 81d39d6bd22bb18fc7411b9024a7916bc7a13971 684d91aed7c5b549f0c911b997f59b7690289f13 d1d5367e0bbd44032b38a8bdc159cb2d8dd63078 b4dc60dca69edb2a067f8502f279f5344183a512 a721a6385c4817caeaefa72b2b8c955744046c09'''.split()
           out=bytearray(); token=os.environ['GH_TOKEN']; repo=os.environ['GITHUB_REPOSITORY']
           for sha in shas:
-              req=urllib.request.Request(f'https://api.github.com/repos/{repo}/git/blobs/{sha}',headers={'Authorization':f'Bearer {token}'})
-              with urllib.request.urlopen(req) as r: out.extend(base64.b64decode(json.load(r)['content']))
-          open('/tmp/control.patch','wb').write(out)
+              req=urllib.request.Request(
+                  f'https://api.github.com/repos/{repo}/git/blobs/{sha}',
+                  headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json'},
+              )
+              with urllib.request.urlopen(req, timeout=20) as response:
+                  out.extend(base64.b64decode(json.load(response)['content']))
+          path=os.path.join(os.environ['RUNNER_TEMP'],'control.patch')
+          open(path,'wb').write(out)
+          print(len(out))
           PY
-          git apply --recount --reject /tmp/control.patch || true
-          find . -name '*.rej' -print -exec cat {} \;
-          git diff --stat
+      - uses: actions/upload-artifact@v4
+        with:
+          name: issue33-control-patch
+          path: ${{ runner.temp }}/control.patch
+          retention-days: 1
+          compression-level: 0
