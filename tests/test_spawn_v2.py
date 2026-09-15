@@ -19,95 +19,88 @@ import pytest
 import dashboard.server as server
 
 
+ANNOTATION_PROJECT = "annotation-fixture"
+
+
 def _set_annotation_paths(monkeypatch, tmp_path):
     path = tmp_path / "runtime" / "annotations.json"
     legacy = tmp_path / "dashboard" / "annotations.json"
     monkeypatch.setattr(server, "ANNOT_PATH", str(path))
     monkeypatch.setattr(server, "LEGACY_ANNOT_PATH", str(legacy))
+    monkeypatch.setattr(server, "_project_key", lambda: ANNOTATION_PROJECT)
     monkeypatch.setattr(
-        server, "_ANNOT_CACHE", {"path": "", "mtime": -1.0, "data": {}}
+        server, "_ANNOT_CACHE", {"path": "", "mtime": -1.0, "project_key": "", "data": {}}
     )
     return path, legacy
 
 
+def _annotation_store(path):
+    return json.loads(path.read_text(encoding="utf-8"))["projects"][ANNOTATION_PROJECT]["agents"]
+
+
 def test_group_only_annotation_is_persisted(monkeypatch, tmp_path):
     path, _legacy = _set_annotation_paths(monkeypatch, tmp_path)
-
     result = server._write_annotation("WiseFaraday", "", "", "runtime-audit")
-
     assert result["ok"] is True
-    assert json.loads(path.read_text(encoding="utf-8"))["WiseFaraday"] == {
-        "role": "", "emoji": "", "group": "runtime-audit",
+    assert _annotation_store(path)["WiseFaraday"] == {
+        "role": "", "emoji": "", "group": "runtime-audit", "project_key": ANNOTATION_PROJECT,
     }
     assert server._annotations()["WiseFaraday"]["group"] == "runtime-audit"
 
 
 def test_annotation_is_removed_only_when_all_fields_are_empty(monkeypatch, tmp_path):
     path, _legacy = _set_annotation_paths(monkeypatch, tmp_path)
-    path.parent.mkdir(parents=True)
-    path.write_text(
-        json.dumps({"WiseFaraday": {"role": "", "emoji": "", "group": "audit"}}),
-        encoding="utf-8",
-    )
-
+    assert server._write_annotation("WiseFaraday", "", "", "audit")["ok"]
     result = server._write_annotation("WiseFaraday", "", "", "")
-
     assert result == {"ok": True, "removed": "WiseFaraday"}
-    assert json.loads(path.read_text(encoding="utf-8")) == {}
+    assert _annotation_store(path) == {}
+    assert server._annotations() == {}
 
 
-def test_legacy_annotation_is_read_then_migrated_on_write(monkeypatch, tmp_path):
+def test_verified_legacy_annotation_is_read_then_migrated_on_write(monkeypatch, tmp_path):
     path, legacy = _set_annotation_paths(monkeypatch, tmp_path)
     legacy.parent.mkdir(parents=True)
     legacy_data = {
-        "WiseFaraday": {"role": "auditor", "emoji": "", "group": "runtime"},
-        "ProOpus": {"role": "parent", "emoji": "", "group": "runtime"},
+        "WiseFaraday": {"role": "auditor", "emoji": "", "group": "runtime", "project_key": ANNOTATION_PROJECT},
+        "ProOpus": {"role": "parent", "emoji": "", "group": "runtime", "project_key": ANNOTATION_PROJECT},
     }
     legacy.write_text(json.dumps(legacy_data), encoding="utf-8")
-
-    assert server._annotations() == legacy_data
-
-    result = server._write_annotation(
-        "WiseFaraday", "runtime maintainer", "", "runtime"
-    )
-
+    assert server._annotations() == {
+        name: {key: value for key, value in entry.items() if key != "project_key"}
+        for name, entry in legacy_data.items()
+    }
+    result = server._write_annotation("WiseFaraday", "runtime maintainer", "", "runtime")
     assert result["ok"] is True
-    migrated = json.loads(path.read_text(encoding="utf-8"))
+    migrated = _annotation_store(path)
     assert migrated["WiseFaraday"]["role"] == "runtime maintainer"
     assert migrated["ProOpus"] == legacy_data["ProOpus"]
     assert json.loads(legacy.read_text(encoding="utf-8")) == legacy_data
-    assert server._annotations() == migrated
+    assert server._annotations()["WiseFaraday"]["role"] == "runtime maintainer"
+    assert server._annotations()["ProOpus"]["role"] == "parent"
 
 
 def test_new_annotation_path_wins_over_legacy(monkeypatch, tmp_path):
     path, legacy = _set_annotation_paths(monkeypatch, tmp_path)
     path.parent.mkdir(parents=True)
     legacy.parent.mkdir(parents=True)
-    path.write_text(
-        json.dumps({"WiseFaraday": {"role": "new", "emoji": "", "group": ""}}),
-        encoding="utf-8",
-    )
-    legacy.write_text(
-        json.dumps({"WiseFaraday": {"role": "old", "emoji": "", "group": ""}}),
-        encoding="utf-8",
-    )
-
+    for target, role in ((path, "new"), (legacy, "old")):
+        target.write_text(json.dumps({"WiseFaraday": {
+            "role": role, "emoji": "", "group": "", "project_key": ANNOTATION_PROJECT,
+        }}), encoding="utf-8")
     assert server._annotations()["WiseFaraday"]["role"] == "new"
     server._write_annotation("WiseFaraday", "updated", "", "")
-    assert json.loads(path.read_text(encoding="utf-8"))["WiseFaraday"]["role"] == "updated"
+    assert _annotation_store(path)["WiseFaraday"]["role"] == "updated"
+    assert json.loads(legacy.read_text())["WiseFaraday"]["role"] == "old"
 
 
 def test_annotation_null_case_creates_runtime_store(monkeypatch, tmp_path):
     path, legacy = _set_annotation_paths(monkeypatch, tmp_path)
-
     assert server._annotations() == {}
     assert not path.exists()
     assert not legacy.exists()
-
     result = server._write_annotation("WiseFaraday", "maintainer", "", "")
-
     assert result["ok"] is True
-    assert json.loads(path.read_text(encoding="utf-8"))["WiseFaraday"]["role"] == "maintainer"
+    assert _annotation_store(path)["WiseFaraday"]["role"] == "maintainer"
 
 
 def test_spawn_names_uses_launcher_scientist_source(monkeypatch, tmp_path):
@@ -133,7 +126,9 @@ def test_spawn_names_status_means_any_adjective_pair_is_free(monkeypatch, tmp_pa
     )
     db = tmp_path / "mail.sqlite3"
     with sqlite3.connect(db) as con:
-        con.execute("CREATE TABLE agents (name TEXT)")
+        con.execute("CREATE TABLE projects (id INTEGER PRIMARY KEY, human_key TEXT)")
+        con.execute("INSERT INTO projects VALUES (1, ?)", (str(tmp_path.resolve()),))
+        con.execute("CREATE TABLE agents (name TEXT, project_id INTEGER DEFAULT 1)")
         con.executemany(
             "INSERT INTO agents(name) VALUES (?)",
             [
@@ -145,6 +140,7 @@ def test_spawn_names_status_means_any_adjective_pair_is_free(monkeypatch, tmp_pa
         )
     monkeypatch.setattr(server, "SPAWN_SCIENTISTS_SCRIPT", str(script))
     monkeypatch.setattr(server, "DB_PATH", str(db))
+    monkeypatch.setattr(server, "_project_key", lambda: str(tmp_path.resolve()))
     server._SPAWN_STATUS_CACHE.update(ts=0.0, key=None, data={})
 
     names = {

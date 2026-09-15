@@ -624,7 +624,10 @@ def _create_runtime(root: Path) -> None:
     runtime = root / "runtime"
     runtime.mkdir(parents=True, exist_ok=True)
     (runtime / "annotations.json").write_text(
-        json.dumps({"agents": ANNOTATIONS}, ensure_ascii=False, indent=2) + "\n",
+        json.dumps({"agents": {
+            name: {**entry, "project_key": str((root / "project").resolve())}
+            for name, entry in ANNOTATIONS.items()
+        }}, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
 

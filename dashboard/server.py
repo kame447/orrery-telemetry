@@ -228,7 +228,8 @@ def _resolve_version() -> str:
 
 
 def _project_key() -> str:
-    return PROJECT_KEY or VAULT
+    """Use one canonical namespace for every Dashboard read and write."""
+    return _canonical_dashboard_project_key()
 
 
 def _normalize_project_key_value(value: object) -> str:
@@ -245,66 +246,25 @@ def _normalize_project_key_value(value: object) -> str:
 
 
 def _canonical_dashboard_project_key() -> str:
-    """Return the immutable configured Dashboard namespace.
-
-    An installed/configured path is a fallback, not an explicit invocation
-    argument.  Canonicalize Git paths through the shared common-directory rule
-    so a dashboard started from a linked worktree reads and writes the same
-    Mail project as NEW AGENT.  A fully bound established context may carry an
-    intentional logical key unrelated to its repository, and remains intact.
-    """
+    """Resolve the configured namespace with the current invocation contract."""
     configured = PROJECT_KEY or VAULT
-    live_key = os.environ.get("AGENTSTACK_PROJECT_KEY", "") or os.environ.get(
-        "PROJECT_KEY", ""
-    )
-    signature = (
-        configured,
-        live_key,
-        os.environ.get("AGENTSTACK_PROJECT_CONTEXT", ""),
-        os.environ.get("AGENTSTACK_PROJECT_REPOSITORY", ""),
-        os.environ.get("AGENTSTACK_PROJECT_WORK_DIR", ""),
-    )
+    signature = (configured,) + tuple(os.environ.get(key, "") for key in (
+        "AGENTSTACK_PROJECT_KEY", "PROJECT_KEY", "AGENTSTACK_PROJECT_CONTEXT_JSON",
+        "AGENTSTACK_PROJECT_REPOSITORY", "AGENTSTACK_PROJECT_WORK_DIR",
+    ))
     if signature == _PROJECT_KEY_CACHE.get("signature"):
         return _PROJECT_KEY_CACHE.get("value", "")
-
-    normalized_configured = _normalize_project_key_value(configured)
-    resolved = normalized_configured
-    established = False
-    bound_work_dir = os.environ.get("AGENTSTACK_PROJECT_WORK_DIR", "").strip()
-    if (
-        configured
-        and _normalize_project_key_value(live_key) == normalized_configured
-        and os.environ.get("AGENTSTACK_PROJECT_CONTEXT") == "1"
-        and bound_work_dir
-        and os.path.isdir(os.path.expanduser(bound_work_dir))
-    ):
-        ok, bound_key = _context_helper_result(
-            "resolve-project-key",
-            os.path.realpath(os.path.expanduser(bound_work_dir)),
-            "/dev/null",
-            "0",
-            "",
+    normalized = _normalize_project_key_value(configured)
+    bound = _bound_dashboard_context()
+    resolved = normalized
+    if bound:
+        resolved = bound["project_key"]
+    elif configured and os.path.isdir(os.path.expanduser(configured)):
+        ok, key = _context_helper_result(
+            "resolve-invocation-project-key", os.path.realpath(os.path.expanduser(configured)),
+            "", normalized,
         )
-        established = ok and bound_key == normalized_configured
-        if established:
-            resolved = bound_key
-
-    if not established and configured:
-        configured_path = os.path.realpath(os.path.expanduser(configured))
-        if os.path.isdir(configured_path):
-            ok, fallback_key = _context_helper_result(
-                "resolve-project-key",
-                configured_path,
-                "/dev/null",
-                "0",
-                "",
-            )
-            # A successful non-Git resolution legitimately returns the live
-            # configured key. Operational resolver failure is different: an
-            # installed linked-worktree literal must not silently become a
-            # second Mail namespace when the required helper is unavailable.
-            resolved = fallback_key if ok and fallback_key else ""
-
+        resolved = key if ok and key else ""
     _PROJECT_KEY_CACHE.update(signature=signature, value=resolved)
     return resolved
 
@@ -330,79 +290,91 @@ def _project_context_helper() -> str:
     return ""
 
 
-def _context_helper_result(
-        action: str, *args: str, configured_fallback: bool = False,
-) -> tuple[bool, str]:
+def _context_helper_result(action: str, *args: str) -> tuple[bool, str]:
     helper = _project_context_helper()
     if not helper:
         return False, ""
     env = os.environ.copy()
     for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
         env.pop(name, None)
-    if configured_fallback:
-        env["AGENTSTACK_PROJECT_KEY"] = _canonical_dashboard_project_key()
-        env["PROJECT_KEY"] = _canonical_dashboard_project_key()
-        env.pop("AGENTSTACK_PROJECT_CONTEXT", None)
-        env.pop("AGENTSTACK_PROJECT_REPOSITORY", None)
-        env.pop("AGENTSTACK_PROJECT_WORK_DIR", None)
     try:
         result = subprocess.run(
             ["/bin/bash", helper, action, *args],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            env=env,
+            capture_output=True, text=True, timeout=5, env=env,
         )
     except (OSError, subprocess.SubprocessError):
         return False, ""
     return result.returncode == 0, getattr(result, "stdout", "").strip()
 
 
-def _context_helper_value(action: str, *args: str) -> str:
-    ok, value = _context_helper_result(action, *args)
-    return value if ok else ""
+def _invocation_context(target: str, explicit_key: str = "", fallback: str = "") -> dict | None:
+    """Read the existing resolver's complete tuple; never reconstruct roots."""
+    ok, raw = _context_helper_result("resolve-invocation-context", target, explicit_key, fallback)
+    if not ok:
+        return None
+    try:
+        data = json.loads(raw)
+        roots = data["protected_roots"]
+        if (not isinstance(data["project_key"], str) or not data["project_key"]
+                or data["work_dir"] != target
+                or not isinstance(roots, list) or not roots
+                or not all(isinstance(root, str) and root for root in roots)
+                or any(data[key] is not None and not isinstance(data[key], str)
+                       for key in ("repository_key", "worktree_root"))):
+            return None
+        return data
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _bound_dashboard_context() -> dict | None:
+    """Preserve an explicit namespace only with a freshly verified full tuple."""
+    configured = _normalize_project_key_value(PROJECT_KEY or VAULT)
+    live = _normalize_project_key_value(os.environ.get("AGENTSTACK_PROJECT_KEY", "")
+                                        or os.environ.get("PROJECT_KEY", ""))
+    if not configured or configured != live:
+        return None
+    try:
+        recorded = json.loads(os.environ.get("AGENTSTACK_PROJECT_CONTEXT_JSON", ""))
+        target = recorded["work_dir"]
+        if not isinstance(target, str) or not os.path.isdir(target):
+            return None
+    except (KeyError, TypeError, ValueError):
+        return None
+    actual = _invocation_context(os.path.realpath(target), configured)
+    if not actual or recorded != actual:
+        return None
+    if (os.environ.get("AGENTSTACK_PROJECT_WORK_DIR", "") != actual["work_dir"]
+            or os.environ.get("AGENTSTACK_PROJECT_REPOSITORY", "") != (actual["repository_key"] or "")):
+        return None
+    return actual
 
 
 def _resolved_work_dir_context(work_dir: str) -> tuple[dict[str, str] | None, str]:
-    """Resolve the one context used by NEW AGENT before any side effect."""
-    helper = _project_context_helper()
-    if not helper:
-        return None, "project context resolver missing; reinstall ORRERY Telemetry"
+    """Resolve NEW AGENT and read-side cwd through the same invocation API."""
     target = os.path.realpath(os.path.expanduser(work_dir))
     if not os.path.isdir(target):
         return None, f"dir does not exist: {target}"
-    resolved_ok, project_key = _context_helper_result(
-        "resolve-project-key", target, "/dev/null", "0", "",
-        configured_fallback=True,
-    )
-    if not resolved_ok or not project_key:
+    data = _invocation_context(target, fallback=_canonical_dashboard_project_key())
+    if not data:
         return None, "project context resolver failed for selected directory"
-    _repo_ok, repository = _context_helper_result("repository-key", target)
-    _worktree_ok, worktree = _context_helper_result("worktree-root", target)
-    if not project_key:
-        return None, "could not resolve project key"
-    roots_ok, protected_roots = _context_helper_result(
-        "resolve-runtime-protected-roots", project_key, target, "/dev/null",
-        configured_fallback=True,
-    )
-    if not roots_ok or not protected_roots:
-        return None, "project protected-root resolution failed for selected directory"
+    roots = data["protected_roots"]
+    if any(":" in root or any(ord(c) < 32 or ord(c) == 127 for c in root) for root in roots):
+        return None, "project roots cannot be represented in the runtime environment"
     return {
-        "project_key": project_key,
-        "repository": repository,
-        "work_dir": worktree or target,
-        "launch_dir": target,
-        "protected_roots": protected_roots,
+        "project_key": data["project_key"],
+        "repository": data["repository_key"] or "",
+        "work_dir": data["worktree_root"] or data["work_dir"],
+        "launch_dir": data["work_dir"],
+        "protected_roots": ":".join(roots),
     }, ""
 
 
 def _configured_workspace() -> str:
-    """Dashboard NEW AGENT default: configured workspace, never dashboard code."""
-    for value in (
-        os.environ.get("AGENTSTACK_PROJECT_WORK_DIR", ""),
-        PROJECT_KEY,
-        VAULT,
-    ):
+    bound = _bound_dashboard_context()
+    if bound:
+        return bound["work_dir"]
+    for value in (PROJECT_KEY, VAULT):
         expanded = os.path.realpath(os.path.expanduser(value)) if value else ""
         if expanded and os.path.isdir(expanded):
             return expanded
@@ -410,29 +382,22 @@ def _configured_workspace() -> str:
 
 
 def _context_matches_dashboard_project(context: dict[str, str]) -> bool:
-    """Whether a delegated target can safely inherit the dashboard project."""
-    configured = _canonical_dashboard_project_key()
-    if not configured:
+    """Check repository evidence, not a stale ambient repository variable."""
+    if not _canonical_dashboard_project_key():
         return False
-    configured_repository = ""
-    bound_repository = os.environ.get("AGENTSTACK_PROJECT_REPOSITORY", "").strip()
-    if bound_repository and os.path.isdir(bound_repository):
-        configured_repository = os.path.realpath(bound_repository)
-    elif os.path.isdir(os.path.expanduser(configured)):
-        configured_repository = _context_helper_value(
-            "repository-key", os.path.realpath(os.path.expanduser(configured))
-        )
-    if context["repository"]:
-        return bool(configured_repository) and (
-            context["repository"] == configured_repository
-        )
+    source = _bound_dashboard_context()
     workspace = _configured_workspace()
-    if workspace:
-        try:
-            return os.path.commonpath([context["launch_dir"], workspace]) == workspace
-        except ValueError:
-            return False
-    return context["project_key"] == configured
+    if source is None and workspace:
+        source = _invocation_context(workspace)
+    if not source:
+        return False
+    repository = source["repository_key"]
+    if repository or context["repository"]:
+        return bool(repository) and repository == context["repository"]
+    try:
+        return os.path.commonpath([context["launch_dir"], workspace]) == workspace
+    except ValueError:
+        return False
 
 
 def _cwd_matches_dashboard_project(cwd: str) -> bool:
@@ -675,12 +640,12 @@ def _stable_live(live: str) -> str:
 
 
 _OBSERVED_LIMIT = 4096
-_observed: dict[str, tuple[tuple[object, ...], float | None]] = {}
+_observed: dict[tuple[str, str], tuple[tuple[object, ...], float | None]] = {}
 _observed_lock = threading.Lock()
 
 
 def _observe_activity(
-    name: str, signature: tuple[object, ...], now: float,
+    name: tuple[str, str], signature: tuple[object, ...], now: float,
 ) -> float | None:
     """署名が前回から変わった時刻を返す。初回観測は活動として数えない。"""
     with _observed_lock:
@@ -695,7 +660,7 @@ def _observe_activity(
         return changed_at
 
 
-def _prune_observed(current_names: set[str]) -> None:
+def _prune_observed(current_names: set[tuple[str, str]]) -> None:
     """消滅した行を落とし、観測キャッシュに明示的な上限を設ける。"""
     with _observed_lock:
         for name in set(_observed) - current_names:
@@ -754,6 +719,7 @@ def tmux_state() -> dict:
             "client_tty": None,
             "cmd": "",
             "pane_pid": 0,
+            "cwd": "",
             "title": "",
         }
 
@@ -764,18 +730,23 @@ def tmux_state() -> dict:
             "#{window_active}#{pane_active}",
             "#{pane_current_command}",
             "#{pane_pid}",
+            "#{pane_current_path}",
             "#{pane_title}",
         ]
     )
     for line in _tmux(["list-panes", "-a", "-F", fmt]).splitlines():
-        parts = _split_tmux_fields(line, 4)
-        if len(parts) == 5:
+        parts = _split_tmux_fields(line, 5)
+        if len(parts) == 6:
+            name, flags, cmd, pane_pid, pane_cwd, title = parts
+        elif len(parts) == 5:
             name, flags, cmd, pane_pid, title = parts
+            pane_cwd = ""
         elif len(parts) == 4:
             # demo / older fake tmux adapters may still emit the historical
             # four-field row even when a fifth format field was requested.
             name, flags, cmd, title = parts
             pane_pid = ""
+            pane_cwd = ""
         else:
             continue
         if flags != "11":  # active window + active pane
@@ -783,6 +754,7 @@ def tmux_state() -> dict:
         if name in sessions:
             sessions[name]["cmd"] = cmd
             sessions[name]["pane_pid"] = _to_int(pane_pid)
+            sessions[name]["cwd"] = pane_cwd
             sessions[name]["title"] = title
 
     fmt = SEP.join(["#{client_session}", "#{client_tty}"])
@@ -1072,22 +1044,31 @@ def agentmail_state() -> tuple[dict, dict]:
     instr: dict[str, dict] = {}
     if not os.path.exists(DB_PATH):
         return agents, instr
+    project_key = _canonical_dashboard_project_key()
+    if not project_key:
+        return agents, instr
     con = None
     try:
         con = _db()
         con.row_factory = sqlite3.Row
         cur = con.cursor()
 
-        retired_filter = "retired_at IS NULL" if _has_retired_at() else "1=1"
+        retired_filter = "a2.retired_at IS NULL" if _has_retired_at() else "1=1"
         cur.execute(
             f"""
             SELECT a.name, a.model, a.program, a.task_description, a.last_active_ts
             FROM agents a
+            JOIN projects p ON p.id = a.project_id
             JOIN (
-                SELECT name, MAX(last_active_ts) m
-                FROM agents WHERE {retired_filter} GROUP BY name
+                SELECT a2.name, MAX(a2.last_active_ts) m
+                FROM agents a2
+                JOIN projects p2 ON p2.id = a2.project_id
+                WHERE p2.human_key = ? AND {retired_filter}
+                GROUP BY a2.name
             ) x ON a.name = x.name AND a.last_active_ts = x.m
-            """
+            WHERE p.human_key = ?
+            """,
+            (project_key, project_key),
         )
         for r in cur.fetchall():
             agents[r["name"]] = {
@@ -1105,14 +1086,19 @@ def agentmail_state() -> tuple[dict, dict]:
             FROM message_recipients mr
             JOIN agents a   ON a.id  = mr.agent_id
             JOIN messages m ON m.id  = mr.message_id
+            JOIN projects p ON p.id  = m.project_id
             JOIN agents sn  ON sn.id = m.sender_id
             JOIN (
                 SELECT mr2.agent_id, MAX(m2.created_ts) mc
                 FROM message_recipients mr2
                 JOIN messages m2 ON m2.id = mr2.message_id
+                JOIN projects p2 ON p2.id = m2.project_id
+                WHERE p2.human_key = ?
                 GROUP BY mr2.agent_id
             ) last ON last.agent_id = mr.agent_id AND last.mc = m.created_ts
-            """
+            WHERE p.human_key = ?
+            """,
+            (project_key, project_key),
         )
         for r in cur.fetchall():
             instr[r["aname"]] = {
@@ -1215,10 +1201,6 @@ def _runtime_name_binding_project(name: str) -> str:
     return projects.pop() if projects else ""
 
 
-def _tmux_session_env(name: str, variable: str) -> str:
-    raw = _tmux(["show-environment", "-t", f"={name}", variable]).strip()
-    prefix = f"{variable}="
-    return raw[len(prefix):] if raw.startswith(prefix) else ""
 
 
 def _session_matches_dashboard_project(
@@ -1367,10 +1349,13 @@ def build_agents(history_days: float | None = HISTORY_DAYS_DEFAULT) -> list[dict
     codex_apps = _codex_app_runtimes()
     now = int(time.time())
     didx = _deliverables_index()  # {agent: [...]}（60秒キャッシュ）
-    retired_names = _retired_names(_project_key())
+    retired_names = _retired_names(_canonical_dashboard_project_key())
     substitutions = _name_substitutions()
     rows = []
+    path_eligibility: dict[str, bool] = {}
     for name, s in sessions.items():
+        if not _session_matches_dashboard_project(name, s, path_eligibility):
+            continue
         m = mail_agents.get(name)
         program = (m or {}).get("program") or ""
         agent_alive = (
@@ -1464,7 +1449,7 @@ def build_agents(history_days: float | None = HISTORY_DAYS_DEFAULT) -> list[dict
     # これが無いと kill 直後の retired agent が deck の showAll でも見えず、
     # 検索・resume の起点が失われる (2026-05-20 ユーザー報告)。
     seen = {r["name"] for r in rows}
-    project_key = _project_key()
+    project_key = _canonical_dashboard_project_key()
     if project_key:
         con = None
         try:
@@ -1541,9 +1526,9 @@ def build_agents(history_days: float | None = HISTORY_DAYS_DEFAULT) -> list[dict
             _stable_live(row.get("live") or ""),
         )
         row["observed_active"] = _observe_activity(
-            row["name"], signature, observed_now,
+            (_project_key(), row["name"]), signature, observed_now,
         )
-    _prune_observed({row["name"] for row in rows})
+    _prune_observed({(_project_key(), row["name"]) for row in rows})
 
     order = {
         "agent": 0,
@@ -1582,14 +1567,18 @@ def _rel(epoch: int, now: int) -> str:
 # Graph (親子 + ORRERY Mail 通信網)
 # --------------------------------------------------------------------------- #
 _CODEX_APP_PROVIDER = CodexAppRuntimeProvider()
-_CAPP_CACHE: dict = {"ts": 0.0, "map": {}}
+_CAPP_CACHE: dict = {"ts": 0.0, "project_key": None, "map": {}}
 _CAPP_RUN_STATES = frozenset(("registering", "working", "waiting", "blocked"))
 
 
 def _codex_app_runtimes() -> dict[str, dict]:
     """Return provider-validated Codex App records keyed by agent name."""
+    project_key = _project_key()
+    if not project_key:
+        return {}
     now = time.time()
-    if now - _CAPP_CACHE["ts"] < 4.5:
+    if (project_key == _CAPP_CACHE.get("project_key")
+            and now - _CAPP_CACHE["ts"] < 4.5):
         return _CAPP_CACHE["map"]
     records: dict[str, dict] = {}
     for snapshot in _CODEX_APP_PROVIDER.list_runtimes():
@@ -1597,11 +1586,16 @@ def _codex_app_runtimes() -> dict[str, dict]:
         name = rec.get("agent_name")
         if not isinstance(name, str) or not name:
             continue
+        if _normalize_project_key_value(rec.get("project_key")) != project_key:
+            continue
+        cwd = rec.get("cwd")
+        if not isinstance(cwd, str) or not _cwd_matches_dashboard_project(cwd):
+            continue
         previous = records.get(name)
         if previous and (previous.get("last_seen_at") or "") > (rec.get("last_seen_at") or ""):
             continue
         records[name] = rec
-    _CAPP_CACHE.update(ts=now, map=records)
+    _CAPP_CACHE.update(ts=now, project_key=project_key, map=records)
     return records
 
 
@@ -1637,22 +1631,76 @@ def _open_codex_app(name: str) -> dict:
     return {"ok": False, "error": "unknown Codex App runtime"}
 
 
-_GRAPH_CACHE: dict = {"ts": 0, "data": None}
+_GRAPH_CACHE: dict = {
+    "ts": 0, "project_key": None, "live_parents": None, "data": None,
+}
 
 
-def _raw_graph() -> dict:
+def _scoped_live_parents(sessions: dict) -> tuple[tuple[str, str], ...]:
+    """Sorted (child, parent) PARENT_AGENT pairs read now from gated sessions.
+
+    `sessions` must already have passed _session_matches_dashboard_project.
+    Each value is read fresh from that exact tmux session (by its session id
+    when known), never from graph_data's host-global parent cache, so a name
+    reused by another project's session cannot inherit an earlier parent.
+    Infra/warm-up sessions pass the gate without project evidence and never
+    qualify as children.
+    """
+    pairs = []
+    for name, session in sessions.items():
+        if name in INFRA_NAMES or name in WARMUP_NAMES:
+            continue
+        target = str(session.get("session_id") or "") or f"={name}"
+        raw = _tmux(["show-environment", "-t", target, "PARENT_AGENT"]).strip()
+        # "-PARENT_AGENT" marks the variable as removed; only NAME=VALUE counts.
+        if not raw.startswith("PARENT_AGENT="):
+            continue
+        parent = raw.split("=", 1)[1].strip()
+        if parent:
+            pairs.append((name, parent))
+    return tuple(sorted(pairs))
+
+def _raw_graph(live_parents: tuple[tuple[str, str], ...] | None = None) -> dict:
     """graph_data.build_graph() を遅延 import + 8 秒キャッシュ。
 
-    build_graph の集計をポーリングのたびに繰り返さないようにする。"""
+    build_graph の集計をポーリングのたびに繰り返さないようにする。
+    Live lineage comes only from `live_parents`, the child->parent pairs of
+    sessions passing the full Dashboard project gate; when omitted they are
+    derived here (graph_payload passes its already-gated pairs).
+    The cache is keyed by the selected project and those exact pairs."""
     now = time.time()
-    if _GRAPH_CACHE["data"] is not None and now - _GRAPH_CACHE["ts"] < 8:
+    project_key = _canonical_dashboard_project_key()
+    if live_parents is None:
+        path_eligibility: dict[str, bool] = {}
+        live_parents = _scoped_live_parents({
+            name: session for name, session in tmux_state().items()
+            if _session_matches_dashboard_project(name, session, path_eligibility)
+        })
+    else:
+        live_parents = tuple(sorted(
+            live_parents.items() if isinstance(live_parents, dict) else live_parents
+        ))
+    if (
+        _GRAPH_CACHE["data"] is not None
+        and _GRAPH_CACHE.get("project_key") == project_key
+        and _GRAPH_CACHE.get("live_parents") == live_parents
+        and now - _GRAPH_CACHE["ts"] < 8
+    ):
         return _GRAPH_CACHE["data"]
     if HERE not in sys.path:
         sys.path.insert(0, HERE)
     import graph_data  # noqa: PLC0415  (lazy: 壊れても全体は落とさない)
 
-    data = graph_data.build_graph()
-    _GRAPH_CACHE.update(ts=now, data=data)
+    # graph_data is imported lazily but its standalone default captures the raw
+    # installed environment. Pass the same canonical/established key used by
+    # every other Dashboard Mail path without mutating process or module state.
+    data = graph_data.build_graph(
+        project_human_key=project_key,
+        live_parents=live_parents,
+    )
+    _GRAPH_CACHE.update(
+        ts=now, project_key=project_key, live_parents=live_parents, data=data,
+    )
     return data
 
 
@@ -1691,12 +1739,16 @@ def _deliverable_roots() -> list[str]:
             if not base:
                 base = cwd
                 try:
+                    env = os.environ.copy()
+                    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+                        env.pop(name, None)
                     result = subprocess.run(
                         ["git", "-C", cwd, "rev-parse", "--show-toplevel"],
                         capture_output=True,
                         text=True,
                         timeout=2,
                         check=False,
+                        env=env,
                     )
                     if result.returncode == 0 and result.stdout.strip():
                         base = result.stdout.strip()
@@ -1741,7 +1793,7 @@ def _deliverables_index() -> dict:
     ``logs/``。frontmatter 先頭付近のみ読むので軽量。"""
     now = time.time()
     roots = _deliverable_roots()
-    cache_key = (tuple(roots), os.path.realpath(VAULT) if VAULT else "")
+    cache_key = (_project_key(), tuple(roots), os.path.realpath(VAULT) if VAULT else "")
     cached = _DELIV_CACHE["map"]
     if (cached is not None and _DELIV_CACHE.get("key") == cache_key
             and now - _DELIV_CACHE["ts"] < 60):
@@ -1790,13 +1842,14 @@ def _deliverables_index() -> dict:
 # --------------------------------------------------------------------------- #
 # Role annotations（ノードの「タスク内役割」ラベル: 人狼デモ / delegate 構図）
 #   $AGENTSTACK_RUNTIME_DIR/annotations.json =
-#       {agent_name: {"role": str, "emoji": str, "group": str}}
+#       {"projects": {project_key: {"agents": {agent_name: {...}}}}}
+#   Each entry carries project_key; unowned legacy entries stay unattributed.
 #   tmux/agent-mail には無い情報を read-time に重ねる。色は spawn 系統に予約済
 #   なので役割は色で塗らず、ノード下のチップ文字で表現（UI 規約に従う）。
 # --------------------------------------------------------------------------- #
 ANNOT_PATH = os.path.join(RUNTIME_DIR, "annotations.json")
 LEGACY_ANNOT_PATH = os.path.join(HERE, "annotations.json")
-_ANNOT_CACHE: dict = {"path": "", "mtime": -1.0, "data": {}}
+_ANNOT_CACHE: dict = {"path": "", "mtime": -1.0, "project_key": "", "data": {}}
 _ANNOT_LOCK = threading.Lock()
 
 
@@ -1813,45 +1866,82 @@ def _annotation_read_path() -> str:
     return ANNOT_PATH
 
 
-def _annotations() -> dict:
+def _annotations(project_key: str | None = None) -> dict:
     """{agent_name: {role, emoji, group}} を返す。mtime ベースで再読込。
 
     `{name: {...}}` の素形式と `{"agents": {name: {...}}}` ラッパの両対応。
     壊れた JSON / 不在は空 dict（チップを出さないだけで全体は落とさない）。"""
+    selected_project = _normalize_project_key_value(
+        _project_key() if project_key is None else project_key
+    )
+    if not selected_project:
+        # Unconfigured: unkeyed entries would otherwise match "" == "".
+        return {}
     path = _annotation_read_path()
     try:
         mt = os.path.getmtime(path)
     except OSError:
-        _ANNOT_CACHE.update(path="", mtime=-1.0, data={})
+        _ANNOT_CACHE.update(path="", mtime=-1.0, project_key=selected_project, data={})
         return {}
-    if path == _ANNOT_CACHE.get("path") and mt == _ANNOT_CACHE["mtime"]:
+    if (path == _ANNOT_CACHE.get("path") and mt == _ANNOT_CACHE["mtime"]
+            and selected_project == _ANNOT_CACHE.get("project_key")):
         return _ANNOT_CACHE["data"]
     try:
         with open(path, "r", encoding="utf-8") as f:
             raw = json.load(f)
     except (OSError, ValueError):
-        if path == _ANNOT_CACHE.get("path"):
+        if (path == _ANNOT_CACHE.get("path")
+                and selected_project == _ANNOT_CACHE.get("project_key")):
             return _ANNOT_CACHE.get("data") or {}
         return {}
     data: dict[str, dict] = {}
     if isinstance(raw, dict):
-        src = raw.get("agents") if isinstance(raw.get("agents"), dict) else raw
+        projects = raw.get("projects")
+        if isinstance(projects, dict):
+            # A project bucket written before filesystem-key normalization may
+            # use a symlink spelling (for example /tmp rather than
+            # /private/tmp).  Read every alias-equivalent bucket, with the
+            # canonical bucket last so a newer write wins for duplicate names.
+            src = {}
+            matching_keys = [
+                key for key in projects
+                if (_normalize_project_key_value(key) == selected_project)
+            ]
+            matching_keys.sort(key=lambda key: key == selected_project)
+            for key in matching_keys:
+                project_entry = projects.get(key)
+                agents = (
+                    project_entry.get("agents", {})
+                    if isinstance(project_entry, dict)
+                    else {}
+                )
+                if isinstance(agents, dict):
+                    src.update(agents)
+        else:
+            src = raw.get("agents") if isinstance(raw.get("agents"), dict) else raw
         for name, v in src.items():
             if not isinstance(name, str) or not isinstance(v, dict):
+                continue
+            entry_project = _normalize_project_key_value(v.get("project_key"))
+            if entry_project != selected_project:
+                # A bucket name or current name binding is not evidence about
+                # who wrote historical metadata. Only entries carrying their
+                # contemporaneous alias-equivalent project may be attributed.
                 continue
             role = str(v.get("role", "")).strip()[:40]
             emoji = str(v.get("emoji", "")).strip()[:8]
             group = str(v.get("group", "")).strip()[:24]
             if role or emoji or group:
                 data[name] = {"role": role, "emoji": emoji, "group": group}
-    _ANNOT_CACHE.update(path=path, mtime=mt, data=data)
+    _ANNOT_CACHE.update(path=path, mtime=mt, project_key=selected_project, data=data)
     return data
 
 
 # --------------------------------------------------------------------------- #
 # Name substitutions
 #   $AGENTSTACK_RUNTIME_DIR/name-substitutions.json =
-#       {registered_name: {"requested": str, "ts": str}}
+#       {"projects": {project_key: {registered_name: {...}}}}
+#   Each entry carries requested, project_key, and ts.
 #
 #   ORRERY Mail does not always register the name it was asked for; which names
 #   it honours depends on its version. The agent then runs fine under a name
@@ -1861,28 +1951,58 @@ def _annotations() -> dict:
 #   left to be inferred from an absence.
 # --------------------------------------------------------------------------- #
 SUBST_PATH = os.path.join(RUNTIME_DIR, "name-substitutions.json")
-_SUBST_CACHE: dict = {"mtime": -1.0, "data": {}}
+_SUBST_CACHE: dict = {"path": "", "mtime": -1.0, "project_key": "", "data": {}}
 _SUBST_LOCK = threading.Lock()
 
 
-def _name_substitutions() -> dict:
+def _name_substitutions(project_key: str | None = None) -> dict:
     """{registered: requested}. Missing or corrupt file means no claims made."""
+    selected_project = _normalize_project_key_value(
+        _project_key() if project_key is None else project_key
+    )
+    if not selected_project:
+        # Unconfigured: unkeyed entries would otherwise match "" == "".
+        return {}
     try:
         mt = os.path.getmtime(SUBST_PATH)
     except OSError:
-        _SUBST_CACHE.update(mtime=-1.0, data={})
+        _SUBST_CACHE.update(path="", mtime=-1.0, project_key=selected_project, data={})
         return {}
-    if mt == _SUBST_CACHE["mtime"]:
+    if (SUBST_PATH == _SUBST_CACHE.get("path") and mt == _SUBST_CACHE["mtime"]
+            and selected_project == _SUBST_CACHE.get("project_key")):
         return _SUBST_CACHE["data"]
     try:
         with open(SUBST_PATH, "r", encoding="utf-8") as f:
             raw = json.load(f)
     except (OSError, ValueError):
-        return _SUBST_CACHE.get("data") or {}
+        if (SUBST_PATH == _SUBST_CACHE.get("path")
+                and selected_project == _SUBST_CACHE.get("project_key")):
+            return _SUBST_CACHE.get("data") or {}
+        return {}
     data: dict[str, str] = {}
     if isinstance(raw, dict):
-        for name, entry in raw.items():
+        projects = raw.get("projects")
+        if isinstance(projects, dict):
+            source = {}
+            matching_keys = [
+                key for key in projects
+                if (_normalize_project_key_value(key) == selected_project)
+            ]
+            matching_keys.sort(key=lambda key: key == selected_project)
+            for key in matching_keys:
+                project_entry = projects.get(key)
+                if isinstance(project_entry, dict):
+                    source.update(project_entry)
+        else:
+            source = raw
+        for name, entry in source.items():
             if not isinstance(name, str):
+                continue
+            entry_project = (
+                entry.get("project_key") if isinstance(entry, dict) else None
+            )
+            entry_project = _normalize_project_key_value(entry_project)
+            if entry_project != selected_project:
                 continue
             requested = ""
             if isinstance(entry, dict):
@@ -1891,17 +2011,24 @@ def _name_substitutions() -> dict:
                 requested = entry.strip()[:128]
             if requested and requested != name:
                 data[name] = requested
-    _SUBST_CACHE.update(mtime=mt, data=data)
+    _SUBST_CACHE.update(path=SUBST_PATH, mtime=mt,
+                        project_key=selected_project, data=data)
     return data
 
 
-def _record_name_substitution(registered: str, requested: str) -> None:
+def _record_name_substitution(
+        registered: str, requested: str, project_key: str | None = None,
+) -> None:
     """Persist that a requested identity was not the one granted.
 
     Best effort by design: failing to write this must not fail a spawn that
     otherwise worked. It is logged either way.
     """
-    if not registered or not requested or registered == requested:
+    selected_project = _normalize_project_key_value(
+        _project_key() if project_key is None else project_key
+    )
+    if (not selected_project or not registered or not requested
+            or registered == requested):
         return
     try:
         with _SUBST_LOCK:
@@ -1912,22 +2039,46 @@ def _record_name_substitution(registered: str, requested: str) -> None:
                 store = {}
             if not isinstance(store, dict):
                 store = {}
-            store[registered] = {
+            projects = store.get("projects")
+            if not isinstance(projects, dict):
+                projects = {}
+                legacy = store if isinstance(store, dict) else {}
+                for name, entry in legacy.items():
+                    if name == "agents" or not isinstance(name, str):
+                        continue
+                    owner = (
+                        entry.get("project_key")
+                        if isinstance(entry, dict) else None
+                    )
+                    if isinstance(owner, str) and owner:
+                        owner = _normalize_project_key_value(owner)
+                        projects.setdefault(owner, {})[name] = entry
+            project_store = projects.setdefault(selected_project, {})
+            if not isinstance(project_store, dict):
+                project_store = {}
+                projects[selected_project] = project_store
+            project_store[registered] = {
                 "requested": requested,
+                "project_key": selected_project,
                 "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             }
+            # Retain unscoped legacy entries verbatim. They remain invisible
+            # until/unless their own embedded project_key verifies ownership;
+            # a later same-name binding must never reattribute them.
+            store["projects"] = projects
             os.makedirs(RUNTIME_DIR, exist_ok=True)
             tmp = f"{SUBST_PATH}.{os.getpid()}.tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(store, f, indent=2, ensure_ascii=False)
             os.replace(tmp, SUBST_PATH)
+            _SUBST_CACHE.update(path="", mtime=-1.0, project_key="", data={})
     except OSError as e:
         logging.warning("could not record name substitution %r->%r: %s",
                         requested, registered, e)
 
 
 def _write_annotation(name: str, role: str, emoji: str,
-                      group: str = "") -> dict:
+                      group: str = "", project_key: str | None = None) -> dict:
     """1 エージェント分の annotation を upsert / 削除。
 
     role / emoji / group がすべて空な場合だけ削除する。
@@ -1935,6 +2086,11 @@ def _write_annotation(name: str, role: str, emoji: str,
     runtime の annotations.json をロックして read-modify-write（atomic
     replace）。旧 dashboard path しかない場合は内容を引き継いで新 path
     に書く。"""
+    selected_project = _normalize_project_key_value(
+        _project_key() if project_key is None else project_key
+    )
+    if not selected_project:
+        return {"ok": False, "error": "Dashboard project is not configured"}
     if not name or _NAME_RE.fullmatch(name) is None:
         return {"ok": False, "error": "invalid name"}
     role = (role or "").strip()[:40]
@@ -1949,21 +2105,60 @@ def _write_annotation(name: str, role: str, emoji: str,
                 raw = {}
         except (OSError, ValueError):
             raw = {}
-        wrapped = isinstance(raw.get("agents"), dict)
-        store = raw["agents"] if wrapped else raw
+        projects = raw.get("projects") if isinstance(raw, dict) else None
+        if not isinstance(projects, dict):
+            projects = {}
+            legacy = raw.get("agents") if isinstance(raw.get("agents"), dict) else raw
+            if isinstance(legacy, dict):
+                for legacy_name, entry in legacy.items():
+                    if not isinstance(legacy_name, str) or not isinstance(entry, dict):
+                        continue
+                    owner = entry.get("project_key")
+                    if isinstance(owner, str) and owner:
+                        owner = _normalize_project_key_value(owner)
+                        owner_entry = projects.setdefault(owner, {"agents": {}})
+                        owner_agents = owner_entry.setdefault("agents", {})
+                        if isinstance(owner_agents, dict):
+                            owner_agents[legacy_name] = entry
+        # Remove only this name from older alias-equivalent buckets.  This
+        # prevents a delete from revealing a stale value while preserving all
+        # other historical entries and every truly distinct project bucket.
+        for key, entry in projects.items():
+            if (key == selected_project
+                    or _normalize_project_key_value(key) != selected_project
+                    or not isinstance(entry, dict)):
+                continue
+            alias_agents = entry.get("agents")
+            if isinstance(alias_agents, dict):
+                alias_agents.pop(name, None)
+
+        project_entry = projects.get(selected_project)
+        if not isinstance(project_entry, dict):
+            project_entry = {}
+        store = project_entry.get("agents")
+        if not isinstance(store, dict):
+            store = {}
         removed = False
         if role or emoji or group:
-            store[name] = {"role": role, "emoji": emoji, "group": group}
+            store[name] = {
+                "role": role, "emoji": emoji, "group": group,
+                "project_key": selected_project,
+            }
         else:
             store.pop(name, None)
             removed = True
-        out = {"agents": store} if wrapped else store
+        project_entry["agents"] = store
+        projects[selected_project] = project_entry
+        # Preserve unscoped legacy data for recovery/migration without making
+        # it visible in any newly selected project.
+        out = dict(raw)
+        out["projects"] = projects
         os.makedirs(os.path.dirname(ANNOT_PATH), exist_ok=True)
         tmp = ANNOT_PATH + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(out, f, ensure_ascii=False, indent=2)
         os.replace(tmp, ANNOT_PATH)
-    _ANNOT_CACHE.update(path="", mtime=-1.0)  # 次回 _annotations で強制再読込
+    _ANNOT_CACHE.update(path="", mtime=-1.0, project_key="")  # 次回 _annotations で強制再読込
     if removed:
         return {"ok": True, "removed": name}
     return {"ok": True, "annot": {"name": name, "role": role,
@@ -1975,7 +2170,14 @@ def graph_payload(days: float, show_all: bool) -> dict:
 
     graph_data normalizes both Rust INTEGER microseconds and legacy ISO TEXT
     to UTC epoch seconds before this recency filter runs."""
-    g = _raw_graph()
+    # The same project-attributed sessions gate both live display and which
+    # live PARENT_AGENT lineage graph_data may admit.
+    path_eligibility: dict[str, bool] = {}
+    sessions = {
+        name: session for name, session in tmux_state().items()
+        if _session_matches_dashboard_project(name, session, path_eligibility)
+    }
+    g = _raw_graph(_scoped_live_parents(sessions))
     graph_health = {
         "timestamp_diagnostics": g.get(
             "timestamp_diagnostics", {"invalid_count": 0, "fields": {}}
@@ -1991,7 +2193,6 @@ def graph_payload(days: float, show_all: bool) -> dict:
 
     mx = max((n["last_active"] for n in nodes if n["last_active"]), default=0)
     win = days * 86400
-    sessions = tmux_state()  # name -> {attached, cmd, title, activity, ...}
     codex_apps = _codex_app_runtimes()
     programs = {n["name"]: (n.get("program") or "") for n in nodes}
     process_tree = (
@@ -2345,7 +2546,7 @@ def _focus_existing_terminal(session: str) -> bool:
 CLAUDE_PROJECTS = os.path.expanduser("~/.claude/projects")
 
 
-_TPATH_CACHE: dict[str, tuple[float, str | None]] = {}
+_TPATH_CACHE: dict[tuple[str, str, str], tuple[float, str | None]] = {}
 
 
 def _ownership_score(text: str, name: str) -> int:
@@ -2410,22 +2611,24 @@ def _claim_transcript(path: str, name: str, score: int, *, exact: bool) -> bool:
         if not exact and score <= held_score:
             return False
         # こちらの主張のほうが強い: 相手のキャッシュを捨てて奪う。
-        _TPATH_CACHE.pop(held_name, None)
+        _TPATH_CACHE.pop(("claude", _project_key(), held_name), None)
     _TPATH_OWNER[path] = (name, score, exact)
     return True
 
 
 def _agent_window(name: str) -> tuple[int, int]:
     """ORRERY Mail DB から (inception_epoch, last_active_epoch)。不明は 0。"""
-    if not os.path.exists(DB_PATH):
+    if not _project_key() or not os.path.exists(DB_PATH):
         return (0, 0)
     con = None
     try:
         con = _db()
         r = con.execute(
-            "SELECT inception_ts, last_active_ts FROM agents "
-            "WHERE name=? ORDER BY last_active_ts DESC LIMIT 1",
-            (name,),
+            "SELECT a.inception_ts, a.last_active_ts FROM agents a "
+            "JOIN projects p ON p.id=a.project_id "
+            "WHERE a.name=? AND p.human_key=? "
+            "ORDER BY a.last_active_ts DESC LIMIT 1",
+            (name, _project_key()),
         ).fetchone()
         if r:
             return (_iso_to_epoch(r[0]), _iso_to_epoch(r[1]))
@@ -2448,7 +2651,17 @@ def _all_transcripts() -> list[str]:
                     out.append(f.path)
     except OSError:
         pass
-    return out
+    eligible_cwds: dict[str, bool] = {}
+    scoped = []
+    for path in out:
+        cwd = _transcript_cwd(path)
+        if not cwd:
+            continue
+        if cwd not in eligible_cwds:
+            eligible_cwds[cwd] = _cwd_matches_dashboard_project(cwd)
+        if eligible_cwds[cwd]:
+            scoped.append(path)
+    return scoped
 
 
 SESSION_INDEX_DIR = os.path.join(RUNTIME_DIR, "session_index")
@@ -2458,16 +2671,17 @@ def _agent_id_for_name(name: str) -> int | None:
     """ORRERY Mail DB から name の最新 agent id を返す(無ければ None)。
 
     UNIQUE(project_id, name) なので 1 プロジェクト内では name→id は一意。
-    プロジェクトをまたぐ同名は last_active 最新を採る。"""
-    if not os.path.exists(DB_PATH):
+    Dashboard の configured project 外にある同名は候補にしない。"""
+    if not _project_key() or not os.path.exists(DB_PATH):
         return None
     con = None
     try:
         con = _db()
         r = con.execute(
-            "SELECT id FROM agents WHERE name=? "
-            "ORDER BY last_active_ts DESC LIMIT 1",
-            (name,),
+            "SELECT a.id FROM agents a JOIN projects p ON p.id=a.project_id "
+            "WHERE a.name=? AND p.human_key=? "
+            "ORDER BY a.last_active_ts DESC LIMIT 1",
+            (name, _project_key()),
         ).fetchone()
         return int(r[0]) if r else None
     except Exception:
@@ -2505,15 +2719,19 @@ def _indexed_transcript(name: str) -> str | None:
     # Schema 3 adds validated repository/workspace provenance. Schema 2 stays
     # readable here for historical transcript display; identity hooks accept
     # it only with their stricter project/cwd repository corroboration.
-    if o.get("schema_version") not in (2, 3) or o.get("binding_kind") != "self":
+    if (not isinstance(o, dict) or o.get("schema_version") not in (2, 3)
+            or o.get("binding_kind") != "self"):
         return None
     if o.get("agent_name") != name:
+        return None
+    if not _project_key() or _normalize_project_key_value(o.get("project_key")) != _project_key():
         return None
     caller = o.get("registered_by")
     if not isinstance(caller, str) or (caller and caller != name):
         return None
     tp = o.get("transcript_path")
-    if isinstance(tp, str) and tp.endswith(".jsonl") and os.path.isfile(tp):
+    if (isinstance(tp, str) and tp.endswith(".jsonl")
+            and os.path.isfile(tp) and _transcript_matches_dashboard_project(tp)):
         return tp
     return None
 
@@ -2532,8 +2750,12 @@ def _transcript_path(session: str) -> str | None:
 
     結果は 120 秒キャッシュ。
     """
+    project_key = _project_key()
+    if not project_key:
+        return None
+    cache_key = ("claude", project_key, session)
     now = time.time()
-    hit = _TPATH_CACHE.get(session)
+    hit = _TPATH_CACHE.get(cache_key)
     if hit and now - hit[0] < 120:
         return hit[1]
 
@@ -2544,7 +2766,7 @@ def _transcript_path(session: str) -> str | None:
     indexed = _indexed_transcript(session)
     if indexed:
         _claim_transcript(indexed, session, 1 << 30, exact=True)
-        _TPATH_CACHE[session] = (now, indexed)
+        _TPATH_CACHE[cache_key] = (now, indexed)
         return indexed
 
     chosen: str | None = None
@@ -2557,12 +2779,13 @@ def _transcript_path(session: str) -> str | None:
         capture_output=True, text=True, timeout=4,
     )
     cwd = (out.stdout or "").strip()
-    if out.returncode == 0 and cwd:
+    if out.returncode == 0 and cwd and _cwd_matches_dashboard_project(cwd):
         d = os.path.join(CLAUDE_PROJECTS, re.sub(r"[^A-Za-z0-9]", "-", cwd))
         if os.path.isdir(d):
             js = sorted(
                 (os.path.join(d, f) for f in os.listdir(d)
-                 if f.endswith(".jsonl")),
+                 if f.endswith(".jsonl")
+                 and _transcript_matches_dashboard_project(os.path.join(d, f))),
                 key=os.path.getmtime, reverse=True,
             )
             if js:
@@ -2599,7 +2822,7 @@ def _transcript_path(session: str) -> str | None:
         # 他人の履歴を見せるより空のほうがましなので諦める。
         chosen = None
 
-    _TPATH_CACHE[session] = (now, chosen)
+    _TPATH_CACHE[cache_key] = (now, chosen)
     return chosen
 
 
@@ -2632,12 +2855,23 @@ def _transcript_cwd(path: str) -> str | None:
                     o = json.loads(line)
                 except ValueError:
                     continue
+                if not isinstance(o, dict):
+                    continue
                 c = o.get("cwd")
+                if not isinstance(c, str):
+                    payload = o.get("payload")
+                    if isinstance(payload, dict):
+                        c = payload.get("cwd")
                 if isinstance(c, str) and os.path.isdir(c):
                     return c
     except OSError:
         pass
     return None
+
+
+def _transcript_matches_dashboard_project(path: str) -> bool:
+    cwd = _transcript_cwd(path)
+    return bool(cwd and _cwd_matches_dashboard_project(cwd))
 
 
 def _agent_program(session: str) -> str:
@@ -2903,8 +3137,12 @@ def _codex_transcript_path(session: str) -> str | None:
 
     結果は 120 秒キャッシュ。
     """
+    project_key = _project_key()
+    if not project_key:
+        return None
+    cache_key = ("codex", project_key, session)
     now = time.time()
-    hit = _TPATH_CACHE.get(("codex", session))
+    hit = _TPATH_CACHE.get(cache_key)
     if hit and now - hit[0] < 120:
         return hit[1]
 
@@ -2914,18 +3152,14 @@ def _codex_transcript_path(session: str) -> str | None:
     # session's transcript for the History view (#27).
     indexed = _indexed_transcript(session)
     if indexed:
-        _TPATH_CACHE[("codex", session)] = (now, indexed)
+        _TPATH_CACHE[cache_key] = (now, indexed)
         return indexed
 
     if not os.path.isdir(_CODEX_SESSIONS_DIR):
-        _TPATH_CACHE[("codex", session)] = (now, None)
+        _TPATH_CACHE[cache_key] = (now, None)
         return None
 
     # ORRERY Mail から inception_ts を引く
-    project_key = _project_key()
-    if not project_key:
-        _TPATH_CACHE[("codex", session)] = (now, None)
-        return None
     inception = 0
     try:
         with _db() as con:
@@ -2942,11 +3176,12 @@ def _codex_transcript_path(session: str) -> str | None:
     except sqlite3.Error:
         pass
     if not inception:
-        _TPATH_CACHE[("codex", session)] = (now, None)
+        _TPATH_CACHE[cache_key] = (now, None)
         return None
 
     best_path: str | None = None
     best_diff = 90  # 90 秒以内のみ採用
+    eligible_cwds: dict[str, bool] = {}
     for root, _dirs, files in os.walk(_CODEX_SESSIONS_DIR):
         for fn in files:
             if not fn.startswith("rollout-") or not fn.endswith(".jsonl"):
@@ -2960,7 +3195,16 @@ def _codex_transcript_path(session: str) -> str | None:
                     o = json.loads(first)
                     if o.get("type") != "session_meta":
                         continue
-                    ts_str = (o.get("payload") or {}).get("timestamp") or ""
+                    meta = o.get("payload") or {}
+                    rollout_cwd = meta.get("cwd")
+                    if not isinstance(rollout_cwd, str):
+                        continue
+                    if rollout_cwd not in eligible_cwds:
+                        eligible_cwds[rollout_cwd] = _cwd_matches_dashboard_project(
+                            rollout_cwd)
+                    if not eligible_cwds[rollout_cwd]:
+                        continue
+                    ts_str = meta.get("timestamp") or ""
                     ts = _iso_to_epoch(ts_str)
                     diff = abs(ts - inception) if ts else best_diff + 1
                     if diff < best_diff:
@@ -2968,7 +3212,7 @@ def _codex_transcript_path(session: str) -> str | None:
                         best_path = fp
             except (OSError, ValueError, KeyError):
                 continue
-    _TPATH_CACHE[("codex", session)] = (now, best_path)
+    _TPATH_CACHE[cache_key] = (now, best_path)
     return best_path
 
 
@@ -3251,7 +3495,7 @@ def messages_since_payload(since_ts: int, limit: int = 80) -> dict:
 # 60s in-memory cache（同じ name+hours へのバースト fetch を吸収）。
 # 出力イベント数は 200 件上限（超えたら時間で均等間引き＝spike を保つ）。
 # --------------------------------------------------------------------------- #
-_HIST_CACHE: dict[tuple[str, int], tuple[float, dict]] = {}
+_HIST_CACHE: dict[tuple, tuple[float, dict]] = {}
 _HIST_TTL = 60.0
 _HIST_LOCK = threading.Lock()
 _SPAWN_SUBJ_RE = re.compile(
@@ -3402,7 +3646,10 @@ def agent_history_payload(name: str = "", hours: int | None = 24,
     if not auto_range:
         hours = max(1, min(168, int(hours)))  # 1h .. 7d
     fetch_hours = 168 if auto_range else hours        # auto は 7d ぶん引いて crop
-    cache_key: tuple = (tuple(sorted(names_list)), hours, bool(include_pane_states))
+    project_key = _project_key()
+    if not project_key:
+        return {"ok": False, "error": "AGENTSTACK_PROJECT_KEY or AGENTSTACK_VAULT is not configured"}
+    cache_key: tuple = (project_key, tuple(sorted(names_list)), hours, bool(include_pane_states))
     now = int(time.time())
     # キャッシュヒット（now はキャッシュ時刻のまま）
     with _HIST_LOCK:
@@ -3410,9 +3657,6 @@ def agent_history_payload(name: str = "", hours: int | None = 24,
         if ent and (time.time() - ent[0]) < _HIST_TTL:
             return ent[1]
 
-    project_key = _project_key()
-    if not project_key:
-        return {"ok": False, "error": "AGENTSTACK_PROJECT_KEY or AGENTSTACK_VAULT is not configured"}
     since = now - fetch_hours * 3600
     agent_infos: dict[str, dict] = {}   # name -> {id, inception_ts, retired_at}
     raw_events: list[dict] = []
@@ -3963,6 +4207,8 @@ def term_capture(session: str, lines: int) -> dict:
         return {"ok": False, "error": "invalid session name"}
     if not _has_session(session):
         return {"ok": False, "error": f"session '{session}' は存在しません"}
+    if not _live_session_matches_dashboard_project(session):
+        return {"ok": False, "error": "tmux session belongs to another project"}
     lines = max(40, min(4000, lines))
     # capture-pane の -t はペイン指定。= 接頭辞は不可なのでセッション名を
     # そのまま渡す(存在は上で has-session -t =session で厳密確認済み)。
@@ -4004,6 +4250,8 @@ def ttyd_ensure(session: str) -> dict:
         return {"ok": False, "error": "invalid session name"}
     if not _has_session(session):
         return {"ok": False, "error": f"session '{session}' は存在しません"}
+    if not _live_session_matches_dashboard_project(session):
+        return {"ok": False, "error": "tmux session belongs to another project"}
     if not os.path.exists(TTYD_BIN):
         return {"ok": False, "error": "ttyd が見つかりません"}
     with _TTYD_LOCK:
@@ -4291,14 +4539,17 @@ def _agent_name_comparison_key(name: str) -> str:
 
 
 def _spawn_name_status(name: str) -> str:
-    """Return available/occupied/unknown; database failures fail closed."""
-    if not name or not os.path.exists(DB_PATH):
+    """Return namespace occupancy; missing ownership/database fails closed."""
+    project_key = _project_key()
+    if not project_key or not name or not os.path.exists(DB_PATH):
         return "unknown"
     comparison_key = _agent_name_comparison_key(name)
     try:
         with _db() as con:
             registered_names = (
-                row[0] for row in con.execute("SELECT name FROM agents")
+                row[0] for row in con.execute(
+                    "SELECT a.name FROM agents a JOIN projects p ON a.project_id=p.id "
+                    "WHERE p.human_key=?", (project_key,))
                 if isinstance(row[0], str)
             )
             occupied = any(
@@ -4438,13 +4689,14 @@ def _spawn_scientist_statuses(
     adjective/scientist combination in Python.  This remains one SQL query even
     when the vocabulary grows beyond SQLite's traditional parameter limit.
     """
-    if not adjectives or not scientists or not os.path.exists(DB_PATH):
+    project_key = _project_key()
+    if not project_key or not adjectives or not scientists or not os.path.exists(DB_PATH):
         return {scientist: "unknown" for scientist in scientists}
     try:
         db_mtime = os.stat(DB_PATH).st_mtime_ns
     except OSError:
         return {scientist: "unknown" for scientist in scientists}
-    key = (DB_PATH, db_mtime, tuple(adjectives), tuple(scientists))
+    key = (project_key, DB_PATH, db_mtime, tuple(adjectives), tuple(scientists))
     now = time.monotonic()
     with _SPAWN_STATUS_LOCK:
         if (_SPAWN_STATUS_CACHE["key"] == key
@@ -4454,7 +4706,9 @@ def _spawn_scientist_statuses(
         with _db() as con:
             occupied = {
                 _agent_name_comparison_key(row[0])
-                for row in con.execute("SELECT name FROM agents")
+                for row in con.execute(
+                    "SELECT a.name FROM agents a JOIN projects p ON a.project_id=p.id "
+                    "WHERE p.human_key=?", (project_key,))
                 if isinstance(row[0], str)
             }
     except sqlite3.Error:
@@ -4698,13 +4952,17 @@ def _runtime_agent_token_project(agent_name: str) -> str | None:
     return _normalize_project_key_value(value) if value and len(value) <= 4096 else ""
 
 
-_SPAWN_LAUNCHES: dict[str, dict] = {}
+_SPAWN_LAUNCHES: dict[tuple[str, str], dict] = {}
 _SPAWN_LAUNCHES_LOCK = threading.Lock()
 _SPAWN_LAUNCH_RETENTION = 1800.0
 
 
-def _spawn_launch_record(name: str, result: dict) -> None:
-    """Remember the outcome of an asynchronous launch for /api/spawn-status."""
+def _spawn_launch_record(name: str, result: dict, project_key: str | None = None) -> None:
+    """Keep asynchronous results under the namespace captured at launch."""
+    selected = _normalize_project_key_value(_project_key() if project_key is None else project_key)
+    if not selected:
+        return
+    key = (selected, name)
     if result.get("pending"):
         state = "launching"
     elif result.get("ok"):
@@ -4716,8 +4974,8 @@ def _spawn_launch_record(name: str, result: dict) -> None:
         for stale in [k for k, v in _SPAWN_LAUNCHES.items()
                       if now - v["ts"] > _SPAWN_LAUNCH_RETENTION]:
             _SPAWN_LAUNCHES.pop(stale, None)
-        previous = _SPAWN_LAUNCHES.get(name)
-        _SPAWN_LAUNCHES[name] = {
+        previous = _SPAWN_LAUNCHES.get(key)
+        _SPAWN_LAUNCHES[key] = {
             "ts": now,
             "started": previous["started"] if previous else now,
             "state": state,
@@ -4726,8 +4984,9 @@ def _spawn_launch_record(name: str, result: dict) -> None:
 
 
 def spawn_launch_status(name: str) -> dict:
+    project_key = _project_key()
     with _SPAWN_LAUNCHES_LOCK:
-        entry = _SPAWN_LAUNCHES.get(name)
+        entry = _SPAWN_LAUNCHES.get((project_key, name)) if project_key else None
     if entry is None:
         return {"ok": False, "error": "no launch recorded for this name"}
     result = entry["result"]
@@ -4743,7 +5002,10 @@ def spawn_launch_status(name: str) -> dict:
 
 
 def spawn_launch_statuses() -> dict:
-    return {"ok": True, "launches": {name: spawn_launch_status(name) for name in list(_SPAWN_LAUNCHES)}}
+    project_key = _project_key()
+    with _SPAWN_LAUNCHES_LOCK:
+        names = [name for owner, name in _SPAWN_LAUNCHES if owner == project_key]
+    return {"ok": True, "launches": {name: spawn_launch_status(name) for name in names}}
 
 
 @dataclass(frozen=True)
@@ -5117,13 +5379,13 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
         logging.warning("spawn register normalized requested name %r to %r", requested_name, child_name)
         # A log line nobody reads is how this stayed invisible. Persist it so
         # the agent carries the discrepancy in the UI for as long as it exists.
-        _record_name_substitution(child_name, requested_name)
+        _record_name_substitution(child_name, requested_name, project_key)
 
     # 2) role/emoji/group annotation (best-effort, failure is non-fatal)
     annot_status = "skipped"
     if role or group:
         try:
-            ar = _write_annotation(child_name, role, "", group)
+            ar = _write_annotation(child_name, role, "", group, project_key)
             annot_status = "ok" if ar.get("ok") else f"fail:{ar.get('error')}"
         except Exception as e:  # noqa: BLE001
             annot_status = f"err:{e}"
@@ -5488,7 +5750,7 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
                 # server constants only, never from the payload.
                 "verdict_deadline_seconds": _spawn_verdict_deadline_seconds(spec),
             }
-            _spawn_launch_record(child_name, pending)
+            _spawn_launch_record(child_name, pending, project_key)
             owned_log = log_fh
             log_fh = None
 
@@ -5502,7 +5764,7 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
                 finally:
                     owned_log.close()
                     discard_handoff()
-                _spawn_launch_record(child_name, verdict)
+                _spawn_launch_record(child_name, verdict, project_key)
 
             threading.Thread(target=runner, name=f"spawn-{child_name}", daemon=True).start()
             handoff["transferred"] = True
@@ -5527,13 +5789,7 @@ def _tmux_session_env(session: str, key: str) -> str:
     """Read one tmux session environment value without executing shell text."""
     if not _valid(session) or re.fullmatch(r"[A-Z0-9_]+", key or "") is None:
         return ""
-    result = subprocess.run(
-        ["tmux", "show-environment", "-t", f"={session}", key],
-        capture_output=True, text=True, timeout=3,
-    )
-    if result.returncode != 0:
-        return ""
-    line = (result.stdout or "").strip()
+    line = _tmux(["show-environment", "-t", f"={session}", key]).strip()
     prefix = f"{key}="
     return line[len(prefix):] if line.startswith(prefix) else ""
 
@@ -5736,7 +5992,7 @@ def do_exit(session: str) -> dict:
 # --------------------------------------------------------------------------- #
 NOTIFY_STATE_FILE = os.path.join(RUNTIME_DIR, "notify-state.json")
 SIGNAL_PROJECTS_DIR = os.path.join(SIGNALS_DIR, "projects")
-_MAIL_HEALTH_CACHE: dict = {"ts": 0.0, "data": None}
+_MAIL_HEALTH_CACHE: dict = {"ts": 0.0, "project_key": None, "data": None}
 
 
 def _slugify_project_key(project_key: str) -> str:
@@ -5745,17 +6001,10 @@ def _slugify_project_key(project_key: str) -> str:
 
 def _signal_agent_dirs() -> list[str]:
     project_key = _project_key()
-    if project_key:
-        return [os.path.join(SIGNAL_PROJECTS_DIR,
-                             _slugify_project_key(project_key), "agents")]
-    try:
-        return [
-            os.path.join(entry.path, "agents")
-            for entry in os.scandir(SIGNAL_PROJECTS_DIR)
-            if entry.is_dir()
-        ]
-    except OSError:
+    if not project_key:
         return []
+    return [os.path.join(SIGNAL_PROJECTS_DIR,
+                         _slugify_project_key(project_key), "agents")]
 
 
 def _pidfile_process_running(
@@ -5842,9 +6091,11 @@ def _systemd_user_unit_running(unit: str) -> bool:
 
 
 def mail_watcher_health() -> dict:
+    project_key = _project_key()
     now = time.time()
     cached = _MAIL_HEALTH_CACHE["data"]
-    if cached is not None and now - _MAIL_HEALTH_CACHE["ts"] < 5:
+    if (cached is not None and project_key == _MAIL_HEALTH_CACHE.get("project_key")
+            and now - _MAIL_HEALTH_CACHE["ts"] < 5):
         return cached
 
     result: dict = {
@@ -5861,14 +6112,18 @@ def mail_watcher_health() -> dict:
         "status": "unknown",
     }
 
-    if os.path.exists(NOTIFY_STATE_FILE):
+    if project_key and os.path.exists(NOTIFY_STATE_FILE):
         try:
             with open(NOTIFY_STATE_FILE, encoding="utf-8") as f:
                 state = json.load(f)
             latest_success = 0
             counts: dict[str, int] = {}
             cutoff = now - 600
-            for entry in state.values():
+            entries = state.values() if isinstance(state, dict) else ()
+            for entry in entries:
+                if (not isinstance(entry, dict)
+                        or _normalize_project_key_value(entry.get("project_key")) != project_key):
+                    continue
                 lr = entry.get("last_result", "")
                 la = entry.get("last_attempt_epoch", 0) or 0
                 if la >= cutoff:
@@ -5892,7 +6147,17 @@ def mail_watcher_health() -> dict:
                 if not agent_dir.is_dir():
                     continue
                 for f in os.scandir(agent_dir.path):
-                    if f.name.endswith(".signal"):
+                    if not f.name.endswith(".signal") or not f.is_file():
+                        continue
+                    try:
+                        with open(f.path, encoding="utf-8") as handle:
+                            payload = json.load(handle)
+                    except (OSError, ValueError):
+                        continue
+                    # A slug can collide. Count only the full, recorded owner;
+                    # missing/legacy ownership is not a cross-project claim.
+                    if (isinstance(payload, dict)
+                            and _normalize_project_key_value(payload.get("project_key")) == project_key):
                         count += 1
         result["signal_count"] = count
     except OSError:
@@ -5932,7 +6197,7 @@ def mail_watcher_health() -> dict:
     else:
         result["status"] = "green"
 
-    _MAIL_HEALTH_CACHE.update(ts=now, data=result)
+    _MAIL_HEALTH_CACHE.update(ts=now, project_key=project_key, data=result)
     return result
 
 

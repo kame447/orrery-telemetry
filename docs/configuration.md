@@ -311,6 +311,10 @@ $AGENTSTACK_RUNTIME_DIR/annotations.json
 
 既存 install の `dashboard/annotations.json` は自動移行されます。
 
+保存形式は `projects[project_key].agents[agent_name]` です。各 entry にも `project_key` を記録し、Dashboard は canonical project に一致する entry だけを表示します。同名 agent の別 project の annotation は、上書き・削除・cache の対象を共有しません。
+
+旧形式の entry も、記録時の `project_key` が確認できれば読み取れます。所有先不明の旧 entry は削除せず保持しますが、現在の project や同名 agent から所有先を推測して表示することはありません。project 未設定時の読み取りは空、annotate は error になります。
+
 - 新 path があれば常にそちらを読みます
 - 新 path がなく旧 path だけがあれば旧 store を読み、次の annotate 書き込みで全 agent を保持したまま新 path へ書きます。この遅延移行では旧 file を残します
 - installer を再実行した場合は payload copy より前に旧 store を runtime へ移します。移行後の旧 file 削除に失敗しても warning に留め、install と annotation は維持します
