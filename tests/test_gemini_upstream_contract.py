@@ -46,11 +46,18 @@ def test_gemini_child_cleanup_is_launcher_owned_and_postposed() -> None:
     text = CHILD.read_text(encoding="utf-8")
     cleanup_helper = '$(printf \'%q\' "$CLEANUP_HELPER")'
     assert 'CLEANUP_HELPER="$HOOKS_DIR/cleanup-child-agent.sh"' in text
-    report_at = text.index(" report --project-key")
-    release_at = text.index(" release --project-key", report_at)
-    retire_at = text.index(" retire --project-key", release_at)
-    cleanup_at = text.index(cleanup_helper, retire_at)
-    assert report_at < release_at < retire_at < cleanup_at
+    runner = text[
+        text.index('cat > "$RUNNER_FILE" <<EOF'):
+        text.index('chmod 700 "$RUNNER_FILE"')
+    ]
+    report_at = runner.index(" report --project-key")
+    cleanup_at = runner.index(cleanup_helper, report_at)
+    assert report_at < cleanup_at
+    # Phase 5 delegates reservation release + retirement to the common
+    # ownership-validating cleanup helper; the provider runner must not repeat
+    # those mutations with its ambient project namespace.
+    assert " release --project-key" not in runner
+    assert " retire --project-key" not in runner
 
     helper = CHILD_MAIL.read_text(encoding="utf-8")
     assert 'subject_state = "complete" if status == "SUCCESS" else "incomplete"' in helper
