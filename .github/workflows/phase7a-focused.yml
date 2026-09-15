@@ -1,0 +1,27 @@
+name: Phase 7a focused graph gate
+
+on:
+  push:
+    branches:
+      - audit/issue33-phase7a-focused
+    paths:
+      - .github/workflows/phase7a-focused.yml
+
+jobs:
+  focused:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/issue33-phase7a-focused
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: python3 -m pip install pytest pytest-timeout
+      - name: Run graph project-scope focused tests
+        run: |
+          python3 -m pytest -q \
+            tests/test_graph_project_scope.py \
+            tests/test_graph_live_lineage.py \
+            tests/test_graph_timestamp_compat.py
