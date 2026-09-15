@@ -146,9 +146,9 @@ Dangerous-command pattern checking is enabled only with `AGENTSTACK_MONITOR_DANG
 
 ### `watch_agent_mail_signals.sh`
 
-It uses event watching when `fswatch` is available and two-second polling otherwise. It does not delete signal files, which are server-owned dirty bits; runtime delivery state and a short lease suppress duplicate injection of the same `(agent, message)`. A periodic scan every 30 seconds recovers missed events.
+It uses event watching when `fswatch` is available and two-second polling otherwise. Runtime delivery state and a short lease suppress duplicate injection per `(project, agent, message)`. Successful delivery removes per-message signals while preserving legacy server-owned dirty bits. A periodic scan every 30 seconds recovers missed events.
 
-The delivery target is only the tmux session whose name exactly matches the agent. After sending notification text literally, it submits with a separate `C-m` call, avoiding bare shells and unrelated sessions. tmux calls run in timeout-controlled workers so a server stall cannot stop the entire watcher.
+The delivery target must exactly match the agent name and have persisted ownership that validates against both the signal's canonical project and the live workspace. New signals carry the canonical `project_key`; legacy signals resolve it through the Mail project resource. Unknown or mismatched project context leaves the signal pending without capturing or injecting into the pane. Notification text is sent literally and submitted with a separate `C-m`; tmux calls remain timeout-controlled.
 
 ## Differences for Codex
 

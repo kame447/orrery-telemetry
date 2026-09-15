@@ -441,6 +441,7 @@ def test_bundled_watcher_reads_agentstack_per_message_signal(tmp_path):
 printf '%s\n' "$*" >> "$FAKE_TMUX_LOG"
 case "$1" in
   has-session) exit 0 ;;
+  display-message) printf '%s\n' "$FAKE_TMUX_CWD" ;;
   capture-pane) printf '%s\n' 'Claude Code' ;;
   send-keys) exit 0 ;;
   *) exit 1 ;;
@@ -450,6 +451,16 @@ esac
     signals = tmp_path / "signals"
     runtime = tmp_path / "runtime"
     lock = tmp_path / "watcher.lock"
+    register_lib = tmp_path / "register-lib.sh"
+    register_lib.write_text(
+        """#!/bin/bash
+ags_normalize_project_key() { printf '%s\n' "$1"; }
+ags_load_registration_token() { printf '%s\n' 'fixture-token'; }
+ags_resolve_registration_context() { printf '%s\n' '{\"project_key\":\"isolated-project\"}'; }
+ags_registration_context_project_key() { printf '%s\n' 'isolated-project'; }
+""",
+        encoding="utf-8",
+    )
     signal_file = (
         signals
         / "projects"
@@ -464,6 +475,7 @@ esac
             {
                 "timestamp": "2026-08-15T00:00:00+00:00",
                 "project": "isolated-project",
+                "project_key": "isolated-project",
                 "agent": "BreezyMaxwell",
                 "message": {
                     "id": 42,
@@ -484,6 +496,9 @@ esac
             "AGENTSTACK_SIGNALS_DIR": str(signals),
             "AGENTSTACK_RUNTIME_DIR": str(runtime),
             "AGENTSTACK_MAIL_WATCHER_LOCK_DIR": str(lock),
+            "AGENTSTACK_REGISTER_LIB": str(register_lib),
+            "AGENTSTACK_PYTHON": sys.executable,
+            "FAKE_TMUX_CWD": str(tmp_path),
             "TMUX_TIMEOUT": "2",
         }
     )
@@ -504,16 +519,17 @@ esac
             except (OSError, json.JSONDecodeError):
                 state = {}
             if (
-                state.get("BreezyMaxwell:42", {}).get("last_result") == "success"
+                state.get("isolated-project:BreezyMaxwell:42", {}).get("last_result") == "success"
                 and not signal_file.exists()
             ):
                 break
             time.sleep(0.1)
-        assert state.get("BreezyMaxwell:42", {}).get("last_result") == "success"
+        assert state.get("isolated-project:BreezyMaxwell:42", {}).get("last_result") == "success"
         assert not signal_file.exists()
         calls = tmux_log.read_text(encoding="utf-8")
-        assert "has-session -t BreezyMaxwell" in calls
-        assert "capture-pane -t BreezyMaxwell" in calls
+        assert "has-session -t =BreezyMaxwell" in calls
+        assert "display-message -t =BreezyMaxwell" in calls
+        assert "capture-pane -t =BreezyMaxwell" in calls
         assert "message from ProOpus [high]: per-message verification" in calls
     finally:
         watcher.terminate()
