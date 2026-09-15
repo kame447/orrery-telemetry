@@ -21,14 +21,48 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat \
-            .github/issue33-final-part-00.patch \
-            .github/issue33-final-part-01.patch \
-            .github/issue33-final-part-02.patch \
-            .github/issue33-final-part-03.patch \
-            > "$RUNNER_TEMP/issue33-final.patch"
-          git apply --check "$RUNNER_TEMP/issue33-final.patch"
-          git apply "$RUNNER_TEMP/issue33-final.patch"
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          parts = [
+              Path('.github/issue33-final-part-00.patch').read_bytes(),
+              Path('.github/issue33-final-part-01.patch').read_bytes(),
+              Path('.github/issue33-final-part-02.patch').read_bytes(),
+              Path('.github/issue33-final-part-03.patch').read_bytes(),
+          ]
+          target = '438500454c72b99371012d036b092bf441ff3054a8d9485ff895380e767e2da9'
+
+          candidates = {parts[0]}
+          for part in parts[1:]:
+              next_candidates = set()
+              for current in candidates:
+                  max_k = min(len(current), len(part))
+                  overlaps = [0]
+                  for k in range(1, max_k + 1):
+                      if current[-k:] == part[:k]:
+                          overlaps.append(k)
+                  for k in overlaps:
+                      next_candidates.add(current + part[k:])
+                      if current and part and not current.endswith(b'\n') and not part.startswith(b'\n'):
+                          next_candidates.add(current + b'\n' + part[k:])
+              # Keep only plausible candidates close to the expected patch size.
+              candidates = {
+                  value for value in next_candidates
+                  if 73000 <= len(value) <= 78000
+              }
+              if not candidates:
+                  raise SystemExit('no plausible staged-patch reconstruction remains')
+
+          exact = [value for value in candidates if hashlib.sha256(value).hexdigest() == target]
+          if len(exact) != 1:
+              details = sorted((len(value), hashlib.sha256(value).hexdigest()) for value in candidates)
+              raise SystemExit(f'exact patch reconstruction failed; candidates={details[:20]}')
+          Path('/tmp/issue33-final.patch').write_bytes(exact[0])
+          print(f'exact patch bytes={len(exact[0])} sha256={target}')
+          PY
+          git apply --check /tmp/issue33-final.patch
+          git apply /tmp/issue33-final.patch
           python - <<'PY'
           import hashlib
           from pathlib import Path
