@@ -19,6 +19,14 @@ import pytest
 import dashboard.server as server
 
 
+@pytest.fixture(autouse=True)
+def _accept_spawn_target(monkeypatch):
+    """These tests fake the launcher process layer (subprocess.run/Popen).
+    The pre-registration target check runs the real validator in its own
+    behavioral tests (test_dashboard_spawn_preflight.py)."""
+    monkeypatch.setattr(server, "_spawn_target_preflight", lambda *_args: "")
+
+
 def _set_annotation_paths(monkeypatch, tmp_path):
     path = tmp_path / "runtime" / "annotations.json"
     legacy = tmp_path / "dashboard" / "annotations.json"

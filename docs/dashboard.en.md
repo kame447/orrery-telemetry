@@ -292,6 +292,8 @@ With no parent, the request sends `standalone: true` and starts an independent a
 
 ### Spawn sequence
 
+Before step 1, the dashboard runs the same project check the child launchers use, with the environment the launcher will get. The requested directory must belong to the configured project. A path key must already be canonical (not a symlink alias or a spelling with `.`/`..`). A logical key is accepted only when the service itself is configured with the matching `AGENTSTACK_PROJECT_REPOSITORY` (or `AGENTSTACK_PROJECT_WORK_DIR`); it is never inferred from the request. A refused request returns an error without registering anything, so the stricter launcher cannot leave an orphaned child.
+
 1. Create child identity and dedicated token with `register_agent`
 2. Apply role / group annotation best-effort
 3. For a normal child only, create a task message with parent as sender and a CC audit trail

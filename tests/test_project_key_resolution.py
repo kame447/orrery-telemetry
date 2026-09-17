@@ -103,12 +103,17 @@ def test_all_five_consumers_call_the_shared_resolver() -> None:
         "hooks/reservation-common.sh",
         "hooks/check-agent-registered.sh",
         "hooks/session-start-reminder.sh",
-        "hooks/cleanup-child-agent.sh",
     )
     for relative in shell_consumers:
         text = (ROOT / relative).read_text(encoding="utf-8")
         assert ". \"$PROJECT_CONTEXT_LIB\"" in text, relative
         assert "agentstack_resolve_project_key" in text, relative
+    # Child cleanup never picks a project from ambient/installed settings: it
+    # validates the child's recorded project against its actual directory.
+    cleanup = (ROOT / "hooks/cleanup-child-agent.sh").read_text(encoding="utf-8")
+    assert ". \"$PROJECT_CONTEXT_LIB\"" in cleanup
+    assert "agentstack_resolve_project_key" not in cleanup
+    assert 'ags_child_target_context "$(pwd -P)" "$PROJECT_KEY"' in cleanup
     await_reply = (ROOT / "bin" / "agentstack-await-reply").read_text(
         encoding="utf-8"
     )

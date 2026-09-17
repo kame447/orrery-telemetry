@@ -339,6 +339,206 @@ child_token_file_path() {
     printf '%s/agent_token_%s\n' "$RUNTIME_DIR" "$key"
 }
 
+# The child's actual directory decides which project it may use. This runs
+# before any credential, Mail, worktree or tmux side effect, and again for a
+# created worktree. PROJECT_KEY becomes the validated canonical key.
+apply_child_target_context() {
+    local target="$1"
+    if ! declare -F ags_child_target_context >/dev/null 2>&1; then
+        echo "Error: registration library is unavailable; cannot validate the child workspace" >&2
+        return 1
+    fi
+    if ! ags_child_target_context "$target" "$PROJECT_KEY"; then
+        echo "Error: project '$PROJECT_KEY' is not valid for child work directory '$target'" >&2
+        return 1
+    fi
+    PROJECT_KEY="$AGS_CHILD_PROJECT_KEY"
+    WORK_DIR="$AGS_CHILD_WORK_DIR"
+    CHILD_REPOSITORY="$AGS_CHILD_REPOSITORY"
+    CHILD_WORKTREE_ROOT="$AGS_CHILD_WORKTREE_ROOT"
+    CHILD_PROTECTED_ROOTS="$AGS_CHILD_PROTECTED_ROOTS"
+}
+
+# The child session carries the whole validated tuple, so its hooks and a
+# later cleanup can prove the same project instead of trusting the key alone.
+append_child_context_env() {
+    TMUX_ENV_ARGS+=(
+        -e "AGENTSTACK_PROJECT_REPOSITORY=$CHILD_REPOSITORY"
+        -e "AGENTSTACK_PROJECT_WORK_DIR=$WORK_DIR"
+        -e "AGENTSTACK_PROJECT_WORKTREE_ROOT=$CHILD_WORKTREE_ROOT"
+        -e "AGENTSTACK_PROTECTED_ROOTS=$CHILD_PROTECTED_ROOTS"
+        -e "AGENTSTACK_PROJECT_CONTEXT="
+        -e "AGENTSTACK_LOOKUP_PROJECT_KEY="
+    )
+}
+
+# A one-shot receipt, when present, must name this child and this project and,
+# where it records one, the same repository (or, outside Git, a directory that
+# contains this workspace; other worktrees of the same repository are allowed).
+# A contradictory receipt is refused before anything is used.
+child_handoff_binding_matches() {
+    local binding_file="$1"
+    [[ -e "$binding_file" || -L "$binding_file" ]] || return 0
+    python3 - "$binding_file" "$CHILD_NAME" "$PROJECT_KEY" "$ORIGINAL_PROJECT_KEY" \
+        "$CHILD_REPOSITORY" "$WORK_DIR" <<'PY'
+import json
+import os
+import stat
+import sys
+
+path, name, project, alias, repository, work_dir = sys.argv[1:7]
+descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
+        raise SystemExit(1)
+    binding = json.loads(os.read(descriptor, 65537).decode("utf-8"))
+finally:
+    os.close(descriptor)
+if not isinstance(binding, dict) or binding.get("agent_name") != name:
+    raise SystemExit(1)
+if binding.get("project_key") not in {project, alias}:
+    raise SystemExit(1)
+if "repository_key" in binding and (binding["repository_key"] or "") != repository:
+    raise SystemExit(1)
+if not repository and isinstance(binding.get("work_dir"), str) and binding["work_dir"]:
+    root = os.path.realpath(binding["work_dir"])
+    if os.path.commonpath([os.path.realpath(work_dir), root]) != root:
+        raise SystemExit(1)
+PY
+}
+
+# A saved child state is workspace evidence only as one valid tuple: its
+# recorded directory must belong to its recorded project, name the recorded
+# repository, and describe this launch's namespace and repository (or contain
+# this directory for a non-Git project). Records without a directory predate
+# the tuple and are left to the credential checks.
+child_saved_workspace_matches() {
+    local state_file="$CHILD_STATE_DIR/$CHILD_NAME.json" saved=""
+    local saved_project="" saved_repository="" saved_work_dir=""
+    local launch_project="$PROJECT_KEY" launch_repository="$CHILD_REPOSITORY" launch_work_dir="$WORK_DIR"
+    [[ -e "$state_file" || -L "$state_file" ]] || return 0
+    saved="$(python3 - "$state_file" <<'PY'
+import json
+import os
+import stat
+import sys
+
+descriptor = os.open(sys.argv[1], os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        raise SystemExit(1)
+    state = json.loads(os.read(descriptor, 65537).decode("utf-8"))
+finally:
+    os.close(descriptor)
+if not isinstance(state, dict):
+    raise SystemExit(1)
+values = [state.get(key) or "" for key in ("project_key", "repository_key", "work_dir")]
+if not all(isinstance(value, str) and "\n" not in value for value in values):
+    raise SystemExit(1)
+print("\n".join(values))
+PY
+)" || return 0  # unreadable: the credential/metadata checks reject it
+    saved_project="$(printf '%s\n' "$saved" | sed -n '1p')"
+    saved_repository="$(printf '%s\n' "$saved" | sed -n '2p')"
+    saved_work_dir="$(printf '%s\n' "$saved" | sed -n '3p')"
+    [[ -n "$saved_work_dir" ]] || return 0
+    ags_child_target_context "$saved_work_dir" "${saved_project:-$launch_project}" || return 1
+    [[ "$AGS_CHILD_REPOSITORY" == "$saved_repository" ]] || return 1
+    [[ "$AGS_CHILD_PROJECT_KEY" == "$launch_project" ]] || return 1
+    if [[ -n "$saved_repository" ]]; then
+        [[ "$launch_repository" == "$saved_repository" ]]
+    else
+        case "$launch_work_dir/" in
+            "$AGS_CHILD_WORK_DIR"/*) return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
+}
+
+# Compare a verified credential with the name-keyed runtime copies. Prints
+# absent (none exist), same (they hold this token) or different.
+child_local_credentials() {
+    local source="$1" token_file state_file
+    token_file="$(child_token_file_path "$CHILD_NAME")" || return 1
+    state_file="$CHILD_STATE_DIR/$CHILD_NAME.json"
+    CHECK_AGENT_NAME="$CHILD_NAME" python3 - "$source" "$token_file" "$state_file" <<'PY'
+import hmac
+import json
+import os
+import sys
+
+source, token_file, state_file = sys.argv[1:4]
+with open(source, encoding="utf-8") as handle:
+    token = handle.read().strip()
+found = []
+if os.path.lexists(token_file):
+    if os.path.islink(token_file):
+        found.append("")
+    else:
+        with open(token_file, encoding="utf-8") as handle:
+            found.append(handle.read().strip())
+if os.path.lexists(state_file):
+    try:
+        if os.path.islink(state_file):
+            raise ValueError
+        with open(state_file, encoding="utf-8") as handle:
+            state = json.load(handle)
+        if state.get("agent_name") not in (None, os.environ["CHECK_AGENT_NAME"]):
+            raise ValueError
+        found.append(state.get("registration_token") or "")
+    except (OSError, ValueError, AttributeError):
+        found.append("")
+if not found:
+    print("absent")
+elif all(isinstance(v, str) and hmac.compare_digest(v, token) for v in found):
+    print("same")
+else:
+    print("different")
+PY
+}
+
+# Remove runtime credentials only while they still hold the token this launch
+# installed; a replacement written meanwhile is another registration's.
+remove_child_credentials_holding() {
+    local token_fingerprint="$1" token_file state_file
+    [[ -n "$token_fingerprint" && -n "${CHILD_NAME:-}" ]] || return 0
+    token_file="$(child_token_file_path "$CHILD_NAME")" || return 0
+    state_file="$CHILD_STATE_DIR/$CHILD_NAME.json"
+    python3 - "$token_fingerprint" "$token_file" "$state_file" <<'PY' 2>/dev/null || true
+import hashlib
+import json
+import os
+import sys
+
+fingerprint, token_file, state_file = sys.argv[1:4]
+def digest(value):
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+try:
+    if not os.path.islink(token_file):
+        with open(token_file, encoding="utf-8") as handle:
+            if digest(handle.read().strip()) == fingerprint:
+                os.unlink(token_file)
+except OSError:
+    pass
+try:
+    if not os.path.islink(state_file):
+        with open(state_file, encoding="utf-8") as handle:
+            if digest(json.load(handle).get("registration_token") or "") == fingerprint:
+                os.unlink(state_file)
+except (OSError, ValueError, AttributeError):
+    pass
+PY
+}
+
+token_file_fingerprint() {
+    python3 -c '
+import hashlib, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    print(hashlib.sha256(handle.read().strip().encode("utf-8")).hexdigest())
+' "$1"
+}
+
 # Copy a child token from a 0600 file into the durable per-child runtime files.
 # The secret is read inside Python and never appears in a process argv or tmux
 # environment.  A dashboard handoff is one-shot, so its source is unlinked only
@@ -348,7 +548,9 @@ adopt_child_token_file() {
     local consume_source="${4:-false}" binding_source="${5:-}" token_file state_file
     token_file="$(child_token_file_path "$agent_name")" || return 1
     state_file="$CHILD_STATE_DIR/$agent_name.json"
-    python3 - "$agent_name" "$project_key" "$source_file" "$token_file" \
+    ADOPT_PROJECT_ALIAS="${ORIGINAL_PROJECT_KEY:-}" ADOPT_REPOSITORY="${CHILD_REPOSITORY:-}" \
+        ADOPT_WORK_DIR="${WORK_DIR:-}" \
+        python3 - "$agent_name" "$project_key" "$source_file" "$token_file" \
         "$state_file" "$consume_source" "$binding_source" <<'PY'
 import json
 import os
@@ -392,6 +594,8 @@ state = {
     "agent_name": agent_name,
     "project_key": project_key,
     "registration_token": registration_token,
+    "repository_key": os.environ.get("ADOPT_REPOSITORY") or None,
+    "work_dir": os.environ.get("ADOPT_WORK_DIR", ""),
 }
 binding_path = pathlib.Path(binding_source) if binding_source else None
 if binding_path is not None:
@@ -404,7 +608,7 @@ if binding_path is not None:
         and type(binding.get("agent_id")) is int
         and binding["agent_id"] > 0
         and binding.get("agent_name") == agent_name
-        and binding.get("project_key") == project_key
+        and binding.get("project_key") in {project_key, os.environ.get("ADOPT_PROJECT_ALIAS", "")}
         and binding.get("program") in {"codex", "codex-cli"}
     ):
         state.update(agent_id=binding["agent_id"], program=binding["program"])
@@ -1620,7 +1824,7 @@ adopt_registered_token_response() {
     local token_file state_file
     token_file="$(child_token_file_path "$agent_name")" || return 1
     state_file="$CHILD_STATE_DIR/$agent_name.json"
-    python3 -c '
+    ADOPT_REPOSITORY="${CHILD_REPOSITORY:-}" ADOPT_WORK_DIR="${WORK_DIR:-}" python3 -c '
 import json
 import os
 import pathlib
@@ -1686,6 +1890,8 @@ state = {
     "agent_name": agent_name,
     "project_key": project_key,
     "registration_token": token,
+    "repository_key": os.environ.get("ADOPT_REPOSITORY") or None,
+    "work_dir": os.environ.get("ADOPT_WORK_DIR", ""),
 }
 if program == "codex" and agent_id is not None:
     state.update(agent_id=agent_id, program="codex")
@@ -1745,6 +1951,10 @@ if [[ -n "$TASK_FILE" ]]; then
     fi
 fi
 CHILD_STATE_DIR="$RUNTIME_DIR/child-agents"
+ORIGINAL_PROJECT_KEY="$PROJECT_KEY"
+CHILD_REPOSITORY=""
+CHILD_WORKTREE_ROOT=""
+CHILD_PROTECTED_ROOTS=""
 
 if [[ -z "$PROJECT_KEY" ]]; then
     echo "Error: AGENTSTACK_PROJECT_KEY or PROJECT_KEY is required" >&2
@@ -1785,6 +1995,7 @@ if [[ -n "$PRE_REGISTERED" ]]; then
         echo "Error: workdir does not exist: $WORK_DIR" >&2
         exit 1
     fi
+    apply_child_target_context "$WORK_DIR" || exit 1
 
     EMBEDDED_TASK_PROMPT=""
     if [[ "$EMBED_TASK" == true ]]; then
@@ -1801,6 +2012,7 @@ if [[ -n "$PRE_REGISTERED" ]]; then
     # owner token. Adopt the 0600 one-shot into durable child-owned files and
     # unlink the handoff only after both writes succeed.
     PRE_REGISTERED_TOKEN_CREATED=false
+    PRE_REGISTERED_TOKEN_FINGERPRINT=""
     PRE_REGISTERED_HANDOFF_TO_CONSUME=""
     PRE_REGISTERED_BINDING_TO_CONSUME=""
     PRE_REGISTERED_SESSION_STARTED=false
@@ -1814,7 +2026,7 @@ if [[ -n "$PRE_REGISTERED" ]]; then
             tmux kill-session -t "=$CHILD_NAME" >/dev/null 2>&1 || true
         fi
         if [[ "$PRE_REGISTERED_TOKEN_CREATED" == true ]]; then
-            rm -f "$CHILD_TOKEN_FILE" "$CHILD_STATE_DIR/$CHILD_NAME.json"
+            remove_child_credentials_holding "$PRE_REGISTERED_TOKEN_FINGERPRINT"
         fi
         cleanup_worktree
         if [[ -f "$MANAGED_FILE" ]]; then
@@ -1837,37 +2049,73 @@ PY
     }
     trap cleanup_preregister_failure EXIT
 
+    if ! child_saved_workspace_matches; then
+        echo "Error: the saved state of $CHILD_NAME records another workspace or a contradictory project; refusing to launch it here" >&2
+        exit 1
+    fi
     if [[ -n "$CHILD_TOKEN_FILE" ]]; then
         ONE_SHOT_TOKEN_FILE="$CHILD_TOKEN_FILE"
-        CONSUME_ONE_SHOT=true
-        if [[ "$USE_CODEX" == true ]]; then
-            # Keep the source until formal metadata validation, prepare, and
-            # child startup have all succeeded. Failure leaves the one-shot as
-            # the token-safe recovery credential instead of consuming it early.
-            CONSUME_ONE_SHOT=false
-        fi
-        if ! CHILD_TOKEN_FILE="$(
-            adopt_child_token_file "$CHILD_NAME" "$PROJECT_KEY" \
-                "$ONE_SHOT_TOKEN_FILE" "$CONSUME_ONE_SHOT" \
-                "${ONE_SHOT_TOKEN_FILE}.binding.json"
-        )"; then
-            echo "Error: --child-token-file is unreadable, insecure, or empty: $ONE_SHOT_TOKEN_FILE" >&2
+        ONE_SHOT_BINDING_FILE="${ONE_SHOT_TOKEN_FILE}.binding.json"
+        # Everything about the handoff is proven before it is copied: its
+        # receipt, Mail's acceptance of the token for this child in this
+        # project, and agreement with any name-keyed local credential. A
+        # refusal leaves the one-shot and every existing file untouched.
+        if ! child_handoff_binding_matches "$ONE_SHOT_BINDING_FILE"; then
+            echo "Error: the child handoff receipt does not match $CHILD_NAME in project '$PROJECT_KEY' at '$WORK_DIR'" >&2
             exit 1
         fi
-        PRE_REGISTERED_TOKEN_CREATED=true
-        if [[ "$USE_CODEX" == true && "$ONE_SHOT_TOKEN_FILE" != "$CHILD_TOKEN_FILE" ]]; then
+        if ! ags_verify_child_credential "$PROJECT_KEY" "$CHILD_NAME" "$ONE_SHOT_TOKEN_FILE"; then
+            echo "Error: --child-token-file is unreadable, insecure, or not accepted by ORRERY Mail for $CHILD_NAME in '$PROJECT_KEY': $ONE_SHOT_TOKEN_FILE" >&2
+            exit 1
+        fi
+        case "$(child_local_credentials "$ONE_SHOT_TOKEN_FILE")" in
+            absent) PRE_REGISTERED_TOKEN_CREATED=true ;;
+            same) ;;
+            *)
+                echo "Error: local credentials for $CHILD_NAME belong to another registration; refusing to replace them" >&2
+                exit 1
+                ;;
+        esac
+        # The one-shot stays until the child has started, for every provider;
+        # a failed launch leaves it as the recovery credential.
+        if ! CHILD_TOKEN_FILE="$(
+            adopt_child_token_file "$CHILD_NAME" "$PROJECT_KEY" \
+                "$ONE_SHOT_TOKEN_FILE" false "$ONE_SHOT_BINDING_FILE"
+        )"; then
+            echo "Error: --child-token-file could not be installed: $ONE_SHOT_TOKEN_FILE" >&2
+            exit 1
+        fi
+        PRE_REGISTERED_TOKEN_FINGERPRINT="$(token_file_fingerprint "$CHILD_TOKEN_FILE")"
+        if [[ "$ONE_SHOT_TOKEN_FILE" != "$CHILD_TOKEN_FILE" ]]; then
             PRE_REGISTERED_HANDOFF_TO_CONSUME="$ONE_SHOT_TOKEN_FILE"
-            PRE_REGISTERED_BINDING_TO_CONSUME="${ONE_SHOT_TOKEN_FILE}.binding.json"
+            PRE_REGISTERED_BINDING_TO_CONSUME="$ONE_SHOT_BINDING_FILE"
         fi
     else
         CHILD_TOKEN_FILE="$(child_token_file_path "$CHILD_NAME")"
         if [[ "$USE_CODEX" != true && ! -s "$CHILD_TOKEN_FILE" ]]; then
+            if ! ags_verify_child_credential "$PROJECT_KEY" "$CHILD_NAME" \
+                "state:$CHILD_STATE_DIR/$CHILD_NAME.json"; then
+                echo "Error: pre-registered child token is required for $CHILD_NAME" >&2
+                echo "  Generate/register the child with a child-owned token, then pass --child-token-file <path>." >&2
+                echo "  Existing state fallback: $CHILD_STATE_DIR/$CHILD_NAME.json (must be accepted by ORRERY Mail in '$PROJECT_KEY')" >&2
+                exit 1
+            fi
             if ! CHILD_TOKEN_FILE="$(
                 restore_child_token_file_from_state "$CHILD_NAME"
             )"; then
                 echo "Error: pre-registered child token is required for $CHILD_NAME" >&2
                 echo "  Generate/register the child with a child-owned token, then pass --child-token-file <path>." >&2
                 echo "  Existing state fallback: $CHILD_STATE_DIR/$CHILD_NAME.json" >&2
+                exit 1
+            fi
+        else
+            CHILD_CREDENTIAL_SOURCE="$CHILD_TOKEN_FILE"
+            if [[ ! -e "$CHILD_TOKEN_FILE" && ! -L "$CHILD_TOKEN_FILE" ]]; then
+                # Codex may restore the token from its state below.
+                CHILD_CREDENTIAL_SOURCE="state:$CHILD_STATE_DIR/$CHILD_NAME.json"
+            fi
+            if ! ags_verify_child_credential "$PROJECT_KEY" "$CHILD_NAME" "$CHILD_CREDENTIAL_SOURCE"; then
+                echo "Error: the runtime credential for $CHILD_NAME is not accepted by ORRERY Mail in '$PROJECT_KEY'" >&2
                 exit 1
             fi
         fi
@@ -1891,7 +2139,7 @@ PY
         echo "[spawn_child/pre-reg] Worktree creation failed; aborting spawn." >&2
         exit 1
     fi
-        WORK_DIR="$WORKTREE_DIR"
+        apply_child_target_context "$WORKTREE_DIR" || exit 1
         echo "[spawn_child/pre-reg] WORK_DIR overridden to worktree: $WORK_DIR" >&2
     fi
 
@@ -1910,6 +2158,7 @@ PY
     # kill-session`): without it, exiting this session can cascade-kill the whole
     # tmux server. Requires tmux >= 3.0.
     TMUX_ENV_ARGS=(-e "CLAUDECODE=1" -e "AGENTSTACK_RESERVED_IDENTITY=1" -e "AGENT_NAME=$CHILD_NAME" -e "PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_HOOKS_DIR=$HOOKS_DIR" -e "AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR" -e "AGENTSTACK_MCP_URL=$MCP_URL" -e "AGENTSTACK_MAIL_ENV=$MAIL_ENV" -e "AGENTSTACK_MAIL_HTTP_BEARER_MODE=$HTTP_BEARER_MODE" -e "AGENTSTACK_TERMINAL=$TERMINAL_SETTING" -e "AGENTSTACK_CODEX_APPROVAL=$(codex_approval_flags)" -e "AGENTSTACK_CODEX_NETWORK_FLAGS=$(codex_network_flags)")
+    append_child_context_env
     if [[ "$STANDALONE" != true ]]; then
         TMUX_ENV_ARGS+=(-e "PARENT_AGENT=$PARENT_NAME")
     fi
@@ -2218,6 +2467,7 @@ if [[ ! -d "$WORK_DIR" ]]; then
     echo "Error: workdir does not exist: $WORK_DIR" >&2
     exit 1
 fi
+apply_child_target_context "$WORK_DIR" || exit 1
 
 # --- Resource declaration validation ---
 if [[ -z "$RESOURCES" && "$UNSAFE_NO_RESOURCES" == false ]]; then
@@ -2550,6 +2800,14 @@ fi
 if [[ "$CHILD_NAME" != "$CHILD_NAME_CANDIDATE" ]]; then
     echo "[spawn_child] register_agent normalized '$CHILD_NAME_CANDIDATE' to actual identity '$CHILD_NAME'" >&2
 fi
+# Runtime credentials are keyed by name only; one that already exists belongs
+# to another registration (possibly another project) and is never replaced.
+if [[ "$(child_local_credentials "$DIRECT_ONE_SHOT_TOKEN_FILE")" != "absent" ]]; then
+    echo "Error: local credentials for $CHILD_NAME already exist; refusing to replace another registration" >&2
+    retire_agent_with_token_file "$CHILD_NAME" "$DIRECT_ONE_SHOT_TOKEN_FILE" > /dev/null 2>&1 || true
+    rm -f "$DIRECT_ONE_SHOT_TOKEN_FILE"
+    exit 1
+fi
 
 # Adopt the token the server persisted, not the one we sent. Legacy servers
 # may ignore the client-supplied registration_token and mint their
@@ -2566,6 +2824,7 @@ if ! CHILD_TOKEN_FILE="$(
     echo "Error: failed to persist the registered child token" >&2
     exit 1
 fi
+DIRECT_TOKEN_FINGERPRINT="$(token_file_fingerprint "$CHILD_TOKEN_FILE")"
 
 # --- 失敗時cleanup trap ---
 # Launcher が完全に readiness/prompt injection を終える前に異常終了したら、
@@ -2598,7 +2857,7 @@ print(json.dumps({'project_key': sys.argv[1], 'agent_name': sys.argv[2]}))
     fi
     # worktree も作っていれば撤去
     cleanup_worktree
-    rm -f "${CHILD_TOKEN_FILE:-}" "$CHILD_STATE_DIR/${CHILD_NAME:-}.json"
+    remove_child_credentials_holding "${DIRECT_TOKEN_FINGERPRINT:-}"
     if [[ -n "${CHILD_NAME:-}" && -f "$MANAGED_FILE" ]]; then
         python3 - "$MANAGED_FILE" "$CHILD_NAME" <<'PY' 2>/dev/null || true
 import pathlib
@@ -2671,7 +2930,7 @@ print(json.dumps({'project_key': sys.argv[1], 'agent_name': sys.argv[2]}))
             retire_agent_with_token_file "$CHILD_NAME" "$CHILD_TOKEN_FILE" > /dev/null 2>&1 || true
         fi
         echo "[spawn_child] Released reservations and retired $CHILD_NAME" >&2
-        rm -f "$CHILD_TOKEN_FILE" "$CHILD_STATE_DIR/$CHILD_NAME.json"
+        remove_child_credentials_holding "$DIRECT_TOKEN_FINGERPRINT"
         SPAWN_COMPLETED=true  # cleanup already completed explicitly above
         exit 21
     fi
@@ -2684,7 +2943,7 @@ if [[ "$USE_WORKTREE" == true ]]; then
         echo "[spawn_child] Worktree creation failed; aborting spawn." >&2
         exit 1
     fi
-    WORK_DIR="$WORKTREE_DIR"
+    apply_child_target_context "$WORKTREE_DIR" || exit 1
     echo "[spawn_child] WORK_DIR overridden to worktree: $WORK_DIR" >&2
 fi
 
@@ -2759,6 +3018,7 @@ declare -F ags_warn_tcc_access >/dev/null 2>&1 && ags_warn_tcc_access "$WORK_DIR
 # kill-session`): without it, exiting this session can cascade-kill the tmux
 # server. Requires tmux >= 3.0.
 TMUX_ENV_ARGS=(-e "CLAUDECODE=1" -e "AGENTSTACK_RESERVED_IDENTITY=1" -e "AGENT_NAME=$CHILD_NAME" -e "PARENT_AGENT=$PARENT_NAME" -e "PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_HOOKS_DIR=$HOOKS_DIR" -e "AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR" -e "AGENTSTACK_MCP_URL=$MCP_URL" -e "AGENTSTACK_MAIL_ENV=$MAIL_ENV" -e "AGENTSTACK_MAIL_HTTP_BEARER_MODE=$HTTP_BEARER_MODE" -e "AGENTSTACK_TERMINAL=$TERMINAL_SETTING" -e "AGENTSTACK_CODEX_APPROVAL=$(codex_approval_flags)" -e "AGENTSTACK_CODEX_NETWORK_FLAGS=$(codex_network_flags)")
+append_child_context_env
 if [[ -n "$AGENTSTACK_HOME_DIR" ]]; then
     TMUX_ENV_ARGS+=(-e "AGENTSTACK_HOME=$AGENTSTACK_HOME_DIR")
 fi

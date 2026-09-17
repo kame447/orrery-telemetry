@@ -22,6 +22,15 @@ rules:
 - delegated cleanup reports the result, releases reservations, soft-retires the
   child identity, removes transient credential/config state, and only then
   exits.
+- both Gemini launchers validate the source repository against the project
+  key before any registration, reservation, worktree, or tmux side effect.
+  The runner carries the validated project/repository/worktree tuple.
+  `spawn_gemini_preregistered.sh` also requires ORRERY Mail to accept the
+  handoff token for the child in that project before copying it, and spends
+  the handoff only after the child starts. Retirement and removal of the
+  durable token are left to the verified common cleanup
+  (`cleanup-child-agent.sh`), so a token Mail does not accept for this
+  project and worktree is never used to retire and is not deleted.
 
 The Dashboard does not manufacture those states. It reports the process/tmux
 state it can measure.

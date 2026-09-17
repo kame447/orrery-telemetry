@@ -48,9 +48,10 @@ def test_gemini_child_cleanup_is_launcher_owned_and_postposed() -> None:
     assert 'CLEANUP_HELPER="$HOOKS_DIR/cleanup-child-agent.sh"' in text
     report_at = text.index(" report --project-key")
     release_at = text.index(" release --project-key", report_at)
-    retire_at = text.index(" retire --project-key", release_at)
-    cleanup_at = text.index(cleanup_helper, retire_at)
-    assert report_at < release_at < retire_at < cleanup_at
+    # The verified common cleanup retires; the runner never retires directly.
+    cleanup_at = text.index(cleanup_helper, release_at)
+    assert report_at < release_at < cleanup_at
+    assert " retire --project-key" not in text
 
     helper = CHILD_MAIL.read_text(encoding="utf-8")
     assert 'subject_state = "complete" if status == "SUCCESS" else "incomplete"' in helper

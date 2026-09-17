@@ -13,6 +13,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from service_teardown import TEST_LABEL_PREFIX  # noqa: E402
+from test_child_lifecycle_isolation import install_fake_curl  # noqa: E402
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -59,6 +60,8 @@ def _fake_launch_env(
         "fi\n",
     )
     _executable(bindir / "claude", "#!/bin/bash\nexit 0\n")
+    # The launcher proves the handoff token with Mail's whois before use.
+    install_fake_curl(bindir)
 
     home = tmp_path / "home"
     home.mkdir()
@@ -73,6 +76,8 @@ def _fake_launch_env(
         "PARENT_AGENT": "ParentAgent",
         "PROJECT_KEY": "/shared/project",
         "AGENTSTACK_PROJECT_KEY": "/shared/project",
+        # A logical key is valid only with the launcher's workspace tuple.
+        "AGENTSTACK_PROJECT_WORK_DIR": str(workdir),
         "AGENTSTACK_RUNTIME_DIR": str(runtime),
         "AGENTSTACK_HOOKS_DIR": str(ROOT / "hooks"),
         "AGENTSTACK_HOME": str(tmp_path / "agentstack"),

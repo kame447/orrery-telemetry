@@ -31,6 +31,7 @@ MAIL_HELPER="$AGENTSTACK_HOME_DIR/bin/agentstack-gemini-child-mail"
 STREAM_HELPER="$AGENTSTACK_HOME_DIR/bin/agentstack-gemini-stream"
 MCP_WRAPPER="$AGENTSTACK_HOME_DIR/bin/agentstack-gemini-mcp"
 CLEANUP_HELPER="$HOOKS_DIR/cleanup-child-agent.sh"
+REGISTER_LIB="${AGENTSTACK_REGISTER_LIB:-$AGENTSTACK_HOME_DIR/bin/lib/agentstack-register.sh}"
 
 usage() {
   cat >&2 <<'EOF'
@@ -68,6 +69,9 @@ command -v tmux >/dev/null 2>&1 || { echo "$PROG: tmux not found" >&2; exit 1; }
 command -v "$GEMINI_BIN" >/dev/null 2>&1 || { echo "$PROG: Antigravity CLI not found (expected agy)" >&2; exit 1; }
 command -v "$PYTHON_BIN" >/dev/null 2>&1 || [[ -x "$PYTHON_BIN" ]] || { echo "$PROG: selected Python is unavailable" >&2; exit 1; }
 [[ -x "$MAIL_HELPER" && -x "$STREAM_HELPER" && -x "$MCP_WRAPPER" ]] || { echo "$PROG: Gemini provider helpers are not installed" >&2; exit 1; }
+[[ -f "$REGISTER_LIB" ]] || { echo "$PROG: missing registration library: $REGISTER_LIB" >&2; exit 1; }
+# shellcheck disable=SC1090
+. "$REGISTER_LIB"
 
 # Defend the resource boundary independently of the Dashboard. Without ROOT,
 # check declaration syntax and print the canonical form; with ROOT, also
@@ -293,6 +297,44 @@ RESOURCES="$(validate_resources)" || exit 2
 
 SOURCE_REPO="$(git -C "$WORK_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
 [[ -n "$SOURCE_REPO" ]] || { echo "$PROG: Gemini dashboard launch requires a git repository" >&2; exit 1; }
+
+# Prove the handoff before anything is copied, created, reserved or consumed:
+# the actual repository must belong to the project, a receipt (when present)
+# must name this child and project, Mail must accept the token for this child
+# there, and a name-keyed durable token must not belong to another
+# registration. A refusal leaves the one-shot handoff untouched.
+ORIGINAL_PROJECT_KEY="$PROJECT_KEY"
+if ! ags_child_target_context "$WORK_DIR" "$PROJECT_KEY"; then
+  echo "$PROG: project '$PROJECT_KEY' is not valid for work directory '$WORK_DIR'" >&2
+  exit 1
+fi
+PROJECT_KEY="$AGS_CHILD_PROJECT_KEY"
+CHILD_REPOSITORY="$AGS_CHILD_REPOSITORY"
+if [[ -e "$CHILD_TOKEN_FILE.binding.json" || -L "$CHILD_TOKEN_FILE.binding.json" ]] && \
+  ! "$PYTHON_BIN" - "$CHILD_TOKEN_FILE.binding.json" "$CHILD_NAME" "$PROJECT_KEY" "$ORIGINAL_PROJECT_KEY" "$CHILD_REPOSITORY" <<'PY'
+import json, os, stat, sys
+path, name, project, alias, repository = sys.argv[1:6]
+fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
+        raise SystemExit(1)
+    binding = json.loads(os.read(fd, 65537).decode("utf-8"))
+finally:
+    os.close(fd)
+ok = (isinstance(binding, dict) and binding.get("agent_name") == name
+      and binding.get("project_key") in {project, alias}
+      and ("repository_key" not in binding or (binding["repository_key"] or "") == repository))
+raise SystemExit(0 if ok else 1)
+PY
+then
+  echo "$PROG: the child handoff receipt does not match $CHILD_NAME in '$PROJECT_KEY'" >&2
+  exit 1
+fi
+if ! AGENTSTACK_MCP_URL="$MCP_URL" ags_verify_child_credential "$PROJECT_KEY" "$CHILD_NAME" "$CHILD_TOKEN_FILE"; then
+  echo "$PROG: the child token is insecure or not accepted by ORRERY Mail for $CHILD_NAME in '$PROJECT_KEY'" >&2
+  exit 1
+fi
 if [[ -n "$WORKTREE_BASE_REV" ]]; then
   BASE_REV="$(git -C "$SOURCE_REPO" rev-parse --verify "$WORKTREE_BASE_REV^{commit}" 2>/dev/null || true)"
 else
@@ -304,6 +346,16 @@ mkdir -p "$RUNTIME_DIR" "$WORKTREE_ROOT"
 chmod 700 "$RUNTIME_DIR" 2>/dev/null || true
 TOKEN_KEY="$(printf '%s' "$CHILD_NAME" | LC_ALL=C tr -c 'A-Za-z0-9_.-' '_')"
 DURABLE_TOKEN="$RUNTIME_DIR/agent_token_$TOKEN_KEY"
+DURABLE_CREATED=false
+if [[ -e "$DURABLE_TOKEN" || -L "$DURABLE_TOKEN" \
+      || -e "$RUNTIME_DIR/child-agents/$CHILD_NAME.json" || -L "$RUNTIME_DIR/child-agents/$CHILD_NAME.json" ]]; then
+  if ! cmp -s <(ags_read_private_child_token "$DURABLE_TOKEN" 2>/dev/null) \
+             <(ags_read_private_child_token "$CHILD_TOKEN_FILE" 2>/dev/null) \
+     || [[ -e "$RUNTIME_DIR/child-agents/$CHILD_NAME.json" || -L "$RUNTIME_DIR/child-agents/$CHILD_NAME.json" ]]; then
+    echo "$PROG: local credentials for $CHILD_NAME belong to another registration; refusing to replace them" >&2
+    exit 1
+  fi
+fi
 WORKTREE_DIR="$WORKTREE_ROOT/$CHILD_NAME"
 BRANCH_NAME="exp/$CHILD_NAME"
 MCP_CONFIG=""
@@ -335,15 +387,29 @@ cleanup_failure() {
       mail_helper release --project-key "$PROJECT_KEY" --agent-name "$CHILD_NAME" \
         --token-file "$DURABLE_TOKEN" --paths "$RESOURCES" >/dev/null 2>&1 || true
     fi
-    if [[ -s "$DURABLE_TOKEN" ]]; then
-      mail_helper retire --project-key "$PROJECT_KEY" --agent-name "$CHILD_NAME" \
-        --token-file "$DURABLE_TOKEN" >/dev/null 2>&1 || true
+    # The core cleanup proves the durable token in this project and
+    # repository before retiring the identity and removing the credential.
+    # Only then is the one-shot handoff spent; otherwise it stays as the
+    # recovery credential.
+    if [[ "$DURABLE_CREATED" == true ]]; then
+      if ( cd "$WORK_DIR" && \
+           AGENTSTACK_PROJECT_KEY="$PROJECT_KEY" \
+           AGENTSTACK_PROJECT_REPOSITORY="$CHILD_REPOSITORY" \
+           AGENTSTACK_PROJECT_WORK_DIR="$WORK_DIR" \
+           AGENTSTACK_MCP_URL="$MCP_URL" \
+           AGENTSTACK_MAIL_ENV="$MAIL_ENV" \
+           AGENTSTACK_MAIL_HTTP_BEARER_MODE="$HTTP_BEARER_MODE" \
+           AGENTSTACK_RUNTIME_DIR="$RUNTIME_DIR" \
+           AGENTSTACK_REGISTER_LIB="$REGISTER_LIB" \
+             "$CLEANUP_HELPER" "$CHILD_NAME" ) >/dev/null 2>&1; then
+        rm -f "$CHILD_TOKEN_FILE" "$CHILD_TOKEN_FILE.binding.json"
+      fi
     fi
     if [[ "$WORKTREE_CREATED" == true ]]; then
       git -C "$SOURCE_REPO" worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1 || true
       git -C "$SOURCE_REPO" branch -D "$BRANCH_NAME" >/dev/null 2>&1 || true
     fi
-    rm -f "$TASK_EVENT_FILE" "$RUNNER_FILE" "$MCP_CONFIG" "$DURABLE_TOKEN" "$GIT_EXCLUDES_FILE" "$TASK_FILE"
+    rm -f "$TASK_EVENT_FILE" "$RUNNER_FILE" "$MCP_CONFIG" "$GIT_EXCLUDES_FILE" "$TASK_FILE"
   fi
 }
 trap cleanup_failure EXIT
@@ -353,12 +419,15 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# Consume the one-shot token into the stable per-agent runtime path expected by
-# the MCP wrapper. The token value and token-file path are not embedded in the
-# workspace MCP config.
-( umask 077 && cat "$CHILD_TOKEN_FILE" > "$DURABLE_TOKEN" )
-chmod 600 "$DURABLE_TOKEN"
-rm -f "$CHILD_TOKEN_FILE"
+# Copy the verified one-shot token into the stable per-agent runtime path
+# expected by the MCP wrapper. The token value and token-file path are not
+# embedded in the workspace MCP config. The one-shot is spent only after the
+# child session has started.
+if [[ ! -e "$DURABLE_TOKEN" ]]; then
+  ( umask 077 && ags_read_private_child_token "$CHILD_TOKEN_FILE" > "$DURABLE_TOKEN" )
+  chmod 600 "$DURABLE_TOKEN"
+  DURABLE_CREATED=true
+fi
 
 [[ ! -e "$WORKTREE_DIR" ]] || { echo "$PROG: worktree path already exists: $WORKTREE_DIR" >&2; exit 1; }
 if git -C "$SOURCE_REPO" show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
@@ -367,6 +436,10 @@ if git -C "$SOURCE_REPO" show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; th
 fi
 git -C "$SOURCE_REPO" worktree add -b "$BRANCH_NAME" "$WORKTREE_DIR" "$BASE_REV" >/dev/null
 WORKTREE_CREATED=true
+if ! ags_child_target_context "$WORKTREE_DIR" "$PROJECT_KEY"; then
+  echo "$PROG: child worktree is not in project '$PROJECT_KEY'" >&2
+  exit 1
+fi
 
 # Linked worktrees share .git/info/exclude. Use a child-owned excludes file
 # injected only into the Antigravity runner instead of mutating shared repo
@@ -439,6 +512,12 @@ export AGENT_NAME=$(printf '%q' "$CHILD_NAME")
 export PARENT_AGENT=$(printf '%q' "$PARENT_AGENT")
 export AGENTSTACK_RESERVED_IDENTITY=1
 export AGENTSTACK_PROJECT_KEY=$(printf '%q' "$PROJECT_KEY")
+export PROJECT_KEY=$(printf '%q' "$PROJECT_KEY")
+export AGENTSTACK_PROJECT_REPOSITORY=$(printf '%q' "$AGS_CHILD_REPOSITORY")
+export AGENTSTACK_PROJECT_WORK_DIR=$(printf '%q' "$AGS_CHILD_WORK_DIR")
+export AGENTSTACK_PROJECT_WORKTREE_ROOT=$(printf '%q' "$AGS_CHILD_WORKTREE_ROOT")
+export AGENTSTACK_PROTECTED_ROOTS=$(printf '%q' "$AGS_CHILD_PROTECTED_ROOTS")
+export AGENTSTACK_REGISTER_LIB=$(printf '%q' "$REGISTER_LIB")
 export AGENTSTACK_HOME=$(printf '%q' "$AGENTSTACK_HOME_DIR")
 export AGENTSTACK_HOOKS_DIR=$(printf '%q' "$HOOKS_DIR")
 export AGENTSTACK_RUNTIME_DIR=$(printf '%q' "$RUNTIME_DIR")
@@ -486,14 +565,10 @@ AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE") \
   $(printf '%q' "$PYTHON_BIN") $(printf '%q' "$MAIL_HELPER") release --project-key $(printf '%q' "$PROJECT_KEY") \
     --agent-name $(printf '%q' "$CHILD_NAME") --token-file $(printf '%q' "$DURABLE_TOKEN") \
     --paths $(printf '%q' "$RESOURCES") || true
-AGENTSTACK_HOME=$(printf '%q' "$AGENTSTACK_HOME_DIR") \
-AGENTSTACK_MCP_URL=$(printf '%q' "$MCP_URL") \
-AGENTSTACK_MAIL_ENV=$(printf '%q' "$MAIL_ENV") \
-AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE") \
-  $(printf '%q' "$PYTHON_BIN") $(printf '%q' "$MAIL_HELPER") retire --project-key $(printf '%q' "$PROJECT_KEY") \
-    --agent-name $(printf '%q' "$CHILD_NAME") --token-file $(printf '%q' "$DURABLE_TOKEN") || true
+# The core cleanup proves the durable credential in this project and worktree,
+# then releases, retires and removes it; a mismatch leaves it for inspection.
 [[ -x $(printf '%q' "$CLEANUP_HELPER") ]] && $(printf '%q' "$CLEANUP_HELPER") || true
-rm -f $(printf '%q' "$TASK_EVENT_FILE") $(printf '%q' "$DURABLE_TOKEN") $(printf '%q' "$MCP_CONFIG") \
+rm -f $(printf '%q' "$TASK_EVENT_FILE") $(printf '%q' "$MCP_CONFIG") \
   $(printf '%q' "$GIT_EXCLUDES_FILE") $(printf '%q' "$RUNNER_FILE")
 echo "[antigravity] child finished; worktree retained at $(printf '%q' "$WORKTREE_DIR")"
 exit "\$child_status"
@@ -509,4 +584,5 @@ TMUX_STARTED=true
 mkdir -p "$(dirname "$MANAGED_FILE")"
 grep -qxF "$CHILD_NAME" "$MANAGED_FILE" 2>/dev/null || printf '%s\n' "$CHILD_NAME" >> "$MANAGED_FILE"
 trap - EXIT HUP INT TERM
+rm -f "$CHILD_TOKEN_FILE" "$CHILD_TOKEN_FILE.binding.json"
 printf '%s\n' "$CHILD_NAME"

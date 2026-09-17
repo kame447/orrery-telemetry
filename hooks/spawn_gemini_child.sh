@@ -44,6 +44,7 @@ MAIL_HELPER="$AGENTSTACK_HOME_DIR/bin/agentstack-gemini-child-mail"
 STREAM_HELPER="$AGENTSTACK_HOME_DIR/bin/agentstack-gemini-stream"
 MCP_WRAPPER="$AGENTSTACK_HOME_DIR/bin/agentstack-gemini-mcp"
 CLEANUP_HELPER="$HOOKS_DIR/cleanup-child-agent.sh"
+REGISTER_LIB="${AGENTSTACK_REGISTER_LIB:-$AGENTSTACK_HOME_DIR/bin/lib/agentstack-register.sh}"
 
 usage() {
   cat >&2 <<'EOF'
@@ -112,6 +113,9 @@ command -v "$PYTHON_BIN" >/dev/null 2>&1 || [[ -x "$PYTHON_BIN" ]] || { echo "$P
 [[ -x "$MAIL_HELPER" ]] || { echo "$PROG: missing $MAIL_HELPER" >&2; exit 1; }
 [[ -x "$STREAM_HELPER" ]] || { echo "$PROG: missing $STREAM_HELPER" >&2; exit 1; }
 [[ -x "$MCP_WRAPPER" ]] || { echo "$PROG: missing Gemini MCP wrapper: $MCP_WRAPPER" >&2; exit 1; }
+[[ -f "$REGISTER_LIB" ]] || { echo "$PROG: missing registration library: $REGISTER_LIB" >&2; exit 1; }
+# shellcheck disable=SC1090
+. "$REGISTER_LIB"
 
 if [[ -n "${PARENT_AGENT:-}" ]]; then
   PARENT_NAME="$PARENT_AGENT"
@@ -124,6 +128,13 @@ fi
 
 SOURCE_REPO="$(git -C "$WORK_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
 [[ -n "$SOURCE_REPO" ]] || { echo "$PROG: delegated Gemini children require a git repository" >&2; exit 1; }
+# The child's actual repository decides the project before any registration,
+# reservation, worktree or tmux side effect.
+if ! ags_child_target_context "$WORK_DIR" "$PROJECT_KEY"; then
+  echo "$PROG: project '$PROJECT_KEY' is not valid for work directory '$WORK_DIR'" >&2
+  exit 1
+fi
+PROJECT_KEY="$AGS_CHILD_PROJECT_KEY"
 if [[ -n "$WORKTREE_BASE_REV" ]]; then
   BASE_REV="$(git -C "$SOURCE_REPO" rev-parse --verify "$WORKTREE_BASE_REV^{commit}" 2>/dev/null || true)"
 else
@@ -183,21 +194,21 @@ cleanup_failure() {
       mail_helper release --project-key "$PROJECT_KEY" --agent-name "$CHILD_NAME" \
         --token-file "$TOKEN_FILE" --paths "$RESOURCES" >/dev/null 2>&1 || true
     fi
-    if [[ "$PREREGISTERED" == true && -n "$CHILD_NAME" && -f "$TOKEN_FILE" ]]; then
-      mail_helper retire --project-key "$PROJECT_KEY" --agent-name "$CHILD_NAME" \
-        --token-file "$TOKEN_FILE" >/dev/null 2>&1 || true
-    fi
-    # agentstack-preregister-child also persists a stable per-agent token for
+    # agentstack-preregister-child persists a stable per-agent token for
     # session-bound MCP. On a failure before the child runner takes ownership,
-    # run the normal core cleanup path so that durable token/state does not
-    # survive an aborted launch.
+    # the core cleanup proves that token in this project and workspace, then
+    # retires the identity and removes the durable credential.
     if [[ "$PREREGISTERED" == true && -n "$CHILD_NAME" && -x "$CLEANUP_HELPER" ]]; then
-      AGENTSTACK_PROJECT_KEY="$PROJECT_KEY" \
-      AGENTSTACK_MCP_URL="$MCP_URL" \
-      AGENTSTACK_MAIL_ENV="$MAIL_ENV" \
-      AGENTSTACK_MAIL_HTTP_BEARER_MODE="$HTTP_BEARER_MODE" \
-      AGENTSTACK_RUNTIME_DIR="$RUNTIME_DIR" \
-        "$CLEANUP_HELPER" "$CHILD_NAME" >/dev/null 2>&1 || true
+      ( cd "$WORK_DIR" && \
+        AGENTSTACK_PROJECT_KEY="$PROJECT_KEY" \
+        AGENTSTACK_PROJECT_REPOSITORY="$AGS_CHILD_REPOSITORY" \
+        AGENTSTACK_PROJECT_WORK_DIR="$WORK_DIR" \
+        AGENTSTACK_MCP_URL="$MCP_URL" \
+        AGENTSTACK_MAIL_ENV="$MAIL_ENV" \
+        AGENTSTACK_MAIL_HTTP_BEARER_MODE="$HTTP_BEARER_MODE" \
+        AGENTSTACK_RUNTIME_DIR="$RUNTIME_DIR" \
+        AGENTSTACK_REGISTER_LIB="$REGISTER_LIB" \
+          "$CLEANUP_HELPER" "$CHILD_NAME" ) >/dev/null 2>&1 || true
     fi
     if [[ "$WORKTREE_CREATED" == true && -n "$WORKTREE_DIR" ]]; then
       git -C "$SOURCE_REPO" worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1 || true
@@ -206,7 +217,14 @@ cleanup_failure() {
     remove_managed_name
     [[ -n "$MCP_CONFIG" ]] && rm -f "$MCP_CONFIG" 2>/dev/null || true
     [[ -n "$GIT_EXCLUDES_FILE" ]] && rm -f "$GIT_EXCLUDES_FILE" 2>/dev/null || true
-    rm -f "$TOKEN_FILE" "$TASK_RAW_FILE" "$TASK_EVENT_FILE" "$RUNNER_FILE"
+    rm -f "$TASK_RAW_FILE" "$TASK_EVENT_FILE" "$RUNNER_FILE"
+    # Before preregistration succeeded, a handoff that exists is the only
+    # recovery credential of a registration that could not be completed.
+    if [[ "$PREREGISTERED" == true ]]; then
+      rm -f "$TOKEN_FILE" "$TOKEN_FILE.binding.json"
+    elif [[ -s "$TOKEN_FILE" ]]; then
+      echo "$PROG: kept the child registration handoff for recovery: $TOKEN_FILE" >&2
+    fi
   fi
 }
 trap cleanup_failure EXIT
@@ -217,7 +235,7 @@ CHILD_NAME="$(
   AGENTSTACK_MCP_URL="$MCP_URL" \
   AGENTSTACK_MAIL_ENV="$MAIL_ENV" \
   AGENTSTACK_MAIL_HTTP_BEARER_MODE="$HTTP_BEARER_MODE" \
-    "$PREREGISTER" --project-key "$PROJECT_KEY" --program antigravity \
+    "$PREREGISTER" --project-key "$PROJECT_KEY" --work-dir "$WORK_DIR" --program antigravity \
       --model "$MODEL" --task-description "Delegated Antigravity child" \
       --token-file-out "$TOKEN_FILE"
 )"
@@ -236,6 +254,11 @@ if git -C "$SOURCE_REPO" show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; th
 fi
 git -C "$SOURCE_REPO" worktree add -b "$BRANCH_NAME" "$WORKTREE_DIR" "$BASE_REV" >/dev/null
 WORKTREE_CREATED=true
+# The linked worktree shares the repository's namespace; prove it before use.
+if ! ags_child_target_context "$WORKTREE_DIR" "$PROJECT_KEY"; then
+  echo "$PROG: child worktree is not in project '$PROJECT_KEY'" >&2
+  exit 1
+fi
 
 # Linked worktrees share .git/info/exclude. Mutating that shared file and then
 # removing the rule on child exit races when two Gemini children overlap. Keep
@@ -339,6 +362,12 @@ export AGENT_NAME=$(printf '%q' "$CHILD_NAME")
 export PARENT_AGENT=$(printf '%q' "$PARENT_NAME")
 export AGENTSTACK_RESERVED_IDENTITY=1
 export AGENTSTACK_PROJECT_KEY=$(printf '%q' "$PROJECT_KEY")
+export PROJECT_KEY=$(printf '%q' "$PROJECT_KEY")
+export AGENTSTACK_PROJECT_REPOSITORY=$(printf '%q' "$AGS_CHILD_REPOSITORY")
+export AGENTSTACK_PROJECT_WORK_DIR=$(printf '%q' "$AGS_CHILD_WORK_DIR")
+export AGENTSTACK_PROJECT_WORKTREE_ROOT=$(printf '%q' "$AGS_CHILD_WORKTREE_ROOT")
+export AGENTSTACK_PROTECTED_ROOTS=$(printf '%q' "$AGS_CHILD_PROTECTED_ROOTS")
+export AGENTSTACK_REGISTER_LIB=$(printf '%q' "$REGISTER_LIB")
 export AGENTSTACK_HOME=$(printf '%q' "$AGENTSTACK_HOME_DIR")
 export AGENTSTACK_HOOKS_DIR=$(printf '%q' "$HOOKS_DIR")
 export AGENTSTACK_RUNTIME_DIR=$(printf '%q' "$RUNTIME_DIR")
@@ -396,15 +425,10 @@ if [[ -n "\$RESOURCES" ]]; then
       --paths "\$RESOURCES" || true
 fi
 
-AGENTSTACK_HOME=$(printf '%q' "$AGENTSTACK_HOME_DIR") \
-AGENTSTACK_MCP_URL=$(printf '%q' "$MCP_URL") \
-AGENTSTACK_MAIL_ENV=$(printf '%q' "$MAIL_ENV") \
-AGENTSTACK_MAIL_HTTP_BEARER_MODE=$(printf '%q' "$HTTP_BEARER_MODE") \
-  $(printf '%q' "$PYTHON_BIN") $(printf '%q' "$MAIL_HELPER") retire --project-key $(printf '%q' "$PROJECT_KEY") \
-    --agent-name $(printf '%q' "$CHILD_NAME") --token-file $(printf '%q' "$TOKEN_FILE") || true
-
+# The core cleanup proves the child credential in this project and worktree,
+# then releases, retires and removes the durable credential.
 [[ -x $(printf '%q' "$CLEANUP_HELPER") ]] && $(printf '%q' "$CLEANUP_HELPER") || true
-rm -f $(printf '%q' "$TASK_EVENT_FILE") $(printf '%q' "$TOKEN_FILE") $(printf '%q' "$MCP_CONFIG") \
+rm -f $(printf '%q' "$TASK_EVENT_FILE") $(printf '%q' "$TOKEN_FILE") $(printf '%q' "$TOKEN_FILE.binding.json") $(printf '%q' "$MCP_CONFIG") \
   $(printf '%q' "$GIT_EXCLUDES_FILE") $(printf '%q' "$RUNNER_FILE")
 echo "[antigravity] child finished; worktree retained at $(printf '%q' "$WORKTREE_DIR")"
 exit "\$child_status"

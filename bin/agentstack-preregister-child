@@ -3,9 +3,12 @@
 #
 # Usage:
 #   agentstack-preregister-child --project-key <path> [--name <agent>] \
-#     --program <claude-code|codex> --model <model> \
+#     [--work-dir <dir>] --program <claude-code|codex> --model <model> \
 #     --task-description <text> --token-file-out <path>
 #
+# The child's work directory (default: the current directory) must belong to
+# the project key; it is validated before any ORRERY Mail request, and the
+# one-shot handoff records the validated project and workspace.
 # Stdout contains only the registered child name. The generated token is written
 # to the requested token file with mode 0600.
 set -euo pipefail
@@ -35,8 +38,11 @@ REGISTER_LIB="${AGENTSTACK_REGISTER_LIB:-$SCRIPT_DIR/lib/agentstack-register.sh}
 usage() {
   cat >&2 <<'EOF'
 Usage: agentstack-preregister-child --project-key <path> [--name <agent>] \
-  --program <claude-code|codex> --model <model> \
+  [--work-dir <dir>] --program <claude-code|codex> --model <model> \
   --task-description <text> --token-file-out <path>
+
+--work-dir is the directory the child will work in (default: current
+directory). It must belong to --project-key, as registration requires.
 
 --name is optional: omitted, a free Adjective-Scientist name is picked (same
 picker as top-level registration). A supplied name that does not end in a
@@ -51,6 +57,7 @@ program="claude-code"
 model="${AGENTSTACK_CLAUDE_MODEL:-claude-code}"
 task_description="Delegated child agent"
 token_file_out=""
+work_dir="$PWD"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -64,6 +71,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --program)
       program="${2:-}"
+      shift 2
+      ;;
+    --work-dir)
+      work_dir="${2:-}"
       shift 2
       ;;
     --model)
@@ -93,6 +104,15 @@ done
 [[ -n "$program" ]] || die "--program is required"
 [[ -n "$model" ]] || die "--model is required"
 [[ -n "$token_file_out" ]] || die "--token-file-out is required"
+[[ -n "$work_dir" && -d "$work_dir" ]] || die "--work-dir must be an existing directory"
+
+# The child's workspace decides whether this project may be used at all. Check
+# it before any ORRERY Mail request so a foreign key never gets an identity.
+ags_child_target_context "$work_dir" "$project_key" \
+  || die "project '$project_key' is not valid for work directory '$work_dir'"
+project_key="$AGS_CHILD_PROJECT_KEY"
+work_dir="$AGS_CHILD_WORK_DIR"
+child_repository="$AGS_CHILD_REPOSITORY"
 
 ags_mail_load_token
 
@@ -111,6 +131,15 @@ elif ! ags_has_scientist_suffix "$agent_name"; then
   if [[ "${AGENTSTACK_STRICT_AGENT_NAMES:-}" == "1" ]]; then
     die "refusing off-list name '$agent_name' (AGENTSTACK_STRICT_AGENT_NAMES=1)"
   fi
+fi
+
+# Runtime credentials are keyed by name only. An existing one belongs to some
+# other registration (possibly another project); never overwrite it.
+existing_token_file="$(ags_registration_token_file "$agent_name")" || die "invalid child name '$agent_name'"
+existing_state_file="$(ags_registration_runtime_dir)/child-agents/$agent_name.json"
+if [[ -e "$existing_token_file" || -L "$existing_token_file" \
+      || -e "$existing_state_file" || -L "$existing_state_file" ]]; then
+  die "local credentials for '$agent_name' already exist; refusing to replace another registration"
 fi
 
 # Ignore any parent/session token inherited from the caller. This helper always
@@ -184,6 +213,7 @@ persist_codex_registration_state() {
   [[ -n "$token_key" ]] || return 1
   canonical_token="$runtime_dir/agent_token_$token_key"
   state_file="$runtime_dir/child-agents/$registered_name.json"
+  AGS_BINDING_REPOSITORY="$child_repository" AGS_BINDING_WORK_DIR="$work_dir" \
   "${AGENTSTACK_PYTHON:-python3}" - "$source_token" "$canonical_token" \
       "$state_file" "$registered_name" "$numeric_id" "$registered_project" \
       "$registered_program" <<'PY'
@@ -232,6 +262,8 @@ try:
         "program": program,
         "project_key": project,
         "registration_token": token,
+        "repository_key": os.environ.get("AGS_BINDING_REPOSITORY") or None,
+        "work_dir": os.environ.get("AGS_BINDING_WORK_DIR", ""),
     }
     with open(state_tmp, "x", encoding="utf-8") as handle:
         json.dump(state, handle, separators=(",", ":"), sort_keys=True)
@@ -257,11 +289,15 @@ PY
 # the same formal receipt with the canonical runtime token for the documented
 # no-argument launch path. Codex launchers fail closed when either copy is
 # unavailable; preregistration must therefore not report success without both.
+# Every program gets the receipt: it binds the handoff to this child, project
+# and validated workspace, and a launcher rejects a handoff that contradicts it.
 if [[ "$program" == "codex" || "$program" == "codex-cli" ]]; then
   [[ "$registered_id" =~ ^[1-9][0-9]*$ ]] \
     || die "register_agent returned no positive numeric id for Codex child $registered"
-  binding_file="${token_file_out}.binding.json"
-  if ! "${AGENTSTACK_PYTHON:-python3}" - "$binding_file" "$registered_id" "$registered" "$project_key" "$program" <<'PY'
+fi
+binding_file="${token_file_out}.binding.json"
+if ! AGS_BINDING_REPOSITORY="$child_repository" AGS_BINDING_WORK_DIR="$work_dir" \
+    "${AGENTSTACK_PYTHON:-python3}" - "$binding_file" "$registered_id" "$registered" "$project_key" "$program" <<'PY'
 import json
 import os
 import pathlib
@@ -269,11 +305,14 @@ import sys
 
 path = pathlib.Path(sys.argv[1])
 payload = {
-    "agent_id": int(sys.argv[2]),
     "agent_name": sys.argv[3],
     "project_key": sys.argv[4],
     "program": sys.argv[5],
+    "repository_key": os.environ["AGS_BINDING_REPOSITORY"] or None,
+    "work_dir": os.environ["AGS_BINDING_WORK_DIR"],
 }
+if sys.argv[2].isdigit() and int(sys.argv[2]) > 0:
+    payload["agent_id"] = int(sys.argv[2])
 temporary = path.with_name(path.name + f".tmp.{os.getpid()}")
 with open(temporary, "x", encoding="utf-8") as handle:
     json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
@@ -284,9 +323,21 @@ os.chmod(temporary, 0o600)
 os.replace(temporary, path)
 os.chmod(path, 0o600)
 PY
-  then
-    die "could not persist the one-shot Codex registration binding"
-  fi
+then
+  die "could not persist the one-shot child registration binding"
+fi
+# The server may have returned a name whose runtime credentials already belong
+# to another registration. Those files are never replaced. The new
+# registration's token and receipt are already in the one-shot handoff above,
+# which stays behind as its only recovery credential.
+registered_token_file="$(ags_registration_token_file "$registered")" \
+  || die "invalid registered child name '$registered'"
+registered_state_file="$(ags_registration_runtime_dir)/child-agents/$registered.json"
+if [[ -e "$registered_token_file" || -L "$registered_token_file" \
+      || -e "$registered_state_file" || -L "$registered_state_file" ]]; then
+  die "local credentials for returned name '$registered' already exist; refusing to replace another registration (the new registration's token is kept in $token_file_out)"
+fi
+if [[ "$program" == "codex" || "$program" == "codex-cli" ]]; then
   persist_codex_registration_state \
     "$registered" "$registered_id" "$project_key" "$program" "$token_file_out" \
     || die "could not persist canonical Codex registration token and metadata"

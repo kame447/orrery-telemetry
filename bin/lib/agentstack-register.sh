@@ -676,6 +676,73 @@ ags_verify_registration_token() {
   [[ "$returned" == "$agent_name" ]]
 }
 
+# Resolve a delegated child's actual target with the core validator before any
+# Mail, credential, worktree or tmux side effect. A key that does not belong to
+# the directory fails; a logical key needs the launcher's repository tuple.
+# Sets AGS_CHILD_PROJECT_KEY (canonical), AGS_CHILD_REPOSITORY,
+# AGS_CHILD_WORK_DIR, AGS_CHILD_WORKTREE_ROOT and AGS_CHILD_PROTECTED_ROOTS.
+ags_child_target_context() {
+  local work_dir="$1" project_key="$2" context=""
+  AGS_CHILD_PROJECT_KEY=""
+  AGS_CHILD_REPOSITORY=""
+  AGS_CHILD_WORK_DIR=""
+  AGS_CHILD_WORKTREE_ROOT=""
+  AGS_CHILD_PROTECTED_ROOTS=""
+  [[ -n "$work_dir" && -n "$project_key" ]] || return 1
+  declare -F agentstack_validate_project_context >/dev/null 2>&1 || return 1
+  context="$(agentstack_validate_project_context "$work_dir" "$project_key" 2>/dev/null)" || return 1
+  AGS_CHILD_PROJECT_KEY="$(agentstack_context_field "$context" project_key)" || return 1
+  AGS_CHILD_REPOSITORY="$(agentstack_context_field "$context" repository_key)" || return 1
+  AGS_CHILD_WORK_DIR="$(agentstack_context_field "$context" work_dir)" || return 1
+  AGS_CHILD_WORKTREE_ROOT="$(agentstack_context_field "$context" worktree_root)" || return 1
+  AGS_CHILD_PROTECTED_ROOTS="${AGS_CHILD_WORKTREE_ROOT:-$AGS_CHILD_WORK_DIR}"
+  [[ -n "$AGS_CHILD_PROJECT_KEY" && -n "$AGS_CHILD_WORK_DIR" ]]
+}
+
+# Print a child credential from a private (0600, regular, non-symlink) token
+# file, or from "state:<path>" (a private child state JSON). Callers capture it
+# in a local variable; it is never passed through the environment of a child.
+ags_read_private_child_token() {
+  local source="$1"
+  [[ -n "$source" ]] || return 1
+  "${AGENTSTACK_PYTHON:-python3}" - "$source" <<'PY'
+import json
+import os
+import stat
+import sys
+
+source = sys.argv[1]
+path = source[len("state:"):] if source.startswith("state:") else source
+try:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
+            raise SystemExit(1)
+        raw = os.read(descriptor, 65537)
+    finally:
+        os.close(descriptor)
+    if len(raw) > 65536:
+        raise SystemExit(1)
+    text = raw.decode("utf-8")
+    token = json.loads(text).get("registration_token") if source.startswith("state:") else text.strip()
+except (OSError, ValueError, AttributeError):
+    raise SystemExit(1)
+if not isinstance(token, str) or not token or len(token) > 4096 or any(c in token for c in "\r\n\0"):
+    raise SystemExit(1)
+print(token, end="")
+PY
+}
+
+# Prove a child credential for NAME in the validated PROJECT through the core
+# whois check before it is adopted, reused, or used to retire.
+ags_verify_child_credential() {
+  local project_key="$1" agent_name="$2" source="$3" token=""
+  token="$(ags_read_private_child_token "$source")" || return 1
+  ags_mail_load_token
+  ags_verify_registration_token "$project_key" "$agent_name" "$token"
+}
+
 ags_pick_scientist_name() {
   local _prefix="${1:-}"
   ags_pick_adjective_scientist_name

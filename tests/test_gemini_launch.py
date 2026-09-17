@@ -123,7 +123,7 @@ def test_bootstrap_registers_antigravity_runtime_and_model() -> None:
 
 def test_delegated_child_uses_worktree_stream_input_and_preregistered_identity() -> None:
     text = _CHILD.read_text(encoding="utf-8")
-    assert '"$PREREGISTER" --project-key "$PROJECT_KEY" --program antigravity' in text
+    assert '"$PREREGISTER" --project-key "$PROJECT_KEY" --work-dir "$WORK_DIR" --program antigravity' in text
     assert 'git -C "$SOURCE_REPO" worktree add -b "$BRANCH_NAME" "$WORKTREE_DIR" "$BASE_REV"' in text
     assert '--input-format stream-json --output-format stream-json' in text
     assert 'cat $(printf \'%q\' "$TASK_EVENT_FILE")' in text
@@ -151,7 +151,10 @@ def test_delegated_child_lifecycle_is_launcher_owned() -> None:
     assert 'mail_helper reserve --project-key "$PROJECT_KEY"' in text
     assert '$(printf \'%q\' "$MAIL_HELPER") report --project-key' in text
     assert '$(printf \'%q\' "$MAIL_HELPER") release --project-key' in text
-    assert '$(printf \'%q\' "$MAIL_HELPER") retire --project-key' in text
+    # Retirement belongs to the verified common cleanup, which proves the
+    # durable credential in this project before retiring with it.
+    assert '$(printf \'%q\' "$MAIL_HELPER") retire --project-key' not in text
+    assert '[[ -x $(printf \'%q\' "$CLEANUP_HELPER") ]] && $(printf \'%q\' "$CLEANUP_HELPER")' in text
     assert 'rm -f $(printf \'%q\' "$TASK_EVENT_FILE") $(printf \'%q\' "$TOKEN_FILE")' in text
     helper = _CHILD_MAIL.read_text(encoding="utf-8")
     assert 'registration_token=token' in helper

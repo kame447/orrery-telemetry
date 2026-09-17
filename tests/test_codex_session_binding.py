@@ -262,6 +262,9 @@ def _codex_entrypoint_layout(tmp_path: Path, layout: str) -> dict[str, Path]:
             "bin/lib/agentstack-register.sh",
             "bin/lib/agentstack-scientists.sh",
             "hooks/spawn_child.sh",
+            # Installed with the hooks; the registration library validates
+            # a child's workspace through it.
+            "hooks/project-context.sh",
             "hooks/prepare-codex-session-binding.py",
             "integrations/codex_app/plugin/scripts/record-codex-session-index.py",
         ):
@@ -326,6 +329,9 @@ def _fake_codex_launch_env(
         "  if [[ \"$1\" == register_agent ]]; then\n"
         "    printf '{\"id\":73,\"name\":\"BoundCodex\","
         "\"registration_token\":\"server-owner-token\"}\\n'\n"
+        # whois with the child's token: Mail accepts it for that name.
+        "  elif [[ \"$1\" == whois ]]; then\n"
+        "    printf '{\"id\":1,\"name\":\"BoundCodex\"}\\n'\n"
         "  else\n"
         "    printf '{\"id\":1}\\n'\n"
         "  fi\n"
@@ -344,7 +350,8 @@ def _fake_codex_launch_env(
 
     home = tmp_path / "home"
     codex_home = tmp_path / "codex-home"
-    workdir = tmp_path / "workdir"
+    # The child works inside the project its physical key names.
+    workdir = project / "workdir"
     home.mkdir()
     codex_home.mkdir()
     workdir.mkdir()
@@ -468,6 +475,8 @@ def test_preregister_no_arg_spawn_reaches_recorder_and_reader(
             "gpt-5.6-terra",
             "--task-description",
             "fixture child",
+            "--work-dir",
+            str(workdir),
             "--token-file-out",
             str(handoff),
         ],
@@ -508,8 +517,11 @@ def test_preregister_no_arg_spawn_reaches_recorder_and_reader(
         "agent_id": AGENT_ID,
         "agent_name": AGENT,
         "program": "codex",
-        "project_key": str(binding_env["project"]),
+        "project_key": str(binding_env["project"].resolve()),
         "registration_token": "server-owner-token",
+        # The receipt now also records the validated workspace.
+        "repository_key": None,
+        "work_dir": str(workdir.resolve()),
     }
     assert handoff.exists() is False and sidecar.exists() is False
 
@@ -634,6 +646,7 @@ def test_refreshed_cli_cache_runner_reaches_recorder_and_reader(
         "provider_mismatch",
         "token_mismatch",
         "prepare_failure",
+        "foreign_workspace",
     ],
 )
 def test_no_arg_codex_spawn_rejects_untrusted_canonical_state_before_cli(
@@ -673,6 +686,12 @@ def test_no_arg_codex_spawn_rejects_untrusted_canonical_state_before_cli(
             state["program"] = "claude-code"
         elif failure_mode == "token_mismatch":
             state["registration_token"] = "older-registration-token"
+        elif failure_mode == "foreign_workspace":
+            # Valid owner token and project, but the recorded directory lies
+            # outside the project it names.
+            foreign = tmp_path / "foreign-workspace"
+            foreign.mkdir()
+            state.update(repository_key=None, work_dir=str(foreign))
         state_path.write_text(json.dumps(state), encoding="utf-8")
     if state_path.exists():
         state_path.chmod(0o600)
@@ -698,6 +717,9 @@ def test_no_arg_codex_spawn_rejects_untrusted_canonical_state_before_cli(
     assert "server-owner-token" not in result.stdout + result.stderr
     if failure_mode == "prepare_failure":
         assert "fresh Codex history binding expectation" in result.stderr
+    elif failure_mode == "foreign_workspace":
+        assert "records another workspace" in result.stderr
+        assert canonical_token.is_file() and state_path.is_file()
     else:
         assert "canonical Codex registration metadata is missing" in result.stderr
         assert "Re-run agentstack-preregister-child" in result.stderr
@@ -1129,6 +1151,12 @@ def test_preregister_receipt_reaches_child_state_without_name_lookup(tmp_path: P
     fake_lib.write_text(
         """
 ags_mail_load_token() { :; }
+ags_child_target_context() {
+  AGS_CHILD_PROJECT_KEY="$2"; AGS_CHILD_REPOSITORY=""; AGS_CHILD_WORK_DIR="$1"
+  AGS_CHILD_WORKTREE_ROOT=""; AGS_CHILD_PROTECTED_ROOTS="$1"
+}
+ags_registration_runtime_dir() { printf '%s/runtime\\n' "$HOME"; }
+ags_registration_token_file() { printf '%s/agent_token_%s\\n' "$(ags_registration_runtime_dir)" "$1"; }
 ags_has_scientist_suffix() { return 0; }
 ags_generate_registration_token() { printf 'sent-token\\n'; }
 ags_mcp_call() {
@@ -1148,6 +1176,8 @@ ags_apply_contact_policy() { :; }
         encoding="utf-8",
     )
     token = tmp_path / "token-BoundCodex"
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
     preregister = subprocess.run(
         [
             str(ROOT / "bin" / "agentstack-preregister-child"),
@@ -1159,6 +1189,8 @@ ags_apply_contact_policy() { :; }
             "codex",
             "--model",
             "gpt-test",
+            "--work-dir",
+            str(project_dir),
             "--token-file-out",
             str(token),
         ],
@@ -1179,6 +1211,8 @@ ags_apply_contact_policy() { :; }
         "agent_name": AGENT,
         "project_key": str(tmp_path / "project"),
         "program": "codex",
+        "repository_key": None,
+        "work_dir": str(project_dir),
     }
 
     runtime = tmp_path / "runtime"
@@ -1239,21 +1273,34 @@ def test_deck_new_agent_handoff_reaches_recorder_and_reader(
     monkeypatch.setattr(server, "_spawn_name_status", lambda _name: "available")
     monkeypatch.setattr(server, "_mcp_call", mcp)
     monkeypatch.setattr(server, "_runtime_agent_token", lambda _name: "parent-owner-token")
+    # The pre-registration target check runs for real against this
+    # repository's validator; only the launcher process itself is faked.
+    monkeypatch.setattr(server, "HOOKS_DIR", str(ROOT / "hooks"))
+    real_run, real_popen = subprocess.run, subprocess.Popen
+
+    def is_preflight(args) -> bool:
+        return len(args) > 3 and args[0] == "/bin/bash" and args[3] == "spawn-preflight"
+
+    def fake_run(args, *rest, **kwargs):
+        if is_preflight(args):
+            return real_run(args, *rest, **kwargs)
+        return type("Result", (), {"returncode": 0})()
+
+    def fake_popen(args, *rest, **kwargs):
+        if is_preflight(args):
+            return real_popen(args, *rest, **kwargs)
+        return launched.append(args)
+
     with monkeypatch.context() as process_patch:
-        process_patch.setattr(
-            server.subprocess, "Popen", lambda args, **_kwargs: launched.append(args)
-        )
-        process_patch.setattr(
-            server.subprocess,
-            "run",
-            lambda *_args, **_kwargs: type("Result", (), {"returncode": 0})(),
-        )
+        process_patch.setattr(server.subprocess, "Popen", fake_popen)
+        process_patch.setattr(server.subprocess, "run", fake_run)
         result = server.do_spawn(
             {
                 "parent": "Parent",
                 "name": AGENT,
                 "task": "verify deck binding",
-                "dir": str(tmp_path),
+                # The child works in the project the dashboard is configured for.
+                "dir": str(binding_env["project"]),
                 "provider": "codex",
                 "model": "gpt-5.6-sol",
                 "effort": "high",

@@ -5083,6 +5083,50 @@ def spawn_with_launch_spec(payload: dict, spec: SpawnLaunchSpec) -> dict:
             discard_handoff()
 
 
+def _spawn_launcher_env(spec: SpawnLaunchSpec, project_key: str) -> dict:
+    """Base environment of a child launcher, shared with its preflight."""
+    env = os.environ.copy()
+    # Provider values first: the identity/context keys below always win.
+    env.update(dict(spec.launcher_env))
+    env["PROJECT_KEY"] = project_key
+    return env
+
+
+def _spawn_target_preflight(spec: SpawnLaunchSpec, project_key: str,
+                            work_dir: str) -> str:
+    """Refuse a child target the launcher would refuse, before registering.
+
+    The launchers validate the child's directory with the core project
+    validator and prove the child token in the canonical namespace. Run the
+    same validator with the launcher's own environment first, so a request
+    that cannot launch never leaves a registered child behind. A logical key
+    is accepted only with a tuple this service was configured with
+    (AGENTSTACK_PROJECT_REPOSITORY / AGENTSTACK_PROJECT_WORK_DIR), never one
+    taken from the request, and a path key must already be canonical.
+    Returns an error message, or "" when the target is valid.
+    """
+    library = os.path.join(HOOKS_DIR, "project-context.sh")
+    if not os.path.isfile(library):
+        return "project context validator is unavailable"
+    try:
+        checked = subprocess.run(
+            ["/bin/bash", "-c", '. "$1"; agentstack_validate_project_context "$2" "$3"',
+             "spawn-preflight", library, work_dir, project_key],
+            env=_spawn_launcher_env(spec, project_key),
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        context = json.loads(checked.stdout) if checked.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        context = None
+    if not isinstance(context, dict):
+        return (f"project '{project_key}' is not valid for dir '{work_dir}' "
+                "(a logical project key needs the service's configured repository)")
+    if context.get("project_key") != project_key:
+        return (f"project key '{project_key}' is not canonical; configure the "
+                f"dashboard with '{context.get('project_key')}'")
+    return ""
+
+
 def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
                   handoff: dict, discard_handoff) -> dict:
     standalone = request["standalone"]
@@ -5115,6 +5159,9 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
     project_key = _project_key()
     if not project_key:
         return {"ok": False, "error": "AGENTSTACK_PROJECT_KEY or AGENTSTACK_VAULT is not configured"}
+    target_error = _spawn_target_preflight(spec, project_key, work_dir)
+    if target_error:
+        return {"ok": False, "error": target_error}
 
     if not requested_name:
         requested_name = _suggest_any_spawn_name() or ""
@@ -5399,14 +5446,11 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
         if worktree_base:
             args.extend(["--worktree-base", worktree_base])
     args.extend([task[:4000] if standalone else task_short, work_dir])
-    env = os.environ.copy()
-    # Provider values first: the identity/context keys below always win.
-    env.update(dict(spec.launcher_env))
+    env = _spawn_launcher_env(spec, project_key)
     if standalone:
         env.pop("PARENT_AGENT", None)
     else:
         env["PARENT_AGENT"] = parent
-    env["PROJECT_KEY"] = project_key
     # launchd の最小 PATH には ~/.local/bin が無く、spawn_child.sh が tmux 内で
     # 起動する `zsh -lc` は非対話シェルのため ~/.zshrc を source せず claude が
     # PATH に乗らない (cold start で claude 即落ち → tmux session が cleanup-

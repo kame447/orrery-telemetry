@@ -27,6 +27,14 @@ _HELPER = _ROOT / "bin" / "agentstack-preregister-child"
 # helper's real control flow without touching a live ORRERY Mail server.
 _FAKE_LIB = r"""
 ags_mail_load_token() { :; }
+# The workspace/credential boundary has its own behavioral tests; here it only
+# has to accept the fixture's key and keep the runtime inside the temp home.
+ags_child_target_context() {
+  AGS_CHILD_PROJECT_KEY="$2"; AGS_CHILD_REPOSITORY=""; AGS_CHILD_WORK_DIR="$1"
+  AGS_CHILD_WORKTREE_ROOT=""; AGS_CHILD_PROTECTED_ROOTS="$1"
+}
+ags_registration_runtime_dir() { printf '%s/runtime\n' "$AGENTSTACK_HOME"; }
+ags_registration_token_file() { printf '%s/agent_token_%s\n' "$(ags_registration_runtime_dir)" "$1"; }
 ags_pick_available_agent_name() { echo "PICKER_CALLED" >&2; printf 'Picked-Curie\n'; }
 ags_has_scientist_suffix() {
   case "$1" in

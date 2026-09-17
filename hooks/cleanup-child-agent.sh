@@ -17,31 +17,9 @@ PROJECT_CONTEXT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/project-conte
 . "$PROJECT_CONTEXT_LIB"
 STATE_DIR="$RUNTIME_DIR/child-agents"
 MANAGED_FILE="${AGENTSTACK_MANAGED_AGENTS_FILE:-$RUNTIME_DIR/managed_agents.txt}"
-PROJECT_KEY_DEFAULT="$(agentstack_resolve_project_key "$(pwd -P)")"
 MCP_URL="${AGENTSTACK_MCP_URL:-${MCP_URL:-http://127.0.0.1:18765/mcp}}"
 MAIL_ENV="${AGENTSTACK_MAIL_ENV:-$HOME/.agentstack/mail/.env}"
 HTTP_BEARER_MODE="${AGENTSTACK_MAIL_HTTP_BEARER_MODE:-auto}"
-
-resolve_agent_name() {
-    if [[ -f "$HOOKS_DIR/resolve-agent-name.sh" ]]; then
-        # shellcheck disable=SC1091
-        source "$HOOKS_DIR/resolve-agent-name.sh"
-        printf '%s\n' "${RESOLVED_AGENT:-}"
-        return 0
-    fi
-    if [[ -n "${AGENT_NAME:-}" ]]; then
-        printf '%s\n' "$AGENT_NAME"
-        return 0
-    fi
-    if [[ -n "${TMUX_PANE:-}" ]]; then
-        local pane_key metadata_file
-        pane_key="${TMUX_PANE//%/_}"
-        metadata_file="$RUNTIME_DIR/agent_name_${pane_key}"
-        if [[ -f "$metadata_file" ]]; then
-            tr -d '[:space:]' < "$metadata_file" 2>/dev/null
-        fi
-    fi
-}
 
 get_agentstack_token() {
     if [[ -n "${MCP_AGENT_MAIL_TOKEN:-}" ]]; then
@@ -74,9 +52,9 @@ legacy_http_bearer_enabled() {
     esac
 }
 
-RESOLVED_AGENT="$(resolve_agent_name)"
-AGENT_NAME="${1:-${RESOLVED_AGENT:-${AGENT_NAME:-}}}"
-PROJECT_KEY="${PROJECT_KEY:-$PROJECT_KEY_DEFAULT}"
+# Only the caller's explicit claim names the child; nothing is inferred from
+# the surrounding pane or session.
+AGENT_NAME="${1:-$AGENT_NAME_ENV_AT_ENTRY}"
 
 if [[ -z "$AGENT_NAME" ]]; then
     exit 0
@@ -92,34 +70,133 @@ TOKEN_KEY="$(printf '%s' "$AGENT_NAME" | LC_ALL=C tr -c 'A-Za-z0-9_.-' '_')"
 TOKEN_FILE="$RUNTIME_DIR/agent_token_$TOKEN_KEY"
 MCP_CONFIG_FILE="$STATE_DIR/${AGENT_NAME}.mcp.json"
 CODEX_HOME_DIR="$STATE_DIR/${AGENT_NAME}.codex-home"
-if [[ -f "$STATE_FILE" ]]; then
-    if ! STATE_PROJECT_KEY=$(
-        python3 - "$STATE_FILE" 2>/dev/null <<'PYEOF'
-import json
-import sys
-
-data = json.load(open(sys.argv[1], encoding="utf-8"))
-print(data.get("project_key", ""))
-PYEOF
-    ); then
-        echo "[cleanup-child-agent] could not read child state for '$AGENT_NAME'; refusing partial cleanup" >&2
-        exit 1
-    fi
-    if [[ -n "$STATE_PROJECT_KEY" ]]; then
-        PROJECT_KEY="$STATE_PROJECT_KEY"
-    else
-        echo "[cleanup-child-agent] child state for '$AGENT_NAME' has no project key; using the configured project key if available" >&2
-    fi
-fi
-
-if [[ ! -s "$TOKEN_FILE" && ! -s "$STATE_FILE" && -z "${CHILD_REGISTRATION_TOKEN:-}" ]]; then
+if [[ ! -e "$TOKEN_FILE" && ! -L "$TOKEN_FILE" && ! -e "$STATE_FILE" && ! -L "$STATE_FILE" \
+      && -z "${CHILD_REGISTRATION_TOKEN:-}" ]]; then
     exit 0
 fi
 
+REGISTER_LIB="${AGENTSTACK_REGISTER_LIB:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/lib/agentstack-register.sh}"
+if [[ ! -f "$REGISTER_LIB" ]]; then
+    echo "[cleanup-child-agent] registration library is unavailable; leaving child state intact" >&2
+    exit 1
+fi
+# shellcheck disable=SC1090
+. "$REGISTER_LIB"
+
+# One snapshot of the child's private files. The token and project come only
+# from them (or, without state, from an explicit token and the live key); every
+# copy that exists must agree. The fingerprint lets later steps notice a
+# replacement written while Mail was being asked.
+read_child_snapshot() {
+    CHILD_REGISTRATION_TOKEN="${CHILD_REGISTRATION_TOKEN:-}" CLEANUP_AGENT_NAME="$AGENT_NAME" \
+        python3 - "$TOKEN_FILE" "$STATE_FILE" <<'PYEOF'
+import hashlib
+import hmac
+import json
+import os
+import stat
+import sys
+
+token_file, state_file = sys.argv[1:3]
+
+
+def read_private(path):
+    if not os.path.lexists(path):
+        return None
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
+            raise ValueError("child credential must be a private regular file")
+        return os.read(descriptor, 65537).decode("utf-8")
+    finally:
+        os.close(descriptor)
+
+
+token_text = read_private(token_file)
+state_text = read_private(state_file)
+state = json.loads(state_text) if state_text is not None else None
+if state is not None and not isinstance(state, dict):
+    raise ValueError("child state must be an object")
+if state is not None and state.get("agent_name") not in (None, os.environ["CLEANUP_AGENT_NAME"]):
+    raise ValueError("child state belongs to another agent")
+tokens = []
+if token_text is not None:
+    tokens.append(token_text.strip())
+if state is not None:
+    tokens.append(state.get("registration_token") or "")
+if os.environ.get("CHILD_REGISTRATION_TOKEN"):
+    tokens.append(os.environ["CHILD_REGISTRATION_TOKEN"])
+if not tokens or not all(isinstance(t, str) and t for t in tokens):
+    raise ValueError("child credential is empty")
+if not all(hmac.compare_digest(t, tokens[0]) for t in tokens):
+    raise ValueError("child credentials disagree")
+project = (state or {}).get("project_key") or ""
+repository = (state or {}).get("repository_key") or ""
+work_dir = (state or {}).get("work_dir") or ""
+fingerprint = hashlib.sha256(
+    ((token_text or "-") + "\0" + (state_text or "-")).encode("utf-8")).hexdigest()
+for value in (fingerprint, project, repository, work_dir):
+    if not isinstance(value, str) or "\n" in value:
+        raise ValueError("child state field is invalid")
+    print(value)
+PYEOF
+}
+
+if ! SNAPSHOT="$(read_child_snapshot 2>/dev/null)"; then
+    echo "[cleanup-child-agent] could not read child state for '$AGENT_NAME'; refusing partial cleanup" >&2
+    exit 1
+fi
+SNAPSHOT_FINGERPRINT="$(printf '%s\n' "$SNAPSHOT" | sed -n '1p')"
+STATE_PROJECT_KEY="$(printf '%s\n' "$SNAPSHOT" | sed -n '2p')"
+STATE_REPOSITORY="$(printf '%s\n' "$SNAPSHOT" | sed -n '3p')"
+STATE_WORK_DIR="$(printf '%s\n' "$SNAPSHOT" | sed -n '4p')"
+
+snapshot_unchanged() {
+    local current
+    current="$(read_child_snapshot 2>/dev/null)" || return 1
+    [[ "$(printf '%s\n' "$current" | sed -n '1p')" == "$SNAPSHOT_FINGERPRINT" ]]
+}
+
+# The project is the child's recorded one; a live key is used only when no
+# state exists, and either way it must validate for this actual workspace.
+PROJECT_KEY="${STATE_PROJECT_KEY:-${AGENTSTACK_PROJECT_KEY:-${PROJECT_KEY:-}}}"
 if [[ -z "$PROJECT_KEY" ]]; then
     echo "[cleanup-child-agent] project key is unavailable for '$AGENT_NAME'; leaving child state intact" >&2
     exit 1
 fi
+refuse_workspace() {
+    echo "[cleanup-child-agent] $1; leaving child state intact" >&2
+    exit 1
+}
+# A recorded workspace is evidence only if the recorded project, repository
+# and directory still form one valid tuple. A contradictory record never
+# authorizes cleanup, whatever the current directory is.
+SAVED_PROJECT_KEY=""
+SAVED_WORK_DIR=""
+if [[ -n "$STATE_WORK_DIR" ]]; then
+    ags_child_target_context "$STATE_WORK_DIR" "$PROJECT_KEY" \
+        || refuse_workspace "the recorded workspace of '$AGENT_NAME' does not belong to '$PROJECT_KEY'"
+    [[ "$AGS_CHILD_REPOSITORY" == "$STATE_REPOSITORY" ]] \
+        || refuse_workspace "the recorded repository of '$AGENT_NAME' contradicts its recorded workspace"
+    SAVED_PROJECT_KEY="$AGS_CHILD_PROJECT_KEY"
+    SAVED_WORK_DIR="$AGS_CHILD_WORK_DIR"
+fi
+ags_child_target_context "$(pwd -P)" "$PROJECT_KEY" \
+    || refuse_workspace "this workspace does not belong to '$AGENT_NAME' in '$PROJECT_KEY'"
+if [[ -n "$SAVED_PROJECT_KEY" && "$AGS_CHILD_PROJECT_KEY" != "$SAVED_PROJECT_KEY" ]]; then
+    refuse_workspace "this workspace resolves to another namespace than '$AGENT_NAME' was started in"
+fi
+if [[ -n "$STATE_REPOSITORY" ]]; then
+    [[ "$AGS_CHILD_REPOSITORY" == "$STATE_REPOSITORY" ]] \
+        || refuse_workspace "this repository is not the one '$AGENT_NAME' was started in"
+elif [[ -n "$SAVED_WORK_DIR" ]]; then
+    case "$AGS_CHILD_WORK_DIR/" in
+        "$SAVED_WORK_DIR"/*) ;;
+        *) refuse_workspace "this directory is outside the workspace '$AGENT_NAME' was started in" ;;
+    esac
+fi
+CLEANUP_PROJECT_KEY="$AGS_CHILD_PROJECT_KEY"
 
 if legacy_http_bearer_enabled; then
     TOKEN=$(get_agentstack_token 2>/dev/null || true)
@@ -129,10 +206,32 @@ else
     TOKEN=""
 fi
 if [[ "$bearer_status" == "2" ]]; then
-    exit 0
+    exit 1
 fi
 if [[ "$bearer_status" == "0" && -z "$TOKEN" ]]; then
-    exit 0
+    echo "[cleanup-child-agent] ORRERY Mail bearer is unavailable; leaving child state intact" >&2
+    exit 1
+fi
+
+# Mail must accept this exact credential for this name in this project before
+# anything is released, retired, or deleted.
+verify_child_ownership() {
+    local source
+    if [[ -e "$TOKEN_FILE" || -L "$TOKEN_FILE" ]]; then
+        source="$TOKEN_FILE"
+    elif [[ -e "$STATE_FILE" || -L "$STATE_FILE" ]]; then
+        source="state:$STATE_FILE"
+    else
+        AGENTSTACK_MCP_URL="$MCP_URL" MCP_AGENT_MAIL_TOKEN="$TOKEN" \
+            ags_verify_registration_token "$CLEANUP_PROJECT_KEY" "$AGENT_NAME" "$CHILD_REGISTRATION_TOKEN"
+        return
+    fi
+    AGENTSTACK_MCP_URL="$MCP_URL" MCP_AGENT_MAIL_TOKEN="$TOKEN" \
+        ags_verify_child_credential "$CLEANUP_PROJECT_KEY" "$AGENT_NAME" "$source"
+}
+if ! verify_child_ownership; then
+    echo "[cleanup-child-agent] ORRERY Mail did not confirm '$AGENT_NAME' in '$CLEANUP_PROJECT_KEY' with this credential; leaving child state intact" >&2
+    exit 1
 fi
 
 call_mcp() {
@@ -168,8 +267,11 @@ if token:
     headers["Authorization"] = f"Bearer {token}"
 conn.request("POST", parsed.path, body=payload, headers=headers)
 resp = conn.getresponse()
-print(resp.read().decode())
+body = resp.read().decode()
 conn.close()
+print(body)
+if not 200 <= resp.status < 300:
+    raise SystemExit(1)
 ' "$method" "$MCP_URL"
 }
 
@@ -179,10 +281,15 @@ print(json.dumps({
     'project_key': sys.argv[1],
     'agent_name': sys.argv[2],
 }))
-" "$PROJECT_KEY" "$AGENT_NAME")
+" "$CLEANUP_PROJECT_KEY" "$AGENT_NAME")
 call_mcp "release_file_reservations" "$release_args" > /dev/null 2>&1 || true
 
-retire_args=$(python3 -c '
+# A replacement written during the release belongs to a newer registration.
+if ! snapshot_unchanged; then
+    echo "[cleanup-child-agent] credentials for '$AGENT_NAME' changed during cleanup; leaving them intact" >&2
+    exit 1
+fi
+retire_args=$(CHILD_REGISTRATION_TOKEN="${CHILD_REGISTRATION_TOKEN:-}" python3 -c '
 import json
 import os
 import pathlib
@@ -205,9 +312,22 @@ print(json.dumps({
     "agent_name": agent_name,
     "registration_token": token,
 }))
-' "$PROJECT_KEY" "$AGENT_NAME" "$TOKEN_FILE" "$STATE_FILE") || retire_args=""
+' "$CLEANUP_PROJECT_KEY" "$AGENT_NAME" "$TOKEN_FILE" "$STATE_FILE") || retire_args=""
+# The durable credential is the only way to retire this identity later, so it
+# is kept unless Mail confirms the retirement (transport failure, HTTP error,
+# or a JSON-RPC/tool error all count as unconfirmed).
+retire_response=""
 if [[ -n "$retire_args" ]]; then
-    call_mcp "retire_agent" "$retire_args" > /dev/null 2>&1 || true
+    retire_response="$(call_mcp "retire_agent" "$retire_args" 2>/dev/null)" || retire_response=""
+fi
+if [[ -z "$retire_response" ]] || printf '%s' "$retire_response" | ags_mcp_has_error; then
+    echo "[cleanup-child-agent] ORRERY Mail did not confirm retiring '$AGENT_NAME'; keeping its credentials for a later cleanup" >&2
+    exit 1
+fi
+
+if ! snapshot_unchanged; then
+    echo "[cleanup-child-agent] credentials for '$AGENT_NAME' changed during cleanup; leaving them intact" >&2
+    exit 1
 fi
 
 python3 - "$MANAGED_FILE" "$AGENT_NAME" <<'PYEOF' 2>/dev/null || true

@@ -315,6 +315,8 @@ parent を選ばないと `standalone: true` を送り、`PARENT_AGENT` のな�
 
 ### Spawn 順序
 
+手順1の前に、dashboard は child launcher と同じ project 検証を、launcher に渡す環境で実行します。要求された directory は設定済み project に属している必要があり、path の key は canonical（symlink の別名や `.`/`..` を含む表記ではない）でなければなりません。logical key は、service 自体に一致する `AGENTSTACK_PROJECT_REPOSITORY`（または `AGENTSTACK_PROJECT_WORK_DIR`）が設定されている場合だけ受け付け、request から推測しません。拒否した request は何も登録せずに error を返すため、より厳格な launcher が孤立した child を残すことはありません。
+
 1. `register_agent` で child identity と専用 token を作成
 2. role / group annotation（best effort）
 3. 通常 child だけ、parent を sender にして task message と CC audit trail を作成
