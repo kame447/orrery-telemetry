@@ -114,5 +114,8 @@
   ],
   "post_cutover_published": [
     "unretire_agent"
-  ]
+  ],
+  "post_cutover_schema_additions": {
+    "whois": ["registration_token"]
+  }
 }

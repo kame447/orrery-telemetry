@@ -6060,6 +6060,7 @@ def build_mcp_server() -> FastMCP:
         agent_name: str,
         include_recent_commits: bool = True,
         commit_limit: int = 5,
+        registration_token: Optional[str] = None,
         format: Optional[str] = None,
     ) -> dict[str, Any]:
         """
@@ -6080,6 +6081,15 @@ def build_mcp_server() -> FastMCP:
             If true, include latest commits touching the project archive authored by the configured git author.
         commit_limit : int
             Maximum number of recent commits to include.
+        registration_token : str, optional
+            Owner proof. Omit it for the ordinary directory lookup. When it is
+            supplied, the profile is returned only if this project and name
+            have a token-bound registration whose credential matches, so a
+            caller can prove that a private credential still owns this exact
+            identity. Soft retirement keeps the row and its credential, so a
+            retired owner still proves itself; deleting the identity or
+            registering it again with another credential invalidates the old
+            proof. The token is never echoed in the result.
 
         Returns
         -------
@@ -6088,6 +6098,19 @@ def build_mcp_server() -> FastMCP:
         """
         project = await _get_project_by_identifier(project_key)
         agent = await _get_agent(project, agent_name)
+        if registration_token is not None:
+            # An explicit owner proof, not a directory read: only a real
+            # token-bound row for this exact project and name can answer it.
+            # An empty token, a tokenless legacy row, and a token that belongs
+            # to a same-name agent in another project all fail here, and the
+            # refusal never repeats the credential.
+            supplied = registration_token.strip()
+            stored = getattr(agent, "registration_token", None)
+            if not supplied or not stored or not hmac.compare_digest(stored, supplied):
+                raise ValueError(
+                    f"registration_token is not valid for agent '{agent_name}' "
+                    f"in project '{project.human_key}'"
+                )
         profile = _agent_to_dict(agent)
         recent: list[dict[str, Any]] = []
         if include_recent_commits:

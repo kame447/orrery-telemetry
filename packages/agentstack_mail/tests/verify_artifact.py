@@ -25,7 +25,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 FULL_GIT_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 AUTHORIZATION_FIXTURE = "authorization-tools-v1.json"
 EXPECTED_AUTHORIZATION_FIXTURE_SHA256 = (
-    "6609e7b2c6816c039ab55432de3bda15ad7c491bad5fb5764b9ae77a2aeda607"
+    "d2283b315b71e0a9ac55901eef0b233eaf5b14816880223dbf25024570742aa0"
 )
 
 EXPECTED_BASELINES = {
@@ -69,8 +69,8 @@ EXPECTED_DESCRIPTION_DIGESTS = {
             "sha256": "139e1ee3071c20421acbda81699f182e6946663e7b61f856ae11bb04fba0ad2c",
         },
         "core": {
-            "utf8_bytes": 687,
-            "sha256": "1b1404e6ec24c23b390f37d5e243327df6f15769963a5c7d457aa87828468c65",
+            "utf8_bytes": 1251,
+            "sha256": "a7c8a9473db90535ca78d7836572e3e8561a9bd18c21e9c014f5b5f826a1f9b3",
         },
     },
 }
@@ -863,6 +863,16 @@ EXPECTED_POST_CUTOVER_INTENTIONAL_DIFFERENCES = [
         "summary": "unretire_agent is published. The frozen live server exposed it; the cutover surface withheld it as a non-compatibility upstream tool, and that decision is reversed.",
         "why_not_in_the_initial_cutover_difference_set": "The initial-cutover-difference-set-exact condition records what was approved on 2026-08-15 and stays at three. Withholding this tool was reviewed then; publishing it was not. It was published on 2026-08-28, after retirement turned out to be one-way in practice: on 2026-08-27 a session ending outside tmux resolved an unrelated live agent's name and retired it, twice, and nothing on the published surface could undo that. register_agent does not clear retired_at, so recovery meant editing the database by hand during an incident. The product decision that speaks of an exact 24-tool boundary is left as written: it records what was decided on 2026-08-15, and rewriting it would make the minutes claim a review that did not happen.",
         "comparator_effect": "The published tool set grows from 24 to 25 and unretire_agent moves from live-only to shared, which shrinks the divergence rather than widening it. No other tool's schema or behaviour changed. unretire_agent's own authorization did change: the frozen live server refuses to restore a token-bearing target when the token is omitted, and Core now allows it, matching how retire_agent is already authorized here. The differential lifecycle scenario passes the token, so it compares the shared success path and does not observe that branch; the changed branch is pinned instead by test_loopback_unretire_restores_a_token_bearing_target_without_its_token in the identity contract.",
+    },
+    {
+        "id": "surface.tool.whois.registration_token",
+        "arose": "post_cutover",
+        "date": "2026-09-17",
+        "approved_by": "fork task owner kame447",
+        "channel": "Astra design under the user-authorized Issue 33 fork work; proposed for upstream review, not approved by the upstream maintainer",
+        "summary": "whois accepts an optional registration_token. Without it the tool is the unchanged tokenless directory read; with it the profile is returned only when this exact project and name have a token-bound registration whose credential matches, so a holder of a private credential can prove it still owns that identity. The token is never echoed in the result or in the refusal.",
+        "why_not_in_the_initial_cutover_difference_set": "The initial-cutover-difference-set-exact condition records what was approved on 2026-08-15 and stays at three. This parameter did not exist then. It was added on 2026-09-17, when an isolated probe of the bundled server showed that the delegated child lifecycle and the notification watcher had no read-only way to ask whether a private credential still owns an exact name in an exact project: every such call failed because the published whois had no such parameter, while the shell helper already sent one.",
+        "comparator_effect": "The published whois input schema gains one optional property, pinned exactly by contract.POST_CUTOVER_SCHEMA_ADDITIONS and recorded in compatibility-tools-v1.json::post_cutover_schema_additions; the frozen live fixture is unchanged and every other schema field still compares exactly. No output field, tool count, resource, or other tool behaviour changed. The authorization catalog records registration_token as a current credential argument of whois, and the tool docstring documents the proof, which moves the whois core description allowance.",
     },
 ]
 

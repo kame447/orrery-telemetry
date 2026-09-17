@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 LOCAL_SINGLE_PRINCIPAL = "local-single-principal"
 AUTHORIZATION_FIXTURE = "authorization-tools-v1.json"
 AUTHORIZATION_FIXTURE_SHA256 = (
-    "6609e7b2c6816c039ab55432de3bda15ad7c491bad5fb5764b9ae77a2aeda607"
+    "d2283b315b71e0a9ac55901eef0b233eaf5b14816880223dbf25024570742aa0"
 )
 
 
@@ -235,7 +235,10 @@ AUTHORIZATION_CATALOG: dict[str, dict[str, object]] = {
         action="read_agent_profile",
         resource="project:{project_key}/agent:{agent_name}/profile",
         required_arguments=("project_key", "agent_name"),
-        authorization_rule="project member or project administrator",
+        current_credential_arguments=("registration_token",),
+        authorization_rule=(
+            "project member or project administrator; supplying registration_token additionally requires it to match this exact project and agent, so a credential holder can prove ownership without a mutation"
+        ),
     ),
 }
 

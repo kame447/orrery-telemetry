@@ -10,6 +10,7 @@ from agentstack_mail.contract import (
     MODEL_COMPATIBILITY_TOOLS,
     NON_COMPATIBILITY_UPSTREAM_TOOLS,
     POST_CUTOVER_PUBLISHED_TOOLS,
+    POST_CUTOVER_SCHEMA_ADDITIONS,
     POLICY_EXCLUDED_UPSTREAM_TOOLS,
     RUNTIME_REQUIRED_TOOLS,
     SERVICE_IDENTITY,
@@ -85,6 +86,20 @@ def test_compatibility_surface_matches_caller_audit() -> None:
     # the record still says what the predecessor exposed.
     assert len(COMPATIBILITY_TOOLS) == 25
     assert POST_CUTOVER_PUBLISHED_TOOLS == {"unretire_agent"}
+    # Published surface additions that are not new tools are recorded the same
+    # way: the frozen predecessor fixture stays as it was.
+    assert POST_CUTOVER_SCHEMA_ADDITIONS == {
+        "whois": {
+            "registration_token": {
+                "anyOf": [{"type": "string"}, {"type": "null"}],
+                "default": None,
+            },
+        },
+    }
+    assert set(POST_CUTOVER_SCHEMA_ADDITIONS) <= COMPATIBILITY_TOOLS
+    assert fixture["post_cutover_schema_additions"] == {
+        name: sorted(properties) for name, properties in POST_CUTOVER_SCHEMA_ADDITIONS.items()
+    }
     assert not POST_CUTOVER_PUBLISHED_TOOLS & MODEL_COMPATIBILITY_TOOLS
     assert not POST_CUTOVER_PUBLISHED_TOOLS & RUNTIME_REQUIRED_TOOLS
     assert set(fixture["post_cutover_published"]) == POST_CUTOVER_PUBLISHED_TOOLS

@@ -68,6 +68,25 @@ MODEL_COMPATIBILITY_TOOLS = frozenset(
 # during an incident.
 POST_CUTOVER_PUBLISHED_TOOLS = frozenset({"unretire_agent"})
 
+# Input properties this server accepts that the frozen predecessor's schema
+# does not carry. whois gained an optional registration_token on 2026-09-17:
+# a delegated child's launcher, its cleanup and the notification watcher have
+# to ask whether a private credential still owns an exact name in an exact
+# project before they release, retire, or type into a pane, and the tokenless
+# directory read cannot answer that. The ordinary lookup is unchanged, so this
+# only adds a property; the ledger entry is
+# post_cutover_intentional_differences[surface.tool.whois.registration_token].
+# The exact published schema of each added property, so a widened type or a
+# new constraint is a contract change like any other.
+POST_CUTOVER_SCHEMA_ADDITIONS: dict[str, dict[str, object]] = {
+    "whois": {
+        "registration_token": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": None,
+        },
+    },
+}
+
 COMPATIBILITY_TOOLS = (
     RUNTIME_REQUIRED_TOOLS | MODEL_COMPATIBILITY_TOOLS | POST_CUTOVER_PUBLISHED_TOOLS
 )
