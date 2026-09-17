@@ -10,8 +10,9 @@ import asyncio
 import json
 import os
 import pathlib
-import subprocess
+import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -834,29 +835,96 @@ def real_tmux(world, tmp_path):
     socket_path = pathlib.Path(tempfile.mkdtemp(prefix="ags-tm-", dir="/tmp")) / "s"
     bindir = pathlib.Path(world["env"]["PATH"].split(":")[0])
     real = shutil.which("tmux", path=os.environ["PATH"])
+    # Every process started here is addressed to this test's own server, with an
+    # empty configuration and the same isolated environment the watcher gets.
+    # The call that creates the server decides what the server is for the rest
+    # of its life, so an ambient HOME, TMUX, SHELL or project variable -- or a
+    # ~/.tmux.conf -- must not reach it. The shell is pinned too, because that
+    # is what tmux runs for default-shell and default-command.
+    base = [real, "-f", os.devnull, "-S", str(socket_path)]
+    env = dict(world["env"], SHELL="/bin/sh")
     (bindir / "tmux").write_text(
         "#!/bin/sh\n"
         'printf "%s\\n" "$*" >> "$FAKE_TMUX_LOG"\n'
-        f'exec {real} -S "{socket_path}" "$@"\n',
+        f'exec {shlex.quote(real)} -f /dev/null -S {shlex.quote(str(socket_path))} "$@"\n',
         encoding="utf-8")
     (bindir / "tmux").chmod(0o755)
 
     def server(*args, check=True):
-        return subprocess.run([real, "-S", str(socket_path), *args], text=True,
-                              capture_output=True, check=check)
+        return subprocess.run([*base, *args], text=True, capture_output=True,
+                              check=check, env=env)
 
     try:
         yield server
     finally:
-        subprocess.run([real, "-S", str(socket_path), "kill-server"],
-                       capture_output=True, check=False)
+        subprocess.run([*base, "kill-server"], capture_output=True, check=False, env=env)
         shutil.rmtree(socket_path.parent, ignore_errors=True)
+
+
+def _tmux_shim_calls(world):
+    """What the watcher asked the real tmux binary for, as the shim logged it."""
+    log = pathlib.Path(world["env"]["FAKE_TMUX_LOG"])
+    return [line.split() for line in log.read_text(encoding="utf-8").splitlines()]
 
 
 def _real_session(server, name, cwd, env):
     server("new-session", "-d", "-s", name, "-c", str(cwd), "sleep 300")
     for key, value in env.items():
         server("set-environment", "-t", name, key, str(value))
+
+
+@pytest.fixture
+def poisoned_ambient(tmp_path, monkeypatch):
+    """Ambient context hostile to any tmux server that would listen to it.
+
+    Ordered before `world` and `real_tmux`, so it is in place when the test's
+    own server is created. The hook is what bites: a global `set-environment`
+    does not reach session environments, but a `session-created` hook plants a
+    work dir belonging to no project into every session it creates, which the
+    marker coherence rule then refuses. The variables around it are the rest of
+    the ambient context that must not travel either.
+    """
+    home = tmp_path / "ambient-home"
+    home.mkdir()
+    (home / ".tmux.conf").write_text(
+        "set-hook -g session-created "
+        "'set-environment AGENTSTACK_PROJECT_WORK_DIR /poisoned'\n"
+        "set-environment -g PROJECT_KEY /poisoned\n",
+        encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("TMUX", "/nonexistent-tmux,1,0")
+    monkeypatch.setenv("SHELL", "/bin/false")
+    monkeypatch.setenv("PROJECT_KEY", "/poisoned")
+    monkeypatch.setenv("AGENTSTACK_PROJECT_KEY", "/poisoned")
+    return home
+
+
+def _assert_real_delivery(world, real_tmux, state, calls, output):
+    """Delivered to the pane real tmux itself names for the exact session."""
+    assert state[state_key(world["alpha"])]["last_result"] == "success", output
+    pane = real_tmux("display-message", "-p", "-t", f"={AGENT}:", "#{pane_id}").stdout.strip()
+    assert pane.startswith("%")
+    sends = [call for call in calls if call[0] == "send-keys"]
+    assert [call[:3] for call in sends] == [["send-keys", "-t", pane]] * 2
+    assert sends[1][-1] == "C-m"
+
+
+def test_the_real_tmux_server_ignores_ambient_context(poisoned_ambient, world, real_tmux):
+    """The fixture's own bootstrap must not carry the outside world in.
+
+    Without the isolated environment and the empty configuration, the call that
+    creates this server inherits `HOME`, `SHELL`, `TMUX` and the project
+    variables, reads that `~/.tmux.conf`, and the delivery fails.
+    """
+    alpha = world["alpha"]
+    _real_session(real_tmux, AGENT, alpha, launcher_env(alpha, alpha))
+    signal = write_signal(world, alpha)
+    with FakeMail() as mail:
+        mail.owners[(str(alpha), AGENT)] = TOKEN
+        state, output = run_watcher(world, mail, [state_key(alpha)])
+    _assert_real_delivery(world, real_tmux, state, _tmux_shim_calls(world), output)
+    assert not signal.exists()
+    assert "/poisoned" not in real_tmux("show-environment", "-t", AGENT).stdout
 
 
 @pytest.mark.parametrize("case", ["exact-session", "prefix-only", "foreign-project"])
@@ -883,17 +951,10 @@ def test_the_watcher_delivers_through_real_tmux(world, real_tmux, case):
         mail.owners[(str(alpha), AGENT)] = TOKEN
         state, output = run_watcher(world, mail, [state_key(alpha)])
 
-    calls = [line.split() for line in
-             pathlib.Path(world["env"]["FAKE_TMUX_LOG"]).read_text(encoding="utf-8").splitlines()]
+    calls = _tmux_shim_calls(world)
     touched = [call for call in calls if call[0] in {"capture-pane", "send-keys"}]
     if case == "exact-session":
-        assert state[state_key(alpha)]["last_result"] == "success"
-        pane = real_tmux("display-message", "-p", "-t", f"={AGENT}:",
-                         "#{pane_id}").stdout.strip()
-        assert pane.startswith("%")
-        sends = [call for call in calls if call[0] == "send-keys"]
-        assert [call[:3] for call in sends] == [["send-keys", "-t", pane]] * 2
-        assert sends[1][-1] == "C-m"
+        _assert_real_delivery(world, real_tmux, state, calls, output)
         assert not signal.exists()
     else:
         expected = "session_not_found" if case == "prefix-only" else "recipient_unverified"
