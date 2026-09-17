@@ -123,7 +123,7 @@ These are not registered directly with events in `settings.template.json`. Their
 | [`spawn_child.sh`](../hooks/spawn_child.sh) | Explicitly run by `/delegate` or dashboard NEW AGENT when starting a child | Combine identity, token, task mail, reservation, tmux, Claude / Codex, worktree, and readiness into one launch transaction |
 | [`cleanup-child-agent.sh`](../hooks/cleanup-child-agent.sh) | Immediately after the child REPL command started by `spawn_child.sh` ends | Best-effort release of reservations, retirement of remote identity, and removal of managed-list / state / credential / MCP configuration |
 | [`monitor_child_agent.sh`](../hooks/monitor_child_agent.sh) | Run once per monitoring interval by a `/delegate` parent | Capture the tmux pane and report completion, session disappearance, permission prompt, stasis, and an optional danger pattern through exit codes |
-| [`watch_agent_mail_signals.sh`](../hooks/watch_agent_mail_signals.sh) | Started by launcher registration as a dedicated `mail-watcher` tmux service | Watch ORRERY Mail signals and inject notification text plus `C-m` into the exact matching agent tmux session |
+| [`watch_agent_mail_signals.sh`](../hooks/watch_agent_mail_signals.sh) | Started by launcher registration as a dedicated `mail-watcher` tmux service | Watch ORRERY Mail signals and inject notification text plus `C-m` into the proven pane of the exact matching agent session in the signal's project |
 
 ### `record-session-index.py`
 
@@ -161,9 +161,13 @@ Dangerous-command pattern checking is enabled only with `AGENTSTACK_MONITOR_DANG
 
 ### `watch_agent_mail_signals.sh`
 
-It uses event watching when `fswatch` is available and two-second polling otherwise. It does not delete signal files, which are server-owned dirty bits; runtime delivery state and a short lease suppress duplicate injection of the same `(agent, message)`. A periodic scan every 30 seconds recovers missed events.
+It uses event watching when `fswatch` is available and two-second polling otherwise. Runtime delivery state and a short lease suppress duplicate injection of the same `(project, agent, message)`; both are named by that whole triple (the lease by its hash), so the same agent name and message id in two projects never share an entry, whatever separators a logical key contains. Entries written by the previous version, which named only agent and message, are left alone and never answer for a project. A successful delivery removes the per-message signal it delivered; legacy single-file signals stay server-owned and are cleared by `fetch_inbox`. A periodic scan every 30 seconds recovers missed events.
 
-The delivery target is only the tmux session whose name exactly matches the agent. After sending notification text literally, it submits with a separate `C-m` call, avoiding bare shells and unrelated sessions. tmux calls run in timeout-controlled workers so a server stall cannot stop the entire watcher.
+Every signal carries the canonical `project_key` of the project it was sent in. A signal that predates that field is delivered only when Mail's own project resource names the project for its slug (the answer must be exactly one entry whose slug matches and whose `human_key` is non-empty); the slug alone is never proof, and an unavailable or malformed answer leaves the signal pending.
+
+The delivery target is the tmux session whose name exactly matches the agent (`=name`), and then one concrete pane: every later call targets that pane id. Before the pane is read or written, the recipient is proven: its own directory and the project variables of its own session must resolve, through the same validator the launchers use, to the signal's project, and the agent's private `agent_token_<name>` (mode 0600, no symlink) must be accepted by Mail's `whois` for that agent in that project. Every session marker that is present has to agree — a project key cannot mask a second key, a repository, a work directory, a worktree root or a protected root belonging elsewhere — while any worktree of the same repository still counts. A session with no such variables can only prove its directory's own project. The watcher's own project selection is never used as recipient evidence, and a recipient that cannot be proven leaves the signal pending without any `capture-pane` or `send-keys`.
+
+Notification text is sent literally and submitted with a separate `C-m` call. The full evidence, including a current `whois` proof, is re-established immediately before each of those two writes: a pane, session, directory, context or token that changed, or a registration Mail no longer accepts, suppresses the remaining write and leaves the signal pending. This narrows the delay between the two writes; it does not make them atomic. tmux calls run in timeout-controlled workers so a server stall cannot stop the entire watcher.
 
 ## Differences for Codex
 

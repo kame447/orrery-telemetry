@@ -13,6 +13,19 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# The registration library supplies the core project validator, the private
+# token reader and the whois check used to prove a recipient. Without it no
+# recipient can be proven, so every signal stays pending.
+REGISTER_LIB="${AGENTSTACK_REGISTER_LIB:-$SCRIPT_DIR/../bin/lib/agentstack-register.sh}"
+if [[ -f "$REGISTER_LIB" ]]; then
+    # shellcheck disable=SC1090
+    . "$REGISTER_LIB"
+fi
+MCP_URL="${AGENTSTACK_MCP_URL:-${MCP_URL:-http://127.0.0.1:18765/mcp}}"
+# The watcher's own project selection is never evidence about a recipient.
+WATCHER_CONTEXT_VARS="AGENTSTACK_PROJECT_KEY PROJECT_KEY AGENTSTACK_PROJECT_REPOSITORY AGENTSTACK_PROJECT_WORK_DIR AGENTSTACK_PROJECT_WORKTREE_ROOT AGENTSTACK_PROTECTED_ROOTS AGENTSTACK_PROJECT_CONTEXT AGENTSTACK_LOOKUP_PROJECT_KEY CHILD_REGISTRATION_TOKEN"
+
 MAIL_HOME="${AGENTSTACK_MAIL_HOME:-$HOME/.agentstack/mail}"
 SIGNALS_DIR="${AGENTSTACK_SIGNALS_DIR:-$MAIL_HOME/signals}"
 POLL_INTERVAL=2  # seconds (fallback if fswatch unavailable)
@@ -101,14 +114,71 @@ print(int(st.st_mtime))
 snippet = (msg.get("body_snippet") or "").replace("\r", " ").replace("\n", " ⏎ ")
 print(snippet[:500])
 print("1" if msg.get("body_truncated") else "0")
+for field in ("project_key", "project"):
+    value = data.get(field)
+    print(value if isinstance(value, str) and "\n" not in value else "")
 PY
 }
 
+# Canonical project of a legacy slug-only signal, from Mail's own project
+# resource. The answer must name the requested slug and carry a human_key;
+# anything else leaves the signal without a project (and so pending).
+resolve_signal_project_key() {
+    local slug="$1"
+    [[ -n "$slug" ]] || return 1
+    declare -F ags_mail_load_token >/dev/null 2>&1 && ags_mail_load_token
+    RESOURCE_SLUG="$slug" RESOURCE_URL="$MCP_URL" python3 - <<'PY' 2>/dev/null
+import json
+import os
+import urllib.request
+
+slug = os.environ["RESOURCE_SLUG"]
+payload = json.dumps({
+    "jsonrpc": "2.0",
+    "id": "watcher-project",
+    "method": "resources/read",
+    "params": {"uri": f"resource://project/{slug}"},
+}).encode()
+headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+bearer = os.environ.get("MCP_AGENT_MAIL_TOKEN", "").strip()
+if bearer:
+    headers["Authorization"] = "Bearer " + bearer
+request = urllib.request.Request(os.environ["RESOURCE_URL"], data=payload, headers=headers)
+with urllib.request.urlopen(request, timeout=5) as response:
+    raw = response.read().decode("utf-8", "replace")
+for line in raw.splitlines():
+    if line.startswith("data:"):
+        raw = line[5:].strip()
+        break
+body = json.loads(raw)
+contents = (body.get("result") or {}).get("contents") or []
+if len(contents) != 1:
+    raise SystemExit(1)
+project = json.loads(contents[0].get("text") or "null")
+if not isinstance(project, dict) or project.get("slug") != slug:
+    raise SystemExit(1)
+human_key = project.get("human_key")
+if not isinstance(human_key, str) or not human_key or "\n" in human_key:
+    raise SystemExit(1)
+print(human_key)
+PY
+}
+
+# State and lease entries are per (project, agent, message). The key is a JSON
+# triple (and its hash for lease directories), so separators inside a logical
+# project key cannot make two deliveries share an entry.
+delivery_key() {
+    python3 -c 'import hashlib, json, sys
+triple = json.dumps(sys.argv[1:4], ensure_ascii=False)
+print(hashlib.sha256(triple.encode("utf-8")).hexdigest() if sys.argv[4] == "hash" else triple)' "$1" "$2" "$3" "$4"
+}
+
 state_should_attempt() {
-    python3 - "$STATE_FILE" "$1" "$2" "$RETRY_COOLDOWN" <<'PY'
+    python3 - "$STATE_FILE" "$1" "$2" "$3" "$RETRY_COOLDOWN" <<'PY'
 import json, sys, time
-path, agent, msg_key, cooldown = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
-compound = f"{agent}:{msg_key}"
+path, project, agent, msg_key = sys.argv[1:5]
+cooldown = int(sys.argv[5])
+compound = json.dumps([project, agent, msg_key], ensure_ascii=False)
 try:
     with open(path, encoding="utf-8") as fh:
         data = json.load(fh)
@@ -127,11 +197,11 @@ PY
 }
 
 state_mark_result() {
-    python3 - "$STATE_FILE" "$1" "$2" "$3" "$4" <<'PY'
+    python3 - "$STATE_FILE" "$1" "$2" "$3" "$4" "$5" <<'PY'
 import fcntl, json, sys, time
 from pathlib import Path
-path, agent, msg_key, result, source = sys.argv[1:6]
-compound = f"{agent}:{msg_key}"
+path, project, agent, msg_key, result, source = sys.argv[1:7]
+compound = json.dumps([project, agent, msg_key], ensure_ascii=False)
 p = Path(path)
 p.parent.mkdir(parents=True, exist_ok=True)
 # 配送 worker を background 化したため複数プロセスが同時に state を read-modify-
@@ -148,6 +218,7 @@ try:
     now = int(time.time())
     entry = data.get(compound, {})
     entry.update({
+        "project_key": project,
         "agent": agent,
         "msg_key": msg_key,
         "last_result": result,
@@ -169,9 +240,8 @@ PY
 }
 
 acquire_delivery_lease() {
-    local agent="$1"
-    local msg_key="$2"
-    local lease_path="${LEASE_DIR}/${agent}-${msg_key}.lock"
+    local lease_path
+    lease_path="${LEASE_DIR}/$(delivery_key "$1" "$2" "$3" hash).lock"
     local now
     now=$(date +%s)
 
@@ -193,7 +263,114 @@ acquire_delivery_lease() {
 }
 
 release_delivery_lease() {
-    rm -rf "${LEASE_DIR}/$1-$2.lock" 2>/dev/null || true
+    rm -rf "${LEASE_DIR}/$(delivery_key "$1" "$2" "$3" hash).lock" 2>/dev/null || true
+}
+
+# Canonical project of a recipient, from its actual directory and its own
+# session context only (run in a subshell with the watcher's variables gone,
+# so no field is ever filled from the watcher).
+#
+# Every marker the session actually carries has to agree with the context
+# resolved from the concrete pane's directory: a key alias cannot mask a
+# second one, and a valid physical key cannot make an explicit repository,
+# work directory, worktree root or protected root from another project
+# irrelevant. Aliases are compared canonically, and any worktree of the same
+# repository counts as the same workspace. A session with no markers at all
+# falls back to its directory's own namespace.
+recipient_project() (
+    local cwd="$1" selected="$2" alias_key="$3" repository="$4" work_dir="$5"
+    local worktree_root="$6" protected_roots="$7"
+    local var="" resolved="" root="" old_ifs=""
+    for var in $WATCHER_CONTEXT_VARS; do unset "$var"; done
+    if [[ -n "$selected" ]]; then
+        export AGENTSTACK_PROJECT_KEY="$selected"
+        [[ -n "$repository" ]] && export AGENTSTACK_PROJECT_REPOSITORY="$repository"
+        [[ -n "$work_dir" ]] && export AGENTSTACK_PROJECT_WORK_DIR="$work_dir"
+        ags_child_target_context "$cwd" "$selected" || exit 1
+    else
+        ags_child_target_context "$cwd" \
+            "$(agentstack_context_field "$(agentstack_resolve_invocation_context "$cwd")" project_key)" \
+            || exit 1
+    fi
+    resolved="$AGS_CHILD_PROJECT_KEY"
+    # A second key spelling must resolve to the very same project.
+    if [[ -n "$alias_key" && "$alias_key" != "$selected" ]]; then
+        ( ags_child_target_context "$cwd" "$alias_key" \
+            && [[ "$AGS_CHILD_PROJECT_KEY" == "$resolved" ]] ) || exit 1
+    fi
+    if [[ -n "$repository" ]]; then
+        [[ "$(agentstack_physical_dir "$repository" 2>/dev/null)" == "$AGS_CHILD_REPOSITORY" ]] || exit 1
+    fi
+    # A recorded workspace may be another worktree of the same repository, but
+    # it must belong to this very project.
+    for root in "$work_dir" "$worktree_root"; do
+        [[ -n "$root" ]] || continue
+        ( ags_child_target_context "$root" "$resolved" \
+            && [[ "$AGS_CHILD_PROJECT_KEY" == "$resolved" ]] ) || exit 1
+    done
+    if [[ -n "$protected_roots" ]]; then
+        old_ifs="$IFS"
+        IFS=":"
+        for root in $protected_roots; do
+            IFS="$old_ifs"
+            [[ -n "$root" ]] || continue
+            ( ags_child_target_context "$root" "$resolved" \
+                && [[ "$AGS_CHILD_PROJECT_KEY" == "$resolved" ]] ) || exit 1
+        done
+        IFS="$old_ifs"
+    fi
+    printf '%s' "$resolved"
+)
+
+# Everything that makes PANE the proven recipient of AGENT in PROJECT, printed
+# as one line (the token appears only as a digest). Fails when the pane is not
+# the exact named session's pane, its own session context does not validate
+# for its actual directory, the canonical project differs from the signal's,
+# or the agent's private token is missing, unsafe, or not accepted by Mail
+# right now (this is re-proved at every call, including the rechecks).
+# The watcher's own project variables are removed first, so only the
+# recipient's session and directory count.
+recipient_evidence() {
+    local agent="$1" pane="$2" project="$3"
+    local pane_line="" name="" cwd="" var="" value="" selected="" resolved="" token_file="" token=""
+    local _pane_id="" _session_id=""
+    local session_key="" session_project="" session_repository="" session_work_dir=""
+    local session_worktree_root="" session_protected_roots=""
+    declare -F ags_child_target_context >/dev/null 2>&1 || return 1
+    declare -F ags_read_private_child_token >/dev/null 2>&1 || return 1
+    pane_line="$(run_to "$TMUX_TIMEOUT" tmux display-message -p -t "$pane" \
+        '#{pane_id}	#{session_id}	#{session_name}	#{pane_current_path}' 2>/dev/null)" || return 1
+    IFS=$'\t' read -r _pane_id _session_id name cwd <<< "$pane_line"
+    [[ "$_pane_id" == "$pane" && "$name" == "$agent" && -n "$cwd" ]] || return 1
+    for var in AGENTSTACK_PROJECT_KEY PROJECT_KEY AGENTSTACK_PROJECT_REPOSITORY \
+        AGENTSTACK_PROJECT_WORK_DIR AGENTSTACK_PROJECT_WORKTREE_ROOT AGENTSTACK_PROTECTED_ROOTS; do
+        value="$(run_to "$TMUX_TIMEOUT" tmux show-environment -t "=$agent" "$var" 2>/dev/null || true)"
+        case "$value" in
+            "$var="*) value="${value#"$var="}" ;;
+            *) value="" ;;
+        esac
+        case "$var" in
+            AGENTSTACK_PROJECT_KEY) session_key="$value" ;;
+            PROJECT_KEY) session_project="$value" ;;
+            AGENTSTACK_PROJECT_REPOSITORY) session_repository="$value" ;;
+            AGENTSTACK_PROJECT_WORK_DIR) session_work_dir="$value" ;;
+            AGENTSTACK_PROJECT_WORKTREE_ROOT) session_worktree_root="$value" ;;
+            AGENTSTACK_PROTECTED_ROOTS) session_protected_roots="$value" ;;
+        esac
+    done
+    selected="${session_key:-$session_project}"
+    resolved="$(recipient_project "$cwd" "$selected" "${session_project:-$session_key}" \
+        "$session_repository" "$session_work_dir" "$session_worktree_root" \
+        "$session_protected_roots")" || return 1
+    [[ -n "$resolved" && "$resolved" == "$project" ]] || return 1
+    token_file="$(ags_registration_token_file "$agent")" || return 1
+    token="$(ags_read_private_child_token "$token_file" 2>/dev/null)" || return 1
+    # Mail is asked every time: an unchanged token file is not evidence that
+    # the registration it belonged to still exists.
+    ( for var in $WATCHER_CONTEXT_VARS; do unset "$var"; done
+      ags_verify_child_credential "$project" "$agent" "$token_file" ) || return 1
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$pane_line" "$selected" "$session_repository" \
+        "$session_work_dir" "$resolved" "$(printf '%s' "$token" | python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
 }
 
 is_pid_running() {
@@ -287,6 +464,7 @@ handle_signal_file() {
     # 重複処理防止は state_should_attempt + acquire_delivery_lease で行う。
     # bash 3.2 (macOS system) 互換: mapfile を使わず逐次 read する。
     local msg_id from subject importance mtime body_snippet body_truncated msg_key
+    local signal_project_key signal_project_slug
     {
         IFS= read -r msg_id
         IFS= read -r from
@@ -295,6 +473,8 @@ handle_signal_file() {
         IFS= read -r mtime
         IFS= read -r body_snippet
         IFS= read -r body_truncated
+        IFS= read -r signal_project_key
+        IFS= read -r signal_project_slug
     } < <(read_signal_meta "$signal_file")
     msg_id="${msg_id:-}"
     from="${from:-unknown}"
@@ -304,11 +484,21 @@ handle_signal_file() {
     body_snippet="${body_snippet:-}"
     body_truncated="${body_truncated:-0}"
     msg_key="${msg_id:-mtime-${mtime}}"
+    signal_project_key="${signal_project_key:-}"
+    signal_project_slug="${signal_project_slug:-}"
+    # A signal without its canonical project (older servers) is delivered only
+    # when Mail itself names the project for its slug.
+    if [[ -z "$signal_project_key" && -n "$signal_project_slug" ]]; then
+        signal_project_key="$(resolve_signal_project_key "$signal_project_slug" || true)"
+    fi
+    if [[ -z "$signal_project_key" ]]; then
+        return 0
+    fi
 
     # `set -e` 下で `|| return` だと return が直前の exit code を継承して
     # 関数が non-zero で抜け、呼び出し元の while ループが止まる。
     # 早期スキップは `return 0` を明示してスクリプト継続を保証する。
-    state_should_attempt "$agent_name" "$msg_key" || return 0
+    state_should_attempt "$signal_project_key" "$agent_name" "$msg_key" || return 0
 
     # 割り込みの閾値。既定は low = 従来どおり全部通す。
     #
@@ -318,11 +508,11 @@ handle_signal_file() {
     # 消費しないまま state に記録するだけなので、次に fetch_inbox を呼べば普通に
     # 読める。奪うのは割り込む権利であって、届く権利ではない。
     if ! importance_at_least "$importance" "$NOTIFY_MIN_IMPORTANCE"; then
-        state_mark_result "$agent_name" "$msg_key" "below_min_importance" "watcher"
+        state_mark_result "$signal_project_key" "$agent_name" "$msg_key" "below_min_importance" "watcher"
         return 0
     fi
 
-    acquire_delivery_lease "$agent_name" "$msg_key" || return 0
+    acquire_delivery_lease "$signal_project_key" "$agent_name" "$msg_key" || return 0
 
     log "Signal: ${agent_name} ← ${from} [${importance}]: ${subject}"
 
@@ -336,7 +526,7 @@ handle_signal_file() {
     while [ "$(jobs -p 2>/dev/null | wc -l | tr -d ' ')" -ge "$MAX_WORKERS" ]; do
         sleep 0.1
     done
-    deliver_worker "$signal_file" "$agent_name" "$msg_key" "$from" "$subject" "$importance" "$per_msg_file" "$body_snippet" "$body_truncated" &
+    deliver_worker "$signal_file" "$signal_project_key" "$agent_name" "$msg_key" "$from" "$subject" "$importance" "$per_msg_file" "$body_snippet" "$body_truncated" &
 }
 
 # deliver_worker: 1 signal の配送を完結させる background ジョブ。すべての tmux
@@ -349,14 +539,32 @@ handle_signal_file() {
 # BoldLeeuwenhoek の古い signal が SwiftFaraday へ誤配)。session 不在は誤配より
 # 安全な skip として扱う。
 deliver_worker() {
-    local signal_file="$1" agent_name="$2" msg_key="$3"
-    local from="$4" subject="$5" importance="$6" per_msg_file="$7"
-    local body_snippet="${8:-}" body_truncated="${9:-0}"
-    local session_name="$agent_name"
+    local signal_file="$1" project="$2" agent_name="$3" msg_key="$4"
+    local from="$5" subject="$6" importance="$7" per_msg_file="$8"
+    local body_snippet="${9:-}" body_truncated="${10:-0}"
+    local session_name="$agent_name" pane="" evidence="" current=""
 
-    if ! run_to "$TMUX_TIMEOUT" tmux has-session -t "$session_name" 2>/dev/null; then
-        state_mark_result "$agent_name" "$msg_key" "session_not_found" "watcher"
-        release_delivery_lease "$agent_name" "$msg_key"
+    finish() {
+        state_mark_result "$project" "$agent_name" "$msg_key" "$1" "watcher"
+        release_delivery_lease "$project" "$agent_name" "$msg_key"
+    }
+
+    # Exact session match only ("=name"), then one concrete pane: later calls
+    # target that pane, never a name tmux could resolve to something else.
+    if ! run_to "$TMUX_TIMEOUT" tmux has-session -t "=$session_name" 2>/dev/null; then
+        finish "session_not_found"
+        return 0
+    fi
+    pane="$(run_to "$TMUX_TIMEOUT" tmux display-message -p -t "=$session_name" '#{pane_id}' 2>/dev/null || true)"
+    if [[ ! "$pane" =~ ^%[0-9]+$ ]]; then
+        finish "session_not_found"
+        return 0
+    fi
+
+    # Nothing is read from or typed into the pane until it is proven to be this
+    # agent in the signal's project; otherwise the signal stays pending.
+    if ! evidence="$(recipient_evidence "$agent_name" "$pane" "$project")"; then
+        finish "recipient_unverified"
         return 0
     fi
 
@@ -368,17 +576,15 @@ deliver_worker() {
     # (Claude が input をキューし、ターン完了後に処理する = むしろ望ましい挙動)。
     # したがって busy でも inject する (旧 watcher と同じ配送方針に戻す)。
     local last_lines rc=0
-    last_lines=$(run_to "$TMUX_TIMEOUT" tmux capture-pane -t "$session_name" -p -S -5 2>/dev/null) || rc=$?
+    last_lines=$(run_to "$TMUX_TIMEOUT" tmux capture-pane -t "$pane" -p -S -5 2>/dev/null) || rc=$?
     if [ "$rc" -ne 0 ]; then
         # capture が時間内に返らない = server stall。inject せず後で再試行。
-        state_mark_result "$agent_name" "$msg_key" "capture_timeout" "watcher"
-        release_delivery_lease "$agent_name" "$msg_key"
+        finish "capture_timeout"
         return 0
     fi
     if echo "$last_lines" | grep -qE '(\$ ?$|% ?$)' && \
        ! echo "$last_lines" | grep -qE '(❯|Claude|claude|ctx:|Sonnet|Opus|Haiku|›)'; then
-        state_mark_result "$agent_name" "$msg_key" "bare_shell" "watcher"
-        release_delivery_lease "$agent_name" "$msg_key"
+        finish "bare_shell"
         return 0
     fi
 
@@ -391,26 +597,39 @@ deliver_worker() {
         prompt="ORRERY Mail notification: message from ${from} [${importance}]: ${subject}. Please call fetch_inbox to read it."
     fi
 
-    if ! run_to "$TMUX_TIMEOUT" tmux send-keys -t "$session_name" -l "$prompt" 2>/dev/null; then
-        state_mark_result "$agent_name" "$msg_key" "inject_failed" "watcher"
-        release_delivery_lease "$agent_name" "$msg_key"
+    # The same pane, session, directory, session context and token must still
+    # hold right before each write. This narrows, but cannot close, the window
+    # in which tmux could hand the pane to something else.
+    current="$(recipient_evidence "$agent_name" "$pane" "$project" || true)"
+    if [[ "$current" != "$evidence" ]]; then
+        finish "recipient_changed"
+        return 0
+    fi
+    if ! run_to "$TMUX_TIMEOUT" tmux send-keys -t "$pane" -l "$prompt" 2>/dev/null; then
+        finish "inject_failed"
         return 0
     fi
     sleep 0.2
+    current="$(recipient_evidence "$agent_name" "$pane" "$project" || true)"
+    if [[ "$current" != "$evidence" ]]; then
+        # The text is already typed, but it is not submitted into a pane that
+        # is no longer this agent's; the signal stays pending.
+        finish "recipient_changed"
+        return 0
+    fi
     # submit は Enter keysym ではなく C-m（Ctrl+M=CR）を使う。spawn_child.sh が
     # Claude/Codex 両方の prompt 注入で C-m を使っており（proven-universal）、Codex
     # REPL では Enter が submit されないことがある（2026-06-05 WildCurie が Enter で
     # 固まった件）。Claude Code は Enter/C-m 両方 submit するので C-m に統一しても無回帰
     # （捨て子 Claude で実測確認）。
-    if ! run_to "$TMUX_TIMEOUT" tmux send-keys -t "$session_name" C-m 2>/dev/null; then
-        state_mark_result "$agent_name" "$msg_key" "submit_failed" "watcher"
-        release_delivery_lease "$agent_name" "$msg_key"
+    if ! run_to "$TMUX_TIMEOUT" tmux send-keys -t "$pane" C-m 2>/dev/null; then
+        finish "submit_failed"
         return 0
     fi
 
-    state_mark_result "$agent_name" "$msg_key" "success" "watcher"
-    release_delivery_lease "$agent_name" "$msg_key"
-    log "  Injected notification into '$agent_name' (session: $session_name)"
+    state_mark_result "$project" "$agent_name" "$msg_key" "success" "watcher"
+    release_delivery_lease "$project" "$agent_name" "$msg_key"
+    log "  Injected notification into '$agent_name' (pane: $pane)"
     # Per-message files are watcher-owned (each represents one delivery); unlink
     # them on success so identical msg_ids never re-fire. Legacy single-file
     # signals remain server-owned and are cleared by fetch_inbox.

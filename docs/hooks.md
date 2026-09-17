@@ -128,7 +128,7 @@ service が応答しているなら登録は可能なので、既定は**要求�
 | [`spawn_child.sh`](../hooks/spawn_child.sh) | `/delegate` または dashboard の NEW AGENT が child 起動時に明示実行 | identity、token、task mail、reservation、tmux、Claude / Codex、worktree、readiness を一つの launch transaction にまとめる |
 | [`cleanup-child-agent.sh`](../hooks/cleanup-child-agent.sh) | `spawn_child.sh` が起動した child の REPL command が終了した直後 | reservation release、remote identity retire、managed list / state / credential / MCP config の削除を best-effort 実行 |
 | [`monitor_child_agent.sh`](../hooks/monitor_child_agent.sh) | `/delegate` の親が監視頻度ごとに一回ずつ実行 | tmux pane を採取し、完了、session 消失、permission prompt、stasis、任意の danger pattern を判定して exit code で返す |
-| [`watch_agent_mail_signals.sh`](../hooks/watch_agent_mail_signals.sh) | launcher の登録処理が dedicated `mail-watcher` tmux service として起動 | ORRERY Mail signal を監視し、対象と完全一致する agent tmux session へ通知文と `C-m` を注入 |
+| [`watch_agent_mail_signals.sh`](../hooks/watch_agent_mail_signals.sh) | launcher の登録処理が dedicated `mail-watcher` tmux service として起動 | ORRERY Mail signal を監視し、signal の project で証明できた agent session の pane へ通知文と `C-m` を注入 |
 
 ### `record-session-index.py`
 
@@ -166,9 +166,13 @@ dangerous command pattern の検査は `AGENTSTACK_MONITOR_DANGER_CHECK=1` の�
 
 ### `watch_agent_mail_signals.sh`
 
-`fswatch` があれば event watch、なければ2秒 polling を使います。signal file は server-owned dirty bit として削除せず、runtime の delivery state と短期 lease で同じ `(agent, message)` の重複注入を抑えます。30秒の periodic scan が取りこぼしを救済します。
+`fswatch` があれば event watch、なければ2秒 polling を使います。runtime の delivery state と短期 lease で同じ `(project, agent, message)` の重複注入を抑えます。どちらもこの3つ組で名前を付ける（lease はその hash）ため、2つの project の同じ agent 名・message id が同じ entry を共有することはなく、logical key に含まれる区切り文字にも影響されません。旧版が作った agent・message だけの entry はそのまま残し、どの project の代わりにもしません。配送に成功した per-message signal は削除し、legacy の単一 file signal は server-owned のまま `fetch_inbox` が消します。30秒の periodic scan が取りこぼしを救済します。
 
-配送先は agent 名と完全一致する tmux session だけです。bare shell や無関係 session を避け、通知 text を literal send した後、submit を別 call の `C-m` で送ります。tmux call は timeout 付き worker に分離し、server stall が watcher 全体を止めないようにします。
+signal には送信元 project の canonical な `project_key` が入ります。この field を持たない旧 signal は、Mail の project resource がその slug の project を答えたときだけ配送します（応答は slug が一致し `human_key` が空でない1件だけ）。slug だけでは証拠にならず、応答が得られない・壊れている場合は pending のままです。
+
+配送先は agent 名と完全一致する tmux session（`=name`）で、そこから具体的な pane を1つ決め、以降の call はその pane id を対象にします。pane を読む・書く前に受信者を証明します。その pane 自身の directory と、その session 自身の project 変数が、launcher と同じ validator で signal の project に解決でき、さらに agent の private な `agent_token_<name>`（mode 0600、symlink 不可）を Mail の `whois` がその project・agent で受け付ける必要があります。session が持っている marker はすべて一致していなければなりません。project key が2つ目の key や、別 project の repository・work directory・worktree root・protected root を覆い隠すことはできません（同じ repository の worktree は同一とみなします）。これらの変数が1つも無い session は、自分の directory 自身の project しか証明できません。watcher 自身の project 選択は受信者の証拠にせず、証明できない受信者には `capture-pane` も `send-keys` も行わず signal を pending のまま残します。
+
+通知 text は literal send し、submit は別 call の `C-m` で送ります。この2回の書き込みの直前には毎回、現在の `whois` 証明を含む証拠一式を取り直します。pane・session・directory・context・token が変わった場合や、Mail が登録を受け付けなくなった場合は残りの書き込みを行わず pending にします。これは2回の書き込みの間の隙間を狭めるもので、atomic にするものではありません。tmux call は timeout 付き worker に分離し、server stall が watcher 全体を止めないようにします。
 
 ## Codex との違い
 
