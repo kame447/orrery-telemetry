@@ -111,6 +111,23 @@ def test_signal_carries_body_by_default(
     assert message["body_truncated"] is False
 
 
+def test_signal_names_the_canonical_project_of_the_real_send(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A local watcher can only prove a recipient against a real project key.
+
+    The slug identifies the signal's directory; the top-level project_key is
+    the project's human key from this very send.
+    """
+    _configure(
+        monkeypatch, tmp_path, AGENTSTACK_MAIL_NOTIFICATIONS_ENABLED="true"
+    )
+    asyncio.run(_send(tmp_path, "しりとり: すいか"))
+    signal = _read_signal(tmp_path)
+    assert signal["project_key"] == str(tmp_path / "project")
+    assert signal["project"] and signal["project"] != signal["project_key"]
+
+
 def test_explicit_false_keeps_signal_metadata_only(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

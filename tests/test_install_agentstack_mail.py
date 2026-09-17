@@ -441,12 +441,39 @@ def test_bundled_watcher_reads_agentstack_per_message_signal(tmp_path):
 printf '%s\n' "$*" >> "$FAKE_TMUX_LOG"
 case "$1" in
   has-session) exit 0 ;;
+  display-message)
+    last=""; for arg in "$@"; do last="$arg"; done
+    case "$last" in
+      # Only the exact-session pane form resolves, as in real tmux.
+      '#{pane_id}') case "$4" in *:) printf '%s\n' '%1' ;; *) printf '\n' ;; esac ;;
+      *) printf '%%1\t$1\tBreezyMaxwell\t%s\n' "$FAKE_PANE_CWD" ;;
+    esac ;;
+  show-environment)
+    # The watcher asks the concrete session for its whole environment; real
+    # tmux answers with one NAME=value line per set variable.
+    if [ -n "$4" ]; then
+      case "$4" in
+        AGENTSTACK_PROJECT_KEY|PROJECT_KEY) printf '%s=%s\n' "$4" "$FAKE_PANE_CWD" ;;
+        *) exit 1 ;;
+      esac
+    else
+      printf 'AGENTSTACK_PROJECT_KEY=%s\nPROJECT_KEY=%s\n' "$FAKE_PANE_CWD" "$FAKE_PANE_CWD"
+    fi ;;
   capture-pane) printf '%s\n' 'Claude Code' ;;
   send-keys) exit 0 ;;
   *) exit 1 ;;
 esac
 """,
     )
+    # The recipient is proven before delivery: it works in the signal's
+    # project and Mail accepts its private token (a fake curl answers whois).
+    from test_child_lifecycle_isolation import install_fake_curl
+
+    install_fake_curl(fake_bin)
+    project = tmp_path / "project"
+    subprocess.run(["git", "init", "-q", str(project)], check=True, capture_output=True,
+                   env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull})
+    project = project.resolve()
     signals = tmp_path / "signals"
     runtime = tmp_path / "runtime"
     lock = tmp_path / "watcher.lock"
@@ -464,6 +491,7 @@ esac
             {
                 "timestamp": "2026-08-15T00:00:00+00:00",
                 "project": "isolated-project",
+                "project_key": str(project),
                 "agent": "BreezyMaxwell",
                 "message": {
                     "id": 42,
@@ -475,10 +503,16 @@ esac
         ),
         encoding="utf-8",
     )
-    env = os.environ.copy()
+    runtime.mkdir(parents=True, exist_ok=True)
+    token = runtime / "agent_token_BreezyMaxwell"
+    token.write_text("recipient-token", encoding="utf-8")
+    token.chmod(0o600)
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith("AGENTSTACK_") and key not in {"PROJECT_KEY", "MCP_AGENT_MAIL_TOKEN"}}
     env.update(
         {
-            "PATH": f"{fake_bin}:/usr/bin:/bin:/usr/sbin:/sbin",
+            "PATH": f"{fake_bin}:{pathlib.Path(sys.executable).parent}:/usr/bin:/bin:/usr/sbin:/sbin",
+            "FAKE_PANE_CWD": str(project),
             "FAKE_TMUX_LOG": str(tmux_log),
             "AGENTSTACK_MAIL_HOME": str(tmp_path / "mail-home"),
             "AGENTSTACK_SIGNALS_DIR": str(signals),
@@ -496,7 +530,8 @@ esac
     )
     try:
         state_file = runtime / "notify-state.json"
-        deadline = time.monotonic() + 10
+        key = json.dumps([str(project), "BreezyMaxwell", "42"])
+        deadline = time.monotonic() + 20
         state: dict[str, dict[str, object]] = {}
         while time.monotonic() < deadline:
             try:
@@ -504,16 +539,16 @@ esac
             except (OSError, json.JSONDecodeError):
                 state = {}
             if (
-                state.get("BreezyMaxwell:42", {}).get("last_result") == "success"
+                state.get(key, {}).get("last_result") == "success"
                 and not signal_file.exists()
             ):
                 break
             time.sleep(0.1)
-        assert state.get("BreezyMaxwell:42", {}).get("last_result") == "success"
+        assert state.get(key, {}).get("last_result") == "success"
         assert not signal_file.exists()
         calls = tmux_log.read_text(encoding="utf-8")
-        assert "has-session -t BreezyMaxwell" in calls
-        assert "capture-pane -t BreezyMaxwell" in calls
+        assert "has-session -t =BreezyMaxwell" in calls
+        assert "capture-pane -t %1" in calls
         assert "message from ProOpus [high]: per-message verification" in calls
     finally:
         watcher.terminate()
