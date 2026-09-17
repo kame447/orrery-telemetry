@@ -80,7 +80,15 @@ elif command == "show-environment":
     # env_fail scripts that. It prints NAME=value for every set variable and
     # -NAME for an unset one.
     if name in (state.get("env_fail") or []):
-        sys.exit(1)
+        remaining = state.get("env_fail_after") or 0
+        if remaining:
+            state["env_fail_after"] = remaining - 1
+            save()
+        else:
+            if state.get("env_fail_mode") == "print":
+                for key, value in session["env"].items():
+                    print(f"{key}={value}")
+            sys.exit(1)
     if len(args) > 3:
         variable = args[-1]
         if variable not in session["env"]:
@@ -222,8 +230,10 @@ def world(tmp_path):
     return world
 
 
-def set_sessions(world, sessions, mutate=None, env_fail=()):
-    state = {"sessions": {}, "mutate": mutate, "env_fail": list(env_fail)}
+def set_sessions(world, sessions, mutate=None, env_fail=(), env_fail_after=0,
+                 env_fail_mode="silent"):
+    state = {"sessions": {}, "mutate": mutate, "env_fail": list(env_fail),
+             "env_fail_after": env_fail_after, "env_fail_mode": env_fail_mode}
     for index, (name, spec) in enumerate(sessions.items(), start=3):
         state["sessions"][name] = {"pane": f"%{index}", "id": f"${index}",
                                    "cwd": str(spec["cwd"]),
@@ -261,6 +271,20 @@ def write_signal(world, project_key, *, slug="alpha-slug", msg_id=42, agent=AGEN
         document["project_key"] = str(project_key)
     path.write_text(json.dumps(document), encoding="utf-8")
     return path
+
+
+def install_quiet_fswatch(world):
+    """Make the watcher use its event backend with an event that never comes.
+
+    With `fswatch` on PATH the watcher scans once at startup and then waits, its
+    next periodic scan being 30 seconds away. That bounds a run to a single
+    delivery attempt, which is what a scenario about one attempt can own.
+    """
+    path = pathlib.Path(world["env"]["PATH"].split(":")[0]) / "fswatch"
+    # Bounded on its own as well as killed by the watcher's own cleanup, so a
+    # terminated run can never leave a stray backend behind.
+    path.write_text("#!/bin/sh\nexec sleep 60\n", encoding="utf-8")
+    path.chmod(0o755)
 
 
 def state_key(project, msg_id=42, agent=AGENT):
@@ -552,6 +576,28 @@ def test_a_name_moved_during_the_final_environment_read_captures_nothing(world):
     assert touched_panes(world) == []
 
 
+@pytest.mark.parametrize("mode", ["silent", "print"])
+def test_a_failed_final_environment_read_captures_nothing(world, mode):
+    """The last read's status matters as much as the first read's.
+
+    Comparing the text alone cannot tell the two apart: a marker-free session's
+    successful snapshot is empty, which is exactly what a failed read prints,
+    and a read can also fail after printing the very same markers. Only the
+    command's own status distinguishes a session that carries no markers from
+    one whose markers could not be read.
+    """
+    alpha = world["alpha"]
+    env = {} if mode == "silent" else launcher_env(alpha, alpha)
+    set_sessions(world, {AGENT: {"cwd": alpha, "env": env}},
+                 env_fail=[AGENT], env_fail_after=1, env_fail_mode=mode)
+    signal = write_signal(world, alpha)
+    with FakeMail() as mail:
+        mail.owners[(str(alpha), AGENT)] = TOKEN
+        state, _ = run_watcher(world, mail, [state_key(alpha)])
+    assert_pending(world, state, alpha, "recipient_unverified", signal)
+    assert touched_panes(world) == []
+
+
 def test_context_that_changes_during_the_owner_proof_captures_nothing(world):
     """The session can re-point only its project variables while Mail answers.
 
@@ -635,8 +681,14 @@ def test_a_same_project_marker_change_between_the_writes_stops_the_submit(world,
     two writes. The project is unchanged, so this is not a foreign delivery,
     but the context the text was typed into is no longer the context that was
     proven, and the submit is withheld.
+
+    Only that one attempt is in question. The session is coherent again once it
+    has moved, so a later attempt is entitled to deliver and would overwrite
+    this result; the run is bounded to a single attempt rather than pretending
+    the later delivery is wrong.
     """
     alpha, linked = world["alpha"], world["linked"]
+    install_quiet_fswatch(world)
     env = dict(launcher_env(alpha, alpha))
     env[marker] = str(alpha)
     moved = dict(env)

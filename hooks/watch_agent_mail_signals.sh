@@ -347,7 +347,8 @@ pane_identity() {
 # recipient's session and directory count.
 recipient_evidence() {
     local agent="$1" pane="$2" project="$3"
-    local pane_line="" name="" cwd="" var="" snapshot="" line="" selected="" resolved=""
+    local pane_line="" name="" cwd="" var="" snapshot="" final_snapshot="" line=""
+    local selected="" resolved=""
     local token_file="" token=""
     local _pane_id="" _session_id=""
     local session_key="" session_project="" session_repository="" session_work_dir=""
@@ -397,15 +398,17 @@ recipient_evidence() {
     # the same concrete session and must still be the ones that were validated:
     # a session that only re-pointed its project variables keeps the same pane,
     # id, name and directory, so the identity check alone would not see it.
-    [[ "$(run_to "$TMUX_TIMEOUT" tmux show-environment -t "$_session_id" 2>/dev/null)" \
-        == "$snapshot" ]] || return 1
+    # The status is checked before the text: a failed read prints nothing, which
+    # is exactly what a successful read of a marker-free session prints.
+    final_snapshot="$(run_to "$TMUX_TIMEOUT" tmux show-environment -t "$_session_id" 2>/dev/null)" || return 1
+    [[ "$final_snapshot" == "$snapshot" ]] || return 1
     # As after the first snapshot, the identity is taken last, so a rename or a
     # rebinding during that final read is seen before anything is captured.
     [[ "$(pane_identity "$pane" "$agent")" == "$pane_line" ]] || return 1
     # Every marker that was read is part of the evidence, so a later recheck
     # compares all of them, not only the key that was selected from them. An
     # unrelated session variable that moves simply leaves the signal pending.
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$pane_line" "$selected" \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$pane_line" "$selected" \
         "$session_key" "$session_project" "$session_repository" "$session_work_dir" \
         "$session_worktree_root" "$session_protected_roots" "$resolved" \
         "$(printf '%s' "$token" | python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
