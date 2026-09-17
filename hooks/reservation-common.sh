@@ -291,6 +291,48 @@ reservation_failure_log() {
     printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$detail" >> "$log_file" 2>/dev/null || true
 }
 
+# A sleeping release worker re-sources this file when its grace period ends,
+# so its request is judged by the current rules even if an older hook armed it.
+# The worker names its debounce slot in QUERY_STATE_FILE and its generation in
+# QUERY_STATE_TOKEN. Either marker means worker mode, and then the slot must be
+# exactly $RUNTIME_DIR/file_release_debounce/<reservation_debounce_key> for
+# this project, agent and first (NFC) relative path, and must still hold the
+# worker's token. A worker armed before slots carried the project cannot show
+# which project it was cancelled for, so it becomes a no-op instead of
+# releasing a reservation that may have been taken again meanwhile. Calls with
+# neither marker (immediate release, SessionEnd) are unaffected.
+reservation_worker_slot_matches() {
+    local agent="$1" project_key="$2" paths_json="$3" relative="" expected=""
+    [ -n "${QUERY_STATE_FILE+x}" ] || [ -n "${QUERY_STATE_TOKEN+x}" ] || return 0
+    [ -n "${QUERY_STATE_FILE:-}" ] && [ -n "${QUERY_STATE_TOKEN:-}" ] || return 1
+    [ -n "$paths_json" ] || return 1
+    relative="$(QUERY_PATHS_JSON="$paths_json" python3 -c '
+import json, os
+paths = json.loads(os.environ["QUERY_PATHS_JSON"])
+if not isinstance(paths, list) or not paths or not isinstance(paths[0], str) or not paths[0]:
+    raise SystemExit(1)
+print(paths[0])
+' 2>/dev/null)" || return 1
+    expected="$(reservation_debounce_key "$project_key" "$agent" "$relative" 2>/dev/null)" || return 1
+    [ -n "$expected" ] || return 1
+    [ "$QUERY_STATE_FILE" = "$RUNTIME_DIR/file_release_debounce/$expected" ] || return 1
+    # The slot may have been re-armed or invalidated between the worker's own
+    # check and this call; only the generation it was started for may release.
+    QUERY_STATE_FILE="$QUERY_STATE_FILE" QUERY_STATE_TOKEN="$QUERY_STATE_TOKEN" python3 -c '
+import os, stat
+path = os.environ["QUERY_STATE_FILE"]
+try:
+    info = os.lstat(path)
+    if not stat.S_ISREG(info.st_mode):
+        raise SystemExit(1)
+    with open(path, encoding="utf-8") as handle:
+        current = handle.read().strip()
+except (OSError, UnicodeError):
+    raise SystemExit(1)
+raise SystemExit(0 if current == os.environ["QUERY_STATE_TOKEN"] else 1)
+' 2>/dev/null
+}
+
 # Send release_file_reservations. The third argument is a JSON list of paths;
 # omit it to release every reservation owned by the agent. Errors are durable.
 reservation_release_request() {
@@ -298,6 +340,10 @@ reservation_release_request() {
     local project_key="$2"
     local paths_json="${3:-}"
     local token=""
+    if ! reservation_worker_slot_matches "$agent" "$project_key" "$paths_json"; then
+        reservation_failure_log "release agent=$agent project=$project_key error=unscoped-release-worker"
+        return 1
+    fi
     if legacy_bearer_enabled; then
         token="$(get_legacy_http_bearer 2>/dev/null || true)"
     else

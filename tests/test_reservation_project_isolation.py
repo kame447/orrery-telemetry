@@ -9,6 +9,8 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -403,6 +405,155 @@ def test_same_agent_and_path_in_two_projects_have_separate_release_slots(repos):
     assert result.returncode == 0, result.stderr
     assert not first_slot.exists()
     assert second_slot.exists()
+
+
+def run_worker(ctx, url, state_file, *, project_key, relative, absolute):
+    """Run the unchanged release worker the way a hook armed it."""
+    state_file.write_text("armed-token\n", encoding="utf-8")
+    env = dict(ctx["env"])
+    env.update(
+        AGENTSTACK_HOOKS_DIR=str(HOOKS),
+        AGENTSTACK_RUNTIME_DIR=str(ctx["runtime"]),
+        AGENTSTACK_PROJECT_KEY=project_key,
+        AGENTSTACK_MCP_URL=url,
+        AGENTSTACK_MAIL_HTTP_BEARER_MODE="disabled",
+        QUERY_AGENT=AGENT,
+        QUERY_PROJECT_KEY=project_key,
+        QUERY_PATHS_JSON=json.dumps([relative, absolute]),
+        QUERY_STATE_FILE=str(state_file),
+        QUERY_STATE_TOKEN="armed-token",
+        QUERY_GRACE_SECONDS="0",
+        QUERY_COMMON_LIB=str(HOOKS / "reservation-common.sh"),
+    )
+    return subprocess.run(
+        [sys.executable, str(HOOKS / "release-file-reservation-worker.py")],
+        cwd=ctx["home"], env=env, text=True, capture_output=True, timeout=30,
+    )
+
+
+def test_legacy_armed_worker_cannot_release_after_upgrade(repos):
+    first = repos["first"]
+    state = repos["runtime"] / "file_release_debounce"
+    state.mkdir()
+    # Armed by the previous hook: the slot is named for agent and path only.
+    legacy = state / hashlib.sha1(f"{AGENT}\0note.md".encode()).hexdigest()
+    with _Server(_released) as server:
+        result = run_worker(repos, server.url, legacy, project_key=str(first),
+                            relative="note.md", absolute=str(first / "note.md"))
+    assert result.returncode == 0, result.stderr
+    assert server.requests == [], "a re-taken reservation must not be released"
+    assert not legacy.exists(), "the worker still removes its own slot"
+    assert "error=unscoped-release-worker" in failure_log(repos)
+
+
+def test_project_scoped_worker_still_releases(repos):
+    first = repos["first"]
+    state = repos["runtime"] / "file_release_debounce"
+    state.mkdir()
+    scoped = state / slot(str(first), AGENT, "note.md")
+    with _Server(_released) as server:
+        result = run_worker(repos, server.url, scoped, project_key=str(first),
+                            relative="note.md", absolute=str(first / "note.md"))
+    assert result.returncode == 0, result.stderr
+    assert arguments(server) == [{
+        "project_key": str(first),
+        "agent_name": AGENT,
+        "paths": ["note.md", str(first / "note.md")],
+    }]
+    assert not scoped.exists()
+    assert failure_log(repos) == ""
+
+
+def test_worker_slot_for_another_project_is_refused(repos):
+    first, second = repos["first"], repos["second"]
+    state = repos["runtime"] / "file_release_debounce"
+    state.mkdir()
+    foreign = state / slot(str(second), AGENT, "note.md")
+    with _Server(_released) as server:
+        result = run_worker(repos, server.url, foreign, project_key=str(first),
+                            relative="note.md", absolute=str(first / "note.md"))
+    assert result.returncode == 0, result.stderr
+    assert server.requests == []
+    assert "error=unscoped-release-worker" in failure_log(repos)
+
+
+def call_release_boundary(ctx, url, **markers):
+    """Call the shared release function directly, as a worker's bash would."""
+    env = dict(ctx["env"])
+    env.update(AGENTSTACK_HOOKS_DIR=str(HOOKS), AGENTSTACK_RUNTIME_DIR=str(ctx["runtime"]),
+               AGENTSTACK_MCP_URL=url, AGENTSTACK_MAIL_HTTP_BEARER_MODE="disabled")
+    for key, value in markers.items():
+        env[key] = str(value)
+    first = ctx["first"]
+    return subprocess.run(
+        ["/bin/bash", "-c", '. "$1"; reservation_release_request "$2" "$3" "$4"',
+         "boundary", str(HOOKS / "reservation-common.sh"), AGENT, str(first),
+         json.dumps(["note.md", str(first / "note.md")])],
+        cwd=ctx["home"], env=env, text=True, capture_output=True, timeout=30,
+    )
+
+
+def test_release_boundary_refuses_partial_foreign_or_replaced_worker_slots(repos):
+    first = repos["first"]
+    state = repos["runtime"] / "file_release_debounce"
+    state.mkdir()
+    scoped = state / slot(str(first), AGENT, "note.md")
+    scoped.write_text("current-token\n", encoding="utf-8")
+    elsewhere = repos["home"] / "file_release_debounce" / scoped.name
+    elsewhere.parent.mkdir()
+    elsewhere.write_text("current-token\n", encoding="utf-8")
+    refused = (
+        {"QUERY_STATE_TOKEN": "current-token"},
+        {"QUERY_STATE_FILE": scoped},
+        {"QUERY_STATE_FILE": scoped, "QUERY_STATE_TOKEN": ""},
+        {"QUERY_STATE_FILE": elsewhere, "QUERY_STATE_TOKEN": "current-token"},
+        {"QUERY_STATE_FILE": scoped, "QUERY_STATE_TOKEN": "replaced-generation"},
+    )
+    with _Server(_released) as server:
+        for markers in refused:
+            result = call_release_boundary(repos, server.url, **markers)
+            assert result.returncode != 0, markers
+        assert server.requests == []
+        accepted = call_release_boundary(repos, server.url, QUERY_STATE_FILE=scoped,
+                                         QUERY_STATE_TOKEN="current-token")
+        immediate = call_release_boundary(repos, server.url)
+    assert accepted.returncode == 0, accepted.stderr
+    assert immediate.returncode == 0, immediate.stderr
+    assert len(server.requests) == 2
+    assert failure_log(repos).count("error=unscoped-release-worker") == len(refused)
+
+
+def test_symlinked_worker_slot_is_refused(repos):
+    first = repos["first"]
+    state = repos["runtime"] / "file_release_debounce"
+    state.mkdir()
+    target = repos["home"] / "token"
+    target.write_text("current-token\n", encoding="utf-8")
+    scoped = state / slot(str(first), AGENT, "note.md")
+    scoped.symlink_to(target)
+    with _Server(_released) as server:
+        result = call_release_boundary(repos, server.url, QUERY_STATE_FILE=scoped,
+                                       QUERY_STATE_TOKEN="current-token")
+    assert result.returncode != 0
+    assert server.requests == []
+
+
+def test_armed_release_worker_end_to_end_releases_in_its_project(repos):
+    """The hook arms the real worker; its slot passes the fresh boundary."""
+    first = repos["first"]
+    with _Server(_released) as server:
+        result = run(repos, RELEASE, server.url,
+                     edit(first, first / "note.md", tool_response={"success": True}),
+                     AGENTSTACK_RELEASE_GRACE_SECONDS="1")
+        assert result.returncode == 0, result.stderr
+        deadline = time.monotonic() + 15
+        while not server.requests and time.monotonic() < deadline:
+            time.sleep(0.2)
+    assert arguments(server) == [{
+        "project_key": str(first),
+        "agent_name": AGENT,
+        "paths": ["note.md", str(first / "note.md")],
+    }]
 
 
 # --- path normalization -------------------------------------------------------
