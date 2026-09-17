@@ -596,7 +596,13 @@ deliver_worker() {
         finish "session_not_found"
         return 0
     fi
-    pane="$(run_to "$TMUX_TIMEOUT" tmux display-message -p -t "=$session_name" '#{pane_id}' 2>/dev/null || true)"
+    # "=name" is a target-session; a target-pane needs "=name:", the current
+    # pane of that exact session. Real tmux answers the bare form with an empty
+    # pane id and exit 0 (and refuses it outright for capture-pane), so the
+    # wrong grammar looks like an absent recipient rather than an error. The
+    # "=" still forces an exact name, so a longer session that merely starts
+    # with this name cannot answer.
+    pane="$(run_to "$TMUX_TIMEOUT" tmux display-message -p -t "=$session_name:" '#{pane_id}' 2>/dev/null || true)"
     if [[ ! "$pane" =~ ^%[0-9]+$ ]]; then
         finish "session_not_found"
         return 0

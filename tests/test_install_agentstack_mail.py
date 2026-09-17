@@ -444,7 +444,8 @@ case "$1" in
   display-message)
     last=""; for arg in "$@"; do last="$arg"; done
     case "$last" in
-      '#{pane_id}') printf '%s\n' '%1' ;;
+      # Only the exact-session pane form resolves, as in real tmux.
+      '#{pane_id}') case "$4" in *:) printf '%s\n' '%1' ;; *) printf '\n' ;; esac ;;
       *) printf '%%1\t$1\tBreezyMaxwell\t%s\n' "$FAKE_PANE_CWD" ;;
     esac ;;
   show-environment)

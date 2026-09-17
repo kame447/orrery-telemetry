@@ -11,7 +11,9 @@ import json
 import os
 import pathlib
 import subprocess
+import shutil
 import sys
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,8 +38,22 @@ def save():
     json.dump(state, open(state_path, "w"))
 
 def target_session(target):
+    """Resolve a target-session: an exact "=name", or a session id."""
     for name, session in state["sessions"].items():
-        if target in ("=" + name, session["pane"], session["id"]):
+        if target in ("=" + name, session["id"]):
+            return name, session
+    return None, None
+
+def target_pane(target):
+    """Resolve a target-pane the way real tmux does.
+
+    A pane id names the pane. "=name:" is the current pane of that exact
+    session. A bare "=name" is a target-session: real tmux does not resolve it
+    to a pane, so neither does this fake -- accepting it here is what hid a
+    production defect that every real session hit.
+    """
+    for name, session in state["sessions"].items():
+        if target in (session["pane"], "=" + name + ":", session["id"] + ":"):
             return name, session
     return None, None
 
@@ -64,10 +80,19 @@ def option(flag):
     return args[args.index(flag) + 1] if flag in args else ""
 
 command = args[0]
-name, session = target_session(option("-t"))
+target = option("-t")
+if command in ("display-message", "capture-pane", "send-keys"):
+    name, session = target_pane(target)
+else:
+    name, session = target_session(target)
 if command == "has-session":
     sys.exit(0 if session else 1)
 if session is None:
+    # Real tmux prints an empty line and succeeds for display-message with an
+    # unresolvable pane target, and fails for the others.
+    if command == "display-message":
+        print()
+        sys.exit(0)
     sys.exit(1)
 if command == "display-message":
     text = args[-1]
@@ -500,6 +525,7 @@ def test_a_name_rebound_while_the_environment_is_read_is_not_delivered_to(world,
     already moved on, so it is no longer this agent's terminal.
     """
     alpha, linked = world["alpha"], world["linked"]
+    install_quiet_fswatch(world)
     old_env = launcher_env("team-b" if case == "foreign-markers" else "team-a", alpha)
     set_sessions(world, {AGENT: {"cwd": alpha, "env": old_env},
                          "Brisk-Curie-new": {"cwd": linked, "env": launcher_env("team-a", alpha)}},
@@ -535,6 +561,7 @@ def test_a_failed_environment_read_is_not_an_absent_marker(world):
 def test_an_identity_that_moves_during_the_owner_proof_captures_nothing(world):
     """The proof is a round trip; the name can move while it is in flight."""
     alpha, linked = world["alpha"], world["linked"]
+    install_quiet_fswatch(world)
     state_path = pathlib.Path(world["env"]["FAKE_TMUX_STATE"])
 
     def rename_away(proofs):
@@ -564,6 +591,7 @@ def test_a_name_moved_during_the_final_environment_read_captures_nothing(world):
     still compares equal and only the identity taken after it can see the move.
     """
     alpha, linked = world["alpha"], world["linked"]
+    install_quiet_fswatch(world)
     set_sessions(world, {AGENT: {"cwd": alpha, "env": launcher_env(alpha, alpha)},
                          "Brisk-Curie-new": {"cwd": linked, "env": launcher_env(alpha, alpha)}},
                  mutate={"on": "env", "skip": 1, "rename": {AGENT: "Brisk-Curie-old",
@@ -640,6 +668,7 @@ def test_mail_must_still_accept_the_token_at_every_step(world, accepts, expected
     before the submit, so `accepts` decides how far delivery gets.
     """
     alpha = world["alpha"]
+    install_quiet_fswatch(world)
     set_sessions(world, {AGENT: {"cwd": alpha, "env": launcher_env(alpha, alpha)}})
     signal = write_signal(world, alpha)
     with FakeMail() as mail:
@@ -659,6 +688,7 @@ def test_mail_must_still_accept_the_token_at_every_step(world, accepts, expected
 @pytest.mark.parametrize("moment", ["capture", "send-literal"])
 def test_a_recipient_that_changes_during_delivery_is_not_submitted_to(world, moment):
     alpha, beta = world["alpha"], world["beta"]
+    install_quiet_fswatch(world)
     set_sessions(world, {AGENT: {"cwd": alpha, "env": launcher_env(alpha, alpha)}},
                  mutate={"on": moment, "session": AGENT, "set": {"cwd": str(beta)}})
     signal = write_signal(world, alpha)
@@ -707,6 +737,7 @@ def test_a_same_project_marker_change_between_the_writes_stops_the_submit(world,
 @pytest.mark.parametrize("change", ["pane-replaced", "token-replaced"])
 def test_other_evidence_changing_after_the_first_write_stops_the_submit(world, change):
     alpha = world["alpha"]
+    install_quiet_fswatch(world)
     mutate = {"on": "send-literal", "session": AGENT}
     if change == "pane-replaced":
         mutate["set"] = {"pane": "%9"}
@@ -784,6 +815,91 @@ def test_a_slug_only_signal_needs_mail_to_name_its_project(world, answer):
         assert state == {}
         assert tmux_calls(world) == []
         assert signal.exists()
+
+
+# --- against real tmux -------------------------------------------------------
+
+
+@pytest.fixture
+def real_tmux(world, tmp_path):
+    """A real tmux server of our own, on its own short socket path.
+
+    The fake tmux above accepts whatever grammar it is written to accept, which
+    is exactly how a target-pane spelled as a target-session survived every
+    test and failed on every real session. Here the watcher drives the actual
+    tmux binary; the shim on PATH only pins the socket and records the call.
+    """
+    if not shutil.which("tmux"):
+        pytest.skip("tmux is not installed")
+    socket_path = pathlib.Path(tempfile.mkdtemp(prefix="ags-tm-", dir="/tmp")) / "s"
+    bindir = pathlib.Path(world["env"]["PATH"].split(":")[0])
+    real = shutil.which("tmux", path=os.environ["PATH"])
+    (bindir / "tmux").write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$*" >> "$FAKE_TMUX_LOG"\n'
+        f'exec {real} -S "{socket_path}" "$@"\n',
+        encoding="utf-8")
+    (bindir / "tmux").chmod(0o755)
+
+    def server(*args, check=True):
+        return subprocess.run([real, "-S", str(socket_path), *args], text=True,
+                              capture_output=True, check=check)
+
+    try:
+        yield server
+    finally:
+        subprocess.run([real, "-S", str(socket_path), "kill-server"],
+                       capture_output=True, check=False)
+        shutil.rmtree(socket_path.parent, ignore_errors=True)
+
+
+def _real_session(server, name, cwd, env):
+    server("new-session", "-d", "-s", name, "-c", str(cwd), "sleep 300")
+    for key, value in env.items():
+        server("set-environment", "-t", name, key, str(value))
+
+
+@pytest.mark.parametrize("case", ["exact-session", "prefix-only", "foreign-project"])
+def test_the_watcher_delivers_through_real_tmux(world, real_tmux, case):
+    """Real tmux, real session, real pane.
+
+    `=name` is a target-session: real tmux answers `display-message -p -t
+    "=name" '#{pane_id}'` with an empty line and exit 0, and refuses the same
+    target for `capture-pane`. Only `=name:` names that exact session's pane.
+    A session whose name merely starts with the agent's name must not answer
+    either, which is what `prefix-only` holds the line on.
+    """
+    alpha, beta = world["alpha"], world["beta"]
+    if case == "prefix-only":
+        # The agent's own session does not exist; another one starts with its name.
+        _real_session(real_tmux, f"{AGENT}-extra", alpha, launcher_env(alpha, alpha))
+    else:
+        _real_session(real_tmux, AGENT, alpha,
+                      launcher_env(beta if case == "foreign-project" else alpha, alpha))
+        # A same-prefix neighbour must never be the one that answers.
+        _real_session(real_tmux, f"{AGENT}-extra", beta, launcher_env(beta, beta))
+    signal = write_signal(world, alpha)
+    with FakeMail() as mail:
+        mail.owners[(str(alpha), AGENT)] = TOKEN
+        state, output = run_watcher(world, mail, [state_key(alpha)])
+
+    calls = [line.split() for line in
+             pathlib.Path(world["env"]["FAKE_TMUX_LOG"]).read_text(encoding="utf-8").splitlines()]
+    touched = [call for call in calls if call[0] in {"capture-pane", "send-keys"}]
+    if case == "exact-session":
+        assert state[state_key(alpha)]["last_result"] == "success"
+        pane = real_tmux("display-message", "-p", "-t", f"={AGENT}:",
+                         "#{pane_id}").stdout.strip()
+        assert pane.startswith("%")
+        sends = [call for call in calls if call[0] == "send-keys"]
+        assert [call[:3] for call in sends] == [["send-keys", "-t", pane]] * 2
+        assert sends[1][-1] == "C-m"
+        assert not signal.exists()
+    else:
+        expected = "session_not_found" if case == "prefix-only" else "recipient_unverified"
+        assert_pending(world, state, alpha, expected, signal)
+        assert touched == []
+    assert TOKEN not in output
 
 
 # --- against the real bundled server -----------------------------------------
