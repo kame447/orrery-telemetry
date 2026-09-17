@@ -154,7 +154,9 @@ def test_delegated_child_lifecycle_is_launcher_owned() -> None:
     # Retirement belongs to the verified common cleanup, which proves the
     # durable credential in this project before retiring with it.
     assert '$(printf \'%q\' "$MAIL_HELPER") retire --project-key' not in text
-    assert '[[ -x $(printf \'%q\' "$CLEANUP_HELPER") ]] && $(printf \'%q\' "$CLEANUP_HELPER")' in text
+    assert 'cleanup_helper=$(printf \'%q\' "$CLEANUP_HELPER")' in text
+    # Cleanup must account for the handoff's own token, read at run time.
+    assert 'CHILD_REGISTRATION_TOKEN="\\$expected_token" "\\$cleanup_helper"' in text
     # The one-shot copy is dropped only while its token stays recoverable.
     assert 'handoff_file=$(printf \'%q\' "$TOKEN_FILE")' in text
     assert 'rm -f "\\$handoff_file" "\\$handoff_file.binding.json"' in text

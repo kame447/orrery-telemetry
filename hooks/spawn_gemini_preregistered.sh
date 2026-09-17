@@ -389,10 +389,14 @@ cleanup_failure() {
     fi
     # The core cleanup proves the durable token in this project and
     # repository before retiring the identity and removing the credential.
-    # Only then is the one-shot handoff spent; otherwise it stays as the
-    # recovery credential.
+    # It is given the handoff's own token, so its success means Mail retired
+    # that identity even if the durable copy vanished. Only then is the
+    # one-shot handoff spent; otherwise it stays as the recovery credential.
     if [[ "$DURABLE_CREATED" == true ]]; then
-      if ( cd "$WORK_DIR" && \
+      local expected_token=""
+      expected_token="$(ags_read_private_child_token "$CHILD_TOKEN_FILE" 2>/dev/null)" || expected_token=""
+      if [[ -n "$expected_token" ]] && ( cd "$WORK_DIR" && \
+           CHILD_REGISTRATION_TOKEN="$expected_token" \
            AGENTSTACK_PROJECT_KEY="$PROJECT_KEY" \
            AGENTSTACK_PROJECT_REPOSITORY="$CHILD_REPOSITORY" \
            AGENTSTACK_PROJECT_WORK_DIR="$WORK_DIR" \
@@ -403,7 +407,10 @@ cleanup_failure() {
            AGENTSTACK_REGISTER_LIB="$REGISTER_LIB" \
              "$CLEANUP_HELPER" "$CHILD_NAME" ) >/dev/null 2>&1; then
         rm -f "$CHILD_TOKEN_FILE" "$CHILD_TOKEN_FILE.binding.json"
+      else
+        echo "$PROG: kept the child registration handoff for recovery: $CHILD_TOKEN_FILE ($CHILD_NAME in '$PROJECT_KEY')" >&2
       fi
+      expected_token=""
     fi
     if [[ "$WORKTREE_CREATED" == true ]]; then
       git -C "$SOURCE_REPO" worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1 || true

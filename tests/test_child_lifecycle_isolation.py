@@ -896,7 +896,8 @@ def run_gemini_child(world, home, mail, **overrides):
 @pytest.mark.parametrize("durable, retire_failure, handoff_kept", [
     (True, "", False),            # confirmed cleanup retired the identity
     (True, "tool-error", False),  # the durable copy still holds the token
-    (False, "", True),            # nothing else holds the token
+    (False, "", False),           # retired with the handoff's own token
+    (False, "tool-error", True),  # nothing else holds the token
 ])
 def test_failed_gemini_child_launch_keeps_a_handoff_that_is_the_only_credential(
         world, durable, retire_failure, handoff_kept):
@@ -915,7 +916,10 @@ def test_failed_gemini_child_launch_keeps_a_handoff_that_is_the_only_credential(
         assert kept == []
     if durable and retire_failure:
         assert token_file(world).read_text() == TOKEN
+    if retire_failure:
         assert (str(world["alpha"]), CHILD) in mail.owners
+    else:
+        assert (str(world["alpha"]), CHILD) not in mail.owners
     assert TOKEN not in result.stdout + result.stderr
 
 
@@ -939,6 +943,107 @@ def test_gemini_runner_drops_its_handoff_only_while_the_token_stays_recoverable(
     else:
         assert not token_file(world).exists()
     assert TOKEN not in finished.stdout + finished.stderr
+
+
+def install_cleanup_race(home):
+    """Change the durable copy immediately before the real cleanup runs."""
+    hooks = home / "hooks"
+    (hooks / "cleanup-child-agent.sh").rename(hooks / "cleanup-real.sh")
+    wrapper = hooks / "cleanup-child-agent.sh"
+    wrapper.write_text(
+        "#!/bin/bash\n"
+        "durable=\"$AGENTSTACK_RUNTIME_DIR/agent_token_$1\"\n"
+        "case \"${RACE_MODE:-}\" in\n"
+        "  remove) rm -f \"$durable\" ;;\n"
+        "  replace) ( umask 077; printf 'another-registration' > \"$durable\" ) ;;\n"
+        "esac\n"
+        "exec /bin/bash \"$(dirname \"$0\")/cleanup-real.sh\" \"$@\"\n",
+        encoding="utf-8")
+    wrapper.chmod(0o755)
+
+
+RACES = [
+    ("remove", "", "retired"),            # no files left: cleanup must still retire
+    ("remove", "tool-error", "kept"),     # ... and a failed retire keeps the handoff
+    ("replace", "", "foreign"),           # another credential: no retire, nothing deleted
+]
+
+
+def assert_race_outcome(world, mail, handoff_files, outcome):
+    retires = [r["args"] for r in mail.requests if r["tool"] == "retire_agent"]
+    if outcome == "retired":
+        assert [(a["project_key"], a["agent_name"]) for a in retires] == [(str(world["alpha"]), CHILD)]
+        assert (str(world["alpha"]), CHILD) not in mail.owners
+        assert not any(path.exists() for path in handoff_files)
+        return
+    assert all(path.read_text() == TOKEN for path in handoff_files)
+    assert (str(world["alpha"]), CHILD) in mail.owners
+    if outcome == "foreign":
+        assert retires == []
+        assert "release_file_reservations" not in mail.tools()
+        assert token_file(world).read_text() == "another-registration"
+
+
+@pytest.mark.parametrize("race, retire_failure, outcome", RACES)
+def test_gemini_child_rollback_race_needs_a_confirmed_retirement(world, race, retire_failure, outcome):
+    home = gemini_home(world)
+    gemini_preregister_stub(home, durable=True)
+    install_cleanup_race(home)
+    with FakeMail() as mail:
+        mail.owners[(str(world["alpha"]), CHILD)] = TOKEN
+        mail.retire_failure = retire_failure
+        result = run_gemini_child(world, home, mail, FAKE_TMUX_FAIL=1, RACE_MODE=race)
+    assert result.returncode != 0
+    handoffs = list(world["runtime"].glob("gemini-preregister-*.token"))
+    if outcome == "retired":
+        assert handoffs == []
+        handoffs = [world["runtime"] / "gemini-preregister-gone.token"]
+    else:
+        assert len(handoffs) == 1
+    assert_race_outcome(world, mail, handoffs, outcome)
+    assert TOKEN not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("race, retire_failure, outcome", RACES)
+def test_gemini_runner_race_needs_a_confirmed_retirement(world, race, retire_failure, outcome):
+    home = gemini_home(world)
+    gemini_preregister_stub(home, durable=True)
+    install_cleanup_race(home)
+    with FakeMail() as mail:
+        mail.owners[(str(world["alpha"]), CHILD)] = TOKEN
+        launched = run_gemini_child(world, home, mail)
+        assert launched.returncode == 0, launched.stderr
+        runner, = world["runtime"].glob("gemini-runner-*.sh")
+        handoff, = world["runtime"].glob("gemini-preregister-*.token")
+        assert TOKEN not in runner.read_text(encoding="utf-8")
+        mail.retire_failure = retire_failure
+        finished = run(world, ["/bin/bash", runner], cwd=world["home"], mail=mail, RACE_MODE=race)
+    assert_race_outcome(world, mail, [handoff], outcome)
+    assert TOKEN not in finished.stdout + finished.stderr
+
+
+@pytest.mark.parametrize("race, retire_failure, outcome", RACES)
+def test_gemini_adapter_rollback_race_needs_a_confirmed_retirement(world, race, retire_failure, outcome):
+    home = gemini_home(world)
+    install_cleanup_race(home)
+    one_shot = private(world["tmp"] / "dashboard-handoff" / "child-token", TOKEN)
+    task = private(world["tmp"] / "task.md", "task")
+    with FakeMail() as mail:
+        mail.owners[(str(world["alpha"]), CHILD)] = TOKEN
+        mail.retire_failure = retire_failure
+        result = run(world, ["/bin/bash", home / "hooks" / "spawn_gemini_preregistered.sh",
+                             "--pre-registered", CHILD, "--child-token-file", one_shot,
+                             "--model", "gemini-3.8-flash-high", "--worktree",
+                             "task", world["alpha"]],
+                     cwd=world["home"], mail=mail,
+                     AGENTSTACK_HOME=home, AGENTSTACK_HOOKS_DIR=home / "hooks",
+                     AGENTSTACK_REGISTER_LIB=None, AGENTSTACK_PROJECT_KEY=world["alpha"],
+                     AGENTSTACK_GEMINI_RESOURCES="src/**", AGENTSTACK_GEMINI_TASK_FILE=task,
+                     AGENTSTACK_WORKTREE_ROOT=world["tmp"] / "worktrees",
+                     FAKE_TMUX_FAIL=1, RACE_MODE=race)
+    assert result.returncode != 0
+    assert_race_outcome(world, mail, [one_shot], outcome)
+    assert TOKEN not in result.stdout + result.stderr
 
 
 def test_gemini_child_in_a_foreign_workspace_never_preregisters(world):

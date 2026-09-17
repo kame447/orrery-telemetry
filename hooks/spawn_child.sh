@@ -3010,10 +3010,10 @@ print(json.dumps({'project_key': sys.argv[1], 'agent_name': sys.argv[2]}))
         call_mcp "release_file_reservations" "$RELEASE_ARGS" > /dev/null 2>&1 || true
         if [[ -s "${CHILD_TOKEN_FILE:-}" ]] \
             && retire_child_confirmed "$CHILD_NAME" "$CHILD_TOKEN_FILE"; then
-            echo "[spawn_child] Released reservations and retired $CHILD_NAME" >&2
+            echo "[spawn_child] Attempted to release reservations; retired $CHILD_NAME" >&2
             remove_child_credentials_holding "$DIRECT_TOKEN_FINGERPRINT"
         else
-            echo "[spawn_child] Released reservations; ORRERY Mail did not confirm retiring $CHILD_NAME in '$PROJECT_KEY', so $CHILD_TOKEN_FILE is kept" >&2
+            echo "[spawn_child] Attempted to release reservations; ORRERY Mail did not confirm retiring $CHILD_NAME in '$PROJECT_KEY', so $CHILD_TOKEN_FILE is kept" >&2
         fi
         SPAWN_COMPLETED=true  # cleanup already completed explicitly above
         exit 21
