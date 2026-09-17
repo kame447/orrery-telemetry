@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 
 import pytest
 
@@ -36,19 +37,28 @@ def save():
 
 def target_session(target):
     for name, session in state["sessions"].items():
-        if target == "=" + name or target == session["pane"]:
+        if target in ("=" + name, session["pane"], session["id"]):
             return name, session
     return None, None
 
 def mutate(moment):
     change = state.get("mutate") or {}
-    if change.get("on") == moment:
-        state["sessions"][change["session"]].update(change.get("set") or {})
-        if change.get("file"):
-            with open(change["file"], "w") as handle:
-                handle.write(change["content"])
-        state["mutate"] = None
+    if change.get("on") != moment:
+        return
+    if change.get("skip"):  # fire on a later occurrence of the same moment
+        change["skip"] -= 1
         save()
+        return
+    # A rename or a rebinding of the agent name to another session.
+    for old, new in (change.get("rename") or {}).items():
+        state["sessions"][new] = state["sessions"].pop(old)
+    if change.get("session"):
+        state["sessions"][change["session"]].update(change.get("set") or {})
+    if change.get("file"):
+        with open(change["file"], "w") as handle:
+            handle.write(change["content"])
+    state["mutate"] = None
+    save()
 
 def option(flag):
     return args[args.index(flag) + 1] if flag in args else ""
@@ -66,10 +76,22 @@ if command == "display-message":
         text = text.replace(key, value)
     print(text)
 elif command == "show-environment":
-    variable = args[-1]
-    if variable not in session["env"]:
+    # Real tmux fails the whole call when the server or the target is gone;
+    # env_fail scripts that. It prints NAME=value for every set variable and
+    # -NAME for an unset one.
+    if name in (state.get("env_fail") or []):
         sys.exit(1)
-    print(f"{variable}={session['env'][variable]}")
+    if len(args) > 3:
+        variable = args[-1]
+        if variable not in session["env"]:
+            sys.exit(1)
+        print(f"{variable}={session['env'][variable]}")
+    else:
+        for key, value in session["env"].items():
+            print(f"{key}={value}")
+        for key in session.get("unset") or []:
+            print(f"-{key}")
+    mutate("env")
 elif command == "capture-pane":
     print("❯ ")
     mutate("capture")
@@ -86,9 +108,15 @@ class FakeMail:
         self.owners: dict[tuple[str, str], str] = {}
         self.projects: dict[str, dict] = {}
         self.requests: list[dict] = []
-        # Mail stops accepting the token after this many proofs (a retirement
-        # or re-registration during delivery); None keeps accepting.
+        # Mail stops accepting the credential after this many proofs: the
+        # registration was deleted, or the name re-registered with another
+        # token. (A soft retirement is not this: it keeps the row and its token
+        # binding, so a retired agent still proves ownership.) None keeps
+        # accepting.
         self.whois_accepts: int | None = None
+        # Fired after each whois proof, so a test can move the recipient
+        # underneath the watcher while the proof is in flight.
+        self.on_whois = None
         parent = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -120,8 +148,11 @@ class FakeMail:
         args = params.get("arguments") or {}
         if params.get("name") == "whois":
             key = (args.get("project_key"), args.get("agent_name"))
-            accepted = len(self.whois_projects()) <= (self.whois_accepts
-                                                      if self.whois_accepts is not None else 1 << 30)
+            proofs = len(self.whois_projects())
+            accepted = proofs <= (self.whois_accepts
+                                  if self.whois_accepts is not None else 1 << 30)
+            if self.on_whois is not None:
+                self.on_whois(proofs)
             if accepted and args.get("registration_token") and self.owners.get(key) == args["registration_token"]:
                 return {"result": {"structuredContent": {"name": args["agent_name"]}}}
             return {"error": {"code": -32000, "message": "invalid registration_token"}}
@@ -191,20 +222,21 @@ def world(tmp_path):
     return world
 
 
-def set_sessions(world, sessions, mutate=None):
-    state = {"sessions": {}, "mutate": mutate}
+def set_sessions(world, sessions, mutate=None, env_fail=()):
+    state = {"sessions": {}, "mutate": mutate, "env_fail": list(env_fail)}
     for index, (name, spec) in enumerate(sessions.items(), start=3):
         state["sessions"][name] = {"pane": f"%{index}", "id": f"${index}",
                                    "cwd": str(spec["cwd"]),
-                                   "env": {k: str(v) for k, v in spec.get("env", {}).items()}}
+                                   "env": {k: str(v) for k, v in spec.get("env", {}).items()},
+                                   "unset": list(spec.get("unset") or [])}
     pathlib.Path(world["env"]["FAKE_TMUX_STATE"]).write_text(json.dumps(state), encoding="utf-8")
 
 
 def launcher_env(key, repository=None):
     """What agent-start exports into the session for a recipient."""
-    env = {"AGENTSTACK_PROJECT_KEY": key, "PROJECT_KEY": key}
+    env = {"AGENTSTACK_PROJECT_KEY": str(key), "PROJECT_KEY": str(key)}
     if repository is not None:
-        env["AGENTSTACK_PROJECT_REPOSITORY"] = repository
+        env["AGENTSTACK_PROJECT_REPOSITORY"] = str(repository)
     return env
 
 
@@ -273,15 +305,20 @@ def touched_panes(world):
     return [call for call in tmux_calls(world) if call[0] in {"capture-pane", "send-keys"}]
 
 
-def assert_delivered(world, state, project, pane="%3", msg_id=42):
+def assert_delivered(world, state, project, pane="%3", msg_id=42, session_id="$3"):
     assert state[state_key(project, msg_id)]["last_result"] == "success"
     sends = [call for call in tmux_calls(world) if call[0] == "send-keys"]
     assert [call[:3] for call in sends] == [["send-keys", "-t", pane], ["send-keys", "-t", pane]]
     assert "message from Parent-Bohr [high]: phase5 check" in sends[0][-1]
     assert sends[1][-1] == "C-m"
     for call in tmux_calls(world):
-        if call[0] in {"has-session", "show-environment"}:
+        if call[0] == "has-session":
             assert call[2] == f"={AGENT}"
+        # The session's own environment is read by the concrete session id the
+        # pane reported, never by the mutable agent name, and in one whole
+        # snapshot rather than one variable at a time.
+        if call[0] == "show-environment":
+            assert call == ["show-environment", "-t", session_id]
 
 
 def assert_pending(world, state, project, result, signal):
@@ -397,6 +434,20 @@ def test_a_linked_worktree_marker_of_the_same_repository_still_delivers(world, m
     assert_delivered(world, state, alpha)
 
 
+def test_a_coherent_context_without_the_optional_markers_still_delivers(world):
+    """Absent optional markers must not shift or invalidate the ones present."""
+    alpha = world["alpha"]
+    set_sessions(world, {AGENT: {"cwd": alpha, "env": {
+        "AGENTSTACK_PROJECT_KEY": str(alpha),
+        "AGENTSTACK_PROJECT_REPOSITORY": str(alpha),
+        "AGENTSTACK_PROJECT_WORK_DIR": str(alpha)}}})
+    write_signal(world, alpha)
+    with FakeMail() as mail:
+        mail.owners[(str(alpha), AGENT)] = TOKEN
+        state, _ = run_watcher(world, mail, [state_key(alpha)])
+    assert_delivered(world, state, alpha)
+
+
 def test_contradictory_markers_are_refused_without_a_key(world):
     """The marker-free fallback does not extend to partial foreign markers."""
     alpha, beta = world["alpha"], world["beta"]
@@ -409,12 +460,135 @@ def test_contradictory_markers_are_refused_without_a_key(world):
     assert touched_panes(world) == []
 
 
+# --- the session environment is read from the concrete session ---------------
+
+
+@pytest.mark.parametrize("case", ["foreign-markers", "name-moved"])
+def test_a_name_rebound_while_the_environment_is_read_is_not_delivered_to(world, case):
+    """The agent name may move to another session at any moment.
+
+    The pane is resolved from the name, but its environment is then read by the
+    session id that pane itself reported, and the pane's identity is taken
+    again afterwards. Reading by `=name` instead would let the session that now
+    holds the name answer for the pane that held it a moment ago: in
+    `foreign-markers` the old pane belongs to another logical project of the
+    same repository, and in `name-moved` its markers are right but the name has
+    already moved on, so it is no longer this agent's terminal.
+    """
+    alpha, linked = world["alpha"], world["linked"]
+    old_env = launcher_env("team-b" if case == "foreign-markers" else "team-a", alpha)
+    set_sessions(world, {AGENT: {"cwd": alpha, "env": old_env},
+                         "Brisk-Curie-new": {"cwd": linked, "env": launcher_env("team-a", alpha)}},
+                 mutate={"on": "env", "rename": {AGENT: "Brisk-Curie-old",
+                                                 "Brisk-Curie-new": AGENT}})
+    signal = write_signal(world, "team-a")
+    with FakeMail() as mail:
+        mail.owners[("team-a", AGENT)] = TOKEN
+        state, _ = run_watcher(world, mail, [state_key("team-a")])
+    assert_pending(world, state, "team-a", "recipient_unverified", signal)
+    assert touched_panes(world) == []
+
+
+def test_a_failed_environment_read_is_not_an_absent_marker(world):
+    """A read that fails must not look like a session that carries no markers.
+
+    The session claims alpha in one variable and beta in another, which the
+    coherence rule refuses. If the failure were swallowed, no marker would be
+    seen at all and the pane's own directory would authorise the delivery.
+    """
+    alpha, beta = world["alpha"], world["beta"]
+    env = dict(launcher_env(alpha, alpha), PROJECT_KEY=str(beta))
+    set_sessions(world, {AGENT: {"cwd": alpha, "env": env}}, env_fail=[AGENT])
+    signal = write_signal(world, alpha)
+    with FakeMail() as mail:
+        mail.owners[(str(alpha), AGENT)] = TOKEN
+        state, _ = run_watcher(world, mail, [state_key(alpha)])
+    assert_pending(world, state, alpha, "recipient_unverified", signal)
+    assert touched_panes(world) == []
+    assert mail.whois_projects() == [], "no credential is sent for an unproven recipient"
+
+
+def test_an_identity_that_moves_during_the_owner_proof_captures_nothing(world):
+    """The proof is a round trip; the name can move while it is in flight."""
+    alpha, linked = world["alpha"], world["linked"]
+    state_path = pathlib.Path(world["env"]["FAKE_TMUX_STATE"])
+
+    def rename_away(proofs):
+        if proofs != 1:  # only while the first proof, before any capture, is in flight
+            return
+        scripted = json.loads(state_path.read_text(encoding="utf-8"))
+        scripted["sessions"]["Brisk-Curie-old"] = scripted["sessions"].pop(AGENT)
+        scripted["sessions"][AGENT] = scripted["sessions"].pop("Brisk-Curie-new")
+        state_path.write_text(json.dumps(scripted), encoding="utf-8")
+
+    set_sessions(world, {AGENT: {"cwd": alpha, "env": launcher_env(alpha, alpha)},
+                         "Brisk-Curie-new": {"cwd": linked, "env": launcher_env(alpha, alpha)}})
+    signal = write_signal(world, alpha)
+    with FakeMail() as mail:
+        mail.owners[(str(alpha), AGENT)] = TOKEN
+        mail.on_whois = rename_away
+        state, _ = run_watcher(world, mail, [state_key(alpha)])
+    assert_pending(world, state, alpha, "recipient_unverified", signal)
+    assert touched_panes(world) == []
+
+
+def test_a_name_moved_during_the_final_environment_read_captures_nothing(world):
+    """The identity is taken after each snapshot, including the last one.
+
+    The environment is re-read once more after the Mail proof; the name is
+    rebound to another session while that read is in flight, so the snapshot
+    still compares equal and only the identity taken after it can see the move.
+    """
+    alpha, linked = world["alpha"], world["linked"]
+    set_sessions(world, {AGENT: {"cwd": alpha, "env": launcher_env(alpha, alpha)},
+                         "Brisk-Curie-new": {"cwd": linked, "env": launcher_env(alpha, alpha)}},
+                 mutate={"on": "env", "skip": 1, "rename": {AGENT: "Brisk-Curie-old",
+                                                            "Brisk-Curie-new": AGENT}})
+    signal = write_signal(world, alpha)
+    with FakeMail() as mail:
+        mail.owners[(str(alpha), AGENT)] = TOKEN
+        state, _ = run_watcher(world, mail, [state_key(alpha)])
+    assert_pending(world, state, alpha, "recipient_unverified", signal)
+    assert touched_panes(world) == []
+
+
+def test_context_that_changes_during_the_owner_proof_captures_nothing(world):
+    """The session can re-point only its project variables while Mail answers.
+
+    Its pane, session id, name and directory are all unchanged, so the identity
+    check cannot see it; the markers are read again from the same concrete
+    session and must still be the ones that were validated.
+    """
+    alpha = world["alpha"]
+    state_path = pathlib.Path(world["env"]["FAKE_TMUX_STATE"])
+
+    def repoint_context(proofs):
+        if proofs != 1:  # only while the first proof, before any capture, is in flight
+            return
+        scripted = json.loads(state_path.read_text(encoding="utf-8"))
+        scripted["sessions"][AGENT]["env"] = launcher_env("team-b", alpha)
+        state_path.write_text(json.dumps(scripted), encoding="utf-8")
+
+    set_sessions(world, {AGENT: {"cwd": alpha, "env": launcher_env("team-a", alpha)}})
+    signal = write_signal(world, "team-a")
+    with FakeMail() as mail:
+        mail.owners[("team-a", AGENT)] = TOKEN
+        mail.on_whois = repoint_context
+        state, _ = run_watcher(world, mail, [state_key("team-a")])
+    assert_pending(world, state, "team-a", "recipient_unverified", signal)
+    assert touched_panes(world) == []
+
+
 # --- evidence re-checked around the delivery delay ---------------------------
 
 
 @pytest.mark.parametrize("accepts, expected_sends", [(0, 0), (1, 0), (2, 1)])
 def test_mail_must_still_accept_the_token_at_every_step(world, accepts, expected_sends):
-    """A registration retired mid-delivery stops the next write.
+    """A credential Mail stops accepting mid-delivery stops the next write.
+
+    Rejection here means the registration was deleted or the name re-registered
+    with another token. Soft retirement is deliberately not that case: it keeps
+    the row and its token binding, so a retired agent still proves ownership.
 
     One proof happens before the capture, one before the literal text and one
     before the submit, so `accepts` decides how far delivery gets.
@@ -451,6 +625,31 @@ def test_a_recipient_that_changes_during_delivery_is_not_submitted_to(world, mom
         assert sends == []
     else:
         assert len(sends) == 1 and "-l" in sends[0], "the typed text is never submitted"
+
+
+@pytest.mark.parametrize("marker", ["AGENTSTACK_PROJECT_WORKTREE_ROOT", "AGENTSTACK_PROTECTED_ROOTS"])
+def test_a_same_project_marker_change_between_the_writes_stops_the_submit(world, marker):
+    """Every marker the proof read is part of the evidence, not just the key.
+
+    The session moves to another worktree of the same repository between the
+    two writes. The project is unchanged, so this is not a foreign delivery,
+    but the context the text was typed into is no longer the context that was
+    proven, and the submit is withheld.
+    """
+    alpha, linked = world["alpha"], world["linked"]
+    env = dict(launcher_env(alpha, alpha))
+    env[marker] = str(alpha)
+    moved = dict(env)
+    moved[marker] = str(linked)
+    set_sessions(world, {AGENT: {"cwd": alpha, "env": env}},
+                 mutate={"on": "send-literal", "session": AGENT, "set": {"env": moved}})
+    signal = write_signal(world, alpha)
+    with FakeMail() as mail:
+        mail.owners[(str(alpha), AGENT)] = TOKEN
+        state, _ = run_watcher(world, mail, [state_key(alpha)])
+    assert_pending(world, state, alpha, "recipient_changed", signal)
+    sends = [call for call in tmux_calls(world) if call[0] == "send-keys"]
+    assert len(sends) == 1 and "-l" in sends[0], "the typed text is never submitted"
 
 
 @pytest.mark.parametrize("change", ["pane-replaced", "token-replaced"])
@@ -535,12 +734,96 @@ def test_a_slug_only_signal_needs_mail_to_name_its_project(world, answer):
         assert signal.exists()
 
 
+# --- against the real bundled server -----------------------------------------
+
+
+def _phase4_proof_helpers():
+    """The bundled-server helpers the Phase 4 owner proof already uses."""
+    import importlib.util
+
+    path = ROOT / "packages/agentstack_mail/tests/test_whois_owner_proof.py"
+    spec = importlib.util.spec_from_file_location("agentstack_whois_owner_proof", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def bundled_mail(tmp_path):
+    """The real `agentstack_mail.cli` server on an isolated database and home."""
+    helpers = _phase4_proof_helpers()
+    port = helpers._free_port()
+    root = tmp_path / "bundled"
+    (root / "home").mkdir(parents=True)
+    env = {key: value for key, value in os.environ.items() if not key.startswith("AGENTSTACK_")}
+    env.update(HOME=str(root / "home"),
+               PATH=f"{pathlib.Path(sys.executable).parent}:/usr/bin:/bin",
+               PYTHONPATH=str(ROOT / "packages" / "agentstack_mail" / "src"),
+               AGENTSTACK_MAIL_ENV_FILE=str(root / "missing.env"),
+               AGENTSTACK_MAIL_DATABASE_URL=f"sqlite+aiosqlite:///{root / 'service.sqlite3'}",
+               AGENTSTACK_MAIL_STORAGE_ROOT=str(root / "archive"),
+               AGENTSTACK_MAIL_NOTIFICATIONS_ENABLED="false",
+               AGENTSTACK_MAIL_TOOLS_LOG_ENABLED="false",
+               AGENTSTACK_MAIL_HTTP_HOST="127.0.0.1",
+               AGENTSTACK_MAIL_HTTP_PORT=str(port),
+               AGENTSTACK_MAIL_HTTP_PATH="/mcp",
+               AGENTSTACK_MAIL_AGENT_NAME_ENFORCEMENT_MODE="passthrough")
+    process = subprocess.Popen([sys.executable, "-m", "agentstack_mail.cli"], env=env,
+                               text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    url = f"http://127.0.0.1:{port}/mcp"
+    try:
+        helpers._wait_ready(url, process)
+        yield SimpleNamespace(url=url, call=lambda tool, arguments: helpers._call(url, tool, arguments))
+    finally:
+        process.terminate()
+        try:
+            process.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate(timeout=10)
+
+
+@pytest.mark.parametrize("credential", ["owner", "stranger"])
+def test_the_watcher_proves_its_recipient_against_the_real_bundled_server(world, bundled_mail,
+                                                                         credential):
+    """The fake Mail above answers a schema; this is the distributed server.
+
+    A delivery is only real if the bundled `whois` accepts the agent's private
+    token for this project, so both answers are exercised end to end.
+    """
+    alpha = world["alpha"]
+    project = str(alpha)
+    bundled_mail.call("ensure_project", {"human_key": project})
+    registered = bundled_mail.call("register_agent", {
+        "project_key": project, "program": "claude-code", "model": "test-model",
+        "name": AGENT, "task_description": "notification recipient",
+        "registration_token": TOKEN})
+    structured = (registered.get("result") or {}).get("structuredContent") or {}
+    # The bundled server issues the canonical spelling of the name it accepted.
+    name = structured["name"]
+
+    write_token(world, TOKEN if credential == "owner" else "someone-elses-token", name=name)
+    set_sessions(world, {name: {"cwd": alpha, "env": launcher_env(alpha, alpha)}})
+    signal = write_signal(world, alpha, agent=name)
+    key = state_key(alpha, agent=name)
+    state, output = run_watcher(world, bundled_mail, [key])
+    sends = [call for call in tmux_calls(world) if call[0] == "send-keys"]
+    if credential == "owner":
+        assert state[key]["last_result"] == "success"
+        assert [call[:3] for call in sends] == [["send-keys", "-t", "%3"]] * 2
+        assert sends[1][-1] == "C-m"
+        assert not signal.exists()
+    else:
+        assert state[key]["last_result"] == "recipient_unverified"
+        assert signal.exists()
+        assert touched_panes(world) == []
+    assert TOKEN not in output
+
+
 # --- producer ----------------------------------------------------------------
 
 
 def test_the_producer_writes_the_canonical_project_key(tmp_path):
-    from types import SimpleNamespace
-
     from agentstack_mail import storage
 
     settings = SimpleNamespace(notifications=SimpleNamespace(

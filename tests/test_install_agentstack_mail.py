@@ -448,10 +448,16 @@ case "$1" in
       *) printf '%%1\t$1\tBreezyMaxwell\t%s\n' "$FAKE_PANE_CWD" ;;
     esac ;;
   show-environment)
-    case "$4" in
-      AGENTSTACK_PROJECT_KEY|PROJECT_KEY) printf '%s=%s\n' "$4" "$FAKE_PANE_CWD" ;;
-      *) exit 1 ;;
-    esac ;;
+    # The watcher asks the concrete session for its whole environment; real
+    # tmux answers with one NAME=value line per set variable.
+    if [ -n "$4" ]; then
+      case "$4" in
+        AGENTSTACK_PROJECT_KEY|PROJECT_KEY) printf '%s=%s\n' "$4" "$FAKE_PANE_CWD" ;;
+        *) exit 1 ;;
+      esac
+    else
+      printf 'AGENTSTACK_PROJECT_KEY=%s\nPROJECT_KEY=%s\n' "$FAKE_PANE_CWD" "$FAKE_PANE_CWD"
+    fi ;;
   capture-pane) printf '%s\n' 'Claude Code' ;;
   send-keys) exit 0 ;;
   *) exit 1 ;;

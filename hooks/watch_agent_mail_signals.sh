@@ -322,6 +322,21 @@ recipient_project() (
     printf '%s' "$resolved"
 )
 
+# The concrete pane's own identity as one tab-separated line: its pane id, the
+# id of the session it belongs to, that session's current name, and its own
+# directory. Fails unless the pane is still this exact pane, still in a
+# session, and still named for the intended agent. Every step of the evidence
+# re-takes this line and compares it, so a session renamed or a name rebound to
+# another session between two calls is a failure rather than a silent swap.
+pane_identity() {
+    local pane="$1" agent="$2" line="" _pane_id="" _session_id="" name="" cwd=""
+    line="$(run_to "$TMUX_TIMEOUT" tmux display-message -p -t "$pane" \
+        '#{pane_id}	#{session_id}	#{session_name}	#{pane_current_path}' 2>/dev/null)" || return 1
+    IFS=$'\t' read -r _pane_id _session_id name cwd <<< "$line"
+    [[ "$_pane_id" == "$pane" && -n "$_session_id" && "$name" == "$agent" && -n "$cwd" ]] || return 1
+    printf '%s' "$line"
+}
+
 # Everything that makes PANE the proven recipient of AGENT in PROJECT, printed
 # as one line (the token appears only as a digest). Fails when the pane is not
 # the exact named session's pane, its own session context does not validate
@@ -332,32 +347,40 @@ recipient_project() (
 # recipient's session and directory count.
 recipient_evidence() {
     local agent="$1" pane="$2" project="$3"
-    local pane_line="" name="" cwd="" var="" value="" selected="" resolved="" token_file="" token=""
+    local pane_line="" name="" cwd="" var="" snapshot="" line="" selected="" resolved=""
+    local token_file="" token=""
     local _pane_id="" _session_id=""
     local session_key="" session_project="" session_repository="" session_work_dir=""
     local session_worktree_root="" session_protected_roots=""
     declare -F ags_child_target_context >/dev/null 2>&1 || return 1
     declare -F ags_read_private_child_token >/dev/null 2>&1 || return 1
-    pane_line="$(run_to "$TMUX_TIMEOUT" tmux display-message -p -t "$pane" \
-        '#{pane_id}	#{session_id}	#{session_name}	#{pane_current_path}' 2>/dev/null)" || return 1
+    pane_line="$(pane_identity "$pane" "$agent")" || return 1
     IFS=$'\t' read -r _pane_id _session_id name cwd <<< "$pane_line"
-    [[ "$_pane_id" == "$pane" && "$name" == "$agent" && -n "$cwd" ]] || return 1
-    for var in AGENTSTACK_PROJECT_KEY PROJECT_KEY AGENTSTACK_PROJECT_REPOSITORY \
-        AGENTSTACK_PROJECT_WORK_DIR AGENTSTACK_PROJECT_WORKTREE_ROOT AGENTSTACK_PROTECTED_ROOTS; do
-        value="$(run_to "$TMUX_TIMEOUT" tmux show-environment -t "=$agent" "$var" 2>/dev/null || true)"
-        case "$value" in
-            "$var="*) value="${value#"$var="}" ;;
-            *) value="" ;;
+    # One complete snapshot of that one session, addressed by the session id the
+    # pane itself just reported. Reading by the agent's name instead would let a
+    # session renamed after the pane was resolved answer for this pane. A
+    # failed, timed-out or killed read is a failure of the whole proof: it must
+    # never be mistaken for a session that simply carries no markers.
+    snapshot="$(run_to "$TMUX_TIMEOUT" tmux show-environment -t "$_session_id" 2>/dev/null)" || return 1
+    # tmux prints NAME=value for a set variable and -NAME for an unset one.
+    # Only these six names are read, matched literally as whole entries; nothing
+    # is sourced, evaluated or exported, and any other line is ignored. Each
+    # marker keeps its own variable: packing them into one delimited string and
+    # reading it back would collapse the empty ones, because bash treats a tab
+    # as IFS whitespace, and an absent optional marker would shift the rest.
+    while IFS= read -r line; do
+        case "$line" in
+            AGENTSTACK_PROJECT_KEY=*) session_key="${line#*=}" ;;
+            PROJECT_KEY=*) session_project="${line#*=}" ;;
+            AGENTSTACK_PROJECT_REPOSITORY=*) session_repository="${line#*=}" ;;
+            AGENTSTACK_PROJECT_WORK_DIR=*) session_work_dir="${line#*=}" ;;
+            AGENTSTACK_PROJECT_WORKTREE_ROOT=*) session_worktree_root="${line#*=}" ;;
+            AGENTSTACK_PROTECTED_ROOTS=*) session_protected_roots="${line#*=}" ;;
         esac
-        case "$var" in
-            AGENTSTACK_PROJECT_KEY) session_key="$value" ;;
-            PROJECT_KEY) session_project="$value" ;;
-            AGENTSTACK_PROJECT_REPOSITORY) session_repository="$value" ;;
-            AGENTSTACK_PROJECT_WORK_DIR) session_work_dir="$value" ;;
-            AGENTSTACK_PROJECT_WORKTREE_ROOT) session_worktree_root="$value" ;;
-            AGENTSTACK_PROTECTED_ROOTS) session_protected_roots="$value" ;;
-        esac
-    done
+    done <<< "$snapshot"
+    # The markers just read describe a session; this proves it is still the
+    # session of this pane, under this name.
+    [[ "$(pane_identity "$pane" "$agent")" == "$pane_line" ]] || return 1
     selected="${session_key:-$session_project}"
     resolved="$(recipient_project "$cwd" "$selected" "${session_project:-$session_key}" \
         "$session_repository" "$session_work_dir" "$session_worktree_root" \
@@ -369,8 +392,23 @@ recipient_evidence() {
     # the registration it belonged to still exists.
     ( for var in $WATCHER_CONTEXT_VARS; do unset "$var"; done
       ags_verify_child_credential "$project" "$agent" "$token_file" ) || return 1
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$pane_line" "$selected" "$session_repository" \
-        "$session_work_dir" "$resolved" "$(printf '%s' "$token" | python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+    # The proof is a round trip to Mail, and both the pane and the session's own
+    # context can move while it is in flight. The markers are read again from
+    # the same concrete session and must still be the ones that were validated:
+    # a session that only re-pointed its project variables keeps the same pane,
+    # id, name and directory, so the identity check alone would not see it.
+    [[ "$(run_to "$TMUX_TIMEOUT" tmux show-environment -t "$_session_id" 2>/dev/null)" \
+        == "$snapshot" ]] || return 1
+    # As after the first snapshot, the identity is taken last, so a rename or a
+    # rebinding during that final read is seen before anything is captured.
+    [[ "$(pane_identity "$pane" "$agent")" == "$pane_line" ]] || return 1
+    # Every marker that was read is part of the evidence, so a later recheck
+    # compares all of them, not only the key that was selected from them. An
+    # unrelated session variable that moves simply leaves the signal pending.
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$pane_line" "$selected" \
+        "$session_key" "$session_project" "$session_repository" "$session_work_dir" \
+        "$session_worktree_root" "$session_protected_roots" "$resolved" \
+        "$(printf '%s' "$token" | python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
 }
 
 is_pid_running() {
