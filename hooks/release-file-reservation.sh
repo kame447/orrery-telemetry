@@ -53,11 +53,20 @@ print("false" if failed else "true")
 # This is the same path/project resolver used by the PreToolUse guard. A
 # different root or path spelling can make release look successful while it
 # releases nothing.
-reservation_resolve_tool_context "$TOOL_OUTPUT" || exit 0
+reservation_resolve_tool_context "$TOOL_OUTPUT"
+RESOLVE_STATUS=$?
+case "$RESOLVE_STATUS" in
+    0) ;;
+    1) exit 0 ;;
+    *)
+        # Never release in a namespace this workspace does not validate.
+        reservation_failure_log "release session=${SESSION_ID:-<none>} error=project-context-invalid status=$RESOLVE_STATUS"
+        exit 0
+        ;;
+esac
 
 if [ -f "$POLICY_LIB_EARLY" ] \
-    && [ "$(agentstack_session_binding_conflict "$SESSION_ID" "$AGENTSTACK_LOOKUP_PROJECT_KEY" \
-        "${AGENT_NAME:-}" "$AGENTSTACK_LOOKUP_REPOSITORY_KEY" "$AGENTSTACK_LOOKUP_WORK_DIR")" = "conflict" ]; then
+    && [ "$(agentstack_session_binding_conflict "$SESSION_ID" "$RESERVATION_PROJECT_KEY" "${AGENT_NAME:-}")" = "conflict" ]; then
     reservation_failure_log "release session=${SESSION_ID:-<none>} path=$REL_PATH error=identity-conflict"
     exit 0
 fi
@@ -110,15 +119,7 @@ mkdir -p "$STATE_DIR" 2>/dev/null || {
     release_now
     exit 0
 }
-STATE_KEY=$(QUERY_AGENT="$AGENT" QUERY_REL_PATH="$REL_PATH" python3 -c '
-import hashlib
-import os
-import unicodedata
-
-agent = os.environ["QUERY_AGENT"]
-path = unicodedata.normalize("NFC", os.environ["QUERY_REL_PATH"])
-print(hashlib.sha1((agent + "\0" + path).encode("utf-8")).hexdigest())
-' 2>/dev/null || echo "")
+STATE_KEY="$(reservation_debounce_key "$RESERVATION_PROJECT_KEY" "$AGENT" "$REL_PATH" 2>/dev/null || true)"
 if [ -z "$STATE_KEY" ]; then
     reservation_failure_log "release agent=$AGENT path=$REL_PATH error=debounce-key-failed fallback=immediate"
     release_now

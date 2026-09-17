@@ -24,21 +24,9 @@ Reads the PostToolUse hook payload (JSON) on stdin. Never raises — a failure
 here must not disturb registration.
 """
 import json
-import hashlib
 import os
-import pathlib
-import stat
-import subprocess
 import sys
 import time
-
-
-def _normalize_project_key(value):
-    if not isinstance(value, str) or not value:
-        return ""
-    if os.path.isabs(value) or os.path.isdir(value):
-        return os.path.realpath(value)
-    return value
 
 
 def _extract_id(v):
@@ -90,7 +78,6 @@ EXIT_NOT_APPLICABLE = 3
 EXIT_DELEGATED = 4
 EXIT_CALLER_UNRESOLVED = 5
 EXIT_WRITE_FAILED = 6
-EXIT_PROJECT_MISMATCH = 7
 
 # Sources resolve-agent-name.sh reports that identify one agent. Anything else
 # (identity-conflict, placeholder-env, unconfirmed-metafile) is a caller whose
@@ -98,110 +85,7 @@ EXIT_PROJECT_MISMATCH = 7
 _SOURCES_THAT_MAY_BIND = {"none", "env", "tmux-session", "metafile+tmux-session", "session-index"}
 
 
-def _repository_key(path_value):
-    if not isinstance(path_value, str) or not os.path.isdir(path_value):
-        return ""
-    env = os.environ.copy()
-    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
-        env.pop(name, None)
-    try:
-        common = subprocess.check_output(
-            ["git", "-C", path_value, "rev-parse", "--git-common-dir"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-            env=env,
-        ).strip()
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    common_path = pathlib.Path(common)
-    if not common_path.is_absolute():
-        common_path = pathlib.Path(path_value) / common_path
-    common_path = pathlib.Path(os.path.realpath(common_path))
-    return str(common_path.parent if common_path.name == ".git" else common_path)
-
-
-def _binding_matches_context(record, context):
-    schema = record.get("schema_version")
-    repository = context.get("repository_key")
-    work_dir = context.get("work_dir")
-    if schema == 3:
-        if repository:
-            return record.get("repository_key") == repository
-        return (
-            record.get("repository_key") is None
-            and record.get("work_dir") == work_dir
-        )
-    if schema == 2:
-        # v2 had no repository field. Its namespace must still equal the
-        # derived namespace, while cwd independently corroborates the actual
-        # repository (or exact non-Git workspace).
-        if _normalize_project_key(record.get("project_key")) != _normalize_project_key(
-            context.get("project_key")
-        ):
-            return False
-        if repository:
-            return _repository_key(record.get("cwd")) == repository
-        legacy_cwd = record.get("cwd")
-        return (
-            isinstance(legacy_cwd, str)
-            and os.path.isdir(legacy_cwd)
-            and os.path.realpath(legacy_cwd) == work_dir
-        )
-    return False
-
-
-def _strong_owner_state(record, context, runtime_dir):
-    name = record.get("agent_name")
-    if not isinstance(name, str) or not name:
-        return "invalid"
-    safe_name = "".join(
-        char if char.isascii() and (char.isalnum() or char in "_.-") else "_"
-        for char in name
-    )
-    owner_path = pathlib.Path(runtime_dir) / f"agent_owner_{safe_name}.json"
-    token_path = pathlib.Path(runtime_dir) / f"agent_token_{safe_name}"
-    if not owner_path.exists() and not owner_path.is_symlink():
-        return "absent"
-    if owner_path.is_symlink() or token_path.is_symlink() or not token_path.is_file():
-        return "invalid"
-    try:
-        if stat.S_IMODE(owner_path.stat().st_mode) & 0o077:
-            return "invalid"
-        if stat.S_IMODE(token_path.stat().st_mode) & 0o077:
-            return "invalid"
-        owner = json.loads(owner_path.read_text(encoding="utf-8"))
-        token_raw = token_path.read_bytes()
-        if len(token_raw) > 4097:
-            return "invalid"
-        token = token_raw.decode("utf-8").rstrip("\n")
-    except Exception:
-        return "invalid"
-    if not isinstance(owner, dict) or owner.get("schema") != 1:
-        return "invalid"
-    if owner.get("agent_name") != name:
-        return "invalid"
-    if owner.get("name_key", name.replace("-", "").casefold()) != name.replace("-", "").casefold():
-        return "invalid"
-    if not token or owner.get("token_sha256") != hashlib.sha256(token.encode("utf-8")).hexdigest():
-        return "invalid"
-    if _normalize_project_key(owner.get("project_key")) != _normalize_project_key(
-        record.get("project_key")
-    ):
-        return "invalid"
-    repository = context.get("repository_key")
-    if repository:
-        if owner.get("repository_key") != repository or owner.get("non_git_root") is not None:
-            return "invalid"
-        return "valid"
-    root = owner.get("non_git_root")
-    try:
-        pathlib.Path(context.get("work_dir")).relative_to(pathlib.Path(root))
-    except (TypeError, ValueError):
-        return "invalid"
-    return "valid" if owner.get("repository_key") is None else "invalid"
-
-
-def _bindings_for(out_dir, session_id, context):
+def _bindings_for(out_dir, session_id):
     """Names already bound to this session by an authoritative record."""
     names = set()
     try:
@@ -223,19 +107,8 @@ def _bindings_for(out_dir, session_id, context):
             continue
         if record.get("session_id") != session_id:
             continue
-        if record.get("binding_kind") != "self":
+        if record.get("schema_version") != 2 or record.get("binding_kind") != "self":
             continue
-        if not _binding_matches_context(record, context):
-            continue
-        owner_state = _strong_owner_state(record, context, os.path.dirname(out_dir))
-        if owner_state == "invalid":
-            continue
-        if record.get("schema_version") == 3:
-            default_project = context.get("repository_key") or context.get("work_dir")
-            if owner_state != "valid" and _normalize_project_key(
-                record.get("project_key")
-            ) != _normalize_project_key(default_project):
-                continue
         name = record.get("agent_name")
         if isinstance(name, str) and name:
             names.add(name)
@@ -259,35 +132,12 @@ def main():
     tool_input = d.get("tool_input") or {}
     agent_name = _extract_name(resp) or tool_input.get("name", "")
 
-    # The caller has already re-resolved this tuple from the hook's actual cwd.
-    # The raw tool_input is never authority: generated instructions and resumed
-    # clients can carry an installed project's stale namespace.
-    try:
-        context = json.loads(os.environ.get("AGENTSTACK_VALIDATED_CONTEXT_JSON", ""))
-    except Exception:
-        return EXIT_PROJECT_MISMATCH
-    if not isinstance(context, dict):
-        return EXIT_PROJECT_MISMATCH
-    project_key = context.get("project_key")
-    repository_key = context.get("repository_key")
-    context_work_dir = context.get("work_dir")
-    worktree_root = context.get("worktree_root")
-    protected_roots = context.get("protected_roots")
-    supplied_project = tool_input.get("project_key") or ""
-    if (
-        not isinstance(project_key, str)
-        or not project_key
-        or _normalize_project_key(supplied_project) != _normalize_project_key(project_key)
-        or not isinstance(context_work_dir, str)
-        or not context_work_dir
-        or not isinstance(cwd, str)
-        or not os.path.isdir(cwd)
-        or os.path.realpath(cwd) != context_work_dir
-        or (repository_key is not None and not isinstance(repository_key, str))
-        or (worktree_root is not None and not isinstance(worktree_root, str))
-        or protected_roots != [worktree_root or context_work_dir]
-    ):
-        return EXIT_PROJECT_MISMATCH
+    # Agent names are project-local, so a binding is only meaningful together
+    # with the project it was made in. resolve-agent-name.sh refuses a record
+    # that cannot show it belongs to the project being enforced.
+    project_key = tool_input.get("project_key") or ""
+    if not isinstance(project_key, str):
+        project_key = ""
 
     # Who called register_agent, as mark-agent-registered.sh resolved it. Both
     # halves are required: the name alone cannot distinguish "nobody claims this
@@ -329,7 +179,7 @@ def main():
 
     # An anonymous caller may only claim a session nobody else has claimed.
     if caller_source == "none":
-        for existing in _bindings_for(out_dir, session_id, context):
+        for existing in _bindings_for(out_dir, session_id):
             if existing != agent_name:
                 return EXIT_CALLER_UNRESOLVED
 
@@ -338,16 +188,12 @@ def main():
         "agent_name": agent_name,
         "session_id": session_id,
         "transcript_path": transcript_path,
-        "cwd": context_work_dir,
+        "cwd": cwd,
         "project_key": project_key,
-        "repository_key": repository_key,
-        "work_dir": context_work_dir,
-        "worktree_root": worktree_root,
-        "protected_roots": protected_roots,
         "registered_by": registered_by,
         # Readers that treat this file as authority check these two, so a record
         # written by an older version is ignored rather than half-trusted.
-        "schema_version": 3,
+        "schema_version": 2,
         "binding_kind": "self",
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }

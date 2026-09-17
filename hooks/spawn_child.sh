@@ -9,6 +9,8 @@
 #   spawn_child.sh --worktree --resources "path" "<task>"
 #   spawn_child.sh --pre-registered <name> --child-token-file <path> "<task>"
 #   spawn_child.sh --pre-registered <name> --child-token-file <path> --embed-task --task-file <path> [<workdir>]
+#   spawn_child.sh --pre-registered <name> --codex --embed-task --task-file <path> [<workdir>]
+#   spawn_child.sh --pre-registered <name> --codex --codex-mcp orrery-only "<task>"
 #   spawn_child.sh --pre-registered <name> --child-token-file <path> --standalone "<task>"
 #
 # モデル指定（--model。Codex は gpt-5.6-sol 既定で旧 model 名も有効）:
@@ -209,6 +211,7 @@ open_child_terminal() {
 USE_CODEX=false
 CLAUDE_MODEL=""
 CODEX_EFFORT="xhigh"
+CODEX_MCP_PROFILE="inherit"
 RESOURCES=""
 RESOURCE_TTL=14400
 UNSAFE_NO_RESOURCES=false
@@ -235,6 +238,14 @@ while [[ "${1:-}" == --* ]]; do
             ;;
         --effort)
             CODEX_EFFORT="$2"
+            shift 2
+            ;;
+        --codex-mcp)
+            if [[ $# -lt 2 || -z "${2:-}" ]]; then
+                echo "Error: --codex-mcp requires inherit or orrery-only" >&2
+                exit 1
+            fi
+            CODEX_MCP_PROFILE="$2"
             shift 2
             ;;
         --resources)
@@ -288,6 +299,18 @@ while [[ "${1:-}" == --* ]]; do
     esac
 done
 
+case "$CODEX_MCP_PROFILE" in
+    inherit|orrery-only) ;;
+    *)
+        echo "Error: --codex-mcp must be inherit or orrery-only: $CODEX_MCP_PROFILE" >&2
+        exit 1
+        ;;
+esac
+if [[ "$CODEX_MCP_PROFILE" != "inherit" && "$USE_CODEX" != true ]]; then
+    echo "Error: --codex-mcp is only valid with --codex" >&2
+    exit 1
+fi
+
 # --worktree-base は --worktree とのみ意味を持つ
 if [[ -n "$WORKTREE_BASE_REV" && "$USE_WORKTREE" != true ]]; then
     echo "Error: --worktree-base requires --worktree" >&2
@@ -322,18 +345,18 @@ child_token_file_path() {
 # after both durable files have been atomically installed.
 adopt_child_token_file() {
     local agent_name="$1" project_key="$2" source_file="$3"
-    local consume_source="${4:-false}" token_file state_file
+    local consume_source="${4:-false}" binding_source="${5:-}" token_file state_file
     token_file="$(child_token_file_path "$agent_name")" || return 1
     state_file="$CHILD_STATE_DIR/$agent_name.json"
     python3 - "$agent_name" "$project_key" "$source_file" "$token_file" \
-        "$state_file" "$consume_source" <<'PY'
+        "$state_file" "$consume_source" "$binding_source" <<'PY'
 import json
 import os
 import pathlib
 import stat
 import sys
 
-agent_name, project_key, source, token_file, state_file, consume = sys.argv[1:7]
+agent_name, project_key, source, token_file, state_file, consume, binding_source = sys.argv[1:8]
 source_path = pathlib.Path(source)
 token_path = pathlib.Path(token_file)
 state_path = pathlib.Path(state_file)
@@ -365,12 +388,28 @@ with open(token_tmp, "x", encoding="utf-8") as f:
     f.flush()
     os.fsync(f.fileno())
 os.chmod(token_tmp, 0o600)
+state = {
+    "agent_name": agent_name,
+    "project_key": project_key,
+    "registration_token": registration_token,
+}
+binding_path = pathlib.Path(binding_source) if binding_source else None
+if binding_path is not None:
+    try:
+        binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        binding = None
+    if (
+        isinstance(binding, dict)
+        and type(binding.get("agent_id")) is int
+        and binding["agent_id"] > 0
+        and binding.get("agent_name") == agent_name
+        and binding.get("project_key") == project_key
+        and binding.get("program") in {"codex", "codex-cli"}
+    ):
+        state.update(agent_id=binding["agent_id"], program=binding["program"])
 with open(state_tmp, "x", encoding="utf-8") as f:
-    json.dump({
-        "agent_name": agent_name,
-        "project_key": project_key,
-        "registration_token": registration_token,
-    }, f)
+    json.dump(state, f)
     f.flush()
     os.fsync(f.fileno())
 os.chmod(state_tmp, 0o600)
@@ -385,6 +424,14 @@ if consume == "true" and source_path != token_path:
         token_path.unlink(missing_ok=True)
         state_path.unlink(missing_ok=True)
         raise
+    if binding_path is not None:
+        try:
+            binding_path.unlink(missing_ok=True)
+        except OSError:
+            # The non-secret sidecar has already been validated and copied
+            # into child state. Its cleanup must not destroy a successfully
+            # adopted owner token.
+            pass
 print(token_path)
 PY
 }
@@ -421,6 +468,102 @@ os.replace(tmp, token_path)
 os.chmod(token_path, 0o600)
 print(token_path)
 PY
+}
+
+# Verify that a Codex token and its formal registration metadata belong to the
+# same preregistration before preparing a launch. The state token is the join
+# key between the two atomic files: a crash or same-name re-registration that
+# leaves one old and one new is rejected rather than silently mixed. When the
+# canonical token file is absent, a complete 0600 state file may restore it.
+validate_codex_child_registration_state() {
+    local agent_name="$1" project_key="$2" token_file="$3" state_file="$4"
+    "${AGENTSTACK_PYTHON:-python3}" - \
+        "$agent_name" "$project_key" "$token_file" "$state_file" <<'PY'
+import hmac
+import json
+import os
+import pathlib
+import re
+import stat
+import sys
+
+agent_name, project_key, token_file, state_file = sys.argv[1:5]
+token_path = pathlib.Path(token_file)
+state_path = pathlib.Path(state_file)
+
+if not re.fullmatch(r"[A-Za-z0-9_.-]+", agent_name):
+    raise ValueError("unsafe child identity")
+
+flags = os.O_RDONLY
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+
+
+def read_private_regular(path, label, limit):
+    descriptor = os.open(path, flags)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"{label} is not a regular file")
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            raise PermissionError(f"{label} permissions must be 0600")
+        raw = os.read(descriptor, limit + 1)
+    finally:
+        os.close(descriptor)
+    if len(raw) > limit:
+        raise ValueError(f"{label} is too large")
+    return raw.decode("utf-8")
+
+
+state = json.loads(read_private_regular(state_path, "child state", 65536))
+if not isinstance(state, dict):
+    raise ValueError("child state must contain an object")
+if type(state.get("agent_id")) is not int or state["agent_id"] <= 0:
+    raise ValueError("child state has no positive numeric agent_id")
+if state.get("agent_name") != agent_name:
+    raise ValueError("child state belongs to another agent_name")
+if state.get("project_key") != project_key:
+    raise ValueError("child state belongs to another project_key")
+if state.get("program") not in {"codex", "codex-cli"}:
+    raise ValueError("child state is not for Codex CLI")
+state_token = state.get("registration_token")
+if not isinstance(state_token, str) or not state_token or len(state_token) > 4096:
+    raise ValueError("child state has no usable registration token")
+
+if token_path.exists() or token_path.is_symlink():
+    token = read_private_regular(token_path, "canonical token", 4096).strip()
+    if not token or not hmac.compare_digest(token, state_token):
+        raise ValueError("canonical token and child state are from different registrations")
+else:
+    token_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(token_path.parent, 0o700)
+    temporary = token_path.with_name(token_path.name + f".tmp.{os.getpid()}")
+    try:
+        with open(temporary, "x", encoding="utf-8") as handle:
+            handle.write(state_token)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, token_path)
+        os.chmod(token_path, 0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
+PY
+}
+
+# Start one launch expectation from a registration receipt. Output is
+# "<stable metadata path><TAB><fresh launch id>". This is a startup
+# precondition: if no new generation can be persisted, starting another CLI
+# under the same registered identity could leave the old receipt authoritative.
+prepare_codex_launch_binding() {
+    local registration_file="$1" launch_kind="${2:-startup}"
+    local helper="$HOOKS_DIR/prepare-codex-session-binding.py"
+    [[ -f "$helper" && -f "$registration_file" ]] || return 1
+    "${AGENTSTACK_PYTHON:-python3}" "$helper" \
+        --runtime-dir "$RUNTIME_DIR" \
+        --registration-file "$registration_file" \
+        --launch-kind "$launch_kind" \
+        --history-mode enabled
 }
 
 # --- Child model catalog -------------------------------------------------
@@ -701,14 +844,28 @@ codex_approval_flags() {
         printf '%s\n' "--ask-for-approval $policy"
         return 0
     fi
-    help_text="$("$codex_bin" --help 2>/dev/null || true)"
+    local status=0
+    help_text="$("$codex_bin" --help 2>/dev/null)" || status=$?
+    if [[ "$status" -ne 0 || -z "$help_text" ]]; then
+        # The binary is on the path but could not answer. That says nothing
+        # about which flags it takes, so it must not be read as "neither flag":
+        # a child launched without the flag runs under Codex's own on-request
+        # default, and the approvals the operator's policy had turned off
+        # come back -- the opposite of an unattended child. Pin the policy the same way a
+        # missing binary does (2026-09-17: an npm wrapper crashing on a missing
+        # optional dependency answered --help with an error, and the child
+        # spawned from that shell asked for approval of its pytest runs).
+        echo "Warning: $codex_bin --help failed (status $status, $(printf '%s' "$help_text" | wc -c | tr -d ' ') bytes); pinning --ask-for-approval $policy" >&2
+        printf '%s\n' "--ask-for-approval $policy"
+        return 0
+    fi
     if printf '%s' "$help_text" | grep -q -- "--ask-for-approval"; then
         printf '%s\n' "--ask-for-approval $policy"
     elif printf '%s' "$help_text" | grep -q -- "--full-auto"; then
         printf '%s\n' "--full-auto"
     fi
-    # Neither flag: emit nothing and let codex use its own defaults rather than
-    # passing an argument this build will reject.
+    # Help answered and names neither flag: emit nothing and let codex use its
+    # own defaults rather than passing an argument this build will reject.
 }
 
 # Writable roots for a Codex child, ':'-separated, handed to the child through
@@ -1096,6 +1253,7 @@ codex_pane_ready() {
 # Prints the directory, or nothing when the proxy or token is unavailable.
 write_child_codex_home() {
     local child_name="$1" token_file="$2"
+    local mcp_profile="${3:-inherit}"
     local runner="${AGENTSTACK_MCP_PROXY:-${AGENTSTACK_HOME_DIR:-$HOME/.agentstack}/integrations/codex_app/plugin/scripts/run-mcp.sh}"
     local source_home="${CODEX_HOME:-$HOME/.codex}"
     [[ -n "$token_file" && -f "$token_file" && -x "$runner" && -d "$source_home" ]] || return 0
@@ -1103,7 +1261,7 @@ write_child_codex_home() {
     local home_dir="$RUNTIME_DIR/child-agents/${child_name}.codex-home"
     "${AGENTSTACK_PYTHON:-python3}" - "$home_dir" "$source_home" "$runner" "$child_name" "$PROJECT_KEY" \
         "$token_file" "$MCP_URL" "$MAIL_ENV" "$RUNTIME_DIR" "$HTTP_BEARER_MODE" \
-        "${AGENTSTACK_PYTHON:-}" <<'PY' || return 0
+        "${AGENTSTACK_PYTHON:-}" "$mcp_profile" <<'PY' || return 0
 import json
 import math
 import os
@@ -1113,7 +1271,7 @@ import sys
 import tomllib
 from datetime import date, datetime, time
 
-home, source, runner, child, project_key, token_file, mcp_url, mail_env, runtime_dir, bearer_mode, python_bin = sys.argv[1:12]
+home, source, runner, child, project_key, token_file, mcp_url, mail_env, runtime_dir, bearer_mode, python_bin, mcp_profile = sys.argv[1:13]
 home_path = pathlib.Path(home)
 source_path = pathlib.Path(source)
 home_path.mkdir(parents=True, exist_ok=True)
@@ -1408,6 +1566,20 @@ if overlay_setting:
             + "; continuing without it",
             file=sys.stderr,
         )
+if mcp_profile == "orrery-only":
+    config = tomllib.loads(config_text)
+    for name, server in config.get("mcp_servers", {}).items():
+        if name == "agentstack" or looks_like_agent_mail(name):
+            continue
+        if isinstance(server, dict):
+            server["enabled"] = False
+    for plugin_id, plugin in config.get("plugins", {}).items():
+        # This plugin supplies the SessionStart hook that binds Codex history.
+        if plugin_id.startswith("agentstack-codex-app@"):
+            continue
+        if isinstance(plugin, dict):
+            plugin["enabled"] = False
+    config_text = emit_toml(config)
 target.write_text(config_text, encoding="utf-8")
 os.chmod(target, 0o600)
 PY
@@ -1444,6 +1616,7 @@ PY
 # response is supplied on stdin and the secret remains file-only.
 adopt_registered_token_response() {
     local agent_name="$1" project_key="$2" sent_token_file="$3"
+    local program="${4:-}"
     local token_file state_file
     token_file="$(child_token_file_path "$agent_name")" || return 1
     state_file="$CHILD_STATE_DIR/$agent_name.json"
@@ -1453,7 +1626,7 @@ import os
 import pathlib
 import sys
 
-agent_name, project_key, sent_file, token_file, state_file = sys.argv[1:6]
+agent_name, project_key, sent_file, token_file, state_file, program = sys.argv[1:7]
 response = json.load(sys.stdin)
 
 def candidate_tokens(obj):
@@ -1484,6 +1657,18 @@ if not token:
 if not token:
     raise ValueError("register_agent returned no usable registration token")
 
+agent_id = None
+for obj in objects:
+    if not isinstance(obj, dict):
+        continue
+    value = obj.get("id")
+    if type(value) is int and value > 0:
+        agent_id = value
+        break
+    if isinstance(value, str) and value.isdigit() and int(value) > 0:
+        agent_id = int(value)
+        break
+
 token_path = pathlib.Path(token_file)
 state_path = pathlib.Path(state_file)
 token_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -1497,12 +1682,15 @@ with open(token_tmp, "x", encoding="utf-8") as handle:
     handle.flush()
     os.fsync(handle.fileno())
 os.chmod(token_tmp, 0o600)
+state = {
+    "agent_name": agent_name,
+    "project_key": project_key,
+    "registration_token": token,
+}
+if program == "codex" and agent_id is not None:
+    state.update(agent_id=agent_id, program="codex")
 with open(state_tmp, "x", encoding="utf-8") as handle:
-    json.dump({
-        "agent_name": agent_name,
-        "project_key": project_key,
-        "registration_token": token,
-    }, handle)
+    json.dump(state, handle)
     handle.flush()
     os.fsync(handle.fileno())
 os.chmod(state_tmp, 0o600)
@@ -1512,7 +1700,7 @@ os.chmod(token_path, 0o600)
 os.chmod(state_path, 0o600)
 pathlib.Path(sent_file).unlink(missing_ok=True)
 print(token_path)
-' "$agent_name" "$project_key" "$sent_token_file" "$token_file" "$state_file"
+' "$agent_name" "$project_key" "$sent_token_file" "$token_file" "$state_file" "$program"
 }
 
 build_embedded_task_prompt() {
@@ -1524,6 +1712,21 @@ build_embedded_task_prompt() {
     printf 'あなたは %s（親: %s）。この起動は --embed-task mode です。ORRERY Mail への登録は親が完了済み・儀式不要です。ensure_project・register_agent・fetch_inbox は実行しないでください。現在時刻: %s。project_key は %s。以下のタスクが正本です。直ちに開始し、完了したら send_message で %s に報告してください:\n\n%s' \
         "$child_name" "$parent_name" "$spawned_at" "$project_key" \
         "$parent_name" "$task_text"
+}
+
+build_codex_mail_task_prompt() {
+    local child_name="$1"
+    local parent_name="$2"
+    printf 'You are %s. The parent agent is %s. The child name %s is already reserved, so do not register under another name. The canonical task is in your ORRERY Mail inbox. Use only the first matching coordination route in the managed instructions. If the provided tool descriptions and argument schema show a bound ORRERY proxy, do not run a helper, register again, or read a token file; call fetch_inbox with only the arguments accepted by that schema to retrieve the canonical task. Only when the actual provided schema is confirmed raw/direct should you follow the managed raw/direct authentication or recovery route before fetching. A proxy failure is not evidence to switch to raw or a helper. Do not infer the task from this prompt; treat the inbox request as authoritative.' \
+        "$child_name" "$parent_name" "$child_name"
+}
+
+append_codex_mcp_profile_notice() {
+    local prompt="$1"
+    printf '%s' "$prompt"
+    if [[ "$CODEX_MCP_PROFILE" == "orrery-only" ]]; then
+        printf '\n\nCapability notice: shell/files and authenticated ORRERY Mail remain available. Other inherited MCP servers and plugins are disabled. The existing AgentStack session-binding plugin configuration is preserved. If a required tool is unavailable, ask your parent agent for help (or the operator in standalone mode).'
+    fi
 }
 
 TASK="${1:-}"
@@ -1554,7 +1757,7 @@ fi
 # 親エージェントが MCP 経由で事前に register_agent / file_reservation_paths を
 # 済ませてから呼ぶモード。通常は task mail を正本にし、--embed-task 使用時は
 # task mail を送らず起動 prompt を正本にする。
-# Usage: spawn_child.sh --pre-registered <CHILD_NAME> --child-token-file <path> "<タスク>" [<作業ディレクトリ>]
+# Usage: spawn_child.sh --pre-registered <CHILD_NAME> [--child-token-file <path>] "<タスク>" [<作業ディレクトリ>]
 if [[ -n "$PRE_REGISTERED" ]]; then
     CHILD_NAME="$PRE_REGISTERED"
     # Both providers share the catalog/normalizers above in every launch path.
@@ -1575,7 +1778,7 @@ if [[ -n "$PRE_REGISTERED" ]]; then
     fi
 
     if [[ -z "$TASK" ]]; then
-        echo "Usage: spawn_child.sh --pre-registered <CHILD_NAME> --child-token-file <path> \"<task>\" [workdir]" >&2
+        echo "Usage: spawn_child.sh --pre-registered <CHILD_NAME> [--child-token-file <path>] \"<task>\" [workdir]" >&2
         exit 1
     fi
     if [[ ! -d "$WORK_DIR" ]]; then
@@ -1598,6 +1801,8 @@ if [[ -n "$PRE_REGISTERED" ]]; then
     # owner token. Adopt the 0600 one-shot into durable child-owned files and
     # unlink the handoff only after both writes succeed.
     PRE_REGISTERED_TOKEN_CREATED=false
+    PRE_REGISTERED_HANDOFF_TO_CONSUME=""
+    PRE_REGISTERED_BINDING_TO_CONSUME=""
     PRE_REGISTERED_SESSION_STARTED=false
     PRE_REGISTERED_SUCCESS=false
     cleanup_preregister_failure() {
@@ -1634,17 +1839,29 @@ PY
 
     if [[ -n "$CHILD_TOKEN_FILE" ]]; then
         ONE_SHOT_TOKEN_FILE="$CHILD_TOKEN_FILE"
+        CONSUME_ONE_SHOT=true
+        if [[ "$USE_CODEX" == true ]]; then
+            # Keep the source until formal metadata validation, prepare, and
+            # child startup have all succeeded. Failure leaves the one-shot as
+            # the token-safe recovery credential instead of consuming it early.
+            CONSUME_ONE_SHOT=false
+        fi
         if ! CHILD_TOKEN_FILE="$(
             adopt_child_token_file "$CHILD_NAME" "$PROJECT_KEY" \
-                "$ONE_SHOT_TOKEN_FILE" true
+                "$ONE_SHOT_TOKEN_FILE" "$CONSUME_ONE_SHOT" \
+                "${ONE_SHOT_TOKEN_FILE}.binding.json"
         )"; then
             echo "Error: --child-token-file is unreadable, insecure, or empty: $ONE_SHOT_TOKEN_FILE" >&2
             exit 1
         fi
         PRE_REGISTERED_TOKEN_CREATED=true
+        if [[ "$USE_CODEX" == true && "$ONE_SHOT_TOKEN_FILE" != "$CHILD_TOKEN_FILE" ]]; then
+            PRE_REGISTERED_HANDOFF_TO_CONSUME="$ONE_SHOT_TOKEN_FILE"
+            PRE_REGISTERED_BINDING_TO_CONSUME="${ONE_SHOT_TOKEN_FILE}.binding.json"
+        fi
     else
         CHILD_TOKEN_FILE="$(child_token_file_path "$CHILD_NAME")"
-        if [[ ! -s "$CHILD_TOKEN_FILE" ]]; then
+        if [[ "$USE_CODEX" != true && ! -s "$CHILD_TOKEN_FILE" ]]; then
             if ! CHILD_TOKEN_FILE="$(
                 restore_child_token_file_from_state "$CHILD_NAME"
             )"; then
@@ -1653,6 +1870,18 @@ PY
                 echo "  Existing state fallback: $CHILD_STATE_DIR/$CHILD_NAME.json" >&2
                 exit 1
             fi
+        fi
+    fi
+
+    if [[ "$USE_CODEX" == true ]]; then
+        if ! validate_codex_child_registration_state \
+            "$CHILD_NAME" "$PROJECT_KEY" "$CHILD_TOKEN_FILE" \
+            "$CHILD_STATE_DIR/$CHILD_NAME.json"; then
+            echo "Error: canonical Codex registration metadata is missing, invalid, or does not match the child token for $CHILD_NAME" >&2
+            echo "  Re-run agentstack-preregister-child for this project and launch the exact returned name." >&2
+            echo "  For an existing one-shot handoff, pass --child-token-file <path> with its matching .binding.json sidecar." >&2
+            echo "  A legacy token-only runtime entry cannot be promoted to a verified history binding." >&2
+            exit 1
         fi
     fi
 
@@ -1692,8 +1921,29 @@ PY
         CHILD_CODEX_BIN="$(resolve_codex_bin)"
         TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_BIN=$CHILD_CODEX_BIN")
         TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_MODEL=$CHILD_MODEL" -e "AGENTSTACK_CODEX_EFFORT=$CODEX_EFFORT")
-        CHILD_CODEX_HOME="$(write_child_codex_home "$CHILD_NAME" "$CHILD_TOKEN_FILE")"
+        CHILD_CODEX_HOME="$(write_child_codex_home "$CHILD_NAME" "$CHILD_TOKEN_FILE" "$CODEX_MCP_PROFILE")"
+        if [[ "$CODEX_MCP_PROFILE" != "inherit" && -z "$CHILD_CODEX_HOME" ]]; then
+            echo "Error: could not create the requested Codex MCP profile: $CODEX_MCP_PROFILE" >&2
+            exit 1
+        fi
+        if ! CHILD_LAUNCH_INFO="$(
+            prepare_codex_launch_binding "$CHILD_STATE_DIR/$CHILD_NAME.json" startup
+        )"; then
+            echo "Error: could not create a fresh Codex history binding expectation" >&2
+            exit 1
+        fi
+        CHILD_LAUNCH_BINDING=""
+        CHILD_LAUNCH_ID=""
+        IFS=$'\t' read -r CHILD_LAUNCH_BINDING CHILD_LAUNCH_ID <<< "$CHILD_LAUNCH_INFO"
+        if [[ -z "$CHILD_LAUNCH_BINDING" || -z "$CHILD_LAUNCH_ID" ]]; then
+            echo "Error: Codex history binding expectation was incomplete" >&2
+            exit 1
+        fi
         TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_ADD_DIRS_RESOLVED=$(codex_child_add_dirs "$CHILD_CODEX_HOME")")
+        TMUX_ENV_ARGS+=(
+            -e "AGENTSTACK_CODEX_LAUNCH_BINDING=$CHILD_LAUNCH_BINDING"
+            -e "AGENTSTACK_CODEX_LAUNCH_ID=$CHILD_LAUNCH_ID"
+        )
         if [[ -n "$CHILD_CODEX_HOME" ]]; then
             echo "[spawn_child/pre-reg] Child CODEX_HOME with authenticated ORRERY Mail: $CHILD_CODEX_HOME" >&2
             TMUX_ENV_ARGS+=(
@@ -1710,8 +1960,9 @@ ${TASK}"
         elif [[ "$EMBED_TASK" == true ]]; then
             CODEX_PROMPT="$EMBEDDED_TASK_PROMPT"
         else
-            CODEX_PROMPT="You are ${CHILD_NAME}. The parent agent is ${PARENT_NAME}. The child name ${CHILD_NAME} is already reserved, so do not register under another name. The canonical task is in your ORRERY Mail inbox. First, if ${REREGISTER_HELPER:-agentstack-reregister} exists, run PROJECT_KEY=${PROJECT_KEY} ${REREGISTER_HELPER:-agentstack-reregister} ${CHILD_NAME}; when that succeeds, skip register_agent and fetch_inbox for ${CHILD_NAME}. The helper reads the child-owned 0600 token file; never request or print its token. Do not infer the task from this prompt; treat the inbox request as authoritative."
+            CODEX_PROMPT="$(build_codex_mail_task_prompt "$CHILD_NAME" "$PARENT_NAME")"
         fi
+        CODEX_PROMPT="$(append_codex_mcp_profile_notice "$CODEX_PROMPT")"
         tmux new-session -d -s "$CHILD_NAME" \
             -c "$WORK_DIR" \
             "${TMUX_ENV_ARGS[@]}" \
@@ -1944,6 +2195,15 @@ ${TASK}"
         echo "[spawn_child/pre-reg] cleanup: git -C $WORKTREE_SOURCE worktree remove $WORKTREE_DIR && git -C $WORKTREE_SOURCE branch -D exp/${CHILD_NAME}" >&2
     fi
 
+    if [[ -n "$PRE_REGISTERED_HANDOFF_TO_CONSUME" ]]; then
+        if ! rm -f -- "$PRE_REGISTERED_HANDOFF_TO_CONSUME"; then
+            echo "Error: could not consume the successful child token handoff" >&2
+            exit 1
+        fi
+        if [[ -n "$PRE_REGISTERED_BINDING_TO_CONSUME" ]]; then
+            rm -f -- "$PRE_REGISTERED_BINDING_TO_CONSUME" 2>/dev/null || true
+        fi
+    fi
     PRE_REGISTERED_SUCCESS=true
     echo "$CHILD_NAME"
     exit 0
@@ -2300,7 +2560,7 @@ fi
 if ! CHILD_TOKEN_FILE="$(
     printf '%s' "$REGISTER_RESULT" |
         adopt_registered_token_response "$CHILD_NAME" "$PROJECT_KEY" \
-            "$DIRECT_ONE_SHOT_TOKEN_FILE"
+            "$DIRECT_ONE_SHOT_TOKEN_FILE" "$CHILD_PROGRAM"
 )"; then
     rm -f "$DIRECT_ONE_SHOT_TOKEN_FILE"
     echo "Error: failed to persist the registered child token" >&2
@@ -2460,10 +2720,10 @@ ${TASK}
 
 - Parent agent: ${PARENT_NAME}
 - Working directory: ${WORK_DIR}${RESOURCE_NOTE}${WORKTREE_NOTE}
-- **Use \`${PROJECT_KEY}\` as the ORRERY Mail project_key**, not the current working directory. This is especially important in worktree mode. The tmux \$PROJECT_KEY env var has the same value. If you call ensure_project(human_key=cwd) from outside the project root, you will create a different project and will not be able to read this inbox.
+- **\`${PROJECT_KEY}\` is the canonical ORRERY Mail project_key**, not the current working directory. This is especially important in worktree mode. The tmux \$PROJECT_KEY env var has the same value. On confirmed raw/direct MCP, use this value where the actual schema accepts a project key; do not call ensure_project(human_key=cwd). On a bound proxy, do not add caller identity or project fields that its schema does not accept.
 - File reservation TTL: ${RESOURCE_TTL} seconds
-- The parent pre-reserved the resources above under your agent name. Do not call macro_file_reservation_cycle or file_reservation_paths again for the same paths; use the existing reservations.
-- If you are worried about remaining TTL, prefer renew_file_reservations rather than acquiring the same paths again.
+- The parent pre-reserved the resources above under your agent name. Do not acquire the same paths again; use the existing reservations through the tools provided by your connection schema.
+- If you are worried about remaining TTL, renew through the provided schema: bound proxy uses \`renew_reservations\`; raw/direct MCP uses \`renew_file_reservations\`.
 - Split large changes into smaller Edit/Update operations instead of one huge Write.
 - Acquire new reservations only when you need additional unreserved paths.
 - Reply to the parent agent when the task is complete."
@@ -2508,9 +2768,30 @@ fi
 if [[ "$USE_CODEX" == true ]]; then
     CHILD_CODEX_BIN="$(resolve_codex_bin)"
     TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_BIN=$CHILD_CODEX_BIN")
-    CHILD_CODEX_HOME="$(write_child_codex_home "$CHILD_NAME" "$CHILD_TOKEN_FILE")"
+    CHILD_CODEX_HOME="$(write_child_codex_home "$CHILD_NAME" "$CHILD_TOKEN_FILE" "$CODEX_MCP_PROFILE")"
+    if [[ "$CODEX_MCP_PROFILE" != "inherit" && -z "$CHILD_CODEX_HOME" ]]; then
+        echo "Error: could not create the requested Codex MCP profile: $CODEX_MCP_PROFILE" >&2
+        exit 1
+    fi
+    if ! CHILD_LAUNCH_INFO="$(
+        prepare_codex_launch_binding "$CHILD_STATE_DIR/$CHILD_NAME.json" startup
+    )"; then
+        echo "Error: could not create a fresh Codex history binding expectation" >&2
+        exit 1
+    fi
+    CHILD_LAUNCH_BINDING=""
+    CHILD_LAUNCH_ID=""
+    IFS=$'\t' read -r CHILD_LAUNCH_BINDING CHILD_LAUNCH_ID <<< "$CHILD_LAUNCH_INFO"
+    if [[ -z "$CHILD_LAUNCH_BINDING" || -z "$CHILD_LAUNCH_ID" ]]; then
+        echo "Error: Codex history binding expectation was incomplete" >&2
+        exit 1
+    fi
     TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_MODEL=$CHILD_MODEL" -e "AGENTSTACK_CODEX_EFFORT=$CODEX_EFFORT")
     TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_ADD_DIRS_RESOLVED=$(codex_child_add_dirs "$CHILD_CODEX_HOME")")
+    TMUX_ENV_ARGS+=(
+        -e "AGENTSTACK_CODEX_LAUNCH_BINDING=$CHILD_LAUNCH_BINDING"
+        -e "AGENTSTACK_CODEX_LAUNCH_ID=$CHILD_LAUNCH_ID"
+    )
     if [[ -n "$CHILD_CODEX_HOME" ]]; then
         echo "[spawn_child] Child CODEX_HOME with authenticated ORRERY Mail: $CHILD_CODEX_HOME" >&2
         TMUX_ENV_ARGS+=(
@@ -2521,7 +2802,8 @@ if [[ "$USE_CODEX" == true ]]; then
         echo "[spawn_child] No MCP proxy available; Codex child uses the shared ORRERY Mail endpoint" >&2
     fi
     # Codex startup: inject a bootstrap prompt that points the child to inbox.
-    CODEX_PROMPT="You are ${CHILD_NAME}. The parent agent is ${PARENT_NAME}. The child name ${CHILD_NAME} is already reserved, so do not register under another name. The canonical task is in your ORRERY Mail inbox. First, if ${REREGISTER_HELPER:-agentstack-reregister} exists, run PROJECT_KEY=${PROJECT_KEY} ${REREGISTER_HELPER:-agentstack-reregister} ${CHILD_NAME}; when that succeeds, skip register_agent and fetch_inbox for ${CHILD_NAME}. The helper reads the child-owned 0600 token file; never request or print its token. Do not infer the task from this prompt; treat the inbox request as authoritative."
+    CODEX_PROMPT="$(build_codex_mail_task_prompt "$CHILD_NAME" "$PARENT_NAME")"
+    CODEX_PROMPT="$(append_codex_mcp_profile_notice "$CODEX_PROMPT")"
     tmux new-session -d -s "$CHILD_NAME" \
         -c "$WORK_DIR" \
         "${TMUX_ENV_ARGS[@]}" \

@@ -4,7 +4,7 @@
 # Usage:
 #   agentstack-preregister-child --project-key <path> [--name <agent>] \
 #     --program <claude-code|codex> --model <model> \
-#     --task-description <text> --token-file-out <path> [--work-dir <path>]
+#     --task-description <text> --token-file-out <path>
 #
 # Stdout contains only the registered child name. The generated token is written
 # to the requested token file with mode 0600.
@@ -36,7 +36,7 @@ usage() {
   cat >&2 <<'EOF'
 Usage: agentstack-preregister-child --project-key <path> [--name <agent>] \
   --program <claude-code|codex> --model <model> \
-  --task-description <text> --token-file-out <path> [--work-dir <path>]
+  --task-description <text> --token-file-out <path>
 
 --name is optional: omitted, a free Adjective-Scientist name is picked (same
 picker as top-level registration). A supplied name that does not end in a
@@ -45,13 +45,12 @@ AGENTSTACK_STRICT_AGENT_NAMES=1 to make that an error instead.
 EOF
 }
 
-project_key=""
+project_key="${AGENTSTACK_PROJECT_KEY:-${PROJECT_KEY:-}}"
 agent_name=""
 program="claude-code"
 model="${AGENTSTACK_CLAUDE_MODEL:-claude-code}"
 task_description="Delegated child agent"
 token_file_out=""
-work_dir="${PWD:-.}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -79,10 +78,6 @@ while [[ $# -gt 0 ]]; do
       token_file_out="${2:-}"
       shift 2
       ;;
-    --work-dir)
-      work_dir="${2:-}"
-      shift 2
-      ;;
     -h|--help)
       usage
       exit 0
@@ -94,20 +89,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$project_key" ]] || die "--project-key is required"
+[[ -n "$project_key" ]] || die "AGENTSTACK_PROJECT_KEY or --project-key is required"
 [[ -n "$program" ]] || die "--program is required"
 [[ -n "$model" ]] || die "--model is required"
 [[ -n "$token_file_out" ]] || die "--token-file-out is required"
-[[ -n "$work_dir" && -d "$work_dir" ]] || die "--work-dir must name an existing directory"
-
-context_json="$(agentstack_resolve_invocation_context "$work_dir" "$project_key")" \
-  || die "could not resolve child workspace context"
-invocation_transport="$(agentstack_build_invocation_transport "$context_json" "$project_key")" \
-  || die "could not bind child project namespace to its workspace"
-context_json="$(agentstack_validate_invocation_transport "$invocation_transport" "$work_dir")" \
-  || die "child project namespace does not match its workspace"
-project_key="$(ags_registration_context_project_key "$context_json")" \
-  || die "could not read validated child project namespace"
 
 ags_mail_load_token
 
@@ -128,34 +113,17 @@ elif ! ags_has_scientist_suffix "$agent_name"; then
   fi
 fi
 
-if ags_local_agent_name_conflicts "$project_key" "$agent_name" candidate; then
-  die "local identity '$agent_name' is already owned by another project or session"
-fi
-if [[ -n "$agent_name" ]]; then
-  name_status="$(ags_agent_name_status "$project_key" "$agent_name")"
-  [[ "$name_status" == "available" ]] \
-    || die "child name '$agent_name' is not positively verified as available"
-fi
-
 # Ignore any parent/session token inherited from the caller. This helper always
 # creates a child-owned token and uses that exact value for registration.
 unset CHILD_REGISTRATION_TOKEN
 child_token="$(ags_generate_registration_token)" || die "failed to generate child registration token"
 
-ags_begin_registration_ownership "$context_json" "$agent_name" \
-  "$child_token" "preregister-child" candidate \
-  || die "could not establish local ownership for '$agent_name'"
-
 # JSON results are handed to the lib helpers with here-strings rather than
 # `printf | fn`: a helper that returns without reading stdin (as the stock
 # stubs in tests do) made printf die of SIGPIPE, and with pipefail the
 # command substitution then exited 141 (CI flake, 2026-09-05).
-ensure_result="$(ags_mcp_call "ensure_project" "human_key=$project_key")" || {
-  ags_release_registration_ownership
-  die "ensure_project failed"
-}
+ensure_result="$(ags_mcp_call "ensure_project" "human_key=$project_key")" || die "ensure_project failed"
 if ags_mcp_has_error <<<"$ensure_result"; then
-  ags_release_registration_ownership
   die "ensure_project returned an error"
 fi
 
@@ -167,27 +135,24 @@ register_args=(
   "task_description=$task_description"
   "registration_token=$child_token"
 )
-register_result="$(ags_mcp_call "register_agent" "${register_args[@]}")" || {
-  ags_release_registration_ownership
-  die "register_agent failed"
-}
+register_result="$(ags_mcp_call "register_agent" "${register_args[@]}")" || die "register_agent failed"
 if ags_mcp_has_error <<<"$register_result"; then
-  ags_release_registration_ownership
   die "register_agent returned an error for $agent_name"
 fi
 
 registered="$(ags_extract_agent_name <<<"$register_result")"
-[[ -n "$registered" ]] || {
-  ags_release_registration_ownership
-  die "could not read registered child name"
-}
+[[ -n "$registered" ]] || die "could not read registered child name"
+registered_id=""
+if declare -F ags_extract_agent_id >/dev/null 2>&1; then
+  registered_id="$(ags_extract_agent_id <<<"$register_result")"
+fi
 if [[ "$registered" != "$agent_name" ]]; then
   printf "%s: ORRERY Mail changed requested identity '%s' to '%s'; the child tmux session must use the server-returned name\n" \
     "$PROG" "$agent_name" "$registered" >&2
-  if ags_local_agent_name_conflicts "$project_key" "$registered" substitution; then
-    ags_release_registration_ownership
-    die "server-returned identity '$registered' conflicts with local ownership"
-  fi
+  # A warning on stderr is read once, by whoever happened to be looking. The
+  # child then runs for hours under a name its parent does not know. Record it
+  # where the dashboard can state it for as long as the agent exists.
+  ags_record_name_substitution "$registered" "$agent_name" || true
 fi
 
 # The token the child must present is the one the SERVER persisted, not the one
@@ -201,23 +166,133 @@ fi
 effective_token="$(ags_extract_registration_token <<<"$register_result")"
 [[ -n "$effective_token" ]] || effective_token="$child_token"
 
-ags_commit_registration_ownership "$context_json" "$agent_name" "$registered" \
-  "$effective_token" "preregister-child" || {
-  ags_release_registration_ownership
-  die "could not persist verified ownership for '$registered'"
-}
-if [[ "$registered" != "$agent_name" ]]; then
-  # Publish annotation only after the returned host-global identity is accepted
-  # and its owner/token pair is durable.
-  ags_record_name_substitution "$registered" "$agent_name" || true
-fi
-
 token_dir="$(dirname "$token_file_out")"
 mkdir -p "$token_dir" || die "could not create token file directory: $token_dir"
 tmp_file="${token_file_out}.$$"
 ( umask 077 && printf '%s' "$effective_token" > "$tmp_file" ) || die "could not write token file"
 mv "$tmp_file" "$token_file_out" || die "could not install token file"
 chmod 600 "$token_file_out" 2>/dev/null || true
+
+persist_codex_registration_state() {
+  local registered_name="$1" numeric_id="$2" registered_project="$3"
+  local registered_program="$4" source_token="$5" runtime_dir token_key
+  local canonical_token state_file
+  [[ "$registered_name" =~ ^[A-Za-z0-9_.-]+$ ]] || return 1
+  [[ "$numeric_id" =~ ^[1-9][0-9]*$ ]] || return 1
+  runtime_dir="${AGENTSTACK_RUNTIME_DIR:-$HOME/.agentstack/runtime}"
+  token_key="$(printf '%s' "$registered_name" | LC_ALL=C tr -c 'A-Za-z0-9_.-' '_')"
+  [[ -n "$token_key" ]] || return 1
+  canonical_token="$runtime_dir/agent_token_$token_key"
+  state_file="$runtime_dir/child-agents/$registered_name.json"
+  "${AGENTSTACK_PYTHON:-python3}" - "$source_token" "$canonical_token" \
+      "$state_file" "$registered_name" "$numeric_id" "$registered_project" \
+      "$registered_program" <<'PY'
+import json
+import os
+import pathlib
+import stat
+import sys
+
+source, token_file, state_file, name, numeric_id, project, program = sys.argv[1:8]
+source_path = pathlib.Path(source)
+token_path = pathlib.Path(token_file)
+state_path = pathlib.Path(state_file)
+
+flags = os.O_RDONLY
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+descriptor = os.open(source_path, flags)
+try:
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("token handoff is not a regular file")
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        raise PermissionError("token handoff permissions must be 0600")
+    token = os.read(descriptor, 4097).decode("utf-8").strip()
+finally:
+    os.close(descriptor)
+if not token or len(token) > 4096:
+    raise ValueError("token handoff is empty or too large")
+
+token_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+state_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+os.chmod(token_path.parent, 0o700)
+os.chmod(state_path.parent, 0o700)
+token_tmp = token_path.with_name(token_path.name + f".tmp.{os.getpid()}")
+state_tmp = state_path.with_name(state_path.name + f".tmp.{os.getpid()}")
+try:
+    with open(token_tmp, "x", encoding="utf-8") as handle:
+        handle.write(token)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(token_tmp, 0o600)
+    state = {
+        "agent_id": int(numeric_id),
+        "agent_name": name,
+        "program": program,
+        "project_key": project,
+        "registration_token": token,
+    }
+    with open(state_tmp, "x", encoding="utf-8") as handle:
+        json.dump(state, handle, separators=(",", ":"), sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(state_tmp, 0o600)
+    # Readers compare the two copies. A crash between replaces leaves a
+    # mismatch that is rejected rather than combining two registrations.
+    os.replace(token_tmp, token_path)
+    os.replace(state_tmp, state_path)
+    os.chmod(token_path, 0o600)
+    os.chmod(state_path, 0o600)
+finally:
+    token_tmp.unlink(missing_ok=True)
+    state_tmp.unlink(missing_ok=True)
+PY
+}
+
+# The launcher needs the server-returned numeric id as well as the name. Keep
+# that non-secret registration receipt beside the one-shot token so
+# spawn_child.sh can consume both without querying by name later. Also persist
+# the same formal receipt with the canonical runtime token for the documented
+# no-argument launch path. Codex launchers fail closed when either copy is
+# unavailable; preregistration must therefore not report success without both.
+if [[ "$program" == "codex" || "$program" == "codex-cli" ]]; then
+  [[ "$registered_id" =~ ^[1-9][0-9]*$ ]] \
+    || die "register_agent returned no positive numeric id for Codex child $registered"
+  binding_file="${token_file_out}.binding.json"
+  if ! "${AGENTSTACK_PYTHON:-python3}" - "$binding_file" "$registered_id" "$registered" "$project_key" "$program" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+payload = {
+    "agent_id": int(sys.argv[2]),
+    "agent_name": sys.argv[3],
+    "project_key": sys.argv[4],
+    "program": sys.argv[5],
+}
+temporary = path.with_name(path.name + f".tmp.{os.getpid()}")
+with open(temporary, "x", encoding="utf-8") as handle:
+    json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
+    handle.write("\n")
+    handle.flush()
+    os.fsync(handle.fileno())
+os.chmod(temporary, 0o600)
+os.replace(temporary, path)
+os.chmod(path, 0o600)
+PY
+  then
+    die "could not persist the one-shot Codex registration binding"
+  fi
+  persist_codex_registration_state \
+    "$registered" "$registered_id" "$project_key" "$program" "$token_file_out" \
+    || die "could not persist canonical Codex registration token and metadata"
+else
+  ags_store_registration_token "$registered" "$effective_token" || true
+fi
 
 ags_apply_contact_policy "$project_key" "$registered" "$effective_token"
 

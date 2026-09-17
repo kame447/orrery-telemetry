@@ -308,7 +308,18 @@ AGENTSTACK_PROJECT_KEY=/absolute/project/path \
 
 を実行します。
 
-確認対象:
+失敗時の stderr は、秘密を含まない定型診断です。たとえば
+`stage=ensure_project reason=transport-failed curl_exit=7` は通信前半、
+`stage=register_agent reason=http-rejected http_status=403` は HTTP 拒否、
+`stage=response-parse reason=invalid-response` は応答形式で止まったことを示します。
+`rpc-error` / `tool-error` はそれぞれ JSON-RPC / tool 層の失敗です。
+`identity-check reason=identity-changed` なら、予約済み identity が別名へ置換されたため
+fail-closed で停止しています。`credential_source` は `child-state` / `inherited` /
+`runtime-file` のどこから owner credential を選んだかだけを示し、値は表示しません。
+
+`http_status=401` や `403` だけで stale / wrong-owner token と断定しないでください。
+`stage=local-token reason=credential-unavailable` の場合に限り、まず次の owner credential
+保存先を確認します。
 
 ```text
 $AGENTSTACK_RUNTIME_DIR/agent_token_<name>
@@ -316,6 +327,7 @@ $AGENTSTACK_RUNTIME_DIR/child-agents/<name>.json
 ```
 
 token が missing / stale / wrong-owner なら親または operator へ報告してください。token を chat、log、process argument に貼らないでください。
+診断追加前に捨てられた過去の response や curl stderr は、この表示から後追いで復元できません。
 
 ## Hook が `AGENT NOT REGISTERED` で block する
 
@@ -397,7 +409,7 @@ protected root 内の Edit / Write では、hook が exact identity を確定し
 3. exact path または最小の glob を `file_reservation_paths` で予約
 4. conflict が返ったら holder へ ORRERY Mail で連絡し、release または expiry を待つ
 
-owner `registration_token` はこのhookのtool argumentsへ送られず、legacy HTTP bearerとは別物です。`isError`は省略またはboolean `false`だけを成功とします。exact identityとprotected scopeの確定後、最初の照会がtransport unreachableの場合だけfail-openです。HTTP/MCP/schema rejection、malformed response、definitive zero後のtransport failureはblockします。pathなし・protected root外はenforcement対象外なのでexit 0です。
+owner `registration_token` はこのhookのtool argumentsへ送られず、legacy HTTP bearerとは別物です。`isError`は省略またはboolean `false`だけを成功とします。exact identityとprotected scopeの確定後、最初の照会がtransport unreachableの場合だけfail-openです。HTTP/MCP/schema rejection、malformed response、definitive zero後のtransport failureはblockします。pathなし・protected root外はenforcement対象外なのでexit 0です。`AGENT PROJECT CONTEXT MISMATCH` は選択 project key（live / installed）が session の実際の workspace に属さないことを示します。`agent-start DIR` で意図した project から起動し直すか、`AGENTSTACK_PROJECT_KEY` を直してください。`AGENT PROJECT CONTEXT UNRESOLVED` は hook input の `cwd` が存在する絶対 directory でない、または `cwd` が無く編集 file が hook 自身の directory の外にあることを示します。
 
 strict版はcutover C5の全client restart/rebind後にdeployします。raw non-tmux Claude は、`register_agent` を呼んで session index に self binding ができていれば identity が解決されます。登録できない client（mail MCP を持たない起動経路）と identity source のない旧 session は `AGENTSTACK_UNMANAGED_SESSION_POLICY` の扱いになり、協調が必要なら `agent-start` 経由で再起動してください。guardを無効化したり、untargeted tmux sessionやstale metadataをidentityとして採用したりしないでください。
 
@@ -428,11 +440,12 @@ stale な top-level environment を継承した可能性がある場合は、新
 
 ## History が見つからない
 
-`/api/history` は agent program に応じて Claude / Codex transcript を探し、見つからなければ他方へ fallback します。
+`/api/history` は ORRERY Mail の agent program に応じて transcript 形式を選びます。program が無い・不明・読み取れない場合は provider 未確認として、どの transcript resolver にも進みません。Codex CLI は、現在の project の数値 agent ID に対応する session index と rollout 先頭の session ID が一致する場合だけ履歴を開きます。index が無い・壊れている・project / provider / ID が一致しない場合は「未確認」とし、時刻や cwd による探索、過去の cache、Claude transcript への fallback は行いません。
 
 - ORRERY Mail の program が正しいか
+- Codex では `runtime/session_index/<agent_id>.json` が現在の project / agent を指しているか
 - transcript が disk に残っているか
-- session / agent 名が一致しているか
+- index の session ID と transcript 先頭の metadata ID が一致しているか
 - child と parent の transcript を取り違えていないか
 
 transcript が存在しない agent は mail timeline だけが見えることがあります。

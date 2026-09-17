@@ -9,7 +9,14 @@ RUNTIME_DIR="${AGENTSTACK_RUNTIME_DIR:-$HOME/.agentstack/runtime}"
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/reservation-common.sh"
 
 TOOL_INPUT=$(cat)
-reservation_extract_session_id "$TOOL_INPUT" || exit 0
+reservation_extract_session_id "$TOOL_INPUT"
+RESOLVE_STATUS=$?
+if [ "$RESOLVE_STATUS" -ne 0 ]; then
+    # Shutdown is never blocked, and another project's reservations are never
+    # released because this session's workspace could not be validated.
+    reservation_failure_log "release-all session=${SESSION_ID:-<none>} error=project-context-invalid status=$RESOLVE_STATUS"
+    exit 0
+fi
 AGENT_RESULT="$(resolve_agent_name)"
 AGENT_SRC="${AGENT_RESULT%%|*}"
 AGENT="${AGENT_RESULT#*|}"

@@ -25,20 +25,6 @@ agent-start
 
 The precedence order is an explicit argument, the `fzf` picker, then the current directory.
 
-## Top-level project context
-
-`agent-start`, `agent-start-codex`, and the optional `agent-start-gemini` resolve the selected directory before registration or tmux session creation. Project keys and protected roots left in the parent shell, installed `env.sh`, or an existing tmux server are not authoritative inputs to that selection.
-
-Use `agent-start-codex --project-key KEY DIR` for an explicit namespace; all three launchers accept the same option. Main and linked worktrees share repository identity, while independent clones remain separate. A non-Git directory defaults to its physical path. Continuing a previous non-Git namespace also requires an explicit `--project-key`.
-
-`work_dir` preserves a selected subdirectory, while protected roots cover its whole worktree. An explicit key is a namespace, not a protected pathname. Git metadata and another main checkout are not added as protection roots automatically. Git inspection failures, broken metadata, bare repositories, and roots the legacy colon-delimited format cannot represent are rejected before launch, not hidden by a fallback to another project.
-
-A fresh tmux session receives the resolved values through `new-session -e`, without seeding a new server's global environment with this project. The launcher also passes the context to bootstrap through explicit argv (`--top-level`, optional `--project-key`, and `--expected-context` for cross-checking); bootstrap re-resolves the complete tuple from the actual target. Inside an existing pane, the CLI/bootstrap process environment is updated; migrating session-wide project metadata that could affect other panes is deferred. `AGENTSTACK_PROJECT_CONTEXT=1`, environment JSON, and tmux environment are transport or hints, never ownership proof. Never forward a reserved child's context as a top-level override.
-
-A standalone bootstrap without argv also ignores ambient and installed keys and derives its default namespace from the actual target. A reserved or resumed identity is validated with the owner record described below. Delegated-child reservation, handoff, cleanup and protected-root propagation, plus watcher, Dashboard, doctor, generated-instruction and proxy migration remain later phases.
-
-Gemini `--dry-run` prints the context and planned command without starting tmux, Mail, or the CLI. Model/effort settings, Codex sandbox/approval and OAuth behavior, and Gemini's post-REPL shell lifecycle are unchanged.
-
 ## tmux session
 
 When launched from outside tmux, the launcher creates a new named session and replaces the current terminal tab. From inside tmux, it renames the current session and runs the CLI in place with `exec`.
@@ -89,11 +75,12 @@ The launcher registers an identity with ORRERY Mail before starting the CLI.
 3. Check ORRERY Mail health
 4. Register with project key, program, model, and task metadata
 5. Compare the requested name with the returned canonical name. On a mismatch, a top-level launch reports it and renames the tmux session to the returned name; a reserved identity stops
-6. Update the managed agent list and clipboard
+6. For Codex CLI, record this launch expectation with the numeric agent ID
+7. Update the managed agent list and clipboard
 
-Top-level launchers and standalone bootstrap establish project context first. An ownership contradiction is refused before `ensure_project`, before an owner token is sent, and before registration state is written. When ORRERY Mail is unreachable, the CLI still starts with a preselected name only after that name is locally conflict-free; a server refusal, context failure, owner mismatch, or persistence failure is a hard stop.
+If `AGENTSTACK_PROJECT_KEY` is unset or ORRERY Mail is unreachable, the CLI itself still starts with the preselected name. Mail, reservations, and project-scoped dashboard features are unavailable, however.
 
-Claude Code hooks also record registration inside the session. Because Codex does not have Claude Code's hook system, `agentstack-codex-bootstrap` handles registration and tmux renaming before startup.
+Claude Code hooks also record registration inside the session. For Codex CLI, `agentstack-codex-bootstrap` handles registration and tmux renaming and also creates a fresh `launch_id` before startup. The official SessionStart hook completes the receipt only after validating the runtime `session_id` against the rollout header. Without that receipt, Codex History does not fall back to a guess.
 
 ## Registration token
 
@@ -103,21 +90,15 @@ Reregistering an existing identity requires that identity's `registration_token`
 ${AGENTSTACK_RUNTIME_DIR:-$HOME/.agentstack/runtime}/agent_token_<name>
 ```
 
-A strong mode-`0600` owner record is stored beside it:
-
-```text
-${AGENTSTACK_RUNTIME_DIR:-$HOME/.agentstack/runtime}/agent_owner_<name>.json
-```
-
-The record binds the namespace, Git repository identity (or non-Git root), SHA-256 digest of the owner token, and creation path; it never contains the raw token. Reregistration re-resolves repository, worktree and protected roots from the actual cwd. Linked worktrees of the same repository are accepted, while an independent clone, another repository, or a digest mismatch is refused before the token is sent to Mail. A non-Git owner is valid only within its recorded physical root.
-
 A delegated child additionally has child-owned state at:
 
 ```text
 ${AGENTSTACK_RUNTIME_DIR:-$HOME/.agentstack/runtime}/child-agents/<name>.json
 ```
 
-The parent's token is not given to a preregistered child. Dashboard spawn generates a child-specific token and passes it to `spawn_child.sh --pre-registered` through a temporary mode-`0600` token file. This keeps the token out of transcripts, command-line arguments, and dashboard responses.
+The parent's token is not given to a preregistered child. Dashboard spawn generates a child-specific token and passes it to `spawn_child.sh --pre-registered` through a temporary mode-`0600` token file. For Codex, it accompanies that token with a non-secret `.binding.json` sidecar containing the formal registration response's numeric ID, name, project, and program. The launcher validates both and consumes the temporary handoff only after the CLI startup and fresh launch expectation have succeeded. The token stays out of transcripts, command-line arguments, and dashboard responses.
+
+`agentstack-preregister-child` also saves Codex's formal registration response in the mode-`0600` canonical token and child state above, rather than only in the temporary handoff. Therefore `spawn_child.sh --pre-registered <name> --codex ...` can omit `--child-token-file` and still create a fresh expectation from the token, numeric ID, name, project, and program that came from the same registration. A complete child state may restore a missing canonical token, but the launcher does not guess from a legacy token-only state, corrupt metadata, a project/name/provider mismatch, or token and state from different registrations. Rerun `agentstack-preregister-child` for the same project, or pass a temporary token and its matching `.binding.json` through `--child-token-file`. A registered Codex child stops before CLI startup when it cannot persist a fresh expectation.
 
 The default `/delegate` path is `--pre-registered --embed-task --task-file <path>`. The parent writes the complete task to a temporary mode-`0600` file, and the launcher embeds it into the first Claude / Codex prompt together with the child name, parent name, spawn time, project key, and instruction to use `send_message` at completion. There is no registration, reregistration, or `fetch_inbox` startup ritual. This prompt is the only source of truth, so do not send the same child a separate task mail. `--task-file` takes precedence over the positional task argument and is also the boundary that prevents the shell from interpreting backticks or `$()` in the task.
 
@@ -126,10 +107,11 @@ The default `/delegate` path is `--pre-registered --embed-task --task-file <path
 ## Reregistration
 
 ```bash
-~/.agentstack/bin/agentstack-reregister "$AGENT_NAME"
+AGENTSTACK_PROJECT_KEY=/path/to/project \
+  ~/.agentstack/bin/agentstack-reregister "$AGENT_NAME"
 ```
 
-The helper reads the owner token and strong owner record from runtime state and restores the identity with the same name. Ambient and installed project keys are not authorization, and a bare `AGENT_NAME` does not grant Bash/write access. A pre-Phase-4 child state is upgraded only when its recorded project and actual cwd are in the same Git repository and token-authenticated `whois` succeeds. SessionStart performs the same recovery before Mail health/registration; the Mail `register_agent` tool itself remains available to an otherwise unregistered session. Cross-repository or ambiguous legacy state must be relaunched with an explicit namespace. Do not create a different name when same-name registration fails.
+The helper reads the owner token from runtime state and restores the identity with the same name. Do not create a different name when same-name registration fails. A different name separates the inbox, thread, reservations, and audit history.
 
 ## `CLAUDECODE` guard
 
@@ -153,6 +135,12 @@ The value is set with `tmux new-session -e` when the session is created, not in 
 - pass `--ask-for-approval ${AGENTSTACK_CODEX_APPROVAL:-on-request}`
 - pass `--add-dir` only when `AGENTSTACK_VAULT` exists
 - remove `OPENAI_API_KEY` and prefer ChatGPT OAuth
+
+Dashboard Codex resume also always sources the same installer-distributed `agentstack-codex-bootstrap`, re-registers the reserved identity, and creates a fresh resume launch before it execs `codex resume`. It does not depend on a personal wrapper under `~/.codex/bin`; a bootstrap or prepare failure prevents resume from starting.
+
+When the launcher created a child-specific `CODEX_HOME`, dashboard resume restores the same `CODEX_HOME`, `CODEX_SHARED_CODEX_DIR`, and writable root only after matching the formal project, agent ID and name with private child state / token and the local ORRERY proxy identity in `config.toml`. An existing session with no child state keeps its previous/default configuration. The legacy / `inherit` compatibility path also continues when valid state exists but the home is absent. Current metadata cannot distinguish “never created” from “removed later”, so that path records “no child config; Mail connectivity unconfirmed” in the resume detail and backend warning log. A same-name child home with no state, or a proxy for a different identity, is never adopted by guess and stops the resume.
+
+In the interactive TUI of `codex-cli 0.154.0`, measurement showed the startup / resume `SessionStart` hook firing after the first submitted user message, not while the composer remained idle. History may therefore remain unconfirmed immediately after resume; it becomes bound only after the first submit supplies an official payload whose ID and rollout header match the fresh resume launch. This timing statement is limited to the measured 0.154.0 path and is not a general guarantee for other versions or modes.
 
 Because an API key in the environment can override OAuth, it is removed only from the Codex subprocess.
 
@@ -188,11 +176,13 @@ ORRERY Telemetry delegation must be entered with the leading slash as `/delegate
 | Item | Details |
 | --- | --- |
 | Trigger | A request to delegate to a child, launch a subagent, or perform parallel work |
-| Basic form | `/delegate "<task>" [--dir <path>] [--codex] [--model <model>] [--worktree] [--worktree-base <rev>]` |
+| Basic form | `/delegate "<task>" [--dir <path>] [--codex] [--model <model>] [--codex-mcp <inherit\|orrery-only>] [--worktree] [--worktree-base <rev>]` |
 | Required prerequisites | The parent's ORRERY Mail identity and canonical project key. Editing tasks require a resource declaration and reservation |
 | Optional prerequisites | `--worktree` requires a Git repository; dashboard annotation requires the dashboard service |
 
 The parent agent does not finish when it hands off the task. It remains responsible for deciding scope and risk, making reservations, monitoring, and verifying the artifact. Use `--codex` for a Codex child, `--model` for an allowed model, and `--dir` to choose the child's working directory.
+
+Codex children default to MCP profile `inherit` for backward compatibility. `/delegate --codex-mcp orrery-only` keeps authenticated ORRERY Mail and the session-binding plugin while disabling other inherited MCP servers and plugins. Do not use it for tasks that require plugin skills or external app tools.
 
 The model generation names in `spawn_child.sh`'s model catalog are canonical. For Claude, an omitted model or `opus` means `claude-opus-5`, and `sonnet` means `claude-sonnet-5`; for Codex, an omitted model or `sol` means `gpt-5.6-sol`. `terra` / `luna` are aliases for the corresponding `gpt-5.6-*` models. Full IDs for older generations remain valid for compatibility, but the warm pool is claimed only for an exact match with the current 200K Opus / Sonnet entries in the catalog.
 

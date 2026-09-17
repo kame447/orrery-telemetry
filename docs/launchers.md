@@ -25,20 +25,6 @@ agent-start
 
 優先順位は明示引数、`fzf` picker、現在 directory の順です。
 
-## Top-level project context
-
-`agent-start`、`agent-start-codex`、任意導入の `agent-start-gemini` は、directory の選択後、登録や tmux session 作成より前に、その起動先から project context を解決します。親 shell、installed `env.sh`、既存 tmux server に残った project key や protected roots は、この選択の正本ではありません。
-
-明示的に namespace を指定する場合は `agent-start-codex --project-key KEY DIR` のように指定します。3種類の launcher が同じ引数を受け付けます。Git では linked worktree と main checkout が repository identity を共有し、独立 clone は分離されます。non-Git directory は物理パスが既定の key です。従来の non-Git namespace を継続するときも `--project-key` で明示してください。
-
-`work_dir` は指定した subdirectory を維持し、protected roots はその worktree 全体を保護します。explicit key は namespace であり、保護対象のパスではありません。Git metadata や別の main checkout を追加の保護 root として自動採用しません。Git 調査失敗、壊れた metadata、bare repository、既存のコロン区切り形式で表せない root は、別 project への fallback で隠さず起動前に拒否します。
-
-新しい tmux session には解決済みの値を `new-session -e` で明示し、新規 server の global environment には今回の project を埋め込みません。launcher は同じ context を bootstrap の明示 argv（`--top-level`、必要なら `--project-key`、検算用 `--expected-context`）でも渡し、bootstrap は実際の target から tuple 全体を再解決します。既存 pane 内では CLI と bootstrap の process environment を更新しますが、他 pane に影響する session-wide project metadata の移行はまだ行いません。`AGENTSTACK_PROJECT_CONTEXT=1`、env JSON、tmux environment は transport / hint であり ownership の証拠ではありません。予約済み child の context を top-level の override として渡してはいけません。
-
-argv なしの standalone bootstrap も ambient / installed key を採用せず、実際の target から既定 namespace を解決します。予約済み / resumed identity は後述の owner record で検証します。delegated child の reservation・handoff・cleanup と protected-root propagation、watcher、Dashboard、doctor、generated instructions / proxy の移行は後続 phase です。
-
-Gemini の `--dry-run` は context と予定コマンドだけを表示し、tmux・Mail・CLI を起動しません。model/effort、Codex の sandbox/approval と OAuth、Gemini が REPL 終了後に shell を残す動作は維持します。
-
 ## tmux session
 
 tmux 外から起動すると、新しい named session を作って現在の terminal tab を置き換えます。tmux 内からは current session を rename し、その場で CLI を `exec` します。
@@ -89,11 +75,12 @@ launcher は CLI を起動する前に ORRERY Mail へ identity を登録しま�
 3. ORRERY Mail health を確認
 4. project key、program、model、task metadata で登録
 5. 要求名と返された canonical name を比較。不一致なら top-level は明示して tmux session を返却名へ rename、reserved identity は停止
-6. managed agent list と clipboard を更新
+6. Codex CLI では数値 agent ID を含む今回の launch expectation を記録
+7. managed agent list と clipboard を更新
 
-top-level launcher と standalone bootstrap は project context を先に確定します。所有権の矛盾は `ensure_project`、owner token の送信、登録 state の書き込みより前に拒否します。ORRERY Mail が到達不能な場合も、preselected name に local conflict がない場合だけ CLI を起動します。server refusal、context failure、owner mismatch、persistence failure は hard stop です。
+`AGENTSTACK_PROJECT_KEY` が未設定、または ORRERY Mail が到達不能でも CLI 自体は preselected name で起動します。ただし mail、reservation、project-scoped dashboard 機能は使えません。
 
-Claude Code hook は session 内登録も記録します。Codex は Claude Code の hook system を持たないため、`agentstack-codex-bootstrap` が起動前の登録と tmux rename を担当します。
+Claude Code hook は session 内登録も記録します。Codex CLI は `agentstack-codex-bootstrap` が起動前の登録と tmux rename に加えて fresh `launch_id` を作り、公式 SessionStart hook が runtime の `session_id` と rollout header を確認して receipt を完成させます。receipt が無ければ Codex History は推測へ fallback しません。
 
 ## Registration token
 
@@ -103,14 +90,6 @@ Claude Code hook は session 内登録も記録します。Codex は Claude Code
 ${AGENTSTACK_RUNTIME_DIR:-$HOME/.agentstack/runtime}/agent_token_<name>
 ```
 
-同じ directory には mode `0600` の強い owner record も保存されます。
-
-```text
-${AGENTSTACK_RUNTIME_DIR:-$HOME/.agentstack/runtime}/agent_owner_<name>.json
-```
-
-record は namespace、Git repository identity（または non-Git root）、token の SHA-256 digest、作成経路を結び付けます。raw token は含みません。再登録時には実際の cwd から repository / worktree / protected roots を再解決します。同じ repository の linked worktree は継続できますが、独立 clone、別 repository、digest 不一致は Mail へ token を送る前に拒否します。non-Git owner は記録済みの物理 root 内だけで有効です。
-
 delegated child はさらに:
 
 ```text
@@ -119,7 +98,9 @@ ${AGENTSTACK_RUNTIME_DIR:-$HOME/.agentstack/runtime}/child-agents/<name>.json
 
 に child-owned state を持ちます。
 
-pre-registered child へ親 token は渡しません。dashboard spawn は child 専用 token を生成し、mode `0600` の一時 token file 経由で `spawn_child.sh --pre-registered` へ渡します。token を transcript、command-line argument、dashboard response に表示しないためです。
+pre-registered child へ親 token は渡しません。dashboard spawn は child 専用 token を生成し、mode `0600` の一時 token file 経由で `spawn_child.sh --pre-registered` へ渡します。Codex では正式な登録応答の数値 ID・name・project・program を非秘密の `.binding.json` sidecar に添えます。launcher は token と sidecar を検証し、CLI の起動と fresh launch expectation の作成が成功した後にだけ一時 handoff を消費します。token を transcript、command-line argument、dashboard response に表示しません。
+
+`agentstack-preregister-child` は Codex の正式な登録応答を、一時 handoff だけでなく上記の canonical token と child state にも mode `0600` で保存します。そのため `spawn_child.sh --pre-registered <name> --codex ...` は `--child-token-file` を省略しても、同じ登録に由来する token・数値 ID・name・project・program から fresh expectation を作れます。canonical token が無くても完全な child state からは復元できますが、token-only の旧 state、破損 metadata、project/name/provider の不一致、token と state の世代不一致は推測で補いません。`agentstack-preregister-child` を同じ project で再実行するか、一時 token と対応する `.binding.json` を `--child-token-file` で渡す必要があります。登録済み Codex child は fresh expectation を永続化できなければ CLI 起動前に停止します。
 
 `/delegate` の既定経路は `--pre-registered --embed-task --task-file <path>` です。親が mode `0600` の一時ファイルへタスク全文を書き、launcher が child 名、親名、spawn 時刻、project key、完了時の `send_message` 指示とともに Claude / Codex の最初の prompt へ埋め込みます。登録・再登録・`fetch_inbox` の起動儀式は不要です。この prompt が唯一の正本なので、同じ child へ task mail を別送してはいけません。`--task-file` は位置引数の task より優先し、backtick や `$()` を shell に解釈させず渡すための境界でもあります。
 
@@ -128,10 +109,11 @@ pre-registered child へ親 token は渡しません。dashboard spawn は child
 ## 再登録
 
 ```bash
-~/.agentstack/bin/agentstack-reregister "$AGENT_NAME"
+AGENTSTACK_PROJECT_KEY=/path/to/project \
+  ~/.agentstack/bin/agentstack-reregister "$AGENT_NAME"
 ```
 
-helper は owner token と強い owner record を runtime state から読み、同名 identity を復元します。ambient / installed project key と bare `AGENT_NAME` は Bash / write の authorization に使いません。Phase 4 より前の child state は、記録した project と実際の cwd が同じ Git repository で、token 付き `whois` が成功した場合だけ強い record へ upgrade します。SessionStart も Mail の health / registration より先に同じ復旧を行います。未登録 session から Mail の `register_agent` tool を呼ぶ経路自体は維持します。cross-repository / 曖昧な legacy state は明示 namespace での再起動が必要です。同名登録に失敗しても別名を作らないでください。
+helper は owner token を runtime state から読み、同名 identity を復元します。同名登録に失敗しても別名を作らないでください。別名は inbox、thread、reservation、監査履歴を分断します。
 
 ## `CLAUDECODE` guard
 
@@ -155,6 +137,12 @@ CLAUDECODE=1
 - `--ask-for-approval ${AGENTSTACK_CODEX_APPROVAL:-on-request}`
 - `AGENTSTACK_VAULT` が存在するときだけ `--add-dir`
 - `OPENAI_API_KEY` を除去し、ChatGPT OAuth を優先
+
+dashboard の Codex resume も installer が配る同じ `agentstack-codex-bootstrap` を必ず source し、reserved identity を再登録して fresh resume launch を作ってから `codex resume` を exec します。個人用 `~/.codex/bin` wrapper には依存せず、bootstrap / prepare が失敗すれば resume 自体を開始しません。
+
+launcher が child 専用 `CODEX_HOME` を作っていた場合、dashboard resume は正式な project・agent ID・name と private child state / token、さらに `config.toml` 内の local ORRERY proxy identity を照合してから、同じ `CODEX_HOME` / `CODEX_SHARED_CODEX_DIR` と writable root を復元します。state の無い既存 session は従来どおり既存 / 既定設定を使い、state は正しいのに home が無い旧・`inherit` 互換経路も継続します。後者は「home を作らなかった」と「後から消えた」を現 metadata では区別できないため、resume の detail と backend warning に「子専用設定なし・Mail 接続未確認」を残します。state が無いのに同名 child home だけ残る場合や、proxy identity が違う場合は、名前から推測して採用せず resume を停止します。
+
+`codex-cli 0.154.0` の interactive TUI では、startup / resume の `SessionStart` hook は composer を開いて idle の間ではなく、最初の user message を submit した後に発火することを実測しています。そのため resume 直後は history が未確認でもよく、最初の submit 後に公式 payload と rollout header が fresh resume launch に一致して初めて bound になります。この発火時点は 0.154.0 の実測範囲であり、他 version / mode の一般保証ではありません。
 
 API key が環境にあると OAuth を上書きすることがあるため、Codex subprocess だけから除去します。
 
@@ -190,11 +178,13 @@ ORRERY Telemetry の委譲は、必ず先頭の slash を付けて `/delegate ..
 | 項目 | 内容 |
 | --- | --- |
 | トリガー | child への委譲、subagent 起動、並列作業を依頼されたとき |
-| 基本形 | `/delegate "<task>" [--dir <path>] [--codex] [--model <model>] [--worktree] [--worktree-base <rev>]` |
+| 基本形 | `/delegate "<task>" [--dir <path>] [--codex] [--model <model>] [--codex-mcp <inherit\|orrery-only>] [--worktree] [--worktree-base <rev>]` |
 | 必須前提 | 親の ORRERY Mail identity と正本 project key。編集 task では対象 resource 宣言と reservation |
 | 任意前提 | `--worktree` には git repository、dashboard annotation には dashboard service |
 
 親 agent は task を渡して終了せず、scope と risk の決定、reservation、monitoring、成果物の検証に責任を持ちます。`--codex` で Codex child、`--model` で許可済み model、`--dir` で child の cwd を選びます。
+
+Codex child の MCP は既定で `inherit`（従来互換）です。`/delegate --codex-mcp orrery-only` は認証済み ORRERY Mail と session-binding plugin を残して、他の継承 MCP/plugin を無効化します。plugin skill や外部 app tool が必要な task では使いません。
 
 model の世代名は `spawn_child.sh` の model catalog が正本です。Claude は無指定 / `opus` が `claude-opus-5`、`sonnet` が `claude-sonnet-5`、Codex は無指定 / `sol` が `gpt-5.6-sol` です。`terra` / `luna` は対応する `gpt-5.6-*` alias です。旧世代の正式 ID は互換性のため有効なままですが、warm pool を claim するのは catalog が示す current 200K Opus / Sonnet と完全一致するときだけです。
 

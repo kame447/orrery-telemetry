@@ -15,7 +15,7 @@ installer が `settings.template.json` を `~/.claude/settings.json` へ merge �
 | Event / matcher | 実行ファイル | 発火タイミング | 主な動作 |
 | --- | --- | --- | --- |
 | `SessionStart` | [`set-ghostty-title.sh`](../hooks/set-ghostty-title.sh) | startup / resume / `/clear` / compact の直後 | 既知の identity を pane metadata、tmux session、terminal title 用 clipboard、managed agent list へ反映 |
-| `SessionStart` | [`session-start-reminder.sh`](../hooks/session-start-reminder.sh) | 同上。title helper の後 | ORRERY Mail health と既存 identity を確認し、同名再登録または登録手順と `fetch_inbox` を session context へ出力 |
+| `SessionStart` | [`session-start-reminder.sh`](../hooks/session-start-reminder.sh) | 同上。title helper の後 | ORRERY Mail health と既存 identity を確認し、embedded task・bound proxy・raw/direct の優先順位に沿う案内を session context へ出力 |
 | `PreToolUse` / `Edit|Write` | [`check-file-reservation.sh`](../hooks/check-file-reservation.sh) | Claude Code が file edit を実行する直前 | protected root 内の既存 exact path reservation を renew-only で確認。0件は1回だけ再確認し、なお0件なら exit 2 で block |
 | `PreToolUse` / `Edit|Write|Bash` | [`check-agent-registered.sh`](../hooks/check-agent-registered.sh) | edit、write、shell command の直前 | 現在の Claude session が `register_agent` 済みか session flag で検査。未登録なら exit 2 で block |
 | `PreToolUse` / reservation tools | [`invalidate-release-debounce.sh`](../hooks/invalidate-release-debounce.sh) | file reservation の取得・renew 直前 | 同じ agent/path に対する古い release worker の token を無効化し、新しい reservation が直後に消される競合を防止 |
@@ -41,16 +41,18 @@ file と tool argument の境界を変えません。旧 Keychain service は既
 ### `session-start-reminder.sh`
 
 - **発火:** すべての `SessionStart` source。startup だけでなく resume、`/clear`、compact 後にも走ります。
-- **動作:** identity を `AGENT_NAME` → pane metadata → exact tmux session の順で解決し、ORRERY Mail の liveness を確認します。owner token と project key があれば shell 側で同じ identity を再登録し、成功後は `fetch_inbox` から始めるよう案内します。
-- **再登録できない場合:** 解決済みの同名を `register_agent` に渡す手順を表示します。別名生成へ分岐しません。child 専用 MCP proxy が認証を注入している場合は、model に token file を読ませません。
+- **動作:** identity を `AGENT_NAME` → pane metadata → exact tmux session の順で解決し、ORRERY Mail の liveness を確認します。owner token と project key があれば shell 側で同じ identity を再登録します。そのうえで、登録済み・儀式不要を明示した embedded task、提供 tool schema が示す bound proxy、raw/direct 接続の順に最初に一致した経路だけを使うよう案内します。embedded task は parent の有無だけで除外しません。shell 登録と raw MCP tool session の認証は別です。
+- **経路の境界:** child proxy の設定 artifact は案内を具体化する hint にだけ使い、model に実際に提供された tool の説明と引数 schema を優先します。bound proxy では helper・再登録・token file 読取を指示せず、障害時も raw/helper へ自動 fallback させません。raw/direct の既存 identity だけ token-safe helper に進み、新規 raw 登録とは分けます。generic な登録失敗を stale token と断定しません。
 
 ### `check-file-reservation.sh`
 
-- **発火:** `Edit` / `Write` の直前。対象 path が `AGENTSTACK_PROTECTED_ROOTS`、または未指定時の project root 内にある場合だけ enforcement します。
-- **project key:** `AGENTSTACK_PROJECT_KEY` → `PROJECT_KEY` → `${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh` の `AGENTSTACK_PROJECT_KEY` → hook input の cwd の順で解決します。installed `env.sh` は shell として source せず、対象の `export AGENTSTACK_PROJECT_KEY=...` だけを literal として読みます。この共通 resolver は registration guard、session reminder、child cleanup、`agentstack-await-reply` も使うため、launcher を経由しない editor session でも install 時と同じ project を参照します。
+- **発火:** `Edit` / `Write` の直前。対象 path が実際の workspace の protected root（下記）内にある場合だけ enforcement します。
+- **workspace が先:** hook input の `cwd` を session の実際の workspace とします。hook process 自身の directory を使うのは input に `cwd` が無い場合だけです。`cwd` が存在しない directory・相対 path・文字列以外なら、path 判定や request の前に `AGENT PROJECT CONTEXT UNRESOLVED` で block します。
+- **project key:** 選択 key は `AGENTSTACK_PROJECT_KEY` → `PROJECT_KEY` → `${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh` の `AGENTSTACK_PROJECT_KEY`（literal として読み、source しない）です。この key は registration と同じ検証を workspace に対して通る必要があります。path の key は同じ Git repository（linked worktree は canonical repository の namespace を共有）か non-Git workspace を含む directory、logical key は launcher が渡す一致した `AGENTSTACK_PROJECT_REPOSITORY` / `AGENTSTACK_PROJECT_WORK_DIR` がある場合だけ有効です。live / installed を問わず検証に失敗した key は、request の前に `AGENT PROJECT CONTEXT MISMATCH` で block します。選択 key が無ければ workspace 自身の repository（または directory）が namespace です。
+- **protected root:** 常に実際の worktree root（non-Git なら検証済み project directory）です。`AGENTSTACK_PROTECTED_ROOTS` で追加できるのは同じ repository の別 worktree root だけで、他 project の root は無視され workspace を置き換えられません。編集 path は workspace 基準で解決し、symlink と `..` も解決してから照合するため、root 配下の表記で別の場所の file を装えません。本当に root 外の file は exit 0 です。ただし input に `cwd` が無い場合は hook directory が workspace の証拠にならないため、root 外の file も unresolved として block します。
 - **identity:** `AGENT_NAME` を優先します。無い場合は `TMUX_PANE` で対象 pane の tmux session を明示取得し、pane metadata は一致確認にだけ使います。metadata と session が違う、placeholder、または解決不能なら HTTP を送る前に exit 2 で block します。untargeted な ambient tmux session は使いません。tmux 外の client でも、`register_agent` を呼んで `<runtime>/session_index/` に記録されていれば、hook input の `session_id` から identity を解決します（優先度は env → tmux → session index）。`session_id` は `[a-zA-Z0-9_-]` 以外を含むなら使わず、symlink の index entry は読みません。identity source が1つも無い session の扱いは下記「unmanaged session」に従います。
 - **動作:** 既存 reservation を相対 path / absolute path の両方で renew-only 確認します。owner `registration_token` は読み込まず tool arguments に送りません。legacy HTTP bearer は別の transport credential で、generated selector が `disabled` の native endpoint には送りません。0件なら非同期 commit を考慮して1回だけ再確認し、auto-acquire はしません。
-- **判定:** 既存 reservation は exit 0、definitive zero、HTTP rejection、JSON-RPC error、MCP `isError=true`または非boolean、schema違反、malformed response、zero後のretry failureは exit 2 です。`isError` は省略または boolean `false` だけを成功として許します。exact identity と protected scope の確定後、**最初の照会**が transport unreachable の場合だけ運用上の fail-open があります。pathなしと protected root外は enforcement 対象外なので exit 0 です。
+- **判定:** 既存 reservation は exit 0、definitive zero、HTTP rejection、JSON-RPC error、MCP `isError=true`または非boolean、schema違反、malformed response、zero後のretry failureは exit 2 です。`isError` は省略または boolean `false` だけを成功として許します。exact identity と protected scope の確定後、**最初の照会**が transport unreachable の場合だけ運用上の fail-open があります。pathなしと protected root外は enforcement 対象外なので exit 0 です。ただし不正な `cwd` や workspace に対して検証できない選択 project はその前に exit 2、hook `cwd` が無い場合の root 外 path も exit 2 です。
 - **deploy順:** strict identity版を既存sessionへ途中適用しません。cutover C5で全clientを`agent-start`経由でrestart/rebindし、exact identityを確認してからrepo版をliveへ同期し、予約あり/なしの両方向testを通します。
 
 ### `check-agent-registered.sh`
@@ -63,7 +65,8 @@ file と tool argument の境界を変えません。旧 Keychain service は既
 ### reservation release hook 群
 
 - **同じ座標系:** [`reservation-common.sh`](../hooks/reservation-common.sh) を `check-file-reservation.sh` と release hook が source し、endpoint、legacy bearer selector、identity、project key、protected root、相対/絶対 path を同じ規則で解決します。HTTP request は常に `Accept: application/json, text/event-stream` を付けます。
-- **grace / debounce:** `release-file-reservation.sh` は `AGENTSTACK_RELEASE_GRACE_SECONDS`（既定90秒、旧 `FILE_RESERVATION_RELEASE_GRACE_SECONDS` も可）だけ待ってから [`release-file-reservation-worker.py`](../hooks/release-file-reservation-worker.py) が解放します。state は `$AGENTSTACK_RUNTIME_DIR/file_release_debounce/` にあり、次の edit は token を更新し、再予約 hook は state file を消して古い worker を no-op にします。
+- **同じ workspace:** release hook も guard と同じく workspace を解決・検証します。検証できなければ `release-failures.log` に `error=project-context-invalid` を記録して何も送らず、他 project の reservation を解放しません。`release-all-reservations.sh` と再予約 hook は、hook `cwd` が無い場合、選択 project key が hook directory に対して独立に検証できるときだけ動きます。
+- **grace / debounce:** `release-file-reservation.sh` は `AGENTSTACK_RELEASE_GRACE_SECONDS`（既定90秒、旧 `FILE_RESERVATION_RELEASE_GRACE_SECONDS` も可）だけ待ってから [`release-file-reservation-worker.py`](../hooks/release-file-reservation-worker.py) が解放します。state は `$AGENTSTACK_RUNTIME_DIR/file_release_debounce/` にあり、次の edit は token を更新し、再予約 hook は state file を消して古い worker を no-op にします。state slot は project namespace・agent・相対 path で名付けるため、2つの project の同じ agent 名・path が互いの release を取り消すことはありません。
 - **欠損・障害:** worker が配布されていなければ同期の即時 release に fallback します。HTTP 406、接続不能、JSON-RPC / MCP error などの解放失敗は `$AGENTSTACK_RUNTIME_DIR/release-failures.log` に1行記録します。hook 自体は edit 完了や session 終了を失敗扱いにしません。
 - **SessionEnd の境界:** `release-all-reservations.sh` は reservation だけを解放します。agent を retire しないため、crash / resume でも irreversible な identity 変更を起こしません。
 
@@ -112,13 +115,15 @@ service が応答しているなら登録は可能なので、既定は**要求�
 - **親子保護:** 親が child を preregister した PostToolUse でも、親 pane metadata を child identity に書き換えません。
 - **保証境界:** PostToolUse は server call 後なので、拒否した別名 row を transaction rollback はしません。また `check-agent-registered.sh` は既存 `AGENT_NAME` を持つ channel を flag なしでも許可します。この hook の保証は「不一致を黙って受理せず、成功 state を新規作成しない」であり、全 session の後続操作を強制停止することではありません。
 
-## 運用 helper（6件）
+## 運用 helper（8件）
 
 以下は `settings.template.json` の event へ直接登録されません。caller と起動条件を明示して運用します。
 
 | 実行ファイル | 呼び出し元 / 起動タイミング | 主な動作 |
 | --- | --- | --- |
 | [`record-session-index.py`](../hooks/record-session-index.py) | `mark-agent-registered.sh` が PostToolUse payload を渡して**同期**起動 | ORRERY Mail ID と Claude `session_id`、transcript、cwd、`project_key`、`registered_by` の exact mapping を atomic write。他人を登録した呼び出しは記録しない |
+| [`prepare-codex-session-binding.py`](../hooks/prepare-codex-session-binding.py) | Codex CLI launcher が ORRERY Mail 登録後、CLI 起動直前に実行 | server 応答由来の project・数値 agent ID・name・program に fresh `launch_id` を加え、今回の receipt 期待を atomic write |
+| [`record-codex-session-index.py`](../integrations/codex_app/plugin/scripts/record-codex-session-index.py) | 公式 Codex `SessionStart` payload を plugin runner が同期入力 | payload の `session_id` と rollout header ID を照合し、同じ `launch_id` の current launch だけを Codex session index として atomic write |
 | [`resolve-agent-name.sh`](../hooks/resolve-agent-name.sh) | identity が必要な reminder、reservation、cleanup helper が source | env → exact tmux session → session index（caller が `AGENTSTACK_SESSION_ID` を渡した場合）の順で identity を解決 |
 | [`spawn_child.sh`](../hooks/spawn_child.sh) | `/delegate` または dashboard の NEW AGENT が child 起動時に明示実行 | identity、token、task mail、reservation、tmux、Claude / Codex、worktree、readiness を一つの launch transaction にまとめる |
 | [`cleanup-child-agent.sh`](../hooks/cleanup-child-agent.sh) | `spawn_child.sh` が起動した child の REPL command が終了した直後 | reservation release、remote identity retire、managed list / state / credential / MCP config の削除を best-effort 実行 |
@@ -128,6 +133,16 @@ service が応答しているなら登録は可能なので、既定は**要求�
 ### `record-session-index.py`
 
 PostToolUse payload から ORRERY Mail の数値 ID、canonical name、Claude `session_id`、transcript path、cwd を取り出し、`$AGENTSTACK_RUNTIME_DIR/session_index/<agent_id>.json` へ一時 file + `os.replace` で書きます。record は `schema_version: 2` と `binding_kind: "self"` を持ちます。**呼び出し元が別の agent を登録した場合（親による child 登録）は record を書きません** — この index は dashboard の resume と guard の identity 解決の両方に読まれるので、読む側で除外するのではなく、書かない方が誤用の余地が残りません。dashboard はこの exact mapping を session resume に優先し、古い session だけ heuristic へ fallback します。入力不備や I/O failure は registration を妨げない quiet no-op です。
+
+### Codex CLI session binding helper
+
+`prepare-codex-session-binding.py` は launcher が取得した正式な登録情報を `$AGENTSTACK_RUNTIME_DIR/codex_launches/<agent_id>.json` に記録します。`launch_id` は起動ごとに新しく、`binding_expected` と起動種別を含みます。prepare は CLI 起動前の必要条件で、helper が無い、lock を作れない、または metadata を atomically 保存できない場合、launcher は新しい CLI を開始しません。これにより旧 launch / receipt を新 run の成功として残しません。pre-register helper と dashboard NEW AGENT は数値 ID を token とは別の非秘密 sidecar に残し、`spawn_child.sh` が child state へ取り込むため、名前による DB 再検索や親の一般 env を identity 根拠にしません。
+
+`record-codex-session-index.py` が identity に使う runtime 値は SessionStart stdin の `session_id` だけです。`CODEX_THREAD_ID`、`CODEX_SESSION_ID`、cwd、時刻、候補数は使いません。payload path の実体が通常 file で、先頭 `session_meta` ID が一致し、launch metadata の project・数値 ID・name・program と launcher がこの process に渡した `launch_id` がすべて一致したときだけ `provider: codex` の receipt を書きます。recorder は trusted plugin runner と同梱し、index の runtime root は launch metadata path から導出します。login shell が親の `AGENTSTACK_RUNTIME_DIR` を復元しても保存先をすり替えられません。内蔵 subagent event は別 CLI process ではなく root ID を共有するため除外します。
+
+この recorder は `agentstack-codex-app` の SessionStart hook plugin が導入・有効である場合にだけ呼ばれます。core install は配置済み plugin source を更新しても Codex が選ぶ optional marketplace/cache を自動更新・有効化しません。既存の有効な plugin には [plugin-only refresh](codex-app.md#core-更新後の既存-plugin-refresh) を実行し、その後の fresh process で確認します。未導入・disabled の利用者は自動 opt-in されません。
+
+launcher と recorder は同じ agent-ID lock を取ります。launch metadata は最初の `session_id` を一方向に claim し、別 ID を一度でも検出するとその generation を競合状態に固定します。各 callback は fresh receipt nonce を launch metadata に先に書き、index は同じ nonce を持つときだけ有効です。したがって index の削除に失敗しても古い receipt は通らず、新 launch まで別 ID、`clear`、再入力、`compact` で自動復旧しません。新 launch を記録した後に旧 callback が遅着しても current `launch_id` と一致せず、現在の receipt を上書きしません。SessionStart hook 自体は fail-open で CLI を止めませんが、`no_transcript`、`id_mismatch`、`write_failed` 等を launch metadata / stderr に残します。dashboard は約10秒の表示猶予後も current receipt が無ければ DECK に `? UNBOUND`、明示的に履歴保存なしなら `— NO HISTORY` を表示し、理由は History tab だけに出します。
 
 ### `resolve-agent-name.sh`
 
@@ -157,7 +172,7 @@ dangerous command pattern の検査は `AGENTSTACK_MONITOR_DANGER_CHECK=1` の�
 
 ## Codex との違い
 
-Codex CLI には Claude Code の `SessionStart` / `PreToolUse` / `PostToolUse` hook system がなく、`mark-agent-registered.sh` も走りません。`agent-start-codex` は bootstrap で identity 登録と tmux rename を済ませ、予約済み child/resume と reregister は応答名不一致で停止します。一方、direct spawn は警告後に応答名を採用し、raw MCP 登録は自動検出されません。これらは別 follow-up であり、mail service の `passthrough` 設定を省略できる根拠にはなりません。managed `~/.codex/AGENTS.md` は reservation の reserve / renew / release を指示します。mail watcher と ORRERY Mail registry は Claude / Codex 共通なので、通知と reservation conflict は相互に見えます。
+Codex CLI の公式 `SessionStart` hook は上記の履歴 receipt に使いますが、Claude Code の registration `PostToolUse` や reservation `PreToolUse` guard と同じものではなく、`mark-agent-registered.sh` も走りません。`agent-start-codex` は bootstrap で identity 登録、tmux rename、launch expectation を済ませ、予約済み child/resume と reregister は応答名不一致で停止します。一方、direct spawn は警告後に応答名を採用し、raw MCP 登録は自動検出されません。managed `~/.codex/AGENTS.md` は reservation の reserve / renew / release を指示します。mail watcher と ORRERY Mail registry は Claude / Codex 共通なので、通知と reservation conflict は相互に見えます。
 
 Codex Desktop はさらに別の plugin hook / Bridge lifecycle を使います。詳しくは [Codex App 統合](codex-app.md)を参照してください。
 
@@ -168,7 +183,3 @@ Codex Desktop はさらに別の plugin hook / Bridge lifecycle を使います�
 - [Codex App 統合](codex-app.md)
 - [設定](configuration.md)
 - [トラブルシューティング](troubleshooting.md)
-
-### 予約の workspace 境界
-
-予約の更新・解除は、hook payload の `cwd` から検証した project と保護対象 root を使います。installed environment の古い root で先に対象外と判定しません。相対 file path も hook プロセスの cwd ではなく payload の cwd を基準に物理パスへ解決します。同一 repository の linked worktree は Mail namespace を共有し、保護範囲は各 worktree です。cwd が不明・無効なら編集を拒否し、予約変更を送りません。

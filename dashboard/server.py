@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import atexit
+import hmac
 import json
 import logging
 import math
@@ -31,6 +32,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1092,6 +1094,7 @@ def build_agents(history_days: float | None = HISTORY_DAYS_DEFAULT) -> list[dict
                 "model": _display_model(pane_model) or
                          (m or {}).get("model", ""),
                 "model_raw": pane_model or (m or {}).get("model_raw", ""),
+                "program": program,
                 "provider": _provider_of(
                     pane_model
                     or (m or {}).get("model_raw")
@@ -1132,7 +1135,7 @@ def build_agents(history_days: float | None = HISTORY_DAYS_DEFAULT) -> list[dict
             cutoff_sql, cutoff_params = _history_cutoff(history_days)
             cur.execute(
                 f"""
-                SELECT a.name, a.model, a.task_description, a.last_active_ts,
+                SELECT a.name, a.model, a.program, a.task_description, a.last_active_ts,
                        {retired_flag} AS retired
                 FROM agents a
                 JOIN projects p ON a.project_id = p.id
@@ -1152,6 +1155,7 @@ def build_agents(history_days: float | None = HISTORY_DAYS_DEFAULT) -> list[dict
                     "running": False, "attached": False, "mail_linked": False,
                     "cmd": "", "live": "",
                     "model": _display_model(r["model"]), "model_raw": r["model"],
+                    "program": r["program"] or "",
                     "provider": _provider_of(r["model"]),
                     "ctx_window": _ctx_window(r["model"]),
                     "ctx_used": None, "act_state": None,
@@ -1188,6 +1192,8 @@ def build_agents(history_days: float | None = HISTORY_DAYS_DEFAULT) -> list[dict
 
     observed_now = time.time()
     for row in rows:
+        if row.get("program") in {"codex", "codex-cli"}:
+            row.update(_codex_history_binding(row["name"], now=observed_now))
         signature = (
             row.get("act_state"),
             row.get("ctx_used"),
@@ -2105,6 +2111,8 @@ def _all_transcripts() -> list[str]:
 
 
 SESSION_INDEX_DIR = os.path.join(RUNTIME_DIR, "session_index")
+CODEX_LAUNCH_DIR = os.path.join(RUNTIME_DIR, "codex_launches")
+CODEX_BINDING_GRACE_SECONDS = 10.0
 
 
 def _agent_id_for_name(name: str) -> int | None:
@@ -2155,10 +2163,7 @@ def _indexed_transcript(name: str) -> str | None:
     # somebody else -- a parent's transcript once appeared on a child's card
     # this way. Falling back to the heuristic is better than showing the wrong
     # session with certainty.
-    # Schema 3 adds validated repository/workspace provenance. Schema 2 stays
-    # readable here for historical transcript display; identity hooks accept
-    # it only with their stricter project/cwd repository corroboration.
-    if o.get("schema_version") not in (2, 3) or o.get("binding_kind") != "self":
+    if o.get("schema_version") != 2 or o.get("binding_kind") != "self":
         return None
     if o.get("agent_name") != name:
         return None
@@ -2341,6 +2346,11 @@ def do_resume(session: str) -> dict:
         return _open_codex_app(session)
     if program.startswith("codex"):
         return _do_resume_codex(session)
+    if not program.startswith("claude"):
+        return {
+            "ok": False,
+            "error": "Agent provider is unconfirmed; transcript resume is unavailable",
+        }
     path = _transcript_path(session)
     if not path:
         return {"ok": False,
@@ -2401,9 +2411,11 @@ def _codex_meta(path: str) -> tuple[str | None, str | None]:
         with open(path, encoding="utf-8", errors="ignore") as f:
             first = f.readline().strip()
         o = json.loads(first)
-        if o.get("type") != "session_meta":
+        if not isinstance(o, dict) or o.get("type") != "session_meta":
             return None, None
-        p = o.get("payload") or {}
+        p = o.get("payload")
+        if not isinstance(p, dict):
+            return None, None
         sid = p.get("id")
         cwd = p.get("cwd")
         if not isinstance(cwd, str) or not os.path.isdir(cwd):
@@ -2457,37 +2469,257 @@ def _codex_child_launch_flags(extra_dirs: list[str] | None = None) -> str:
     return " ".join(parts)
 
 
+_CODEX_PROGRAMS = {"codex", "codex-cli"}
+_CODEX_CHILD_STATE_MAX_BYTES = 65536
+_CODEX_CHILD_CONFIG_MAX_BYTES = 1024 * 1024
+
+
+def _read_private_regular(path: str, label: str, limit: int) -> bytes:
+    """Read one owner-only regular file without following a final symlink."""
+
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise ValueError(f"{label} is unavailable") from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError(f"{label} is not a regular file")
+    if info.st_uid != os.getuid():
+        raise ValueError(f"{label} is not owned by the dashboard user")
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        raise ValueError(f"{label} permissions must be 0600")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError(f"{label} is unavailable") from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.getuid():
+            raise ValueError(f"{label} changed while it was opened")
+        if stat.S_IMODE(opened.st_mode) & 0o077:
+            raise ValueError(f"{label} permissions must be 0600")
+        raw = os.read(descriptor, limit + 1)
+    finally:
+        os.close(descriptor)
+    if len(raw) > limit:
+        raise ValueError(f"{label} is too large")
+    return raw
+
+
+def _is_agentstack_mail_alias(name: str) -> bool:
+    normalized = name.replace("-", "").replace("_", "").replace('"', "").lower()
+    return normalized in {
+        "agentmail", "mcpagentmail", "agentstackmail", "orrerymail", "agentstack",
+    }
+
+
+def _validate_codex_child_proxy_config(
+    config: dict, *, session: str, registration: dict, token_file: str
+) -> None:
+    """Require every configured Mail alias to be this child's local proxy."""
+
+    servers = config.get("mcp_servers")
+    if not isinstance(servers, dict):
+        raise ValueError("child Codex config has no ORRERY proxy")
+    mail_servers = [
+        (name, value)
+        for name, value in servers.items()
+        if isinstance(name, str) and _is_agentstack_mail_alias(name)
+    ]
+    if not mail_servers:
+        raise ValueError("child Codex config has no ORRERY proxy")
+    expected_token = os.path.abspath(token_file)
+    for _name, server in mail_servers:
+        if not isinstance(server, dict):
+            raise ValueError("child Codex Mail alias is not a local proxy")
+        # A direct HTTP/bearer entry is the default-home failure mode R1b must
+        # not mistake for an authenticated child proxy.
+        if (
+            not isinstance(server.get("command"), str)
+            or not server["command"].strip()
+            or "url" in server
+            or "bearer_token_env_var" in server
+        ):
+            raise ValueError("child Codex Mail alias is not a local proxy")
+        env = server.get("env")
+        if not isinstance(env, dict):
+            raise ValueError("child Codex Mail proxy has no identity environment")
+        configured_token = env.get("AGENTSTACK_PROXY_TOKEN_FILE")
+        if not isinstance(configured_token, str) or (
+            os.path.abspath(os.path.expanduser(configured_token)) != expected_token
+        ):
+            raise ValueError("child Codex Mail proxy belongs to another registration")
+        if (
+            env.get("AGENTSTACK_PROXY_AGENT_NAME") != session
+            or env.get("AGENTSTACK_PROJECT_KEY") != registration["project_key"]
+            or not isinstance(env.get("AGENTSTACK_PROXY_PROGRAM"), str)
+            or env["AGENTSTACK_PROXY_PROGRAM"] not in _CODEX_PROGRAMS
+        ):
+            raise ValueError("child Codex Mail proxy belongs to another registration")
+
+
+def _codex_resume_child_home(
+    session: str, registration: dict
+) -> tuple[str | None, str]:
+    """Return a verified child CODEX_HOME and its restore status.
+
+    ``unmanaged`` means neither canonical child artifact exists and preserves
+    the pre-existing default/custom-home behavior. ``absent`` means formal
+    child state exists but no home was ever written (legacy/inherit) or it was
+    later removed; current metadata cannot distinguish those cases.
+    """
+
+    if not _valid(session):
+        raise ValueError("Codex child identity is unsafe")
+    state_dir = os.path.join(RUNTIME_DIR, "child-agents")
+    state_path = os.path.join(state_dir, f"{session}.json")
+    child_home = os.path.join(state_dir, f"{session}.codex-home")
+    try:
+        os.lstat(state_path)
+    except FileNotFoundError:
+        try:
+            os.lstat(child_home)
+        except FileNotFoundError:
+            return None, "unmanaged"
+        except OSError as exc:
+            raise ValueError("canonical Codex child home cannot be inspected") from exc
+        raise ValueError("canonical Codex child home has no matching child state")
+    except OSError as exc:
+        raise ValueError("canonical Codex child state cannot be inspected") from exc
+
+    try:
+        state = json.loads(
+            _read_private_regular(
+                state_path, "Codex child state", _CODEX_CHILD_STATE_MAX_BYTES
+            ).decode("utf-8")
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Codex child state is invalid") from exc
+    if not isinstance(state, dict):
+        raise ValueError("Codex child state is invalid")
+    if (
+        type(state.get("agent_id")) is not int
+        or state["agent_id"] <= 0
+        or state["agent_id"] != registration["agent_id"]
+        or state.get("agent_name") != session
+        or registration.get("agent_name") != session
+        or state.get("project_key") != registration["project_key"]
+        or not isinstance(state.get("program"), str)
+        or state["program"] not in _CODEX_PROGRAMS
+        or not isinstance(registration.get("program"), str)
+        or registration["program"] not in _CODEX_PROGRAMS
+    ):
+        raise ValueError("Codex child state belongs to another registration")
+    state_token = state.get("registration_token")
+    if not isinstance(state_token, str) or not state_token or len(state_token) > 4096:
+        raise ValueError("Codex child state has no usable owner credential")
+    token_key = re.sub(r"[^A-Za-z0-9_.-]", "_", session)
+    token_file = os.path.join(RUNTIME_DIR, f"agent_token_{token_key}")
+    try:
+        canonical_token = _read_private_regular(
+            token_file, "canonical Codex child credential", 4096
+        ).decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise ValueError("canonical Codex child credential is invalid") from exc
+    if not canonical_token or not hmac.compare_digest(
+        canonical_token.encode("utf-8"), state_token.encode("utf-8")
+    ):
+        raise ValueError("Codex child state and credential are from different registrations")
+
+    try:
+        home_info = os.lstat(child_home)
+    except FileNotFoundError:
+        return None, "absent"
+    except OSError as exc:
+        raise ValueError("canonical Codex child home cannot be inspected") from exc
+    if not stat.S_ISDIR(home_info.st_mode) or home_info.st_uid != os.getuid():
+        raise ValueError("canonical Codex child home is unsafe")
+    config_path = os.path.join(child_home, "config.toml")
+    try:
+        config = tomllib.loads(
+            _read_private_regular(
+                config_path, "Codex child config", _CODEX_CHILD_CONFIG_MAX_BYTES
+            ).decode("utf-8")
+        )
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError("Codex child config is invalid") from exc
+    _validate_codex_child_proxy_config(
+        config,
+        session=session,
+        registration=registration,
+        token_file=token_file,
+    )
+    return child_home, "restored"
+
+
 def _do_resume_codex(session: str) -> dict:
     """Codex agent を `codex resume <sid>` で tmux 再開する。
 
     rollout は ~/.codex/sessions/.../rollout-*.jsonl。session_meta.payload の
     id=session_id / cwd=作業ディレクトリ。cx と同じ起動条件を再現する:
-      - codex_agent_bootstrap.sh を source（AGENT_NAME export + ORRERY Mail
+      - installed agentstack-codex-bootstrap を source（AGENT_NAME export + ORRERY Mail
         再登録 + mail-watcher 起動 + tmux リネーム）
       - launch_codex_workspace.sh と同じ writable scope / sandbox / approval
-    selfref 探索ではなく inception_ts 一致で rollout を引くので子の会話を
-    誤マッチしない（_codex_transcript_path）。"""
+    project-scoped session index と rollout header の ID 一致で path を引き、
+    時刻 / cwd / selfref の推測へ落ちない（_codex_transcript_path）。"""
     path = _codex_transcript_path(session)
     if not path:
         return {"ok": False,
-                "error": f"'{session}' の Codex rollout が見つからず再開できません"}
+                "error": f"'{session}' の Codex rollout 対応付けを確認できず再開できません"}
     sid, cwd = _codex_meta(path)
     if not sid or not re.fullmatch(r"[0-9A-Fa-f-]{8,}", sid):
         return {"ok": False, "error": f"Codex session id 不正: {sid}"}
     if not cwd:
         return {"ok": False,
                 "error": "元の作業ディレクトリ(cwd)を特定できず再開できません"}
-    bootstrap = os.path.expanduser("~/.codex/bin/codex_agent_bootstrap.sh")
-    # zsh -lic で .zshrc を読ませ codex を PATH 解決。bootstrap が無ければ
-    # source をスキップ（AGENT_NAME export と resume は維持）。
-    src = f'source {shlex.quote(bootstrap)}; ' if os.path.exists(bootstrap) else ''
+    registration = _codex_registration(session)
+    if registration is None:
+        return {"ok": False,
+                "error": "Codex の正式な project/agent 登録を確認できず再開できません"}
+    try:
+        child_home, child_home_status = _codex_resume_child_home(
+            session, registration
+        )
+    except ValueError as exc:
+        return {"ok": False, "error": f"Codex child 設定を確認できません: {exc}"}
+    install_home = os.environ.get("AGENTSTACK_HOME") or os.path.dirname(HERE)
+    bootstrap = os.path.join(install_home, "bin", "agentstack-codex-bootstrap")
+    if not os.path.isfile(bootstrap):
+        return {
+            "ok": False,
+            "error": f"Codex resume bootstrap が見つかりません: {bootstrap}",
+        }
+    # The product bootstrap clears inherited launch pairs, re-registers the
+    # reserved identity and persists a fresh launch generation.  `&&` is the
+    # safety boundary: a bootstrap/prepare failure must not reach Codex exec.
+    src = (
+        f'source {shlex.quote(bootstrap)} {shlex.quote(cwd)} && '
+    )
+    child_home_env = ""
+    extra_dirs = None
+    if child_home:
+        child_home_env = (
+            f'export CODEX_HOME={shlex.quote(child_home)}; '
+            f'export CODEX_SHARED_CODEX_DIR={shlex.quote(child_home)}; '
+        )
+        extra_dirs = [child_home]
+    elif child_home_status == "absent":
+        logging.warning(
+            "Codex resume child home absent; using existing/default config "
+            "with Mail connectivity unconfirmed (agent=%s id=%s)",
+            session,
+            registration["agent_id"],
+        )
     inner = (
         'export PATH="$HOME/.local/bin:$PATH"; '
-        f'export AGENT_NAME={session}; '
+        f'export AGENT_NAME={shlex.quote(session)}; '
+        'export AGENTSTACK_RESERVED_IDENTITY=1; '
+        'export AGENTSTACK_CODEX_LAUNCH_KIND=resume; '
+        f'{child_home_env}'
         f'{src}'
         f'exec env -u OPENAI_API_KEY codex resume {sid} '
         f'-C {shlex.quote(cwd)} '
-        f'{_codex_child_launch_flags()}'
+        f'{_codex_child_launch_flags(extra_dirs)}'
     )
     launch = _open_terminal_tmux(
         ["tmux", "new-session", "-A", "-s", session, "-c", cwd,
@@ -2495,10 +2727,13 @@ def _do_resume_codex(session: str) -> dict:
         title=session,
     )
     if launch.get("ok"):
+        detail = f"Codex 会話を tmux で再開 (sid {sid[:8]}… / {cwd})"
+        if child_home_status == "absent":
+            detail += "。子専用設定なし。既存/既定設定で再開し、Mail 接続は未確認です"
         return {
             "ok": True,
             "action": "resumed",
-            "detail": f"Codex 会話を tmux で再開 (sid {sid[:8]}… / {cwd})",
+            "detail": detail,
             "terminal": launch.get("adapter"),
         }
     return {"ok": False, "error": f"codex resume 起動失敗: {launch.get('error')}"}
@@ -2544,85 +2779,241 @@ def _block_text(content) -> list[tuple[str, str]]:
     return rows
 
 
-_CODEX_SESSIONS_DIR = os.path.expanduser("~/.codex/sessions")
+def _codex_registration(session: str) -> dict | None:
+    """Return this project's numeric Codex CLI registration for ``session``."""
 
-
-def _codex_transcript_path(session: str) -> str | None:
-    """Codex (codex-cli) 用 transcript ファイルを探索する。
-
-    Codex は `~/.codex/sessions/YYYY/MM/DD/rollout-DATE-UUID.jsonl` に保存し、
-    ファイル名にエージェント名が入らない。1 行目の session_meta.payload.timestamp
-    を読み、ORRERY Mail の inception_ts と最も近い (90 秒以内) ものを返す。
-
-    結果は 120 秒キャッシュ。
-    """
-    now = time.time()
-    hit = _TPATH_CACHE.get(("codex", session))
-    if hit and now - hit[0] < 120:
-        return hit[1]
-
-    # The exact binding recorded at registration wins over the nearest-
-    # timestamp guess below, the same way `_transcript_path` prefers it for
-    # Claude. With several rollouts close together the guess picked another
-    # session's transcript for the History view (#27).
-    indexed = _indexed_transcript(session)
-    if indexed:
-        _TPATH_CACHE[("codex", session)] = (now, indexed)
-        return indexed
-
-    if not os.path.isdir(_CODEX_SESSIONS_DIR):
-        _TPATH_CACHE[("codex", session)] = (now, None)
-        return None
-
-    # ORRERY Mail から inception_ts を引く
     project_key = _project_key()
-    if not project_key:
-        _TPATH_CACHE[("codex", session)] = (now, None)
+    if not project_key or not os.path.isfile(DB_PATH):
         return None
-    inception = 0
     try:
         with _db() as con:
             con.row_factory = sqlite3.Row
             row = con.execute(
-                "SELECT a.inception_ts FROM agents a "
+                "SELECT a.id, a.program FROM agents a "
                 "JOIN projects p ON a.project_id=p.id "
                 "WHERE a.name=? AND p.human_key=? "
                 "ORDER BY a.last_active_ts DESC LIMIT 1",
                 (session, project_key),
             ).fetchone()
-            if row and row["inception_ts"]:
-                inception = _iso_to_epoch(row["inception_ts"])
     except sqlite3.Error:
-        pass
-    if not inception:
-        _TPATH_CACHE[("codex", session)] = (now, None)
+        return None
+    program = (row["program"] or "") if row else ""
+    if not row or program not in {"codex", "codex-cli"}:
+        return None
+    return {
+        "agent_id": int(row["id"]),
+        "agent_name": session,
+        "project_key": project_key,
+        "program": program,
+    }
+
+
+def _verified_codex_index(
+    session: str,
+    registration: dict,
+    expected_launch_id: str,
+    expected_session_id: str,
+    expected_receipt_id: str,
+) -> str | None:
+    """Validate one receipt against registration, launch, and rollout header."""
+
+    agent_id = registration["agent_id"]
+    project_key = registration["project_key"]
+    index_path = os.path.join(SESSION_INDEX_DIR, f"{agent_id}.json")
+    try:
+        with open(index_path, encoding="utf-8") as handle:
+            record = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
         return None
 
-    best_path: str | None = None
-    best_diff = 90  # 90 秒以内のみ採用
-    for root, _dirs, files in os.walk(_CODEX_SESSIONS_DIR):
-        for fn in files:
-            if not fn.startswith("rollout-") or not fn.endswith(".jsonl"):
-                continue
-            fp = os.path.join(root, fn)
-            try:
-                with open(fp, encoding="utf-8") as fh:
-                    first = fh.readline().strip()
-                    if not first:
-                        continue
-                    o = json.loads(first)
-                    if o.get("type") != "session_meta":
-                        continue
-                    ts_str = (o.get("payload") or {}).get("timestamp") or ""
-                    ts = _iso_to_epoch(ts_str)
-                    diff = abs(ts - inception) if ts else best_diff + 1
-                    if diff < best_diff:
-                        best_diff = diff
-                        best_path = fp
-            except (OSError, ValueError, KeyError):
-                continue
-    _TPATH_CACHE[("codex", session)] = (now, best_path)
-    return best_path
+    if record.get("schema_version") != 2:
+        return None
+    if record.get("binding_kind") != "self" or record.get("provider") != "codex":
+        return None
+    if record.get("program") != registration["program"]:
+        return None
+    if type(record.get("agent_id")) is not int or record["agent_id"] != agent_id:
+        return None
+    if record.get("agent_name") != session or record.get("project_key") != project_key:
+        return None
+    if record.get("registered_by") != session:
+        return None
+    if record.get("launch_id") != expected_launch_id:
+        return None
+    if record.get("receipt_id") != expected_receipt_id:
+        return None
+
+    session_id = record.get("session_id")
+    transcript_path = record.get("transcript_path")
+    if session_id != expected_session_id:
+        return None
+    if not isinstance(transcript_path, str) or not transcript_path.endswith(".jsonl"):
+        return None
+    real_transcript = os.path.realpath(transcript_path)
+    if not os.path.isfile(real_transcript):
+        return None
+    header_session_id, _cwd = _codex_meta(real_transcript)
+    if header_session_id != session_id:
+        return None
+    return transcript_path
+
+
+_CODEX_BINDING_REASONS = {
+    "awaiting_hook": "Waiting for this run's history binding receipt.",
+    "binding_missing": "This launch has no verified registration binding.",
+    "hook_not_observed": "This run did not produce a verified history binding receipt.",
+    "no_transcript": "This run did not provide a usable transcript file.",
+    "id_mismatch": "The runtime session ID did not match the rollout metadata.",
+    "write_failed": "The verified history receipt could not be written.",
+    "unsupported_source": "This runtime lifecycle event could not be bound safely.",
+    "receipt_missing": "This run's verified history receipt is unavailable.",
+    "invalid_binding": "History binding is unconfirmed because this launch's registration binding is invalid.",
+    "disabled": "This session is configured not to save transcript history.",
+}
+
+
+def _codex_history_binding(session: str, *, now: float | None = None) -> dict:
+    """Return visible binding state for the current launch, never a guess."""
+
+    registration = _codex_registration(session)
+    if registration is None:
+        return {
+            "history_binding": "unconfirmed",
+            "history_binding_reason": _CODEX_BINDING_REASONS["invalid_binding"],
+            "history_binding_reason_code": "invalid_binding",
+        }
+    launch_path = os.path.join(CODEX_LAUNCH_DIR, f"{registration['agent_id']}.json")
+    try:
+        with open(launch_path, encoding="utf-8") as handle:
+            launch = json.load(handle)
+    except (OSError, ValueError):
+        launch = None
+    valid_common = (
+        isinstance(launch, dict)
+        and launch.get("schema_version") == 1
+        and launch.get("provider") == "codex"
+        and launch.get("program") == registration["program"]
+        and type(launch.get("agent_id")) is int
+        and launch.get("agent_id") == registration["agent_id"]
+        and launch.get("agent_name") == session
+        and launch.get("project_key") == registration["project_key"]
+        and isinstance(launch.get("launch_id"), str)
+        and bool(launch.get("launch_id"))
+        and launch.get("launch_kind") in {"startup", "resume"}
+        and type(launch.get("binding_conflicted")) is bool
+        and (
+            launch.get("claimed_session_id") is None
+            or (
+                isinstance(launch.get("claimed_session_id"), str)
+                and bool(launch.get("claimed_session_id"))
+            )
+        )
+        and (
+            launch.get("receipt_id") is None
+            or (
+                isinstance(launch.get("receipt_id"), str)
+                and bool(launch.get("receipt_id"))
+            )
+        )
+    )
+    if not valid_common:
+        reason = "binding_missing" if launch is None else "invalid_binding"
+        return {
+            "history_binding": "unconfirmed",
+            "history_binding_reason": _CODEX_BINDING_REASONS[reason],
+            "history_binding_reason_code": reason,
+        }
+    if launch.get("history_mode") == "disabled" and launch.get("binding_expected") is False:
+        return {
+            "history_binding": "disabled",
+            "history_binding_reason": _CODEX_BINDING_REASONS["disabled"],
+            "history_binding_reason_code": "disabled",
+        }
+    if launch.get("history_mode") != "enabled" or launch.get("binding_expected") is not True:
+        return {
+            "history_binding": "unconfirmed",
+            "history_binding_reason": _CODEX_BINDING_REASONS["invalid_binding"],
+            "history_binding_reason_code": "invalid_binding",
+        }
+    if launch.get("binding_conflicted") is True:
+        return {
+            "history_binding": "unconfirmed",
+            "history_binding_reason": _CODEX_BINDING_REASONS["id_mismatch"],
+            "history_binding_reason_code": "id_mismatch",
+        }
+
+    claimed_session_id = launch.get("claimed_session_id")
+    receipt_id = launch.get("receipt_id")
+    transcript = None
+    if isinstance(claimed_session_id, str) and isinstance(receipt_id, str):
+        transcript = _verified_codex_index(
+            session,
+            registration,
+            launch["launch_id"],
+            claimed_session_id,
+            receipt_id,
+        )
+    if transcript:
+        return {
+            "history_binding": "bound",
+            "history_binding_reason": "",
+            "history_binding_reason_code": "bound",
+            "transcript_path": transcript,
+        }
+
+    reason = launch.get("last_reason")
+    if reason not in _CODEX_BINDING_REASONS or reason == "disabled":
+        reason = "receipt_missing" if reason == "bound" else "hook_not_observed"
+    observed_at = time.time() if now is None else float(now)
+    expected_at = launch.get("expected_at")
+    grace_age = (
+        observed_at - float(expected_at)
+        if type(expected_at) in {int, float}
+        else None
+    )
+    if (
+        grace_age is not None
+        and 0.0 <= grace_age < CODEX_BINDING_GRACE_SECONDS
+        and reason == "hook_not_observed"
+    ):
+        return {
+            "history_binding": "pending",
+            "history_binding_reason": _CODEX_BINDING_REASONS["awaiting_hook"],
+            "history_binding_reason_code": "awaiting_hook",
+        }
+    return {
+        "history_binding": "unconfirmed",
+        "history_binding_reason": _CODEX_BINDING_REASONS[reason],
+        "history_binding_reason_code": reason,
+    }
+
+
+def _codex_indexed_transcript(session: str) -> str | None:
+    """Return a receipt verified for the current Codex launch, or fail closed.
+
+    A Codex rollout has no agent name, so cwd, timestamps and candidate counts
+    cannot establish ownership. The session index is authoritative only when
+    it agrees with the current project's ORRERY Mail row and with the runtime
+    session id in the rollout header. Claude's legacy index reader deliberately
+    remains separate because its pre-provider records have a different
+    compatibility contract.
+    """
+    state = _codex_history_binding(session)
+    path = state.get("transcript_path")
+    return path if state.get("history_binding") == "bound" and isinstance(path, str) else None
+
+
+def _codex_transcript_path(session: str) -> str | None:
+    """Resolve Codex history only through a verified session-index binding.
+
+    This path intentionally has no cache and no timestamp/cwd scan. Reading
+    the small index on every request makes a newly written, replaced or removed
+    binding visible immediately and prevents a prior guessed path (including a
+    cached ``None``) from becoming authority for the current run.
+    """
+    return _codex_indexed_transcript(session)
 
 
 def _events_from_codex_jsonl(path: str) -> list[dict]:
@@ -2698,15 +3089,23 @@ def history_payload(session: str, limit: int) -> dict:
     # ため、program で先に分岐する（do_resume と同じ理由）。
     if program.startswith("codex"):
         path = _codex_transcript_path(session)
-        is_codex = bool(path)
-        if not path:                      # 念のため Claude 側もフォールバック
-            path = _transcript_path(session)
-    else:
+        if not path:
+            if program in {"codex", "codex-cli"}:
+                binding = _codex_history_binding(session)
+                return {"ok": False, "error": binding["history_binding_reason"], **binding}
+            return {"ok": False, "error": "Codex transcript history binding is unconfirmed"}
+        is_codex = True
+    elif program.startswith("claude"):
         path = _transcript_path(session)
         is_codex = False
         if not path:
             path = _codex_transcript_path(session)
             is_codex = bool(path)
+    else:
+        return {
+            "ok": False,
+            "error": "Agent provider is unconfirmed; transcript history is unavailable",
+        }
     if not path:
         return {
             "ok": False,
@@ -2742,7 +3141,7 @@ def history_payload(session: str, limit: int) -> dict:
     total = len(events)
     if limit and total > limit:
         events = events[-limit:]
-    return {
+    result = {
         "ok": True,
         "session": session,
         "file": os.path.basename(path),
@@ -2751,6 +3150,9 @@ def history_payload(session: str, limit: int) -> dict:
         "shown": len(events),
         "events": events,
     }
+    if is_codex:
+        result.update(history_binding="bound", history_binding_reason="")
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -4745,6 +5147,7 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
     if not isinstance(server_token, str):
         server_token = ""
     effective_child_token = server_token.strip() or child_token
+    registered_agent_id = registration.get("id")
     name_substituted = child_name != requested_name
     if name_substituted:
         logging.warning("spawn register normalized requested name %r to %r", requested_name, child_name)
@@ -4785,6 +5188,12 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
         }
         result.update(extra)
         return result
+
+    if provider == "codex" and (
+        type(registered_agent_id) is not int or registered_agent_id <= 0
+    ):
+        return retained_registration_error(
+            "register_agent returned no positive numeric id for Codex binding")
 
     # Registration defaults are contact-gated on ORRERY Mail. Match the
     # normal launcher path and open the new child before delivering its task.
@@ -4862,7 +5271,7 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
         nonlocal token_created
         paths = []
         if token_created and token_file:
-            paths.append(token_file)
+            paths.extend([token_file, f"{token_file}.binding.json"])
         if not keep_owner_credential:
             paths.extend([
                 owner_credential,
@@ -4955,6 +5364,25 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
             f.flush()
             os.fsync(f.fileno())
         os.chmod(token_file, 0o600)
+        if provider == "codex":
+            binding_file = f"{token_file}.binding.json"
+            binding_fd = os.open(binding_file, open_flags, 0o600)
+            with os.fdopen(binding_fd, "w") as f:
+                json.dump(
+                    {
+                        "agent_id": registered_agent_id,
+                        "agent_name": child_name,
+                        "project_key": project_key,
+                        "program": program,
+                    },
+                    f,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.chmod(binding_file, 0o600)
     except Exception as e:  # noqa: BLE001
         remove_spawn_credentials()
         return retained_registration_error(f"spawn token write failed: {e}")

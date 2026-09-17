@@ -144,58 +144,6 @@ if [ "$NAME_STATUS" -ne 0 ]; then
     exit 2
 fi
 
-# A successful Mail call does not make the model-supplied project_key an
-# authority for local session identity. Bind it to the hook's actual cwd. A
-# previously registered custom namespace is accepted only through a strong
-# owner record whose token digest and repository provenance both validate.
-PROJECT_CONTEXT_LIB="$HOOKS_DIR/project-context.sh"
-REGISTER_LIB="${AGENTSTACK_REGISTER_LIB:-$HOOKS_DIR/../bin/lib/agentstack-register.sh}"
-HOOK_CWD=$(printf '%s' "$INPUT" | python3 -c '
-import json, sys
-try:
-    value = json.loads(sys.stdin.read()).get("cwd", "")
-except Exception:
-    value = ""
-print(value if isinstance(value, str) else "")
-' 2>/dev/null || echo "")
-REGISTER_PROJECT_KEY=$(printf '%s' "$INPUT" | python3 -c '
-import json, sys
-try:
-    value = (json.loads(sys.stdin.read()).get("tool_input") or {}).get("project_key", "")
-except Exception:
-    value = ""
-print(value if isinstance(value, str) else "")
-' 2>/dev/null || echo "")
-VALIDATED_CONTEXT=""
-if [ -n "$HOOK_CWD" ] && [ -d "$HOOK_CWD" ] && \
-   [ -f "$PROJECT_CONTEXT_LIB" ] && [ -f "$REGISTER_LIB" ]; then
-    # shellcheck disable=SC1090
-    . "$PROJECT_CONTEXT_LIB"
-    # shellcheck disable=SC1090
-    . "$REGISTER_LIB"
-    OWNER_TOKEN="$(ags_load_registration_token "$AGENT_NAME_VAL" 2>/dev/null || true)"
-    if ags_registration_owner_exists_for_name "$AGENT_NAME_VAL"; then
-        if [ -n "$OWNER_TOKEN" ]; then
-            VALIDATED_CONTEXT="$(ags_registration_owner_context \
-                "$AGENT_NAME_VAL" "$OWNER_TOKEN" "$HOOK_CWD" 2>/dev/null || true)"
-        fi
-    else
-        VALIDATED_CONTEXT="$(agentstack_resolve_invocation_context "$HOOK_CWD" 2>/dev/null || true)"
-    fi
-fi
-VALIDATED_PROJECT_KEY="$(ags_registration_context_project_key "$VALIDATED_CONTEXT" 2>/dev/null || true)"
-if [ -z "$VALIDATED_CONTEXT" ] || [ -z "$REGISTER_PROJECT_KEY" ] || \
-   ! ags_project_keys_equal "$REGISTER_PROJECT_KEY" "$VALIDATED_PROJECT_KEY"; then
-    mkdir -p "$RUNTIME_DIR"
-    printf '%s mark-agent-registered: project/workspace ownership mismatch (session_id=%s cwd=%s requested_project=%s)\n' \
-        "$(date '+%Y-%m-%dT%H:%M:%S')" "$SESSION_ID" "$HOOK_CWD" "$REGISTER_PROJECT_KEY" \
-        >> "$RUNTIME_DIR/registration-failures.log"
-    echo "AGENT REGISTRATION NOT ACCEPTED: project namespace is not owned by this session workspace." >&2
-    exit 2
-fi
-AGENTSTACK_VALIDATED_CONTEXT_JSON="$VALIDATED_CONTEXT"
-export AGENTSTACK_VALIDATED_CONTEXT_JSON
-
 # Record the agent-mail-id <-> sessionId <-> transcript map (see
 # record-session-index.py) BEFORE the flag exists. The index started as a
 # convenience for the dashboard's session resume, but resolve-agent-name.sh now
@@ -209,6 +157,15 @@ if [ -f "$HOOKS_DIR/record-session-index.py" ]; then
     # name to the parent's session would let the parent act as the child. The
     # caller is resolved the same way the guards resolve identity, so a session
     # identified only by tmux is not mistaken for an anonymous self-registration.
+    REGISTER_PROJECT_KEY=$(printf '%s' "$INPUT" | python3 -c '
+import json, sys
+try:
+    value = (json.loads(sys.stdin.read()).get("tool_input") or {}).get("project_key", "")
+    print(value if isinstance(value, str) else "")
+except Exception:
+    print("")
+' 2>/dev/null || echo "")
+
     # Both halves of the resolution travel to the writer. The name alone hides
     # the difference between "no claim on this session" and "the claim was
     # refused", and the writer must not read a refusal as an anonymous agent
@@ -218,8 +175,6 @@ if [ -f "$HOOKS_DIR/record-session-index.py" ]; then
         CALLER_RESULT="$(
             AGENTSTACK_SESSION_ID="$SESSION_ID" \
             AGENTSTACK_LOOKUP_PROJECT_KEY="$REGISTER_PROJECT_KEY" \
-            AGENTSTACK_LOOKUP_REPOSITORY_KEY="$(agentstack_context_field "$VALIDATED_CONTEXT" repository_key)" \
-            AGENTSTACK_LOOKUP_WORK_DIR="$(agentstack_context_field "$VALIDATED_CONTEXT" work_dir)" \
             bash -c '. "$0"; printf "%s|%s" "${RESOLVED_AGENT_SRC:-none}" "${RESOLVED_AGENT:-}"' \
                 "$HOOKS_DIR/resolve-agent-name.sh" 2>/dev/null
         )"
@@ -251,10 +206,6 @@ case "${INDEX_STATUS:-0}" in
     6)
         echo "SESSION BINDING NOT WRITTEN: the identity index could not be updated." >&2
         echo "The remote registration succeeded, but this session stays unregistered locally." >&2
-        exit 0
-        ;;
-    7)
-        echo "SESSION BINDING REFUSED: the registered project does not match the validated workspace context." >&2
         exit 0
         ;;
     *) ;;

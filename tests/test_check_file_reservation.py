@@ -137,6 +137,8 @@ class ReservationHookTests(unittest.TestCase):
         fake_bin.mkdir()
         fake_python = fake_bin / "python3"
         fake_python.write_text(
+            # Only the renewal request and the transport probe are faked; the
+            # hooks' other stdin scripts (workspace resolution) run for real.
             "#!/bin/sh\n"
             "if [ -n \"${AGENTSTACK_PROBE_URL+x}\" ]; then\n"
             "    cat >/dev/null; printf '%s\\n' reachable; exit 0\n"
@@ -168,9 +170,8 @@ class ReservationHookTests(unittest.TestCase):
                 "PATH": f"{fake_bin}:{env.get('PATH', '')}",
             }
         )
-        # Claude Code sends the session cwd with every hook payload.
         payload = json.dumps(
-            {"cwd": str(workspace), "tool_input": {"file_path": str(workspace / "note.md")}}
+            {"tool_input": {"file_path": str(workspace / "note.md")}}
         )
         return subprocess.run(
             ["/bin/bash", str(HOOK)],
@@ -196,10 +197,11 @@ class ReservationHookTests(unittest.TestCase):
         resolver_bytes: bytes | None = None,
         tmux_session_agent: str | None = None,
         file_path: Path | None = None,
-        payload_cwd: str | None = "",
+        payload_cwd: Any = "",
+        process_cwd: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        """payload_cwd: "" (default) is the session working in root, the normal
-        Claude Code payload; None omits cwd; any other value is sent as given."""
+        """payload_cwd: "" (default) sends root, as Claude Code sends the
+        session cwd with every hook; None omits cwd; anything else is sent."""
         runtime = root / "runtime"
         hooks = root / "isolated-hooks"
         runtime.mkdir(exist_ok=True)
@@ -252,13 +254,13 @@ class ReservationHookTests(unittest.TestCase):
         }
         if payload_cwd is not None:
             document["cwd"] = payload_cwd or str(root)
-        payload = json.dumps(document)
         return subprocess.run(
             ["/bin/bash", str(HOOK)],
-            input=payload,
+            input=json.dumps(document),
             text=True,
             capture_output=True,
             env=env,
+            cwd=process_cwd,
             check=False,
             timeout=10,
         )
@@ -291,17 +293,48 @@ class ReservationHookTests(unittest.TestCase):
         self.assertNotIn("registration_token", arguments)
         self.assertEqual(request["json"]["params"]["name"], "renew_file_reservations")
 
-    def test_absent_or_invalid_hook_cwd_blocks_before_any_request(self) -> None:
-        """Without the session's actual workspace the guard cannot tell which
-        project a protected file belongs to, so it refuses instead of guessing
-        from the hook process's own directory."""
-        for label, cwd in (("absent", None), ("deleted", "missing-worktree")):
+    def test_missing_hook_cwd_uses_the_valid_single_project_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, _Server(
+            lambda _count: (200, _mcp_result(1))
+        ) as server:
+            root = Path(directory)
+            result = self.run_hook(
+                server.url, root, payload_cwd=None, process_cwd=root
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(server.requests), 1)
+        arguments = server.requests[0]["json"]["params"]["arguments"]
+        self.assertEqual(arguments["project_key"], str(root))
+
+    def test_missing_hook_cwd_never_falls_back_to_a_stale_project(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as other, _Server(
+            lambda _count: (200, _mcp_result(1))
+        ) as server:
+            root = Path(directory)
+            result = self.run_hook(
+                server.url, root, payload_cwd=None, process_cwd=Path(other)
+            )
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("AGENT PROJECT CONTEXT MISMATCH", result.stderr)
+        self.assertEqual(server.requests, [])
+
+    def test_invalid_hook_cwd_blocks_before_any_request(self) -> None:
+        for label in ("deleted", "relative", "non-string"):
             with self.subTest(cwd=label), tempfile.TemporaryDirectory() as directory, _Server(
                 lambda _count: (200, _mcp_result(1))
             ) as server:
                 root = Path(directory)
-                payload_cwd = None if cwd is None else str(root / cwd)
-                result = self.run_hook(server.url, root, payload_cwd=payload_cwd)
+                if label == "deleted":
+                    cwd: Any = str(root / "missing-worktree")
+                elif label == "relative":
+                    cwd = "relative/dir"
+                else:
+                    cwd = 42
+                result = self.run_hook(
+                    server.url, root, payload_cwd=cwd, process_cwd=root
+                )
 
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertIn("AGENT PROJECT CONTEXT UNRESOLVED", result.stderr)
@@ -324,6 +357,10 @@ class ReservationHookTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("FILE RESERVATION REQUIRED", result.stderr)
+        self.assertIn(
+            "reservation tool provided by your connection schema", result.stderr
+        )
+        self.assertNotIn("Acquire one with macro_file_reservation_cycle", result.stderr)
         self.assertEqual(len(server.requests), 2)
         self.assertEqual(
             {request["json"]["params"]["name"] for request in server.requests},

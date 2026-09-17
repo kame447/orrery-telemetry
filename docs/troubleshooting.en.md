@@ -286,7 +286,20 @@ AGENTSTACK_PROJECT_KEY=/absolute/project/path \
   ~/.agentstack/bin/agentstack-reregister "$AGENT_NAME"
 ```
 
-Inspect:
+On failure, stderr contains a fixed, secret-free diagnostic. For example,
+`stage=ensure_project reason=transport-failed curl_exit=7` identifies the first
+transport step; `stage=register_agent reason=http-rejected http_status=403`
+identifies an HTTP rejection; and `stage=response-parse reason=invalid-response`
+identifies an unexpected response shape. `rpc-error` and `tool-error` identify
+the JSON-RPC and tool layers respectively. `identity-check
+reason=identity-changed` means a reserved identity was replaced by another name,
+so the helper stopped fail-closed. `credential_source` reports only whether the
+owner credential came from `child-state`, `inherited`, or `runtime-file`; it
+never reports the value.
+
+Do not infer a stale or wrong-owner token from HTTP 401 or 403 alone. Only when
+the diagnostic says `stage=local-token reason=credential-unavailable`, first
+inspect these owner-credential locations:
 
 ```text
 $AGENTSTACK_RUNTIME_DIR/agent_token_<name>
@@ -294,6 +307,8 @@ $AGENTSTACK_RUNTIME_DIR/child-agents/<name>.json
 ```
 
 If the token is missing / stale / owned by another identity, report it to the parent or operator. Do not paste a token into chat, logs, or process arguments.
+Responses and curl stderr discarded before these diagnostics existed cannot be
+reconstructed retroactively from the new output.
 
 ## Hook blocks with `AGENT NOT REGISTERED`
 
@@ -375,7 +390,7 @@ For Edit / Write under a protected root, the hook establishes exact identity and
 3. Reserve the exact path or smallest glob with `file_reservation_paths`
 4. If a conflict is returned, contact the holder through ORRERY Mail and wait for release or expiry
 
-The owner `registration_token` is not sent in this hook's tool arguments and is separate from the legacy HTTP bearer. `isError` succeeds only when omitted or boolean `false`. After exact identity and protected scope are established, only transport unreachability on the first query fails open. HTTP/MCP/schema rejection, malformed response, and transport failure after definitive zero block. A missing path or path outside protected roots is outside enforcement and exits 0.
+The owner `registration_token` is not sent in this hook's tool arguments and is separate from the legacy HTTP bearer. `isError` succeeds only when omitted or boolean `false`. After exact identity and protected scope are established, only transport unreachability on the first query fails open. HTTP/MCP/schema rejection, malformed response, and transport failure after definitive zero block. A missing path or path outside protected roots is outside enforcement and exits 0. `AGENT PROJECT CONTEXT MISMATCH` means the selected project key (live or installed) does not belong to the session's actual workspace: start the session from the intended project with `agent-start DIR` or correct `AGENTSTACK_PROJECT_KEY`. `AGENT PROJECT CONTEXT UNRESOLVED` means the hook input's `cwd` was not an existing absolute directory, or had no `cwd` and the edited file lies outside the hook's own directory.
 
 Deploy the strict version only after every client is restarted/rebound at cutover C5. Raw non-tmux Claude resolves identity when `register_agent` creates a self binding in the session index. Clients that cannot register because their startup path lacks the mail MCP, and old sessions without an identity source, follow `AGENTSTACK_UNMANAGED_SESSION_POLICY`; restart through `agent-start` when coordination is required. Do not disable the guard or adopt an untargeted tmux session or stale metadata as identity.
 
@@ -406,11 +421,12 @@ If stale top-level environment may have been inherited, relaunch from a new term
 
 ## History cannot be found
 
-`/api/history` searches Claude / Codex transcripts based on agent program, then falls back to the other when absent.
+`/api/history` selects the transcript format from the agent program in ORRERY Mail. If the program is missing, unknown, or unreadable, the provider is unconfirmed and no transcript resolver runs. For Codex CLI, it opens history only when the session index for the current project's numeric agent ID agrees with the session ID in the rollout header. A missing or malformed index, or a project / provider / ID mismatch, is reported as unconfirmed; the reader does not scan by time or cwd, reuse an old cache entry, or fall back to a Claude transcript.
 
 - whether ORRERY Mail program is correct
+- for Codex, whether `runtime/session_index/<agent_id>.json` identifies the current project and agent
 - whether the transcript remains on disk
-- whether session and agent names match
+- whether the index session ID matches the metadata ID at the start of the transcript
 - whether child and parent transcripts were confused
 
 An agent with no transcript may show only its mail timeline.

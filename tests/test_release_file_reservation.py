@@ -166,8 +166,9 @@ class ReleaseHookTests(unittest.TestCase):
         env: dict[str, str],
         cwd: Path,
     ) -> subprocess.CompletedProcess[str]:
-        # Claude Code sends the session cwd in every hook payload, and the hooks
-        # resolve the actual workspace from it rather than from ambient state.
+        # Claude Code sends the session cwd with every hook payload; the
+        # missing-cwd fallback has its own tests in
+        # test_reservation_project_isolation.py.
         document = json.loads(payload)
         if isinstance(document, dict):
             document.setdefault("cwd", str(cwd))
@@ -264,7 +265,6 @@ class ReleaseHookTests(unittest.TestCase):
 
             reserve_payload = json.dumps(
                 {
-                    "cwd": str(project),
                     "session_id": "session-1",
                     "tool_input": {
                         "agent_name": "PluckyEinstein",
@@ -323,13 +323,6 @@ class ReleaseHookTests(unittest.TestCase):
                 agent_name=None,
                 install_resolver=True,
             )
-            # A legacy (schema 2) binding keeps authority only when the cwd the
-            # old writer recorded corroborates the actual repository.
-            git_env = {**env, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
-            for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
-                git_env.pop(name, None)
-            subprocess.run(["git", "init", "-q", str(project)], env=git_env,
-                           check=True, capture_output=True, timeout=30)
             index = runtime / "session_index"
             index.mkdir()
             (index / "binding.json").write_text(
@@ -341,7 +334,6 @@ class ReleaseHookTests(unittest.TestCase):
                         "agent_name": "IndexedCurie",
                         "registered_by": "IndexedCurie",
                         "project_key": str(project),
-                        "cwd": str(project),
                     }
                 ),
                 encoding="utf-8",
@@ -403,9 +395,7 @@ class ReleaseHookTests(unittest.TestCase):
             self.assertEqual(request["params"]["name"], "release_file_reservations")
             self.assertEqual(
                 request["params"]["arguments"],
-                # The project is resolved from the session's actual workspace,
-                # so it is the physical path (e.g. /private/tmp for /tmp).
-                {"project_key": str(project.resolve()), "agent_name": "PluckyEinstein"},
+                {"project_key": str(project), "agent_name": "PluckyEinstein"},
             )
 
     def test_template_wires_all_release_hooks(self) -> None:
