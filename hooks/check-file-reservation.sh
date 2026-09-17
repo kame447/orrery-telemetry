@@ -53,7 +53,7 @@ case "$RESOLVE_STATUS" in
         ;;
     *)
         echo "AGENT PROJECT CONTEXT UNRESOLVED: cannot validate this edit's workspace." >&2
-        echo "The hook payload's cwd must be an existing absolute directory." >&2
+        echo "The hook payload must carry the session cwd as an existing absolute directory." >&2
         exit 2
         ;;
 esac

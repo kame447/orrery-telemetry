@@ -191,18 +191,21 @@ def test_payload_cwd_not_shell_cwd_selects_workspace_and_relative_base(repos):
     }]
 
 
-def test_missing_payload_cwd_uses_the_hook_directory_only_when_it_validates(repos):
-    first, second = repos["first"], repos["second"]
+def test_missing_payload_cwd_is_unresolved_even_for_a_valid_relative_edit(repos):
+    second = repos["second"]
+    payload = edit(None, "note.md", tool_response={"success": True})
     with _Server(lambda _: (200, _mcp_result(1))) as server:
-        valid = run(repos, CHECK, server.url, edit(None, "note.md"),
-                    process_cwd=second, AGENTSTACK_PROJECT_KEY=second)
-        assert valid.returncode == 0, valid.stderr
-        assert arguments(server)[0]["project_key"] == str(second)
-        stale = run(repos, CHECK, server.url, edit(None, second / "note.md"),
-                    process_cwd=second, AGENTSTACK_PROJECT_KEY=first)
-    assert stale.returncode == 2
-    assert "AGENT PROJECT CONTEXT MISMATCH" in stale.stderr
-    assert len(server.requests) == 1
+        # The hook directory and the selected key agree, and still they are
+        # not the session's workspace: a relative path has no base.
+        guarded = run(repos, CHECK, server.url, payload,
+                      process_cwd=second, AGENTSTACK_PROJECT_KEY=second)
+        released = run(repos, RELEASE, server.url, payload,
+                       process_cwd=second, AGENTSTACK_PROJECT_KEY=second)
+    assert guarded.returncode == 2, guarded.stderr
+    assert "AGENT PROJECT CONTEXT UNRESOLVED" in guarded.stderr
+    assert released.returncode == 0, released.stderr
+    assert server.requests == []
+    assert "release session=session-1 error=project-context-invalid" in failure_log(repos)
 
 
 def test_missing_cwd_with_stale_shell_cwd_cannot_turn_real_edits_into_no_ops(repos):
@@ -219,7 +222,7 @@ def test_missing_cwd_with_stale_shell_cwd_cannot_turn_real_edits_into_no_ops(rep
     assert failure_log(repos).count("error=project-context-invalid") == 2
 
 
-def test_session_hooks_without_cwd_need_an_independently_valid_selection(repos):
+def test_session_hooks_never_act_without_a_payload_cwd(repos):
     first = repos["first"]
     state = repos["runtime"] / "file_release_debounce"
     state.mkdir()
@@ -227,21 +230,54 @@ def test_session_hooks_without_cwd_need_an_independently_valid_selection(repos):
     armed.write_text("token\n", encoding="utf-8")
     invalidate = {"session_id": "session-1", "tool_input": {"paths": ["note.md"]}}
     with _Server(_released) as server:
-        skipped = run(repos, RELEASE_ALL, server.url, {"session_id": "session-1"},
-                      process_cwd=first)
-        assert skipped.returncode == 0, skipped.stderr
-        assert server.requests == []
-        assert "release-all session=session-1 error=project-context-invalid" in failure_log(repos)
-        run(repos, INVALIDATE, server.url, invalidate, process_cwd=first)
-        assert armed.exists()
+        for overrides in ({}, {"AGENTSTACK_PROJECT_KEY": first}):
+            ended = run(repos, RELEASE_ALL, server.url, {"session_id": "session-1"},
+                        process_cwd=first, **overrides)
+            assert ended.returncode == 0, ended.stderr
+            invalidated = run(repos, INVALIDATE, server.url, invalidate,
+                              process_cwd=first, **overrides)
+            assert invalidated.returncode == 0, invalidated.stderr
+    assert server.requests == []
+    assert failure_log(repos).count("release-all session=session-1 error=project-context-invalid") == 2
+    assert armed.exists()
 
-        selected = run(repos, RELEASE_ALL, server.url, {"session_id": "session-1"},
-                       process_cwd=first, AGENTSTACK_PROJECT_KEY=first)
-        assert selected.returncode == 0, selected.stderr
-        run(repos, INVALIDATE, server.url, invalidate,
-            process_cwd=first, AGENTSTACK_PROJECT_KEY=first)
-    assert arguments(server) == [{"project_key": str(first), "agent_name": AGENT}]
-    assert not armed.exists()
+
+# --- canonical namespace ------------------------------------------------------
+
+def test_selected_key_spellings_resolve_to_the_canonical_namespace(repos):
+    second = repos["second"]
+    alias = repos["home"] / "alias"
+    alias.symlink_to(second, target_is_directory=True)
+    (second / "sub").mkdir()
+    spellings = (alias, f"{second}/sub/..", f"{alias}/sub/../")
+    with _Server(lambda _: (200, _mcp_result(1))) as server:
+        for spelling in spellings:
+            result = run(repos, CHECK, server.url, edit(second, second / "note.md"),
+                         AGENTSTACK_PROJECT_KEY=spelling)
+            assert result.returncode == 0, (spelling, result.stderr)
+        with _Server(_released) as release_server:
+            ended = run(repos, RELEASE_ALL, release_server.url,
+                        {"session_id": "session-1", "cwd": str(alias)},
+                        AGENTSTACK_PROJECT_KEY=alias)
+    assert ended.returncode == 0, ended.stderr
+    assert [item["project_key"] for item in arguments(server)] == [str(second)] * len(spellings)
+    assert arguments(release_server) == [{"project_key": str(second), "agent_name": AGENT}]
+
+
+def test_invalidation_leaves_project_less_legacy_slots_alone(repos):
+    first = repos["first"]
+    state = repos["runtime"] / "file_release_debounce"
+    state.mkdir()
+    legacy = state / hashlib.sha1(f"{AGENT}\0note.md".encode()).hexdigest()
+    legacy.write_text("token\n", encoding="utf-8")
+    current = state / slot(str(first), AGENT, "note.md")
+    current.write_text("token\n", encoding="utf-8")
+    result = run(repos, INVALIDATE, "http://127.0.0.1:9/mcp",
+                 {"session_id": "session-1", "cwd": str(first),
+                  "tool_input": {"paths": ["note.md"]}})
+    assert result.returncode == 0, result.stderr
+    assert legacy.exists()
+    assert not current.exists()
 
 
 # --- linked worktrees ---------------------------------------------------------

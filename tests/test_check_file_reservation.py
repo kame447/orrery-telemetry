@@ -170,8 +170,9 @@ class ReservationHookTests(unittest.TestCase):
                 "PATH": f"{fake_bin}:{env.get('PATH', '')}",
             }
         )
+        # Claude Code sends the session cwd with every hook payload.
         payload = json.dumps(
-            {"tool_input": {"file_path": str(workspace / "note.md")}}
+            {"cwd": str(workspace), "tool_input": {"file_path": str(workspace / "note.md")}}
         )
         return subprocess.run(
             ["/bin/bash", str(HOOK)],
@@ -293,7 +294,8 @@ class ReservationHookTests(unittest.TestCase):
         self.assertNotIn("registration_token", arguments)
         self.assertEqual(request["json"]["params"]["name"], "renew_file_reservations")
 
-    def test_missing_hook_cwd_uses_the_valid_single_project_fallback(self) -> None:
+    def test_missing_hook_cwd_blocks_even_when_the_hook_directory_matches(self) -> None:
+        """The hook process directory is not the session's workspace."""
         with tempfile.TemporaryDirectory() as directory, _Server(
             lambda _count: (200, _mcp_result(1))
         ) as server:
@@ -302,10 +304,9 @@ class ReservationHookTests(unittest.TestCase):
                 server.url, root, payload_cwd=None, process_cwd=root
             )
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(server.requests), 1)
-        arguments = server.requests[0]["json"]["params"]["arguments"]
-        self.assertEqual(arguments["project_key"], str(root))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("AGENT PROJECT CONTEXT UNRESOLVED", result.stderr)
+        self.assertEqual(server.requests, [])
 
     def test_missing_hook_cwd_never_falls_back_to_a_stale_project(self) -> None:
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as other, _Server(
@@ -317,7 +318,7 @@ class ReservationHookTests(unittest.TestCase):
             )
 
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("AGENT PROJECT CONTEXT MISMATCH", result.stderr)
+        self.assertIn("AGENT PROJECT CONTEXT UNRESOLVED", result.stderr)
         self.assertEqual(server.requests, [])
 
     def test_invalid_hook_cwd_blocks_before_any_request(self) -> None:

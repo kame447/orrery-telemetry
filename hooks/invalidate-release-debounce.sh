@@ -80,19 +80,14 @@ for raw_path in raw_paths:
                 relative = os.path.basename(absolute)
             normalized = unicodedata.normalize("NFC", relative)
             # Slots are per project namespace (see reservation_debounce_key).
+            # Slots armed before the namespace was part of the name cannot be
+            # attributed to this project, so they are left to their own
+            # workers rather than cancelled from here.
             key = "\0".join((project_key, agent, normalized))
-            names = {hashlib.sha1(key.encode("utf-8")).hexdigest()}
-            # Workers armed before the namespace was part of the slot used
-            # agent+path only, in NFC or (older still) NFD. Invalidating them
-            # can only cancel a stale release, never release anything.
-            for form in ("NFC", "NFD"):
-                legacy = agent + "\0" + unicodedata.normalize(form, relative)
-                names.add(hashlib.sha1(legacy.encode("utf-8")).hexdigest())
-            for name in names:
-                try:
-                    (state_dir / name).unlink()
-                except OSError:
-                    pass
+            try:
+                (state_dir / hashlib.sha1(key.encode("utf-8")).hexdigest()).unlink()
+            except OSError:
+                pass
 PY
 
 exit 0
