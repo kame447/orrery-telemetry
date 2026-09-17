@@ -70,6 +70,9 @@ class FakeMail:
         self.on_call = None
         self.retire_failure = ""  # "", "tool-error", "http-500" or "drop"
         self.rename: dict[str, str] = {}  # requested name -> returned name
+        self.rename_all = ""  # return this name for every registration
+        self.mint = ""  # server-minted token that replaces the sent one
+        self.reservation_conflict = False
         parent = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -106,21 +109,42 @@ class FakeMail:
     def answer(self, name: str, args: dict) -> dict:
         key = (args.get("project_key"), args.get("agent_name"))
         if name == "whois":
-            if args.get("registration_token") and self.owners.get(key) == args["registration_token"]:
+            if not args.get("registration_token"):
+                message = ("requires registration_token" if key in self.owners
+                           else f"Agent '{args.get('agent_name')}' not found in project")
+                return {"error": {"code": -32000, "message": message}}
+            if self.owners.get(key) == args["registration_token"]:
                 return {"result": {"structuredContent": {"name": args["agent_name"]}}}
             return {"error": {"code": -32000, "message": "invalid registration_token"}}
         if name == "retire_agent":
             if self.retire_failure == "tool-error":
                 return {"result": {"isError": True, "content": [
                     {"type": "text", "text": "Error calling tool 'retire_agent': busy"}]}}
-            if self.owners.get(key) == args.get("registration_token"):
+            if key in self.owners:  # the bundled server authorizes loopback retire
                 del self.owners[key]
-                return {"result": {"structuredContent": {"retired": True}}}
+                receipt = {"status": "retired", "agent_name": args["agent_name"],
+                           "project_key": args["project_key"]}
+                if self.retire_failure == "empty":
+                    receipt = {}
+                elif self.retire_failure == "mismatched":
+                    receipt["agent_name"] = "Other-Bohr"
+                return {"result": {"structuredContent": receipt,
+                                   "content": [{"type": "text", "text": json.dumps(receipt)}]}}
             return {"error": {"code": -32000, "message": "invalid registration_token"}}
         if name == "register_agent":
-            returned = self.rename.get(args["name"], args["name"])
-            self.owners[(args["project_key"], returned)] = args["registration_token"]
-            return {"result": {"structuredContent": {"id": 7, "name": returned}}}
+            returned = self.rename_all or self.rename.get(args["name"], args["name"])
+            token = self.mint or args["registration_token"]
+            self.owners[(args["project_key"], returned)] = token
+            reply = {"id": 7, "name": returned}
+            if self.mint:
+                reply["registration_token"] = self.mint
+            return {"result": {"structuredContent": reply}}
+        if name == "file_reservation_paths":
+            outcome = {"granted": [], "conflicts": []}
+            if self.reservation_conflict:
+                outcome["conflicts"] = [{"path": "src/a.py", "holders": [{"agent_name": "Other-Bohr"}]}]
+            return {"result": {"structuredContent": outcome,
+                               "content": [{"type": "text", "text": json.dumps(outcome)}]}}
         return {"result": {"structuredContent": {"ok": True, "granted": [], "conflicts": []}}}
 
     def tools(self) -> list[str]:
@@ -365,7 +389,7 @@ def test_cleanup_keeps_credentials_replaced_during_mail_calls(world, moment):
     assert mail.tools() == expected
 
 
-@pytest.mark.parametrize("failure", ["tool-error", "http-500", "drop"])
+@pytest.mark.parametrize("failure", ["tool-error", "http-500", "drop", "empty", "mismatched"])
 def test_cleanup_keeps_the_owner_credential_unless_retirement_is_confirmed(world, failure):
     files = arrange_child(world, project=world["alpha"], repository=world["alpha"],
                           work_dir=world["alpha"])
@@ -445,6 +469,21 @@ def test_preregister_keeps_the_new_handoff_when_the_returned_name_collides(world
     receipt = json.loads(out.with_name(out.name + ".binding.json").read_text())
     assert receipt["agent_name"] == CHILD
     assert receipt["project_key"] == str(world["alpha"])
+
+
+def test_preregister_reports_a_failed_durable_store_and_keeps_the_handoff(world):
+    # A file where the runtime directory belongs makes the durable store fail.
+    world["runtime"].write_text("not a directory", encoding="utf-8")
+    out = world["tmp"] / "handoff" / "token"
+    with FakeMail() as mail:
+        result = run(world, [PREREGISTER, "--project-key", world["alpha"],
+                             "--work-dir", world["alpha"], "--name", CHILD,
+                             "--token-file-out", out], cwd=world["alpha"], mail=mail)
+    assert result.returncode != 0
+    assert "could not store the durable token" in result.stderr
+    assert str(out) in result.stderr
+    assert out.read_text() == mail.owners[(str(world["alpha"]), CHILD)]
+    assert result.stdout.strip() == ""
 
 
 def test_preregister_binds_a_linked_worktree_to_the_canonical_project(world):
@@ -648,6 +687,104 @@ def test_direct_launch_in_a_foreign_workspace_never_contacts_mail(world):
     assert not world["runtime"].exists() or not list(world["runtime"].glob("agent_token_*"))
 
 
+@pytest.mark.parametrize("retired", [True, False])
+def test_direct_renamed_collision_retires_with_the_server_token(world, retired):
+    private(token_file(world), "another-registration")
+    with FakeMail() as mail:
+        mail.rename_all = CHILD
+        mail.mint = "server-minted-token"
+        if not retired:
+            mail.retire_failure = "tool-error"
+        result = run(world, ["/bin/bash", SPAWN, "--unsafe-no-resources", "task", world["alpha"]],
+                     cwd=world["home"], mail=mail, AGENTSTACK_PROJECT_KEY=world["alpha"])
+    assert result.returncode != 0
+    assert token_file(world).read_text() == "another-registration"
+    assert not state_file(world).exists()
+    assert "new-session" not in tmux_calls(world)
+    retire = [r["args"] for r in mail.requests if r["tool"] == "retire_agent"]
+    assert [args["registration_token"] for args in retire] == ["server-minted-token"]
+    handoffs = list((world["runtime"] / "spawn-tokens").glob("direct.*.token"))
+    if retired:
+        assert handoffs == []
+        assert (str(world["alpha"]), CHILD) not in mail.owners
+    else:
+        assert [path.read_text() for path in handoffs] == ["server-minted-token"]
+        assert stat.S_IMODE(handoffs[0].stat().st_mode) == 0o600
+        assert str(handoffs[0]) in result.stderr and CHILD in result.stderr
+    assert "server-minted-token" not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("failure", ["", "http-500", "empty", "mismatched"])
+def test_failed_direct_launch_keeps_credentials_unless_retirement_is_confirmed(world, failure):
+    retired = not failure
+    with FakeMail() as mail:
+        mail.mint = "server-minted-token"
+        mail.retire_failure = failure
+        result = run(world, ["/bin/bash", SPAWN, "--unsafe-no-resources", "task", world["alpha"]],
+                     cwd=world["home"], mail=mail, AGENTSTACK_PROJECT_KEY=world["alpha"],
+                     FAKE_TMUX_FAIL=1)
+    assert result.returncode != 0
+    registered = [r["args"]["name"] for r in mail.requests if r["tool"] == "register_agent"]
+    assert len(registered) == 1
+    retire = [r["args"] for r in mail.requests if r["tool"] == "retire_agent"]
+    assert [args["registration_token"] for args in retire] == ["server-minted-token"]
+    canonical = world["runtime"] / f"agent_token_{registered[0]}"
+    if retired:
+        assert not canonical.exists()
+    else:
+        assert canonical.read_text() == "server-minted-token"
+        assert "did not confirm retiring" in result.stderr
+
+
+@pytest.mark.parametrize("retired", [True, False])
+def test_direct_reservation_conflict_keeps_credentials_unless_retirement_is_confirmed(world, retired):
+    with FakeMail() as mail:
+        mail.mint = "server-minted-token"
+        mail.reservation_conflict = True
+        if not retired:
+            mail.retire_failure = "drop"
+        result = run(world, ["/bin/bash", SPAWN, "--resources", "src/a.py", "task", world["alpha"]],
+                     cwd=world["home"], mail=mail, AGENTSTACK_PROJECT_KEY=world["alpha"])
+    assert result.returncode == 21, result.stderr
+    registered = [r["args"]["name"] for r in mail.requests if r["tool"] == "register_agent"]
+    retire = [r["args"] for r in mail.requests if r["tool"] == "retire_agent"]
+    assert [args["registration_token"] for args in retire] == ["server-minted-token"]
+    canonical = world["runtime"] / f"agent_token_{registered[0]}"
+    assert "new-session" not in tmux_calls(world)
+    if retired:
+        assert not canonical.exists()
+        assert "retired" in result.stderr
+    else:
+        assert canonical.read_text() == "server-minted-token"
+        assert "did not confirm retiring" in result.stderr
+
+
+@pytest.mark.parametrize("retired", [True, False])
+def test_direct_token_install_failure_retires_with_the_server_token(world, retired):
+    # A file where the state directory belongs makes installing the token fail.
+    world["runtime"].mkdir(parents=True, exist_ok=True)
+    (world["runtime"] / "child-agents").write_text("not a directory", encoding="utf-8")
+    with FakeMail() as mail:
+        mail.mint = "server-minted-token"
+        if not retired:
+            mail.retire_failure = "tool-error"
+        result = run(world, ["/bin/bash", SPAWN, "--unsafe-no-resources", "task", world["alpha"]],
+                     cwd=world["home"], mail=mail, AGENTSTACK_PROJECT_KEY=world["alpha"])
+    assert result.returncode != 0
+    assert "failed to persist the registered child token" in result.stderr
+    retire = [r["args"] for r in mail.requests if r["tool"] == "retire_agent"]
+    assert [args["registration_token"] for args in retire] == ["server-minted-token"]
+    handoffs = list((world["runtime"] / "spawn-tokens").glob("direct.*.token"))
+    if retired:
+        assert handoffs == []
+    else:
+        assert [path.read_text() for path in handoffs] == ["server-minted-token"]
+        assert stat.S_IMODE(handoffs[0].stat().st_mode) == 0o600
+    assert (world["runtime"] / "child-agents").read_text() == "not a directory"
+    assert "new-session" not in tmux_calls(world)
+    assert "server-minted-token" not in result.stdout + result.stderr
+
+
 # --- Gemini -------------------------------------------------------------------
 
 
@@ -727,6 +864,81 @@ def test_gemini_child_keeps_the_handoff_of_a_failed_preregistration(world):
     kept = list(world["runtime"].glob("gemini-preregister-*.token"))
     assert [path.read_text() for path in kept] == ["recovery-token"]
     assert "new-session" not in tmux_calls(world)
+
+
+def gemini_preregister_stub(home, *, durable: bool):
+    """A preregistration that succeeded, with or without its durable copy."""
+    body = ("#!/usr/bin/env python3\nimport os, sys\n"
+            "out = sys.argv[sys.argv.index('--token-file-out') + 1]\n"
+            "def write(path):\n"
+            "    os.makedirs(os.path.dirname(path), exist_ok=True)\n"
+            "    fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)\n"
+            f"    os.write(fd, {TOKEN!r}.encode())\n"
+            "    os.close(fd)\n"
+            "write(out)\n")
+    if durable:
+        body += (f"write(os.path.join(os.environ['AGENTSTACK_RUNTIME_DIR'], 'agent_token_{CHILD}'))\n")
+    body += f"print({CHILD!r})\n"
+    path = home / "bin" / "agentstack-preregister-child"
+    path.write_text(body, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def run_gemini_child(world, home, mail, **overrides):
+    return run(world, ["/bin/bash", home / "hooks" / "spawn_gemini_child.sh",
+                       "--resources", "src/**", "task", world["alpha"]],
+               cwd=world["home"], mail=mail,
+               AGENTSTACK_HOME=home, AGENTSTACK_HOOKS_DIR=home / "hooks",
+               AGENTSTACK_REGISTER_LIB=None, AGENTSTACK_PROJECT_KEY=world["alpha"],
+               AGENTSTACK_WORKTREE_ROOT=world["tmp"] / "worktrees", **overrides)
+
+
+@pytest.mark.parametrize("durable, retire_failure, handoff_kept", [
+    (True, "", False),            # confirmed cleanup retired the identity
+    (True, "tool-error", False),  # the durable copy still holds the token
+    (False, "", True),            # nothing else holds the token
+])
+def test_failed_gemini_child_launch_keeps_a_handoff_that_is_the_only_credential(
+        world, durable, retire_failure, handoff_kept):
+    home = gemini_home(world)
+    gemini_preregister_stub(home, durable=durable)
+    with FakeMail() as mail:
+        mail.owners[(str(world["alpha"]), CHILD)] = TOKEN
+        mail.retire_failure = retire_failure
+        result = run_gemini_child(world, home, mail, FAKE_TMUX_FAIL=1)
+    assert result.returncode != 0
+    kept = list(world["runtime"].glob("gemini-preregister-*.token"))
+    if handoff_kept:
+        assert [path.read_text() for path in kept] == [TOKEN]
+        assert "kept the child registration handoff" in result.stderr
+    else:
+        assert kept == []
+    if durable and retire_failure:
+        assert token_file(world).read_text() == TOKEN
+        assert (str(world["alpha"]), CHILD) in mail.owners
+    assert TOKEN not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("retire_failure", ["", "mismatched"])
+def test_gemini_runner_drops_its_handoff_only_while_the_token_stays_recoverable(
+        world, retire_failure):
+    home = gemini_home(world)
+    gemini_preregister_stub(home, durable=True)
+    with FakeMail() as mail:
+        mail.owners[(str(world["alpha"]), CHILD)] = TOKEN
+        mail.retire_failure = retire_failure
+        launched = run_gemini_child(world, home, mail)
+        assert launched.returncode == 0, launched.stderr
+        runner, = world["runtime"].glob("gemini-runner-*.sh")
+        handoff, = world["runtime"].glob("gemini-preregister-*.token")
+        finished = run(world, ["/bin/bash", runner], cwd=world["home"], mail=mail)
+    assert "whois" in mail.tools() and "retire_agent" in mail.tools()
+    assert not handoff.exists()
+    if retire_failure:
+        assert token_file(world).read_text() == TOKEN, "the durable copy is the recovery"
+    else:
+        assert not token_file(world).exists()
+    assert TOKEN not in finished.stdout + finished.stderr
 
 
 def test_gemini_child_in_a_foreign_workspace_never_preregisters(world):

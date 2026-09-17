@@ -155,7 +155,10 @@ def test_delegated_child_lifecycle_is_launcher_owned() -> None:
     # durable credential in this project before retiring with it.
     assert '$(printf \'%q\' "$MAIL_HELPER") retire --project-key' not in text
     assert '[[ -x $(printf \'%q\' "$CLEANUP_HELPER") ]] && $(printf \'%q\' "$CLEANUP_HELPER")' in text
-    assert 'rm -f $(printf \'%q\' "$TASK_EVENT_FILE") $(printf \'%q\' "$TOKEN_FILE")' in text
+    # The one-shot copy is dropped only while its token stays recoverable.
+    assert 'handoff_file=$(printf \'%q\' "$TOKEN_FILE")' in text
+    assert 'rm -f "\\$handoff_file" "\\$handoff_file.binding.json"' in text
+    assert 'rm -f $(printf \'%q\' "$TASK_EVENT_FILE") $(printf \'%q\' "$MCP_CONFIG")' in text
     helper = _CHILD_MAIL.read_text(encoding="utf-8")
     assert 'registration_token=token' in helper
     assert 'subject_state = "complete" if status == "SUCCESS" else "incomplete"' in helper

@@ -183,6 +183,28 @@ path.write_text("\n".join(line for line in lines if line != name) + "\n", encodi
 PY
 }
 
+# True when both paths are private regular files holding the same token. The
+# one-shot handoff may be discarded only while such a durable copy exists or
+# after the verified cleanup retired the identity that copy belonged to.
+same_private_token() {
+  "$PYTHON_BIN" -c 'import os, stat, sys
+def read(path):
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
+            raise SystemExit(1)
+        return os.read(fd, 65537).decode("utf-8").strip()
+    finally:
+        os.close(fd)
+try:
+    first, second = read(sys.argv[1]), read(sys.argv[2])
+except (OSError, UnicodeError):
+    raise SystemExit(1)
+raise SystemExit(0 if first and first == second else 1)' "$1" "$2"
+}
+DURABLE_TOKEN_FILE=""
+
 cleanup_failure() {
   status=$?
   if [[ $status -ne 0 ]]; then
@@ -198,7 +220,12 @@ cleanup_failure() {
     # session-bound MCP. On a failure before the child runner takes ownership,
     # the core cleanup proves that token in this project and workspace, then
     # retires the identity and removes the durable credential.
-    if [[ "$PREREGISTERED" == true && -n "$CHILD_NAME" && -x "$CLEANUP_HELPER" ]]; then
+    local handoff_recoverable=false cleanup_ok=false
+    if [[ "$PREREGISTERED" == true && -n "$DURABLE_TOKEN_FILE" ]] \
+        && same_private_token "$TOKEN_FILE" "$DURABLE_TOKEN_FILE"; then
+      handoff_recoverable=true
+    fi
+    if [[ "$PREREGISTERED" == true && -n "$CHILD_NAME" && -x "$CLEANUP_HELPER" ]] && \
       ( cd "$WORK_DIR" && \
         AGENTSTACK_PROJECT_KEY="$PROJECT_KEY" \
         AGENTSTACK_PROJECT_REPOSITORY="$AGS_CHILD_REPOSITORY" \
@@ -208,7 +235,8 @@ cleanup_failure() {
         AGENTSTACK_MAIL_HTTP_BEARER_MODE="$HTTP_BEARER_MODE" \
         AGENTSTACK_RUNTIME_DIR="$RUNTIME_DIR" \
         AGENTSTACK_REGISTER_LIB="$REGISTER_LIB" \
-          "$CLEANUP_HELPER" "$CHILD_NAME" ) >/dev/null 2>&1 || true
+          "$CLEANUP_HELPER" "$CHILD_NAME" ) >/dev/null 2>&1; then
+      cleanup_ok=true
     fi
     if [[ "$WORKTREE_CREATED" == true && -n "$WORKTREE_DIR" ]]; then
       git -C "$SOURCE_REPO" worktree remove --force "$WORKTREE_DIR" >/dev/null 2>&1 || true
@@ -218,12 +246,14 @@ cleanup_failure() {
     [[ -n "$MCP_CONFIG" ]] && rm -f "$MCP_CONFIG" 2>/dev/null || true
     [[ -n "$GIT_EXCLUDES_FILE" ]] && rm -f "$GIT_EXCLUDES_FILE" 2>/dev/null || true
     rm -f "$TASK_RAW_FILE" "$TASK_EVENT_FILE" "$RUNNER_FILE"
-    # Before preregistration succeeded, a handoff that exists is the only
-    # recovery credential of a registration that could not be completed.
-    if [[ "$PREREGISTERED" == true ]]; then
+    # The handoff is the recovery credential unless its token also lives in
+    # the private durable copy and cleanup either retired that identity or
+    # kept the copy. Otherwise it stays, and its path is reported.
+    if [[ "$handoff_recoverable" == true ]] \
+        && { [[ "$cleanup_ok" == true ]] || same_private_token "$TOKEN_FILE" "$DURABLE_TOKEN_FILE"; }; then
       rm -f "$TOKEN_FILE" "$TOKEN_FILE.binding.json"
     elif [[ -s "$TOKEN_FILE" ]]; then
-      echo "$PROG: kept the child registration handoff for recovery: $TOKEN_FILE" >&2
+      echo "$PROG: kept the child registration handoff for recovery: $TOKEN_FILE${CHILD_NAME:+ ($CHILD_NAME in '$PROJECT_KEY')}" >&2
     fi
   fi
 }
@@ -241,6 +271,7 @@ CHILD_NAME="$(
 )"
 [[ -n "$CHILD_NAME" ]] || { echo "$PROG: child preregistration returned no name" >&2; exit 1; }
 PREREGISTERED=true
+DURABLE_TOKEN_FILE="$(ags_registration_token_file "$CHILD_NAME")" || exit 1
 
 BRANCH_NAME="exp/$CHILD_NAME"
 WORKTREE_DIR="$WORKTREE_ROOT/$CHILD_NAME"
@@ -426,9 +457,25 @@ if [[ -n "\$RESOURCES" ]]; then
 fi
 
 # The core cleanup proves the child credential in this project and worktree,
-# then releases, retires and removes the durable credential.
-[[ -x $(printf '%q' "$CLEANUP_HELPER") ]] && $(printf '%q' "$CLEANUP_HELPER") || true
-rm -f $(printf '%q' "$TASK_EVENT_FILE") $(printf '%q' "$TOKEN_FILE") $(printf '%q' "$TOKEN_FILE.binding.json") $(printf '%q' "$MCP_CONFIG") \
+# releases, then retires and removes the durable credential only on a confirmed
+# retirement. The one-shot copy is dropped only while the same token is still
+# held privately or after that confirmed cleanup; otherwise it is kept.
+$(declare -f same_private_token)
+PYTHON_BIN=$(printf '%q' "$PYTHON_BIN")
+handoff_file=$(printf '%q' "$TOKEN_FILE")
+durable_file=$(printf '%q' "$DURABLE_TOKEN_FILE")
+handoff_recoverable=0
+same_private_token "\$handoff_file" "\$durable_file" && handoff_recoverable=1
+cleanup_ok=0
+if [[ -x $(printf '%q' "$CLEANUP_HELPER") ]] && $(printf '%q' "$CLEANUP_HELPER"); then
+  cleanup_ok=1
+fi
+if [[ "\$handoff_recoverable" == 1 ]] && { [[ "\$cleanup_ok" == 1 ]] || same_private_token "\$handoff_file" "\$durable_file"; }; then
+  rm -f "\$handoff_file" "\$handoff_file.binding.json"
+else
+  echo "[antigravity] kept the child registration handoff for recovery: \$handoff_file"
+fi
+rm -f $(printf '%q' "$TASK_EVENT_FILE") $(printf '%q' "$MCP_CONFIG") \
   $(printf '%q' "$GIT_EXCLUDES_FILE") $(printf '%q' "$RUNNER_FILE")
 echo "[antigravity] child finished; worktree retained at $(printf '%q' "$WORKTREE_DIR")"
 exit "\$child_status"

@@ -734,6 +734,42 @@ print(token, end="")
 PY
 }
 
+# True only for Mail's positive retire_agent receipt (read on stdin) for NAME in
+# PROJECT: status "retired" with the same agent and project, as the result,
+# its structuredContent, or a JSON text block. An empty, malformed or
+# mismatched answer is not proof that the identity is gone, so a caller must
+# keep the credential that could still retire it.
+ags_retire_receipt_confirms() {
+  local agent_name="$1" project_key="$2"
+  "${AGENTSTACK_PYTHON:-python3}" -c '
+import json
+import sys
+
+name, project = sys.argv[1:3]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+if not isinstance(data, dict) or data.get("error"):
+    raise SystemExit(1)
+result = data.get("result")
+if not isinstance(result, dict) or result.get("isError") is True:
+    raise SystemExit(1)
+candidates = [result, result.get("structuredContent")]
+for part in result.get("content") or []:
+    if isinstance(part, dict) and isinstance(part.get("text"), str):
+        try:
+            candidates.append(json.loads(part["text"]))
+        except Exception:
+            pass
+for receipt in candidates:
+    if (isinstance(receipt, dict) and receipt.get("status") == "retired"
+            and receipt.get("agent_name") == name and receipt.get("project_key") == project):
+        raise SystemExit(0)
+raise SystemExit(1)
+' "$agent_name" "$project_key"
+}
+
 # Prove a child credential for NAME in the validated PROJECT through the core
 # whois check before it is adopted, reused, or used to retire.
 ags_verify_child_credential() {

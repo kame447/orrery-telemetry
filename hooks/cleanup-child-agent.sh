@@ -314,13 +314,15 @@ print(json.dumps({
 }))
 ' "$CLEANUP_PROJECT_KEY" "$AGENT_NAME" "$TOKEN_FILE" "$STATE_FILE") || retire_args=""
 # The durable credential is the only way to retire this identity later, so it
-# is kept unless Mail confirms the retirement (transport failure, HTTP error,
-# or a JSON-RPC/tool error all count as unconfirmed).
+# is kept unless Mail returns its positive retirement receipt for this agent
+# and project (transport failure, HTTP error, JSON-RPC/tool error, or an empty
+# or mismatched answer all count as unconfirmed).
 retire_response=""
 if [[ -n "$retire_args" ]]; then
     retire_response="$(call_mcp "retire_agent" "$retire_args" 2>/dev/null)" || retire_response=""
 fi
-if [[ -z "$retire_response" ]] || printf '%s' "$retire_response" | ags_mcp_has_error; then
+if [[ -z "$retire_response" ]] \
+    || ! printf '%s' "$retire_response" | ags_retire_receipt_confirms "$AGENT_NAME" "$CLEANUP_PROJECT_KEY"; then
     echo "[cleanup-child-agent] ORRERY Mail did not confirm retiring '$AGENT_NAME'; keeping its credentials for a later cleanup" >&2
     exit 1
 fi

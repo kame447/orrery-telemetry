@@ -341,8 +341,8 @@ if [[ "$program" == "codex" || "$program" == "codex-cli" ]]; then
   persist_codex_registration_state \
     "$registered" "$registered_id" "$project_key" "$program" "$token_file_out" \
     || die "could not persist canonical Codex registration token and metadata"
-else
-  ags_store_registration_token "$registered" "$effective_token" || true
+elif ! ags_store_registration_token "$registered" "$effective_token"; then
+  die "could not store the durable token for $registered in '$project_key'; the registration's token is kept in $token_file_out"
 fi
 
 ags_apply_contact_policy "$project_key" "$registered" "$effective_token"

@@ -2544,7 +2544,9 @@ conn.request("POST", parsed.path, body=payload, headers=headers)
 resp = conn.getresponse()
 print(resp.read().decode())
 conn.close()
-' "$method" "$MCP_URL"
+if sys.argv[3] == "strict" and not 200 <= resp.status < 300:
+    sys.exit(1)
+' "$method" "$MCP_URL" "${CALL_MCP_STATUS:-lenient}"
 }
 
 load_agent_name_helpers() {
@@ -2724,7 +2726,65 @@ print(json.dumps({
         encoding="utf-8").strip(),
 }))
 ' "$PROJECT_KEY" "$agent_name" "$token_file")
-    call_mcp "retire_agent" "$retire_args"
+    # Retirement decides whether a credential may be deleted: an HTTP error
+    # status is a failure even when the body looks like JSON.
+    CALL_MCP_STATUS=strict call_mcp "retire_agent" "$retire_args"
+}
+
+# True only when Mail returned its positive retirement receipt for this child
+# and project. Transport failure, an HTTP/JSON-RPC/tool error, or an empty or
+# mismatched answer all leave the identity possibly live, so callers must keep
+# the credential that could still retire it.
+retire_child_confirmed() {
+    local agent_name="$1" token_file="$2" response
+    response="$(retire_agent_with_token_file "$agent_name" "$token_file" 2>/dev/null)" || return 1
+    printf '%s' "$response" | ags_retire_receipt_confirms "$agent_name" "$PROJECT_KEY"
+}
+
+# Replace the proposed token in the direct one-shot with the one the server
+# actually persisted (stock servers mint their own), before anything may need
+# to retire this registration. The response arrives on stdin; the token is
+# only ever written to the 0600 file.
+persist_effective_direct_token() {
+    local token_file="$1"
+    python3 -c '
+import json, os, sys
+
+path = sys.argv[1]
+try:
+    response = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+objects = [response]
+result = response.get("result") if isinstance(response, dict) else None
+objects.append(result)
+if isinstance(result, dict):
+    objects.append(result.get("structuredContent"))
+    for part in result.get("content") or []:
+        if isinstance(part, dict) and isinstance(part.get("text"), str):
+            try:
+                objects.append(json.loads(part["text"]))
+            except Exception:
+                pass
+token = ""
+for obj in objects:
+    if isinstance(obj, dict) and isinstance(obj.get("registration_token"), str):
+        token = obj["registration_token"].strip()
+        if token:
+            break
+if not token:
+    raise SystemExit(0)
+temporary = f"{path}.tmp.{os.getpid()}"
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+descriptor = os.open(temporary, flags, 0o600)
+try:
+    os.write(descriptor, token.encode("utf-8"))
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+os.replace(temporary, path)
+os.chmod(path, 0o600)
+' "$token_file"
 }
 
 parse_resource_paths_json() {
@@ -2800,12 +2860,22 @@ fi
 if [[ "$CHILD_NAME" != "$CHILD_NAME_CANDIDATE" ]]; then
     echo "[spawn_child] register_agent normalized '$CHILD_NAME_CANDIDATE' to actual identity '$CHILD_NAME'" >&2
 fi
+# From here on the one-shot holds the token that can retire this registration.
+if ! printf '%s' "$REGISTER_RESULT" | persist_effective_direct_token "$DIRECT_ONE_SHOT_TOKEN_FILE"; then
+    echo "Error: could not save the registered child token; it may remain registered as $CHILD_NAME in '$PROJECT_KEY'" >&2
+    exit 1
+fi
 # Runtime credentials are keyed by name only; one that already exists belongs
 # to another registration (possibly another project) and is never replaced.
+# The new registration is retired with its own token; its one-shot is removed
+# only once Mail confirms that, and otherwise stays as the recovery credential.
 if [[ "$(child_local_credentials "$DIRECT_ONE_SHOT_TOKEN_FILE")" != "absent" ]]; then
     echo "Error: local credentials for $CHILD_NAME already exist; refusing to replace another registration" >&2
-    retire_agent_with_token_file "$CHILD_NAME" "$DIRECT_ONE_SHOT_TOKEN_FILE" > /dev/null 2>&1 || true
-    rm -f "$DIRECT_ONE_SHOT_TOKEN_FILE"
+    if retire_child_confirmed "$CHILD_NAME" "$DIRECT_ONE_SHOT_TOKEN_FILE"; then
+        rm -f "$DIRECT_ONE_SHOT_TOKEN_FILE"
+    else
+        echo "Error: ORRERY Mail did not confirm retiring the new registration $CHILD_NAME in '$PROJECT_KEY'; its token is kept in $DIRECT_ONE_SHOT_TOKEN_FILE" >&2
+    fi
     exit 1
 fi
 
@@ -2820,8 +2890,12 @@ if ! CHILD_TOKEN_FILE="$(
         adopt_registered_token_response "$CHILD_NAME" "$PROJECT_KEY" \
             "$DIRECT_ONE_SHOT_TOKEN_FILE" "$CHILD_PROGRAM"
 )"; then
-    rm -f "$DIRECT_ONE_SHOT_TOKEN_FILE"
-    echo "Error: failed to persist the registered child token" >&2
+    echo "Error: failed to persist the registered child token for $CHILD_NAME" >&2
+    if retire_child_confirmed "$CHILD_NAME" "$DIRECT_ONE_SHOT_TOKEN_FILE"; then
+        rm -f "$DIRECT_ONE_SHOT_TOKEN_FILE"
+    else
+        echo "Error: ORRERY Mail did not confirm retiring the new registration $CHILD_NAME in '$PROJECT_KEY'; its token is kept in $DIRECT_ONE_SHOT_TOKEN_FILE" >&2
+    fi
     exit 1
 fi
 DIRECT_TOKEN_FINGERPRINT="$(token_file_fingerprint "$CHILD_TOKEN_FILE")"
@@ -2831,6 +2905,7 @@ DIRECT_TOKEN_FINGERPRINT="$(token_file_fingerprint "$CHILD_TOKEN_FILE")"
 # 一瞬 tmux session が作られていても child credentials と予約を回収する。
 SPAWN_COMPLETED=false
 CHILD_SESSION_STARTED=false
+CHILD_RETIRED=false
 cleanup_on_failure() {
     if [[ "$SPAWN_COMPLETED" == true ]]; then
         return
@@ -2851,13 +2926,20 @@ print(json.dumps({'project_key': sys.argv[1], 'agent_name': sys.argv[2]}))
             call_mcp "release_file_reservations" "$release_args" > /dev/null 2>&1 || true
         fi
         # エージェント retire
-        if [[ -s "${CHILD_TOKEN_FILE:-}" ]]; then
-            retire_agent_with_token_file "$CHILD_NAME" "$CHILD_TOKEN_FILE" > /dev/null 2>&1 || true
+        if [[ -s "${CHILD_TOKEN_FILE:-}" ]] \
+            && retire_child_confirmed "$CHILD_NAME" "$CHILD_TOKEN_FILE"; then
+            CHILD_RETIRED=true
         fi
     fi
     # worktree も作っていれば撤去
     cleanup_worktree
-    remove_child_credentials_holding "${DIRECT_TOKEN_FINGERPRINT:-}"
+    # The credential is the only way to retire the child later; keep it
+    # unless Mail confirmed the retirement.
+    if [[ "$CHILD_RETIRED" == true ]]; then
+        remove_child_credentials_holding "${DIRECT_TOKEN_FINGERPRINT:-}"
+    elif [[ -n "${CHILD_NAME:-}" ]]; then
+        echo "[spawn_child] cleanup: ORRERY Mail did not confirm retiring $CHILD_NAME in '$PROJECT_KEY'; keeping ${CHILD_TOKEN_FILE:-its credentials}" >&2
+    fi
     if [[ -n "${CHILD_NAME:-}" && -f "$MANAGED_FILE" ]]; then
         python3 - "$MANAGED_FILE" "$CHILD_NAME" <<'PY' 2>/dev/null || true
 import pathlib
@@ -2926,11 +3008,13 @@ import json, sys
 print(json.dumps({'project_key': sys.argv[1], 'agent_name': sys.argv[2]}))
 " "$PROJECT_KEY" "$CHILD_NAME")
         call_mcp "release_file_reservations" "$RELEASE_ARGS" > /dev/null 2>&1 || true
-        if [[ -s "${CHILD_TOKEN_FILE:-}" ]]; then
-            retire_agent_with_token_file "$CHILD_NAME" "$CHILD_TOKEN_FILE" > /dev/null 2>&1 || true
+        if [[ -s "${CHILD_TOKEN_FILE:-}" ]] \
+            && retire_child_confirmed "$CHILD_NAME" "$CHILD_TOKEN_FILE"; then
+            echo "[spawn_child] Released reservations and retired $CHILD_NAME" >&2
+            remove_child_credentials_holding "$DIRECT_TOKEN_FINGERPRINT"
+        else
+            echo "[spawn_child] Released reservations; ORRERY Mail did not confirm retiring $CHILD_NAME in '$PROJECT_KEY', so $CHILD_TOKEN_FILE is kept" >&2
         fi
-        echo "[spawn_child] Released reservations and retired $CHILD_NAME" >&2
-        remove_child_credentials_holding "$DIRECT_TOKEN_FINGERPRINT"
         SPAWN_COMPLETED=true  # cleanup already completed explicitly above
         exit 21
     fi
