@@ -12,7 +12,10 @@ from agentstack_mail.authorization import (
     assert_authorization_catalog_boundary,
     catalog_as_plain_data,
 )
-from agentstack_mail.contract import COMPATIBILITY_TOOLS
+from agentstack_mail.contract import (
+    COMPATIBILITY_TOOLS,
+    POST_CUTOVER_SCHEMA_ADDITIONS,
+)
 
 
 async def verify() -> None:
@@ -67,6 +70,19 @@ async def verify() -> None:
         raise SystemExit("installed wheel must publish zero MCP resource templates")
     if prompts:
         raise SystemExit("installed wheel must publish zero MCP prompts")
+    # Properties added after the cutover are pinned exactly and then removed,
+    # so every other field still has to equal the frozen predecessor.
+    for tool_name, properties in POST_CUTOVER_SCHEMA_ADDITIONS.items():
+        schema = actual[tool_name]["inputSchema"]
+        for property_name, property_schema in properties.items():
+            if schema["properties"].pop(property_name, None) != property_schema:
+                raise SystemExit(
+                    f"installed wheel schema mismatch: {tool_name}.{property_name}"
+                )
+            if property_name in schema.get("required", []):
+                raise SystemExit(
+                    f"installed wheel schema mismatch: {tool_name}.{property_name} is required"
+                )
     if actual != expected:
         mismatched = sorted(
             name for name in expected if actual.get(name) != expected[name]

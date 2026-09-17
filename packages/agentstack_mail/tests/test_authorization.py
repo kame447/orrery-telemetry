@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 from agentstack_mail import app, authorization, config, db
-from agentstack_mail.contract import COMPATIBILITY_TOOLS
+from agentstack_mail.contract import COMPATIBILITY_TOOLS, POST_CUTOVER_SCHEMA_ADDITIONS
 from fastmcp import Client
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +28,8 @@ EXPECTED_CURRENT_CREDENTIAL_ARGUMENTS = {
     "retire_agent": ("registration_token",),
     # Recovery carries the same credential as the retirement it reverses.
     "unretire_agent": ("registration_token",),
+    # An optional owner proof on an otherwise unchanged directory read.
+    "whois": ("registration_token",),
     "send_message": ("sender_token",),
 }
 AUTHORIZATION_FIXTURE_PATH = (
@@ -118,6 +120,10 @@ def test_authorization_catalog_exactly_matches_the_published_contract() -> None:
 
     expected_required = _live_required_arguments()
     input_properties = _live_input_properties()
+    for tool_name, properties in POST_CUTOVER_SCHEMA_ADDITIONS.items():
+        # Recorded additions to the published surface; the frozen predecessor
+        # fixture above stays exactly as it was.
+        input_properties[tool_name] |= set(properties)
     for tool_name, record in catalog.items():
         assert set(record) == EXPECTED_FIELDS
         assert record["required_arguments"] == expected_required[tool_name]

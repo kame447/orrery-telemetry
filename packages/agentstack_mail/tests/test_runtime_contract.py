@@ -14,7 +14,7 @@ from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
-from agentstack_mail.contract import COMPATIBILITY_TOOLS, ISOLATION_DEFAULTS
+from agentstack_mail.contract import COMPATIBILITY_TOOLS, POST_CUTOVER_SCHEMA_ADDITIONS, ISOLATION_DEFAULTS
 
 LEGACY_ENV = {
     "PORT": "8765",
@@ -203,6 +203,15 @@ def test_actual_tool_schemas_match_the_frozen_live_contract() -> None:
         }
 
     actual = asyncio.run(inspect_server())
+
+    # Properties this server added after the cutover are compared against
+    # their ledger entry and then removed, so every other field still has to
+    # equal the frozen predecessor exactly.
+    for tool_name, properties in POST_CUTOVER_SCHEMA_ADDITIONS.items():
+        schema = actual[tool_name]["inputSchema"]
+        for property_name, property_schema in properties.items():
+            assert schema["properties"].pop(property_name) == property_schema
+            assert property_name not in schema.get("required", [])
 
     assert actual == expected
     tools = asyncio.run(build_mcp_server().get_tools())
