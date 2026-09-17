@@ -118,27 +118,25 @@ except Exception:
 }
 
 # Resolve the hook invocation's actual workspace and the Mail namespace it may
-# act in. The payload cwd is the workspace; the hook process's own directory is
-# used only when the payload carries no cwd at all (the single-project
-# fallback, RESERVATION_CWD_FALLBACK=1). That directory is not evidence of
-# where the session works, so callers must not turn a fallback into a no-op
-# for a path outside it.
+# act in. The payload cwd is the only workspace evidence: the hook process's
+# own directory can belong to another session or repository, so a payload
+# without an absolute, existing cwd is unresolved rather than guessed.
 #
 # A selected key (live AGENTSTACK_PROJECT_KEY/PROJECT_KEY, else the installed
 # one) must validate against that workspace; with no selection the key derived
-# from the workspace is used. Protection always starts at the actual
-# worktree root, so configured roots can add same-repository worktrees but can
-# never replace the workspace being edited.
+# from the workspace is used. Either way the namespace is the validated
+# context's canonical project_key, never the selection's own spelling.
+# Protection always starts at the actual worktree root, so configured roots can
+# add same-repository worktrees but can never replace the workspace edited.
 #
 # Sets RESERVATION_PROJECT_KEY, RESERVATION_WORK_DIR and PROTECTED_ROOTS.
-# Returns 2 when the workspace is invalid and 3 when the selected project does
-# not belong to it. Callers must not classify paths or contact Mail after a
-# nonzero return.
+# Returns 2 when the workspace is missing or invalid and 3 when the selected
+# project does not belong to it. Callers must not classify paths or contact
+# Mail after a nonzero return.
 reservation_resolve_workspace() {
     local tool_document="$1" cwd_state="" target="" work_dir="" selected=""
     local context="" repository="" workspace_root="" configured="" root=""
     local root_context="" old_ifs=""
-    RESERVATION_CWD_FALLBACK=0
     RESERVATION_PROJECT_KEY=""
     RESERVATION_WORK_DIR=""
     PROTECTED_ROOTS=""
@@ -148,18 +146,11 @@ try:
     document = json.loads(sys.stdin.read())
 except Exception:
     document = {}
-if not isinstance(document, dict) or "cwd" not in document:
-    print("absent:")
-else:
-    value = document["cwd"]
-    ok = isinstance(value, str) and os.path.isabs(value) and "\n" not in value
-    print(("value:" + value) if ok else "invalid:")
+value = document.get("cwd") if isinstance(document, dict) else None
+ok = isinstance(value, str) and os.path.isabs(value) and "\n" not in value
+print(("value:" + value) if ok else "invalid:")
 ' 2>/dev/null || echo "invalid:")
     case "$cwd_state" in
-        absent:)
-            target="$(pwd -P)"
-            RESERVATION_CWD_FALLBACK=1
-            ;;
         value:*) target="${cwd_state#value:}" ;;
         *) return 2 ;;
     esac
@@ -168,11 +159,10 @@ else:
     selected="$(agentstack_resolve_project_key "" "" 0)"
     if [ -n "$selected" ]; then
         context="$(agentstack_validate_project_context "$work_dir" "$selected" 2>/dev/null)" || return 3
-        RESERVATION_PROJECT_KEY="$selected"
     else
         context="$(agentstack_resolve_invocation_context "$work_dir" 2>/dev/null)" || return 2
-        RESERVATION_PROJECT_KEY="$(agentstack_context_field "$context" project_key)" || return 2
     fi
+    RESERVATION_PROJECT_KEY="$(agentstack_context_field "$context" project_key)" || return 2
     repository="$(agentstack_context_field "$context" repository_key)" || return 2
     workspace_root="$(agentstack_context_field "$context" worktree_root)" || return 2
     if [ -z "$workspace_root" ]; then
@@ -260,13 +250,7 @@ for root in os.environ["QUERY_ROOTS"].split(":"):
 ' 2>/dev/null)
     status=$?
     [ "$status" -eq 0 ] || return 2
-    if [ -z "$resolved" ]; then
-        # Outside every root is a deliberate no-op only when the workspace came
-        # from the payload. Without it, a stale hook directory would make any
-        # edit in the real workspace look unprotected.
-        [ "$RESERVATION_CWD_FALLBACK" = "1" ] && return 2
-        return 1
-    fi
+    [ -n "$resolved" ] || return 1
     MATCHED_ROOT="$(printf '%s\n' "$resolved" | sed -n '1p')"
     FILE_PATH="$(printf '%s\n' "$resolved" | sed -n '2p')"
     REL_PATH="$(printf '%s\n' "$resolved" | sed -n '3p')"
@@ -276,17 +260,10 @@ for root in os.environ["QUERY_ROOTS"].split(":"):
 
 # Session-scoped hooks (SessionEnd, reservation-tool PreToolUse) have no file
 # path, but still act only in the validated namespace of their own workspace.
-# Without a payload cwd they proceed only when a selected project (live or
-# installed) independently validates against the hook directory.
 reservation_extract_session_id() {
     local tool_document="$1"
     reservation_extract_session_id_only "$tool_document"
-    reservation_resolve_workspace "$tool_document" || return $?
-    if [ "$RESERVATION_CWD_FALLBACK" = "1" ] \
-        && [ -z "$(agentstack_resolve_project_key "" "" 0)" ]; then
-        return 2
-    fi
-    return 0
+    reservation_resolve_workspace "$tool_document"
 }
 
 # Name one debounce slot. The project namespace is part of it, so the same
@@ -314,6 +291,48 @@ reservation_failure_log() {
     printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$detail" >> "$log_file" 2>/dev/null || true
 }
 
+# A sleeping release worker re-sources this file when its grace period ends,
+# so its request is judged by the current rules even if an older hook armed it.
+# The worker names its debounce slot in QUERY_STATE_FILE and its generation in
+# QUERY_STATE_TOKEN. Either marker means worker mode, and then the slot must be
+# exactly $RUNTIME_DIR/file_release_debounce/<reservation_debounce_key> for
+# this project, agent and first (NFC) relative path, and must still hold the
+# worker's token. A worker armed before slots carried the project cannot show
+# which project it was cancelled for, so it becomes a no-op instead of
+# releasing a reservation that may have been taken again meanwhile. Calls with
+# neither marker (immediate release, SessionEnd) are unaffected.
+reservation_worker_slot_matches() {
+    local agent="$1" project_key="$2" paths_json="$3" relative="" expected=""
+    [ -n "${QUERY_STATE_FILE+x}" ] || [ -n "${QUERY_STATE_TOKEN+x}" ] || return 0
+    [ -n "${QUERY_STATE_FILE:-}" ] && [ -n "${QUERY_STATE_TOKEN:-}" ] || return 1
+    [ -n "$paths_json" ] || return 1
+    relative="$(QUERY_PATHS_JSON="$paths_json" python3 -c '
+import json, os
+paths = json.loads(os.environ["QUERY_PATHS_JSON"])
+if not isinstance(paths, list) or not paths or not isinstance(paths[0], str) or not paths[0]:
+    raise SystemExit(1)
+print(paths[0])
+' 2>/dev/null)" || return 1
+    expected="$(reservation_debounce_key "$project_key" "$agent" "$relative" 2>/dev/null)" || return 1
+    [ -n "$expected" ] || return 1
+    [ "$QUERY_STATE_FILE" = "$RUNTIME_DIR/file_release_debounce/$expected" ] || return 1
+    # The slot may have been re-armed or invalidated between the worker's own
+    # check and this call; only the generation it was started for may release.
+    QUERY_STATE_FILE="$QUERY_STATE_FILE" QUERY_STATE_TOKEN="$QUERY_STATE_TOKEN" python3 -c '
+import os, stat
+path = os.environ["QUERY_STATE_FILE"]
+try:
+    info = os.lstat(path)
+    if not stat.S_ISREG(info.st_mode):
+        raise SystemExit(1)
+    with open(path, encoding="utf-8") as handle:
+        current = handle.read().strip()
+except (OSError, UnicodeError):
+    raise SystemExit(1)
+raise SystemExit(0 if current == os.environ["QUERY_STATE_TOKEN"] else 1)
+' 2>/dev/null
+}
+
 # Send release_file_reservations. The third argument is a JSON list of paths;
 # omit it to release every reservation owned by the agent. Errors are durable.
 reservation_release_request() {
@@ -321,6 +340,10 @@ reservation_release_request() {
     local project_key="$2"
     local paths_json="${3:-}"
     local token=""
+    if ! reservation_worker_slot_matches "$agent" "$project_key" "$paths_json"; then
+        reservation_failure_log "release agent=$agent project=$project_key error=unscoped-release-worker"
+        return 1
+    fi
     if legacy_bearer_enabled; then
         token="$(get_legacy_http_bearer 2>/dev/null || true)"
     else

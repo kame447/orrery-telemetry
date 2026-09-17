@@ -9,6 +9,8 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -191,18 +193,21 @@ def test_payload_cwd_not_shell_cwd_selects_workspace_and_relative_base(repos):
     }]
 
 
-def test_missing_payload_cwd_uses_the_hook_directory_only_when_it_validates(repos):
-    first, second = repos["first"], repos["second"]
+def test_missing_payload_cwd_is_unresolved_even_for_a_valid_relative_edit(repos):
+    second = repos["second"]
+    payload = edit(None, "note.md", tool_response={"success": True})
     with _Server(lambda _: (200, _mcp_result(1))) as server:
-        valid = run(repos, CHECK, server.url, edit(None, "note.md"),
-                    process_cwd=second, AGENTSTACK_PROJECT_KEY=second)
-        assert valid.returncode == 0, valid.stderr
-        assert arguments(server)[0]["project_key"] == str(second)
-        stale = run(repos, CHECK, server.url, edit(None, second / "note.md"),
-                    process_cwd=second, AGENTSTACK_PROJECT_KEY=first)
-    assert stale.returncode == 2
-    assert "AGENT PROJECT CONTEXT MISMATCH" in stale.stderr
-    assert len(server.requests) == 1
+        # The hook directory and the selected key agree, and still they are
+        # not the session's workspace: a relative path has no base.
+        guarded = run(repos, CHECK, server.url, payload,
+                      process_cwd=second, AGENTSTACK_PROJECT_KEY=second)
+        released = run(repos, RELEASE, server.url, payload,
+                       process_cwd=second, AGENTSTACK_PROJECT_KEY=second)
+    assert guarded.returncode == 2, guarded.stderr
+    assert "AGENT PROJECT CONTEXT UNRESOLVED" in guarded.stderr
+    assert released.returncode == 0, released.stderr
+    assert server.requests == []
+    assert "release session=session-1 error=project-context-invalid" in failure_log(repos)
 
 
 def test_missing_cwd_with_stale_shell_cwd_cannot_turn_real_edits_into_no_ops(repos):
@@ -219,7 +224,7 @@ def test_missing_cwd_with_stale_shell_cwd_cannot_turn_real_edits_into_no_ops(rep
     assert failure_log(repos).count("error=project-context-invalid") == 2
 
 
-def test_session_hooks_without_cwd_need_an_independently_valid_selection(repos):
+def test_session_hooks_never_act_without_a_payload_cwd(repos):
     first = repos["first"]
     state = repos["runtime"] / "file_release_debounce"
     state.mkdir()
@@ -227,21 +232,54 @@ def test_session_hooks_without_cwd_need_an_independently_valid_selection(repos):
     armed.write_text("token\n", encoding="utf-8")
     invalidate = {"session_id": "session-1", "tool_input": {"paths": ["note.md"]}}
     with _Server(_released) as server:
-        skipped = run(repos, RELEASE_ALL, server.url, {"session_id": "session-1"},
-                      process_cwd=first)
-        assert skipped.returncode == 0, skipped.stderr
-        assert server.requests == []
-        assert "release-all session=session-1 error=project-context-invalid" in failure_log(repos)
-        run(repos, INVALIDATE, server.url, invalidate, process_cwd=first)
-        assert armed.exists()
+        for overrides in ({}, {"AGENTSTACK_PROJECT_KEY": first}):
+            ended = run(repos, RELEASE_ALL, server.url, {"session_id": "session-1"},
+                        process_cwd=first, **overrides)
+            assert ended.returncode == 0, ended.stderr
+            invalidated = run(repos, INVALIDATE, server.url, invalidate,
+                              process_cwd=first, **overrides)
+            assert invalidated.returncode == 0, invalidated.stderr
+    assert server.requests == []
+    assert failure_log(repos).count("release-all session=session-1 error=project-context-invalid") == 2
+    assert armed.exists()
 
-        selected = run(repos, RELEASE_ALL, server.url, {"session_id": "session-1"},
-                       process_cwd=first, AGENTSTACK_PROJECT_KEY=first)
-        assert selected.returncode == 0, selected.stderr
-        run(repos, INVALIDATE, server.url, invalidate,
-            process_cwd=first, AGENTSTACK_PROJECT_KEY=first)
-    assert arguments(server) == [{"project_key": str(first), "agent_name": AGENT}]
-    assert not armed.exists()
+
+# --- canonical namespace ------------------------------------------------------
+
+def test_selected_key_spellings_resolve_to_the_canonical_namespace(repos):
+    second = repos["second"]
+    alias = repos["home"] / "alias"
+    alias.symlink_to(second, target_is_directory=True)
+    (second / "sub").mkdir()
+    spellings = (alias, f"{second}/sub/..", f"{alias}/sub/../")
+    with _Server(lambda _: (200, _mcp_result(1))) as server:
+        for spelling in spellings:
+            result = run(repos, CHECK, server.url, edit(second, second / "note.md"),
+                         AGENTSTACK_PROJECT_KEY=spelling)
+            assert result.returncode == 0, (spelling, result.stderr)
+        with _Server(_released) as release_server:
+            ended = run(repos, RELEASE_ALL, release_server.url,
+                        {"session_id": "session-1", "cwd": str(alias)},
+                        AGENTSTACK_PROJECT_KEY=alias)
+    assert ended.returncode == 0, ended.stderr
+    assert [item["project_key"] for item in arguments(server)] == [str(second)] * len(spellings)
+    assert arguments(release_server) == [{"project_key": str(second), "agent_name": AGENT}]
+
+
+def test_invalidation_leaves_project_less_legacy_slots_alone(repos):
+    first = repos["first"]
+    state = repos["runtime"] / "file_release_debounce"
+    state.mkdir()
+    legacy = state / hashlib.sha1(f"{AGENT}\0note.md".encode()).hexdigest()
+    legacy.write_text("token\n", encoding="utf-8")
+    current = state / slot(str(first), AGENT, "note.md")
+    current.write_text("token\n", encoding="utf-8")
+    result = run(repos, INVALIDATE, "http://127.0.0.1:9/mcp",
+                 {"session_id": "session-1", "cwd": str(first),
+                  "tool_input": {"paths": ["note.md"]}})
+    assert result.returncode == 0, result.stderr
+    assert legacy.exists()
+    assert not current.exists()
 
 
 # --- linked worktrees ---------------------------------------------------------
@@ -367,6 +405,155 @@ def test_same_agent_and_path_in_two_projects_have_separate_release_slots(repos):
     assert result.returncode == 0, result.stderr
     assert not first_slot.exists()
     assert second_slot.exists()
+
+
+def run_worker(ctx, url, state_file, *, project_key, relative, absolute):
+    """Run the unchanged release worker the way a hook armed it."""
+    state_file.write_text("armed-token\n", encoding="utf-8")
+    env = dict(ctx["env"])
+    env.update(
+        AGENTSTACK_HOOKS_DIR=str(HOOKS),
+        AGENTSTACK_RUNTIME_DIR=str(ctx["runtime"]),
+        AGENTSTACK_PROJECT_KEY=project_key,
+        AGENTSTACK_MCP_URL=url,
+        AGENTSTACK_MAIL_HTTP_BEARER_MODE="disabled",
+        QUERY_AGENT=AGENT,
+        QUERY_PROJECT_KEY=project_key,
+        QUERY_PATHS_JSON=json.dumps([relative, absolute]),
+        QUERY_STATE_FILE=str(state_file),
+        QUERY_STATE_TOKEN="armed-token",
+        QUERY_GRACE_SECONDS="0",
+        QUERY_COMMON_LIB=str(HOOKS / "reservation-common.sh"),
+    )
+    return subprocess.run(
+        [sys.executable, str(HOOKS / "release-file-reservation-worker.py")],
+        cwd=ctx["home"], env=env, text=True, capture_output=True, timeout=30,
+    )
+
+
+def test_legacy_armed_worker_cannot_release_after_upgrade(repos):
+    first = repos["first"]
+    state = repos["runtime"] / "file_release_debounce"
+    state.mkdir()
+    # Armed by the previous hook: the slot is named for agent and path only.
+    legacy = state / hashlib.sha1(f"{AGENT}\0note.md".encode()).hexdigest()
+    with _Server(_released) as server:
+        result = run_worker(repos, server.url, legacy, project_key=str(first),
+                            relative="note.md", absolute=str(first / "note.md"))
+    assert result.returncode == 0, result.stderr
+    assert server.requests == [], "a re-taken reservation must not be released"
+    assert not legacy.exists(), "the worker still removes its own slot"
+    assert "error=unscoped-release-worker" in failure_log(repos)
+
+
+def test_project_scoped_worker_still_releases(repos):
+    first = repos["first"]
+    state = repos["runtime"] / "file_release_debounce"
+    state.mkdir()
+    scoped = state / slot(str(first), AGENT, "note.md")
+    with _Server(_released) as server:
+        result = run_worker(repos, server.url, scoped, project_key=str(first),
+                            relative="note.md", absolute=str(first / "note.md"))
+    assert result.returncode == 0, result.stderr
+    assert arguments(server) == [{
+        "project_key": str(first),
+        "agent_name": AGENT,
+        "paths": ["note.md", str(first / "note.md")],
+    }]
+    assert not scoped.exists()
+    assert failure_log(repos) == ""
+
+
+def test_worker_slot_for_another_project_is_refused(repos):
+    first, second = repos["first"], repos["second"]
+    state = repos["runtime"] / "file_release_debounce"
+    state.mkdir()
+    foreign = state / slot(str(second), AGENT, "note.md")
+    with _Server(_released) as server:
+        result = run_worker(repos, server.url, foreign, project_key=str(first),
+                            relative="note.md", absolute=str(first / "note.md"))
+    assert result.returncode == 0, result.stderr
+    assert server.requests == []
+    assert "error=unscoped-release-worker" in failure_log(repos)
+
+
+def call_release_boundary(ctx, url, **markers):
+    """Call the shared release function directly, as a worker's bash would."""
+    env = dict(ctx["env"])
+    env.update(AGENTSTACK_HOOKS_DIR=str(HOOKS), AGENTSTACK_RUNTIME_DIR=str(ctx["runtime"]),
+               AGENTSTACK_MCP_URL=url, AGENTSTACK_MAIL_HTTP_BEARER_MODE="disabled")
+    for key, value in markers.items():
+        env[key] = str(value)
+    first = ctx["first"]
+    return subprocess.run(
+        ["/bin/bash", "-c", '. "$1"; reservation_release_request "$2" "$3" "$4"',
+         "boundary", str(HOOKS / "reservation-common.sh"), AGENT, str(first),
+         json.dumps(["note.md", str(first / "note.md")])],
+        cwd=ctx["home"], env=env, text=True, capture_output=True, timeout=30,
+    )
+
+
+def test_release_boundary_refuses_partial_foreign_or_replaced_worker_slots(repos):
+    first = repos["first"]
+    state = repos["runtime"] / "file_release_debounce"
+    state.mkdir()
+    scoped = state / slot(str(first), AGENT, "note.md")
+    scoped.write_text("current-token\n", encoding="utf-8")
+    elsewhere = repos["home"] / "file_release_debounce" / scoped.name
+    elsewhere.parent.mkdir()
+    elsewhere.write_text("current-token\n", encoding="utf-8")
+    refused = (
+        {"QUERY_STATE_TOKEN": "current-token"},
+        {"QUERY_STATE_FILE": scoped},
+        {"QUERY_STATE_FILE": scoped, "QUERY_STATE_TOKEN": ""},
+        {"QUERY_STATE_FILE": elsewhere, "QUERY_STATE_TOKEN": "current-token"},
+        {"QUERY_STATE_FILE": scoped, "QUERY_STATE_TOKEN": "replaced-generation"},
+    )
+    with _Server(_released) as server:
+        for markers in refused:
+            result = call_release_boundary(repos, server.url, **markers)
+            assert result.returncode != 0, markers
+        assert server.requests == []
+        accepted = call_release_boundary(repos, server.url, QUERY_STATE_FILE=scoped,
+                                         QUERY_STATE_TOKEN="current-token")
+        immediate = call_release_boundary(repos, server.url)
+    assert accepted.returncode == 0, accepted.stderr
+    assert immediate.returncode == 0, immediate.stderr
+    assert len(server.requests) == 2
+    assert failure_log(repos).count("error=unscoped-release-worker") == len(refused)
+
+
+def test_symlinked_worker_slot_is_refused(repos):
+    first = repos["first"]
+    state = repos["runtime"] / "file_release_debounce"
+    state.mkdir()
+    target = repos["home"] / "token"
+    target.write_text("current-token\n", encoding="utf-8")
+    scoped = state / slot(str(first), AGENT, "note.md")
+    scoped.symlink_to(target)
+    with _Server(_released) as server:
+        result = call_release_boundary(repos, server.url, QUERY_STATE_FILE=scoped,
+                                       QUERY_STATE_TOKEN="current-token")
+    assert result.returncode != 0
+    assert server.requests == []
+
+
+def test_armed_release_worker_end_to_end_releases_in_its_project(repos):
+    """The hook arms the real worker; its slot passes the fresh boundary."""
+    first = repos["first"]
+    with _Server(_released) as server:
+        result = run(repos, RELEASE, server.url,
+                     edit(first, first / "note.md", tool_response={"success": True}),
+                     AGENTSTACK_RELEASE_GRACE_SECONDS="1")
+        assert result.returncode == 0, result.stderr
+        deadline = time.monotonic() + 15
+        while not server.requests and time.monotonic() < deadline:
+            time.sleep(0.2)
+    assert arguments(server) == [{
+        "project_key": str(first),
+        "agent_name": AGENT,
+        "paths": ["note.md", str(first / "note.md")],
+    }]
 
 
 # --- path normalization -------------------------------------------------------
