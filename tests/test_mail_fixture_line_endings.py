@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # Existing pins from authorization.py and test_agentstack_mail_contract.py.
 PINNED_FIXTURES = {
     "packages/agentstack_mail/fixtures/authorization-tools-v1.json": (
-        "6609e7b2c6816c039ab55432de3bda15ad7c491bad5fb5764b9ae77a2aeda607"
+        "d2283b315b71e0a9ac55901eef0b233eaf5b14816880223dbf25024570742aa0"
     ),
     "packages/agentstack_mail/fixtures/live-tools-list.json": (
         "6ea7dabf41f71091161fa1fcb8a4073a383a65c7bba4785306217fd35f9e8332"
