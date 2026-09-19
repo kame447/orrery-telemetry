@@ -1,0 +1,86 @@
+name: Phase 3 documentation correction (one-shot)
+
+on:
+  push:
+    branches: [fix/issue33-reservation-workspace]
+    paths: [.github/workflows/issue33-phase3-docs.yml]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: issue33-phase3-docs
+  cancel-in-progress: false
+
+jobs:
+  correct-docs:
+    if: github.repository == 'kame447/orrery-telemetry'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Correct only the verified reservation paragraphs in both languages
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/fix/issue33-reservation-workspace
+          test "$(git rev-parse HEAD^)" = 997bd7f60dec0928c7d5dd8087c526caa4f0bd20
+          test "$(git ls-remote origin "$GITHUB_REF" | cut -f1)" = "$GITHUB_SHA"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          changes = {
+              'docs/configuration.md': (
+                  'hook と helper の実行時は `AGENTSTACK_PROJECT_KEY` → `PROJECT_KEY` →\n'
+                  '`${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh` → 現在の cwd の順です。installed\n'
+                  '`env.sh` は source せず、`AGENTSTACK_PROJECT_KEY`（protected root の fallback では\n'
+                  '`AGENTSTACK_PROTECTED_ROOTS` も）だけを literal として読み取ります。このため install\n'
+                  '済みの editor を別 directory から起動しても reservation と registration は同じ project\n'
+                  'key を使い、同時に `env.sh` 内の任意 shell code は実行されません。',
+                  '予約 hook が選択 project key を読む順序は `AGENTSTACK_PROJECT_KEY` → `PROJECT_KEY` →\n'
+                  '`${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh` です。installed `env.sh` は source せず、\n'
+                  '`AGENTSTACK_PROJECT_KEY`（protected roots の参照では `AGENTSTACK_PROTECTED_ROOTS` も）\n'
+                  'だけを literal として読み取り、任意 shell code は実行しません。\n\n'
+                  '選択した key は、そのまま予約操作の権限にはなりません。予約 hook は payload の `cwd` を\n'
+                  '存在する絶対 directory として解決し、その workspace に選択 key が属することを検証してから、\n'
+                  'canonical project key で照会・解除します。key が未選択なら workspace から導出します。\n'
+                  'hook process 自身の cwd では代用しません。workspace が不明または選択 key が不一致なら、\n'
+                  '編集前の guard は Mail に接続せず block し、解除 hook は log を残して送信を skip します。\n\n'
+                  '実際の worktree root は常に保護対象です。設定済み `AGENTSTACK_PROTECTED_ROOTS` は、\n'
+                  '同じ repository に属する別 worktree の root だけを追加でき、実際の workspace を置き換えたり、\n'
+                  '別 repository の root を予約対象へ混ぜたりしません。詳細は [予約 hook](hooks.md) を参照してください。'
+              ),
+              'docs/configuration.en.md': (
+                  'At hook and helper runtime the precedence is `AGENTSTACK_PROJECT_KEY` → `PROJECT_KEY` → `${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh` → current cwd. The installed `env.sh` is not sourced; only `AGENTSTACK_PROJECT_KEY`, and `AGENTSTACK_PROTECTED_ROOTS` when falling back for protected roots, are read literally. Thus an installed editor started from another directory uses the same project key for reservation and registration without executing arbitrary shell code from `env.sh`.',
+                  'Reservation hooks select a project key from `AGENTSTACK_PROJECT_KEY` → `PROJECT_KEY` → `${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh`. The installed `env.sh` is not sourced; only `AGENTSTACK_PROJECT_KEY`, and `AGENTSTACK_PROTECTED_ROOTS` when reading protected roots, are read literally without executing arbitrary shell code.\n\n'
+                  'A selected key does not by itself authorize a reservation operation. The hooks require the payload `cwd` to resolve to an existing absolute directory, validate that the selected key belongs to that workspace, and then use the canonical project key for checks and releases. With no selected key, they derive it from the workspace. The hook process directory is never a substitute. An unresolved workspace or mismatched key blocks the pre-edit guard before it contacts Mail; release hooks log the problem and skip the request.\n\n'
+                  'The actual worktree root is always protected. Configured `AGENTSTACK_PROTECTED_ROOTS` may add only other worktree roots belonging to the same repository; they cannot replace the actual workspace or add roots from another repository. See [reservation hooks](hooks.en.md) for details.'
+              ),
+          }
+          for name, (old, new) in changes.items():
+              path = Path(name)
+              content = path.read_bytes()
+              before, after = old.encode('utf-8'), new.encode('utf-8')
+              if content.count(before) != 1:
+                  raise SystemExit(f'{name}: expected exactly one verified paragraph')
+              path.write_bytes(content.replace(before, after))
+          PY
+          git diff --check
+          python3 - <<'PY'
+          import subprocess
+          expected = {'docs/configuration.md', 'docs/configuration.en.md'}
+          actual = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          if actual != expected:
+              raise SystemExit(f'Unexpected changed files: {actual}')
+          PY
+          git diff --stat
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/configuration.md docs/configuration.en.md
+          git commit -m 'docs: align reservation configuration with workspace validation'
+          test "$(git ls-remote origin "$GITHUB_REF" | cut -f1)" = "$GITHUB_SHA"
+          git push origin HEAD:refs/heads/fix/issue33-reservation-workspace
+          printf 'Documentation correction HEAD: %s\n' "$(git rev-parse HEAD)"
