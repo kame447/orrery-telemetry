@@ -137,12 +137,16 @@ class ReservationHookTests(unittest.TestCase):
         fake_bin.mkdir()
         fake_python = fake_bin / "python3"
         fake_python.write_text(
+            # Only the renewal request and the transport probe are faked; the
+            # hooks' other stdin scripts (workspace resolution) run for real.
             "#!/bin/sh\n"
-            "if [ \"${1-}\" = \"-c\" ]; then\n"
-            f"    exec {json.dumps(os.sys.executable)} \"$@\"\n"
+            "if [ -n \"${AGENTSTACK_PROBE_URL+x}\" ]; then\n"
+            "    cat >/dev/null; printf '%s\\n' reachable; exit 0\n"
             "fi\n"
-            "cat >/dev/null\n"
-            "printf '%s\\n' 'HOOK_RENEWED: 0'\n",
+            "if [ -n \"${QUERY_PROJECT_KEY-}\" ]; then\n"
+            "    cat >/dev/null; printf '%s\\n' 'HOOK_RENEWED: 0'; exit 0\n"
+            "fi\n"
+            f"exec {json.dumps(os.sys.executable)} \"$@\"\n",
             encoding="utf-8",
         )
         fake_python.chmod(0o755)
@@ -166,8 +170,9 @@ class ReservationHookTests(unittest.TestCase):
                 "PATH": f"{fake_bin}:{env.get('PATH', '')}",
             }
         )
+        # Claude Code sends the session cwd with every hook payload.
         payload = json.dumps(
-            {"tool_input": {"file_path": str(workspace / "note.md")}}
+            {"cwd": str(workspace), "tool_input": {"file_path": str(workspace / "note.md")}}
         )
         return subprocess.run(
             ["/bin/bash", str(HOOK)],
@@ -193,7 +198,11 @@ class ReservationHookTests(unittest.TestCase):
         resolver_bytes: bytes | None = None,
         tmux_session_agent: str | None = None,
         file_path: Path | None = None,
+        payload_cwd: Any = "",
+        process_cwd: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        """payload_cwd: "" (default) sends root, as Claude Code sends the
+        session cwd with every hook; None omits cwd; anything else is sent."""
         runtime = root / "runtime"
         hooks = root / "isolated-hooks"
         runtime.mkdir(exist_ok=True)
@@ -241,15 +250,18 @@ class ReservationHookTests(unittest.TestCase):
             )
             fake_tmux.chmod(0o755)
             env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
-        payload = json.dumps(
-            {"tool_input": {"file_path": str(file_path or root / "note.md")}}
-        )
+        document: dict[str, Any] = {
+            "tool_input": {"file_path": str(file_path or root / "note.md")}
+        }
+        if payload_cwd is not None:
+            document["cwd"] = payload_cwd or str(root)
         return subprocess.run(
             ["/bin/bash", str(HOOK)],
-            input=payload,
+            input=json.dumps(document),
             text=True,
             capture_output=True,
             env=env,
+            cwd=process_cwd,
             check=False,
             timeout=10,
         )
@@ -281,6 +293,53 @@ class ReservationHookTests(unittest.TestCase):
         arguments = request["json"]["params"]["arguments"]
         self.assertNotIn("registration_token", arguments)
         self.assertEqual(request["json"]["params"]["name"], "renew_file_reservations")
+
+    def test_missing_hook_cwd_blocks_even_when_the_hook_directory_matches(self) -> None:
+        """The hook process directory is not the session's workspace."""
+        with tempfile.TemporaryDirectory() as directory, _Server(
+            lambda _count: (200, _mcp_result(1))
+        ) as server:
+            root = Path(directory)
+            result = self.run_hook(
+                server.url, root, payload_cwd=None, process_cwd=root
+            )
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("AGENT PROJECT CONTEXT UNRESOLVED", result.stderr)
+        self.assertEqual(server.requests, [])
+
+    def test_missing_hook_cwd_never_falls_back_to_a_stale_project(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as other, _Server(
+            lambda _count: (200, _mcp_result(1))
+        ) as server:
+            root = Path(directory)
+            result = self.run_hook(
+                server.url, root, payload_cwd=None, process_cwd=Path(other)
+            )
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("AGENT PROJECT CONTEXT UNRESOLVED", result.stderr)
+        self.assertEqual(server.requests, [])
+
+    def test_invalid_hook_cwd_blocks_before_any_request(self) -> None:
+        for label in ("deleted", "relative", "non-string"):
+            with self.subTest(cwd=label), tempfile.TemporaryDirectory() as directory, _Server(
+                lambda _count: (200, _mcp_result(1))
+            ) as server:
+                root = Path(directory)
+                if label == "deleted":
+                    cwd: Any = str(root / "missing-worktree")
+                elif label == "relative":
+                    cwd = "relative/dir"
+                else:
+                    cwd = 42
+                result = self.run_hook(
+                    server.url, root, payload_cwd=cwd, process_cwd=root
+                )
+
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("AGENT PROJECT CONTEXT UNRESOLVED", result.stderr)
+                self.assertEqual(server.requests, [])
 
     def test_reachable_server_without_bearer_can_confirm_reservation(self) -> None:
         with tempfile.TemporaryDirectory() as directory, _Server(

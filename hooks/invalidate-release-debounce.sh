@@ -13,7 +13,7 @@ TOOL_INPUT=$(cat)
 STATE_DIR="$RUNTIME_DIR/file_release_debounce"
 [ -d "$STATE_DIR" ] || exit 0
 
-reservation_extract_session_id "$TOOL_INPUT"
+reservation_extract_session_id "$TOOL_INPUT" || exit 0
 AGENT_RESULT="$(resolve_agent_name)"
 AGENT_SRC="${AGENT_RESULT%%|*}"
 AGENT="${AGENT_RESULT#*|}"
@@ -21,7 +21,8 @@ AGENT="${AGENT_RESULT#*|}"
 [ -n "$AGENT" ] || exit 0
 
 QUERY_DOCUMENT="$TOOL_INPUT" QUERY_STATE_DIR="$STATE_DIR" \
-    QUERY_AGENT="$AGENT" QUERY_ROOTS="$PROTECTED_ROOTS" QUERY_CWD="$(pwd)" \
+    QUERY_AGENT="$AGENT" QUERY_ROOTS="$PROTECTED_ROOTS" QUERY_CWD="$RESERVATION_WORK_DIR" \
+    QUERY_PROJECT_KEY="$RESERVATION_PROJECT_KEY" \
     QUERY_HOME="$HOME" python3 - <<'PY' >/dev/null 2>&1 || true
 import hashlib
 import json
@@ -45,15 +46,11 @@ if not isinstance(raw_paths, list):
 
 home = os.environ["QUERY_HOME"]
 cwd = os.environ["QUERY_CWD"]
-roots = []
-for raw_root in os.environ.get("QUERY_ROOTS", "").split(":"):
-    if raw_root.startswith("~/"):
-        raw_root = os.path.join(home, raw_root[2:])
-    raw_root = raw_root.rstrip("/") if raw_root != "/" else raw_root
-    if raw_root:
-        roots.append(raw_root)
+# Roots are the physical, already validated roots of this workspace.
+roots = [root for root in os.environ.get("QUERY_ROOTS", "").split(":") if root]
 
 agent = os.environ["QUERY_AGENT"]
+project_key = os.environ["QUERY_PROJECT_KEY"]
 state_dir = Path(os.environ["QUERY_STATE_DIR"])
 for raw_path in raw_paths:
     if not isinstance(raw_path, str) or not raw_path:
@@ -68,23 +65,29 @@ for raw_path in raw_paths:
         # when /var and /private/var name the same temporary directory.
         candidates = [os.path.join(root, raw_path) for root in roots]
         candidates.append(os.path.join(cwd, raw_path))
-    for absolute in candidates:
+    for candidate in candidates:
+        # Same normalization as the Edit guard: a symlink or ".." spelling
+        # cannot name a slot for a file that lives outside these roots.
+        absolute = os.path.realpath(candidate)
         for root in roots:
-            if absolute == root:
-                relative = os.path.basename(absolute)
-            elif absolute.startswith(root + "/"):
-                relative = absolute[len(root) + 1 :]
-            else:
+            try:
+                if os.path.commonpath([absolute, root]) != root:
+                    continue
+            except ValueError:
                 continue
-            # New workers use NFC. NFD is included so an upgraded install also
-            # invalidates state armed by the older handwritten hook.
-            for form in ("NFC", "NFD"):
-                normalized = unicodedata.normalize(form, relative)
-                key = hashlib.sha1((agent + "\0" + normalized).encode("utf-8")).hexdigest()
-                try:
-                    (state_dir / key).unlink()
-                except OSError:
-                    pass
+            relative = os.path.relpath(absolute, root)
+            if relative == ".":
+                relative = os.path.basename(absolute)
+            normalized = unicodedata.normalize("NFC", relative)
+            # Slots are per project namespace (see reservation_debounce_key).
+            # Slots armed before the namespace was part of the name cannot be
+            # attributed to this project, so they are left to their own
+            # workers rather than cancelled from here.
+            key = "\0".join((project_key, agent, normalized))
+            try:
+                (state_dir / hashlib.sha1(key.encode("utf-8")).hexdigest()).unlink()
+            except OSError:
+                pass
 PY
 
 exit 0
