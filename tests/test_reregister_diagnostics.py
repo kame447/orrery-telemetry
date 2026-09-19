@@ -263,8 +263,8 @@ def test_success_keeps_exact_stdout_and_cleans_temporary_files(tmp_path: pathlib
     assert calls[0]["arguments"] == {
         "project_key": "fixture-project",
         "agent_name": AGENT_NAME,
-        "registration_token": OWNER_SECRET,
     }
+    assert calls[2]["arguments"]["registration_token"] == OWNER_SECRET
     diagnosed_calls = calls[1:]
     assert all(call["output_mode"] == 0o600 for call in diagnosed_calls)
     assert all(call["diag_mode"] == 0o600 for call in diagnosed_calls)
@@ -313,7 +313,10 @@ def test_missing_owner_credential_fails_locally_without_transport(tmp_path: path
     completed, calls = _run_wrapper(tmp_path, credential_source=None)
     assert completed.returncode != 0
     assert completed.stdout == ""
-    assert completed.stderr == "agentstack-reregister: stage=local-token reason=credential-unavailable\n"
+    assert completed.stderr == (
+        "agentstack-reregister: stage=local-token reason=credential-unavailable "
+        "docs=docs/persistent-agents.md#credential-unavailable operator_action=required\n"
+    )
     assert calls == []
     _assert_no_secrets(completed)
 
