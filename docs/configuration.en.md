@@ -116,7 +116,11 @@ When a healthy listener uses the expected database but its service environment c
 
 The installer's project-key precedence is `--project-key` / process `AGENTSTACK_PROJECT_KEY` → `PROJECT_KEY` → existing `env.sh` at the install destination. If none exist on first install, it does not guess that the repository checkout is the project; it stops with exit 2 before making changes. `AGENTSTACK_PROJECT_KEY` is recommended for persistent configuration.
 
-At hook and helper runtime the precedence is `AGENTSTACK_PROJECT_KEY` → `PROJECT_KEY` → `${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh` → current cwd. The installed `env.sh` is not sourced; only `AGENTSTACK_PROJECT_KEY`, and `AGENTSTACK_PROTECTED_ROOTS` when falling back for protected roots, are read literally. Thus an installed editor started from another directory uses the same project key for reservation and registration without executing arbitrary shell code from `env.sh`.
+Reservation hooks select a project key from `AGENTSTACK_PROJECT_KEY` → `PROJECT_KEY` → `${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh`. The installed `env.sh` is not sourced; only `AGENTSTACK_PROJECT_KEY`, and `AGENTSTACK_PROTECTED_ROOTS` when reading protected roots, are read literally without executing arbitrary shell code.
+
+A selected key does not by itself authorize a reservation operation. The hooks require the payload `cwd` to resolve to an existing absolute directory, validate that the selected key belongs to that workspace, and then use the canonical project key for checks and releases. With no selected key, they derive it from the workspace. The hook process directory is never a substitute. An unresolved workspace or mismatched key blocks the pre-edit guard before it contacts Mail; release hooks log the problem and skip the request.
+
+The actual worktree root is always protected. Configured `AGENTSTACK_PROTECTED_ROOTS` may add only other worktree roots belonging to the same repository; they cannot replace the actual workspace or add roots from another repository. See [reservation hooks](hooks.en.md) for details.
 
 The installer derives `AGENTSTACK_MAIL_DB`, `AGENTSTACK_MAIL_ENV`, and `AGENTSTACK_SIGNALS_DIR` from state / render and stores the state root together with `AGENTSTACK_MAIL_HTTP_BEARER_MODE=disabled` in `env.sh`.
 
