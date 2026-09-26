@@ -127,7 +127,12 @@ def test_tmux_child_uses_selected_profile_not_server_environment(tmp_path, path_
     bindir.mkdir(parents=True)
     output = tmp_path / "selected-profile"
     fake = bindir / "claude"
-    fake.write_text('#!/bin/bash\nprintf "%s\\n" "${CLAUDE_CONFIG_DIR-unset}" > ' + shlex.quote(str(output)) + "\n")
+    temporary_output = output.with_suffix(".tmp")
+    fake.write_text(
+        '#!/bin/bash\nprintf "%s\\n" "${CLAUDE_CONFIG_DIR-unset}" > '
+        + shlex.quote(str(temporary_output)) + "\nmv "
+        + shlex.quote(str(temporary_output)) + " " + shlex.quote(str(output)) + "\n"
+    )
     fake.chmod(0o755)
     hooks = tmp_path / "hooks"
     hooks.mkdir()
