@@ -291,7 +291,7 @@ installer に渡して `env.sh`・service 定義・`install-state.json` に永�
 AGENTSTACK_CLAUDE_MODELS="claude-sonnet-5,claude-opus-5-5" ./scripts/install.sh
 ```
 
-重複・空要素・前後空白は除去します。不正なIDを含む明示指定は、候補を勝手に広げずClaudeの起動を拒否します。Codex / Gemini の候補は維持します。既定モデルは `claude-sonnet-5` が候補にあればそれ、なければ先頭です。再インストールで指定を省略すると前回の値を保持し、`AGENTSTACK_CLAUDE_MODELS=""` を明示すると自動検出へ戻ります。`CLAUDE_CONFIG_DIR` も同じ保持・解除規則で、別profileには絶対パスを指定してください。非空の値は探索先だけでなく、起動するClaude子プロセスのprofileにも適用されます。空の値はservice・子プロセスでは未設定に戻します。表示後にcacheが期限切れになったモデルの起動は拒否します。別モデルへ置き換えず、候補を再取得してください。
+重複・空要素・前後空白は除去します。不正なIDを含む明示指定は、候補を勝手に広げずClaudeの起動を拒否します。Codex / Gemini の候補は維持します。既定モデルは `claude-sonnet-5` が候補にあればそれ、なければ先頭です。再インストールで指定を省略すると前回の値を保持し、`AGENTSTACK_CLAUDE_MODELS=""` を明示すると自動検出へ戻ります。`CLAUDE_CONFIG_DIR` も同じ保持・解除規則で、別profileには絶対パスを指定してください。非空の値は探索先だけでなく、起動するClaude子プロセスのprofileにも適用されます。tmux境界でも明示的に引き継ぎ、別profileを指定した場合は起動済みのwarm processを再利用せず新しく起動します。空の値はservice・子プロセスでは未設定に戻します。表示後にcacheが期限切れになったモデルの起動は拒否します。別モデルへ置き換えず、候補を再取得してください。
 
 discovery はアカウントの利用権限の証明ではありません。Orrery は選択した正式IDをCLIへ渡し、自分では別モデルへ置き換えません。短縮名 `fable` は最新版へ解決しますが、正式ID `claude-fable-5` はそのまま渡します。Claude Code内部の認可・自動fallback動作は変更せず、候補表示やtmux起動を実APIの認可成功とは扱いません。CLI自身の設定は [Claude Code公式のmodel設定](https://code.claude.com/docs/en/model-config) を参照してください。
 

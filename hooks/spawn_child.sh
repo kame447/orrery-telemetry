@@ -1814,7 +1814,8 @@ ${TASK}"
         # 旧実装は部分一致（*opus* + *[1m]* skip）だったため、opus[1m] は skip できても
         # fable 等の非デフォルトモデルが warm-sonnet に握り潰されていた（RainyKepler 事例）。
         # exact-match に広げて [1m] 以外の降格も塞ぐ。
-        if [[ "$STANDALONE" == true ]]; then
+        if [[ "$STANDALONE" == true || -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+            # A warm process cannot change its already-loaded Claude profile.
             # A claimed warm session may retain a parent environment. Cold
             # start standalone children so PARENT_AGENT is guaranteed absent.
             WARM_TYPE="__skip_warm__"
@@ -1851,8 +1852,9 @@ ${TASK}"
                 -c "$WORK_DIR" \
                 "${TMUX_ENV_ARGS[@]}" \
                 -e "CLAUDE_CHILD_MODEL=$CHILD_MODEL" \
+                -e "CLAUDE_CHILD_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-}" \
                 -e "CLAUDE_CHILD_MCP_CONFIG=$CHILD_MCP_CONFIG" \
-                "$CHILD_SHELL"' -lc '"'"'export PATH="$HOME/.local/bin:$PATH"; MCP_ARGS=(); [[ -n "$CLAUDE_CHILD_MCP_CONFIG" ]] && MCP_ARGS=(--mcp-config "$CLAUDE_CHILD_MCP_CONFIG" --strict-mcp-config); claude --model "$CLAUDE_CHILD_MODEL" "${MCP_ARGS[@]}"; /bin/bash "$AGENTSTACK_HOOKS_DIR/cleanup-child-agent.sh"'"'"''
+                "$CHILD_SHELL"' -lc '"'"'export PATH="$HOME/.local/bin:$PATH"; if [[ -n "$CLAUDE_CHILD_CONFIG_DIR" ]]; then export CLAUDE_CONFIG_DIR="$CLAUDE_CHILD_CONFIG_DIR"; else unset CLAUDE_CONFIG_DIR; fi; MCP_ARGS=(); [[ -n "$CLAUDE_CHILD_MCP_CONFIG" ]] && MCP_ARGS=(--mcp-config "$CLAUDE_CHILD_MCP_CONFIG" --strict-mcp-config); claude --model "$CLAUDE_CHILD_MODEL" "${MCP_ARGS[@]}"; /bin/bash "$AGENTSTACK_HOOKS_DIR/cleanup-child-agent.sh"'"'"''
             PRE_REGISTERED_SESSION_STARTED=true
             SPAWN_TRAP_SESSION="$CHILD_NAME"
 
@@ -2659,8 +2661,9 @@ else
         -c "$WORK_DIR" \
         "${TMUX_ENV_ARGS[@]}" \
         -e "CLAUDE_CHILD_MODEL=$CHILD_MODEL" \
+        -e "CLAUDE_CHILD_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-}" \
         -e "CLAUDE_CHILD_MCP_CONFIG=$CHILD_MCP_CONFIG" \
-        "$CHILD_SHELL"' -lc '"'"'export PATH="$HOME/.local/bin:$PATH"; MCP_ARGS=(); [[ -n "$CLAUDE_CHILD_MCP_CONFIG" ]] && MCP_ARGS=(--mcp-config "$CLAUDE_CHILD_MCP_CONFIG" --strict-mcp-config); claude --model "$CLAUDE_CHILD_MODEL" "${MCP_ARGS[@]}"; /bin/bash "$AGENTSTACK_HOOKS_DIR/cleanup-child-agent.sh"'"'"''
+        "$CHILD_SHELL"' -lc '"'"'export PATH="$HOME/.local/bin:$PATH"; if [[ -n "$CLAUDE_CHILD_CONFIG_DIR" ]]; then export CLAUDE_CONFIG_DIR="$CLAUDE_CHILD_CONFIG_DIR"; else unset CLAUDE_CONFIG_DIR; fi; MCP_ARGS=(); [[ -n "$CLAUDE_CHILD_MCP_CONFIG" ]] && MCP_ARGS=(--mcp-config "$CLAUDE_CHILD_MCP_CONFIG" --strict-mcp-config); claude --model "$CLAUDE_CHILD_MODEL" "${MCP_ARGS[@]}"; /bin/bash "$AGENTSTACK_HOOKS_DIR/cleanup-child-agent.sh"'"'"''
     CHILD_SESSION_STARTED=true
     SPAWN_TRAP_SESSION="$CHILD_NAME"
     # Claude REPL起動待機

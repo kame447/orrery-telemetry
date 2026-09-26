@@ -97,3 +97,63 @@ def test_empty_profile_is_unset_in_background_controller(tmp_path):
     body = text[text.index("export_background_env() {"):text.index("start_background() {")]
     command = body + '\nCLAUDE_CONFIG_DIR_SETTING=""\nexport CLAUDE_CONFIG_DIR="/old/profile"\nexport_background_env\ntest -z "${CLAUDE_CONFIG_DIR+x}"'
     subprocess.run(["/bin/bash", "-e", "-c", command], env={"HOME": str(tmp_path), "PATH": os.environ["PATH"]}, capture_output=True, text=True, check=True)
+
+
+@pytest.mark.parametrize("path_index", [0, 1], ids=["pre-registered", "direct"])
+@pytest.mark.parametrize("profile", ["", "/fixture/team & profile"])
+def test_tmux_child_uses_selected_profile_not_server_environment(tmp_path, path_index, profile):
+    import shlex
+    import shutil
+    import tempfile
+    import time
+    tmux = shutil.which("tmux")
+    if not tmux:
+        pytest.skip("tmux is required for the actual process boundary")
+    lines = (ROOT / "hooks/spawn_child.sh").read_text().splitlines()
+    commands = []
+    for index, line in enumerate(lines):
+        if '-e "CLAUDE_CHILD_MODEL=$CHILD_MODEL"' not in line:
+            continue
+        start = index
+        while 'tmux new-session -d -s "$CHILD_NAME"' not in lines[start]:
+            start -= 1
+        end = index
+        while lines[end].rstrip().endswith("\\"):
+            end += 1
+        commands.append("\n".join(lines[start:end + 1]))
+    assert len(commands) == 2
+    home = tmp_path / "home"
+    bindir = home / ".local/bin"
+    bindir.mkdir(parents=True)
+    output = tmp_path / "selected-profile"
+    fake = bindir / "claude"
+    fake.write_text('#!/bin/bash\nprintf "%s\\n" "${CLAUDE_CONFIG_DIR-unset}" > ' + shlex.quote(str(output)) + "\n")
+    fake.chmod(0o755)
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    (hooks / "cleanup-child-agent.sh").write_text("exit 0\n")
+    # A short, private socket path avoids macOS's Unix socket length limit.
+    with tempfile.TemporaryDirectory(prefix="orrery-profile-", dir="/tmp") as socket_dir:
+        socket = str(Path(socket_dir) / "tmux")
+        def run(*args):
+            return subprocess.run([tmux, "-S", socket, *args], capture_output=True, text=True, check=True)
+        try:
+            run("new-session", "-d", "-s", "fixture-server", "-c", str(tmp_path), "sleep 30")
+            run("set-environment", "-g", "CLAUDE_CONFIG_DIR", "/stale/server-profile")
+            env = {"HOME": str(home), "PATH": os.environ["PATH"], "CLAUDE_CONFIG_DIR": profile,
+                   "TEST_TMUX": tmux, "TEST_SOCKET": socket, "TEST_HOOKS": str(hooks),
+                   "CHILD_NAME": "fixture-child", "WORK_DIR": str(tmp_path),
+                   "CHILD_MODEL": "claude-future-9", "CHILD_MCP_CONFIG": "", "CHILD_SHELL": "/bin/bash"}
+            setup = 'tmux() { "$TEST_TMUX" -S "$TEST_SOCKET" "$@"; }\nTMUX_ENV_ARGS=(-e "HOME=$HOME" -e "AGENTSTACK_HOOKS_DIR=$TEST_HOOKS")\n'
+            subprocess.run(["/bin/bash", "-eu", "-c", setup + commands[path_index]], env=env, capture_output=True, text=True, check=True)
+            deadline = time.monotonic() + 5
+            while not output.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert output.read_text().strip() == (profile or "unset")
+        finally:
+            subprocess.run([tmux, "-S", socket, "kill-server"], capture_output=True, timeout=5)
+
+
+def test_explicit_profile_cannot_claim_a_prestarted_warm_session():
+    text = (ROOT / "hooks/spawn_child.sh").read_text()
+    assert 'if [[ "$STANDALONE" == true || -n "${CLAUDE_CONFIG_DIR:-}" ]]; then' in text
