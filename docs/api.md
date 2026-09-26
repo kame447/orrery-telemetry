@@ -530,7 +530,7 @@ request:
 
 `standalone: true` では `parent` を空に固定し、`PARENT_AGENT` を subprocess environment から削除します。synthetic self-mail は作らず、task の先頭4000文字を launcher へ直接渡します。通常 child は parent を sender とする inbox message と CC audit trail を作り、登録 summary / launcher prompt は先頭80文字です。
 
-Claude provider に `effort` を渡すと拒否します。Codex model は `AGENTSTACK_CODEX_MODELS` allow-list、Claude model は server の `_SPAWN_MODELS` に従います。Codex の既定は `gpt-5.6-sol` / `xhigh` です。
+Claude provider に `effort` を渡すと拒否します。Codex model は `AGENTSTACK_CODEX_MODELS` allow-list、Claude model は [Claude model catalog](configuration.md#claude-model-catalog) の優先順位で解決した現在の候補に従います。Claude の明示設定が不正な場合や、指定モデルが現在の候補にない場合は、別モデルへ置き換えず拒否します。Codex の既定は `gpt-5.6-sol` / `xhigh` です。
 
 non-git directory では Codex が trust dialog を出すことがあります。spawner は `C-m` で受理し、3秒ごと・最大10回を超えて dialog が残る場合は fail-fast します。server は launcher readiness を最大120秒待ち、失敗時は tmux session と token / child credential file を cleanup します。
 
