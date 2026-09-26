@@ -530,7 +530,7 @@ Success:
 
 With `standalone: true`, `parent` is fixed as empty and `PARENT_AGENT` is removed from subprocess environment. No synthetic self-mail is created; the first 4,000 task characters are passed directly to the launcher. A normal child creates an inbox message with the parent as sender plus a CC audit trail; the registration summary / launcher prompt uses the first 80 characters.
 
-Passing `effort` for the Claude provider is rejected. Codex models follow the `AGENTSTACK_CODEX_MODELS` allowlist; Claude models follow the current candidates resolved using the [Claude model catalog](configuration.en.md#claude-model-catalog) precedence. An invalid explicit Claude configuration or a requested model outside the current candidates is rejected without substituting another model. Codex defaults are `gpt-5.6-sol` / `xhigh`.
+Claude rejects `effort`. Codex models follow the `AGENTSTACK_CODEX_MODELS` allow-list. Claude accepts well-formed formal IDs independently of local catalog membership or expiry; an explicit `AGENTSTACK_CLAUDE_MODELS` remains a strict allow-list, and invalid configuration blocks Claude launch. The fixed Claude default is `claude-opus-5-5`; it is rejected if an override excludes it and the request omits a model. Orrery never substitutes another model. See [Claude model catalog](configuration.en.md#claude-model-catalog). Codex defaults to `gpt-5.6-sol` / `xhigh`.
 
 Codex may show a trust dialog in a non-Git directory. The spawner accepts it with `C-m`; if the dialog remains after checks every three seconds, up to ten times, it fails fast. The server waits up to 120 seconds for launcher readiness and cleans up the tmux session and token / child credential files on failure.
 

@@ -73,14 +73,14 @@ def _gemini_models(base: Any) -> tuple[list[str], str]:
             values.append(value)
     models = values or list(_DEFAULT_MODELS)
     native = (
-        ("claude", set(base._SPAWN_MODELS) | set(base._claude_models())),
+        ("claude", set(base._SPAWN_MODELS)),
         ("codex", set(base._codex_models())),
     )
     for model in models:
         if _MODEL_RE.fullmatch(model) is None:
             return [], f"invalid model id for provider gemini: {model!r}"
         for provider, ids in native:
-            if model in ids:
+            if model in ids or (provider == "claude" and model.startswith("claude-")):
                 # A shared id would make the model string ambiguous for every
                 # consumer that infers a provider from it.
                 return [], (

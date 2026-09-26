@@ -57,14 +57,14 @@ def test_freshest_cli_cache_is_selected_not_merged(profile):
     desktop = document("claude-desktop-9", fetched=400)
     desktop["catalog"]["surface"] = "ccd"
     write(profile, desktop, "desktop.json")
-    assert catalog.resolve_catalog(FALLBACK) == catalog.ModelCatalog(("claude-new-9",), "local_cache")
+    assert catalog.resolve_catalog(FALLBACK) == catalog.ModelCatalog((*FALLBACK, "claude-new-9"), "local_cache")
 
 
 def test_cache_refresh_and_expiry_apply_without_restart(profile):
     path = write(profile, document("claude-new-9"))
-    assert catalog.resolve_catalog(FALLBACK).models == ("claude-new-9",)
+    assert catalog.resolve_catalog(FALLBACK).models == (*FALLBACK, "claude-new-9")
     path.write_text(json.dumps(document("claude-new-10", fetched=200)))
-    assert catalog.resolve_catalog(FALLBACK).models == ("claude-new-10",)
+    assert catalog.resolve_catalog(FALLBACK).models == (*FALLBACK, "claude-new-10")
     path.write_text(json.dumps(document("claude-new-10", stale=NOW)))
     assert catalog.resolve_catalog(FALLBACK) == catalog.ModelCatalog(FALLBACK, "bundled")
 
@@ -101,7 +101,7 @@ def test_broken_or_oversized_cache_is_bounded(profile, content):
 def test_newest_broken_cache_does_not_hide_older_valid_cache(profile):
     write(profile, document("claude-valid-9"))
     write(profile, [], "other.json")
-    assert catalog.resolve_catalog(FALLBACK).models == ("claude-valid-9",)
+    assert catalog.resolve_catalog(FALLBACK).models == (*FALLBACK, "claude-valid-9")
 
 
 @pytest.mark.parametrize("setting", [None, "", "   "])
@@ -112,7 +112,7 @@ def test_default_profile_for_missing_or_empty_setting(monkeypatch, tmp_path, set
     else:
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", setting)
     write(tmp_path / ".claude", document("claude-home-9"))
-    assert catalog.resolve_catalog(FALLBACK).models == ("claude-home-9",)
+    assert catalog.resolve_catalog(FALLBACK).models == (*FALLBACK, "claude-home-9")
 
 
 def test_relative_profile_never_searches_working_directory(monkeypatch, tmp_path):
@@ -149,10 +149,24 @@ def test_discovery_only_opens_catalog_files(monkeypatch, profile):
         assert Path(target) == path
         return original(target, flags, *args, **kwargs)
     monkeypatch.setattr(catalog.os, "open", checked_open)
-    assert catalog.resolve_catalog(FALLBACK).models == ("claude-new-9",)
+    assert catalog.resolve_catalog(FALLBACK).models == (*FALLBACK, "claude-new-9")
     assert opened == [path]
 
 
 def test_unresolvable_profile_home_falls_back(monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "~orrery-no-such-user-test/profile")
     assert catalog.resolve_catalog(FALLBACK).models == FALLBACK
+
+
+def test_discovery_adds_candidates_without_reordering_or_removing_bundled(profile):
+    write(profile, document("claude-new-9", FALLBACK[1], FALLBACK[0]))
+    assert catalog.resolve_catalog(FALLBACK).models == (*FALLBACK, "claude-new-9")
+
+
+@pytest.mark.parametrize("value,valid", [
+    ("claude-future-9", True), ("claude-sonnet-9[1m]", True),
+    ("claude-fable-5", True), ("gpt-9", False), ("claude-", False),
+    ("claude-x;echo BAD", False), ("claude-x\n", False), (None, False),
+])
+def test_formal_id_validation_is_independent_of_catalog(value, valid):
+    assert catalog.is_model_id(value) is valid

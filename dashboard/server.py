@@ -58,9 +58,13 @@ except ModuleNotFoundError:  # direct `python dashboard/server.py`
 QUOTA_SERVICE = _build_quota_service()
 
 try:
-    from dashboard.claude_models import resolve_catalog as _resolve_claude_catalog
+    from dashboard.claude_models import (
+        is_model_id as _is_claude_model_id, resolve_catalog as _resolve_claude_catalog,
+    )
 except ModuleNotFoundError:  # direct script execution
-    from claude_models import resolve_catalog as _resolve_claude_catalog
+    from claude_models import (
+        is_model_id as _is_claude_model_id, resolve_catalog as _resolve_claude_catalog,
+    )
 
 
 def _same_origin_request(handler) -> bool:
@@ -5152,7 +5156,7 @@ def _claude_models() -> list[str]:
 def _claude_default_model(models: list[str]) -> str:
     if _CLAUDE_SPAWN_DEFAULT_MODEL in models:
         return _CLAUDE_SPAWN_DEFAULT_MODEL
-    return models[0] if models else ""
+    return ""  # A restrictive override requires an explicit choice, not a new default.
 
 
 def _codex_models() -> list[str]:
@@ -5856,16 +5860,17 @@ def do_spawn(payload: dict) -> dict:
     claude_catalog = _claude_catalog() if provider == "claude" else None
     if claude_catalog and claude_catalog.error:
         return {"ok": False, "error": claude_catalog.error}
-    claude_models = list(claude_catalog.models) if claude_catalog else []
     default_model = (
-        _claude_default_model(claude_models)
+        _CLAUDE_SPAWN_DEFAULT_MODEL
         if provider == "claude"
         else _codex_models()[0]
     )
     model = (payload.get("model") or default_model).strip()
     effort = (payload.get("effort") or "").strip().lower()
     if provider == "claude":
-        if model not in claude_models:
+        # Discovery only adds choices; only an explicit override restricts IDs.
+        if (not _is_claude_model_id(model)
+                or (claude_catalog.source == "override" and model not in claude_catalog.models)):
             return {"ok": False, "error": f"model not allowed for provider claude: {model}"}
         if effort:
             return {"ok": False, "error": "effort not supported for provider: claude"}

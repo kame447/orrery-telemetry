@@ -23,13 +23,18 @@ class ModelCatalog:
     error: str = ""
 
 
+def is_model_id(value: object) -> bool:
+    """Validate a formal Claude ID independently of discovery results."""
+    return (isinstance(value, str) and len(value) <= 128
+            and MODEL_RE.fullmatch(value) is not None)
+
+
 def _model_ids(values: list) -> tuple[str, ...]:
     if len(values) > MAX_MODELS:
         return ()
     models: list[str] = []
     for value in values:
-        if (not isinstance(value, str) or len(value) > 128
-                or MODEL_RE.fullmatch(value) is None):
+        if not is_model_id(value):
             return ()
         if value not in models:
             models.append(value)
@@ -103,7 +108,7 @@ def discover_models(now_ms: float | None = None) -> tuple[str, ...]:
 
 
 def resolve_catalog(fallback: tuple[str, ...]) -> ModelCatalog:
-    """Explicit override > fresh local CLI cache > bundled candidates."""
+    """An explicit allow-list, otherwise bundled candidates plus fresh discovery."""
     override = os.environ.get("AGENTSTACK_CLAUDE_MODELS", "")
     if override.strip():
         values = [value.strip() for value in override.split(",") if value.strip()]
@@ -112,4 +117,6 @@ def resolve_catalog(fallback: tuple[str, ...]) -> ModelCatalog:
             return ModelCatalog((), "override", "AGENTSTACK_CLAUDE_MODELS contains invalid model IDs")
         return ModelCatalog(models, "override")
     models = discover_models()
-    return ModelCatalog(models, "local_cache") if models else ModelCatalog(fallback, "bundled")
+    if models:
+        return ModelCatalog(tuple(dict.fromkeys((*fallback, *models))), "local_cache")
+    return ModelCatalog(fallback, "bundled")
