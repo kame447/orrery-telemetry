@@ -8,7 +8,35 @@
 
 ---
 
-## Unreleased
+## 2026.09.25
+
+### Claude Code 2.1.282 で、Claude の子が全部起動に失敗していました（#81）
+
+Claude Code 2.1.282 は、起動直後の入力欄にプレースホルダ（`❯ Try "fix lint errors"`）を出し、`? for shortcuts` を出さなくなりました。`spawn_child.sh` は「空の `❯` 行」か「`for shortcuts`」でしか起動完了を判定していなかったため、60 秒待って打ち切り、`Claude readiness timeout (60s)` で Claude の子を1体も起動できませんでした。`❯` の直後が `Try "` の行も入力待ちとして扱うようにしました。安全確認ダイアログの `❯ No, exit`・`❯ Yes, I trust` は、従来どおり入力待ちとして扱いません。
+
+## 2026.09.24
+
+### 子の事前登録が、ハイフン付きの名前で既存の agent と衝突していました（#72）
+
+ORRERY Mail は `register_agent` で名前の英数字以外を取り除いて保存する一方、`whois` などの参照は受け取った名前をそのまま探していました。そのため `agentstack-preregister-child` が生成した `Hardy-Somerville` のような名前は、空きの確認では見つからないのに、登録すると既存の `HardySomerville` と同じ名前になり、事前登録が失敗していました。参照を「完全一致を先に探し、無ければ同じ規則で正規化して探す」に揃え、`agentstack-register.sh` も同じ正規化を使うようにしました。旧形式の名前での参照は、そのまま既存の agent に解決されます。
+
+### install 系のテストが、本物の `~/.codex/AGENTS.md` を書き換えることがありました（#73）
+
+Codex の子の中でテストを流すと、子から受け継いだ `CODEX_HOME` が本物の `~/.codex` を指したまま install 系のテストが走り、managed block の project key を pytest の一時ディレクトリに書き換えていました。テストの前に `CODEX_HOME` と `CLAUDE_CONFIG_DIR` を消し、実ホームを書き換えようとしたテストを止める検査を足しました。
+
+### managed block と docs の記述が実態とずれていました（#74）
+
+Codex 向けの managed block が「Codex には PostToolUse hook が無い」「skill registry が無い」と説明し、docs には存在しない見出し `#credential-unavailable` へのリンクがありました。記述を実態に合わせ、見出しを追加しました。docs 内のアンカーが実在するかを検査するテストも足しました。
+
+### `agentstack-selftest` が、正常なのに「dashboard が別の database を読んでいる」と失敗することがありました
+
+dashboard はグラフを 8 秒 cache します。selftest は agent を登録した直後に1回だけグラフを読むため、直前に cockpit などがグラフを読んでいると、登録前の古いグラフを受け取って失敗していました。2つの agent とそのリンクが揃うまで最大 12 秒読み直し、それでも無いときだけ失敗とするようにしました。
+
+## 2026.09.23
+
+### Claude Opus 5.5 を child の current model として選べませんでした
+
+child launcher の無指定 `opus` と warm pool は Claude Opus 5 のままで、2026-09-22 に公開された Opus 5.5 を選べませんでした。既定を `claude-opus-5-5` に更新し、current 1M alias を `claude-opus-5-5[1m]` に向けました。generic な `opus[1m]` は既存どおり legacy Opus 4.8 1M のままにし、`claude-opus-5`、`opus-5`、`opus-5[1m]` は旧世代を明示指定する互換形として維持しています。dashboard の Claude model allow-list にも Opus 5.5 を追加しました。
 
 ### 正常終了した Codex child を再開できませんでした（#59）
 
@@ -26,7 +54,9 @@ DECK と NETWORK は `gone` / `retired` という表示状態だけで resume �
 
 ### fresh install と CI が `sqlmodel 0.0.45` 以降で動かなくなっていました（#67）
 
-ORRERY Mail は datetime を naive UTC で書き込んでいますが、依存に上限が無かったため、fresh venv は naive datetime を拒否する新しい `sqlmodel` を解決し、Mail の tool と installer が database write で失敗していました。隔離した同じ fixture は `0.0.44` で通り、`0.0.45` から失敗します。稼働中と同じ挙動へ戻す即応として `sqlmodel<0.0.45` に pin しました。timezone-aware datetime への移行と既存 database の naive 値との互換対応は別の修正で行います。
+ORRERY Mail は datetime を naive UTC で書き込んでいますが、依存に上限が無かったため、fresh venv は naive datetime を拒否する新しい `sqlmodel` を解決し、Mail の tool と installer が database write で失敗していました。隔離した同じ fixture は `0.0.44` で通り、`0.0.45` から失敗します。まず稼働中と同じ挙動へ戻す即応として `sqlmodel<0.0.45` に pin しました。
+
+続く本修正では database への書き込みと検索条件を timezone-aware UTC に統一しました。SQLModel の版に依存しない型で、既存 database に保存済みの naive 値は UTC として読み出し、新規の naive 値は拒否します。API・signal・通知の timestamp 文字列は従来形式を保ったまま、`sqlmodel` の上限 pin を外しました。
 
 ## 2026.09.19
 
