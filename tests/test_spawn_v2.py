@@ -188,6 +188,54 @@ def test_spawn_names_uses_current_codex_defaults(monkeypatch):
     ]
 
 
+@pytest.fixture(autouse=True)
+def _isolated_claude_catalog(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-profile"))
+    monkeypatch.delenv("AGENTSTACK_CLAUDE_MODELS", raising=False)
+
+
+def test_claude_catalog_drives_picker_and_exact_launch(monkeypatch):
+    from dashboard.claude_models import ModelCatalog
+    monkeypatch.setattr(server, "_claude_catalog", lambda: ModelCatalog(("claude-future-9",), "local_cache"))
+    monkeypatch.setattr(server.subprocess, "run", lambda *a, **k: type("R", (), {"stdout": "Sunny\n\036Curie\n"})())
+    monkeypatch.setattr(server, "_spawn_scientist_statuses", lambda *a: {})
+    monkeypatch.setattr(server, "spawn_with_launch_spec", lambda payload, spec: {"model": spec.model, "program": spec.program})
+    data = server.spawn_names_payload()
+    claude = next(p for p in data["providers"] if p["id"] == "claude")
+    assert data["models"] == claude["models"] == ["claude-future-9"]
+    assert data["default_model"] == claude["default_model"] == "claude-future-9"
+    assert claude["model_source"] == "local_cache"
+    assert server.do_spawn({"parent": "Parent", "task": "work", "model": "claude-future-9"}) == {
+        "model": "claude-future-9", "program": "claude-code",
+    }
+    assert server.do_spawn({"parent": "Parent", "task": "work"})["model"] == "claude-future-9"
+    assert not server.do_spawn({"parent": "Parent", "task": "work", "model": "claude-sonnet-5"})["ok"]
+
+
+def test_invalid_claude_override_cannot_broaden_launch_policy(monkeypatch):
+    monkeypatch.setenv("AGENTSTACK_CLAUDE_MODELS", "claude-opus-5,gpt-not-claude")
+    monkeypatch.setattr(server, "spawn_with_launch_spec", lambda *a: pytest.fail("invalid override launched"))
+    result = server.do_spawn({"parent": "Parent", "task": "work", "model": "claude-opus-5"})
+    assert result == {"ok": False, "error": "AGENTSTACK_CLAUDE_MODELS contains invalid model IDs"}
+    assert server._claude_models() == []
+
+
+def test_invalid_claude_override_does_not_break_codex(monkeypatch):
+    monkeypatch.setenv("AGENTSTACK_CLAUDE_MODELS", "invalid")
+    monkeypatch.setattr(server, "spawn_with_launch_spec", lambda payload, spec: {"model": spec.model})
+    assert server.do_spawn({"parent": "Parent", "task": "work", "provider": "codex"}) == {"model": server._codex_models()[0]}
+
+
+def test_discovered_claude_model_cannot_be_claimed_by_gemini(monkeypatch):
+    from dashboard import gemini_provider_runtime as gemini
+    monkeypatch.setenv("AGENTSTACK_CLAUDE_MODELS", "claude-future-9")
+    for model in ("claude-future-9", "claude-opus-5"):
+        monkeypatch.setenv("AGENTSTACK_GEMINI_MODELS", model)
+        models, error = gemini._gemini_models(server)
+        assert models == []
+        assert "collides with provider claude" in error
+
+
 def test_mcp_call_shapes_credentials_to_the_live_server_schema(monkeypatch):
     calls = []
 

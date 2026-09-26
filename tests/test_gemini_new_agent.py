@@ -815,6 +815,12 @@ def test_public_payload_cannot_spoof_launch_identity(gemini_env, monkeypatch):
 # --------------------------------------------------------------------------- #
 # Concurrency
 # --------------------------------------------------------------------------- #
+@pytest.fixture(autouse=True)
+def _isolated_claude_catalog(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-profile"))
+    monkeypatch.delenv("AGENTSTACK_CLAUDE_MODELS", raising=False)
+
+
 def test_concurrent_gemini_and_native_spawns_do_not_cross_contaminate(gemini_env):
     launches = gemini_env.launches
     release = launches.block(str(gemini_env.adapter))

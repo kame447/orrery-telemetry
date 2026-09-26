@@ -73,7 +73,7 @@ def _gemini_models(base: Any) -> tuple[list[str], str]:
             values.append(value)
     models = values or list(_DEFAULT_MODELS)
     native = (
-        ("claude", set(base._SPAWN_MODELS)),
+        ("claude", set(base._SPAWN_MODELS) | set(base._claude_models())),
         ("codex", set(base._codex_models())),
     )
     for model in models:

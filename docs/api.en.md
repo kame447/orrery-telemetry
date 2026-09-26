@@ -68,6 +68,8 @@ See [Installation](install.en.md#version) for version resolution order.
 
 ## GET `/api/spawn-names`
 
+The Claude provider exposes `model_source` (`override`, `local_cache`, or `bundled`) and `model_error` for explicit-setting diagnostics. Invalid overrides return an empty Claude `models` list without disabling other providers. Top-level `models` / `default_model` mirror the same Claude candidates. See [Claude model catalog](configuration.en.md#claude-model-catalog) for discovery and authorization boundaries.
+
 There is no query.
 
 ```bash

@@ -68,6 +68,8 @@ version の解決順は [インストール](install.md#version)を参照して�
 
 ## GET `/api/spawn-names`
 
+Claude provider の `model_source` は `override` / `local_cache` / `bundled`、`model_error` は明示設定の診断です。不正な明示指定ではClaudeの `models` は空になり、他providerは残ります。top-levelの `models` / `default_model` は同じClaude候補を返します。探索規則と権限の境界は [Claude model catalog](configuration.md#claude-model-catalog) を参照してください。
+
 query はありません。
 
 ```bash

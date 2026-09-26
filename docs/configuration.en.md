@@ -39,6 +39,8 @@ Its file mode is `0600`. Service environment is written into the launchd plist /
 | `AGENTSTACK_SPAWN_SCRIPT` | `$AGENTSTACK_HOOKS_DIR/spawn_child.sh` | NEW AGENT launcher |
 | `AGENTSTACK_SPAWN_DIRS` | `~` | `:`-separated spawn-directory presets |
 | `AGENTSTACK_SPAWN_ROOTS` | `$HOME` | `:`-separated roots allowed for directory typeahead |
+| `AGENTSTACK_CLAUDE_MODELS` | unset | `,`-separated explicit dashboard Claude model override |
+| `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude Code profile directory, also inherited by spawned children |
 | `AGENTSTACK_CODEX_MODELS` | `gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna` | `,`-separated dashboard Codex model allowlist |
 
 Path values expand `~`. An empty string is treated as unset. An invalid integer `AGENTSTACK_PORT` falls back to `8770`.
@@ -252,6 +254,22 @@ Running the installer with environment variables `AGENTSTACK_SPAWN_DIRS` / `AGEN
 - `SPAWN_ROOTS` means “scope visible through typeahead.” `GET /api/fs/dirs` returns only child directories inside these roots. The default sole root is `$HOME`. The server validates the boundary with `realpath` and rejects `..`, paths outside roots, hidden directories, and symlinks outside roots
 
 `SPAWN_ROOTS` is not derived automatically from `SPAWN_DIRS`. A chip outside the roots can be entered as an exact path, but suggestions below it are not shown. In most cases the default `$HOME` contains the chips, so setting only `SPAWN_DIRS` is sufficient.
+
+## Claude model catalog
+
+`NEW AGENT` resolves Claude candidates from explicit `AGENTSTACK_CLAUDE_MODELS`, then Claude Code's local catalog, then the bundled fallback. Discovery reads fresh v2 / `surface=cc` entries under `CLAUDE_CONFIG_DIR/cache/model-catalog`, or `~/.claude/cache/model-catalog/` when the variable is unset or empty. It selects the valid entry with the newest fetch time without merging files. It does not verify whether that cache belongs to the currently logged-in account.
+
+This is an internal format observed in Claude Code 2.1.283, not a stable public API. Missing, expired, unknown-schema or malformed caches use the bundled candidates. Reads are bounded to 64 directory entries, 1 MiB per file and 128 models. Discovery never opens credential files, queries Keychain or the network, or scrapes running panes.
+
+To pin candidates, pass an override to the installer; a shell export alone does not reach a running service.
+
+```bash
+AGENTSTACK_CLAUDE_MODELS="claude-sonnet-5,claude-opus-5-5" ./scripts/install.sh
+```
+
+Duplicates, empty entries and surrounding whitespace are removed. Invalid explicit IDs disable Claude launch rather than silently broadening the candidate list; Codex and Gemini remain available. The default is `claude-sonnet-5` if present, otherwise the first candidate. An omitted value on reinstall preserves the old setting; explicit `AGENTSTACK_CLAUDE_MODELS=""` restores discovery. `CLAUDE_CONFIG_DIR` follows the same preserve/clear rule; use an absolute path for a separate profile. A nonempty value also selects the profile used by spawned Claude children, not just the discovery root. Empty values are omitted/unset in service and child environments. If a displayed candidate expires before launch, the request is rejected; refresh the picker instead of substituting another model.
+
+Discovery does not prove account authorization. Orrery passes the selected full ID to the CLI and does not substitute another model itself. The `fable` shorthand still tracks the current version, while explicit `claude-fable-5` is preserved. Claude Code's own authorization and automatic fallback behavior are unchanged; a candidate or a ready tmux session is not proof of an authorized API request. See [Claude Code's model configuration](https://code.claude.com/docs/en/model-config) for the CLI's own policy.
 
 ## Codex model catalog
 

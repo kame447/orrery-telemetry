@@ -36,6 +36,8 @@ CODEX_NETWORK_SETTING="${AGENTSTACK_CODEX_NETWORK:-}"
 CODEX_ADD_DIRS_SETTING="${AGENTSTACK_CODEX_ADD_DIRS:-}"
 PORTRAITS_DIR_SETTING="${AGENTSTACK_PORTRAITS_DIR:-}"
 CUSTOM_PORTRAITS_SETTING="${AGENTSTACK_CUSTOM_PORTRAITS:-}"
+CLAUDE_MODELS_SETTING="${AGENTSTACK_CLAUDE_MODELS:-}"
+CLAUDE_CONFIG_DIR_SETTING="${CLAUDE_CONFIG_DIR:-}"
 CODEX_MODELS_SETTING="${AGENTSTACK_CODEX_MODELS:-}"
 HOOKS_DIR="${AGENTSTACK_HOOKS_DIR:-$HOME/.agentstack/hooks}"
 RUNTIME_DIR="${AGENTSTACK_RUNTIME_DIR:-$HOME/.agentstack/runtime}"
@@ -52,6 +54,13 @@ GUI="gui/$(id -u)"
 
 sed_escape() {
   printf '%s' "$1" | sed 's/[&|]/\\&/g'
+}
+
+
+xml_sed_escape() {
+  local escaped
+  escaped="$(printf '%s' "$1" | sed -e 's/\&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')"
+  sed_escape "$escaped"
 }
 
 render_plist() {
@@ -74,6 +83,8 @@ render_plist() {
     -e "s|__DELIVERABLE_ROOTS__|$(sed_escape "$DELIVERABLE_ROOTS")|g" \
     -e "s|__LANG__|$(sed_escape "$LANG_SETTING")|g" \
     -e "s|__MURMUR__|$(sed_escape "$MURMUR_SETTING")|g" \
+    -e "s|__CLAUDE_MODELS__|$(xml_sed_escape "$CLAUDE_MODELS_SETTING")|g" \
+    -e "s|__CLAUDE_CONFIG_DIR__|$(xml_sed_escape "$CLAUDE_CONFIG_DIR_SETTING")|g" \
     -e "s|__WORKTREE_ROOT__|$(sed_escape "$WORKTREE_ROOT_SETTING")|g" \
     -e "s|__HOOKS_DIR__|$(sed_escape "$HOOKS_DIR")|g" \
     -e "s|__RUNTIME_DIR__|$(sed_escape "$RUNTIME_DIR")|g" \
@@ -85,6 +96,10 @@ render_plist() {
     -e "s|__VAULT__|$(sed_escape "$VAULT")|g" \
     -e "s|__PATH__|$(sed_escape "$PATH_VALUE")|g" \
     "$PLIST_TEMPLATE" > "$PLIST_DST"
+  if [[ -z "$CLAUDE_CONFIG_DIR_SETTING" ]]; then
+    sed '/<key>CLAUDE_CONFIG_DIR<\/key>/{N;d;}' "$PLIST_DST" > "$PLIST_DST.tmp"
+    mv "$PLIST_DST.tmp" "$PLIST_DST"
+  fi
 }
 
 background_pid() {
@@ -138,6 +153,12 @@ export_background_env() {
   export AGENTSTACK_CODEX_ADD_DIRS="$CODEX_ADD_DIRS_SETTING"
   export AGENTSTACK_PORTRAITS_DIR="$PORTRAITS_DIR_SETTING"
   export AGENTSTACK_CUSTOM_PORTRAITS="$CUSTOM_PORTRAITS_SETTING"
+  export AGENTSTACK_CLAUDE_MODELS="$CLAUDE_MODELS_SETTING"
+  if [[ -n "$CLAUDE_CONFIG_DIR_SETTING" ]]; then
+    export CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR_SETTING"
+  else
+    unset CLAUDE_CONFIG_DIR
+  fi
   export AGENTSTACK_CODEX_MODELS="$CODEX_MODELS_SETTING"
   export AGENTSTACK_HOOKS_DIR="$HOOKS_DIR"
   export AGENTSTACK_RUNTIME_DIR="$RUNTIME_DIR"

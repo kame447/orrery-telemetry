@@ -39,6 +39,8 @@
 | `AGENTSTACK_SPAWN_SCRIPT` | `$AGENTSTACK_HOOKS_DIR/spawn_child.sh` | NEW AGENT launcher |
 | `AGENTSTACK_SPAWN_DIRS` | `~` | `:` 区切りの spawn directory preset |
 | `AGENTSTACK_SPAWN_ROOTS` | `$HOME` | `:` 区切りの directory typeahead 許可 root |
+| `AGENTSTACK_CLAUDE_MODELS` | 未設定 | `,` 区切りの dashboard Claude model 明示 override |
+| `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude Codeのprofile directory（子にも引き継ぐ） |
 | `AGENTSTACK_CODEX_MODELS` | `gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna` | `,` 区切りの dashboard Codex model allow-list |
 
 path 系は `~` を展開します。空文字は未設定として扱います。integer の `AGENTSTACK_PORT` が不正なら `8770` に戻ります。
@@ -276,6 +278,22 @@ installer に渡して `env.sh`・service 定義・`install-state.json` に永�
 - `SPAWN_ROOTS` は「typeahead で閲覧できる範囲」。`GET /api/fs/dirs` はこの root 内の child directory だけを返します。未設定時は `$HOME` が唯一の root です。server は `realpath` で境界を検証し、`..`、root 外、hidden directory、root 外への symlink を拒否します
 
 `SPAWN_ROOTS` は `SPAWN_DIRS` から自動導出しません。chip が root 外を指す構成では exact path として入力できますが、その配下の suggestion は表示されません。多くの場合は既定の `$HOME` が chip を含むので、`SPAWN_DIRS` だけ指定すれば足ります。
+
+## Claude model catalog
+
+`NEW AGENT` の Claude 候補は、`AGENTSTACK_CLAUDE_MODELS` の明示指定、Claude Code の local catalog、同梱 fallback の順に解決します。`CLAUDE_CONFIG_DIR` の配下、未設定・空なら `~/.claude/cache/model-catalog/` から、期限内の v2 / `surface=cc` cache を読みます。複数ファイルは混ぜず、取得時刻が最新の有効な1件を使います。cache 内のアカウントが現在のログイン先と同じかは検証しません。
+
+これは Claude Code 2.1.283 で観測した内部形式で、公開された安定 API ではありません。欠損・期限切れ・未知のschema・壊れたデータでは同梱候補へ戻ります。読み取り上限は64 directory entries、各1 MiB、128モデルです。credential ファイル、Keychain、ネットワーク、実行中 pane は探索しません。
+
+手動で候補を固定するときは、次のように installer に渡します。shell の export だけでは稼働中 service に届きません。
+
+```bash
+AGENTSTACK_CLAUDE_MODELS="claude-sonnet-5,claude-opus-5-5" ./scripts/install.sh
+```
+
+重複・空要素・前後空白は除去します。不正なIDを含む明示指定は、候補を勝手に広げずClaudeの起動を拒否します。Codex / Gemini の候補は維持します。既定モデルは `claude-sonnet-5` が候補にあればそれ、なければ先頭です。再インストールで指定を省略すると前回の値を保持し、`AGENTSTACK_CLAUDE_MODELS=""` を明示すると自動検出へ戻ります。`CLAUDE_CONFIG_DIR` も同じ保持・解除規則で、別profileには絶対パスを指定してください。非空の値は探索先だけでなく、起動するClaude子プロセスのprofileにも適用されます。空の値はservice・子プロセスでは未設定に戻します。表示後にcacheが期限切れになったモデルの起動は拒否します。別モデルへ置き換えず、候補を再取得してください。
+
+discovery はアカウントの利用権限の証明ではありません。Orrery は選択した正式IDをCLIへ渡し、自分では別モデルへ置き換えません。短縮名 `fable` は最新版へ解決しますが、正式ID `claude-fable-5` はそのまま渡します。Claude Code内部の認可・自動fallback動作は変更せず、候補表示やtmux起動を実APIの認可成功とは扱いません。CLI自身の設定は [Claude Code公式のmodel設定](https://code.claude.com/docs/en/model-config) を参照してください。
 
 ## Codex model catalog
 
