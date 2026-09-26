@@ -82,7 +82,7 @@ Inside the running agent, ask for a child. This is the same in Claude Code and C
 
 **Success**: a second card appears on the dashboard with a line from the parent to the child. When the child finishes, a "done" message arrives in the parent's terminal. The NETWORK tab shows the messages passing between the two.
 
-The child's OS terminal does not open automatically by default. Use Deck Open tmux when you need its screen; see [Configuration](docs/configuration.en.md#child-spawn) to enable automatic opening.
+The child's OS terminal opens in the background by default. For Dashboard-first use, set `AGENTSTACK_AUTO_OPEN_CHILD=0` to stop automatic opening while keeping Deck Open tmux; see [Configuration](docs/configuration.en.md#child-spawn).
 
 ### 5. Play shiritori as an end-to-end check
 

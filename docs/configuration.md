@@ -30,6 +30,7 @@
 | `AGENTSTACK_MURMUR` | enabled | `off` で murmur の吹き出しを無効化 |
 | `AGENTSTACK_LABEL_PREFIX` | `org.agentstack` | launchd label prefix |
 | `AGENTSTACK_TERMINAL` | `auto` | `ghostty / iterm / terminal / wt / none`。`wt` は WSL2 の Windows Terminal（`auto` は WSL2 内で `wt.exe` が見えれば選ぶ） |
+| `AGENTSTACK_AUTO_OPEN_CHILD` | `1` | `0` で child 起動時の OS terminal 自動表示だけを止める。Deck の Open tmux は維持 |
 | `AGENTSTACK_HOOKS_DIR` | `~/.agentstack/hooks` | hook と既定 spawn script の root |
 | `AGENTSTACK_RUNTIME_DIR` | `~/.agentstack/runtime` | token、annotation、session index、child / watcher state |
 | `AGENTSTACK_MAIL_HOME` | `~/.agentstack/mail` | signal data root |
@@ -167,8 +168,8 @@ installer は `AGENTSTACK_MAIL_DB`、`AGENTSTACK_MAIL_ENV`、`AGENTSTACK_SIGNALS
 
 | 環境変数 | 既定値 | 意味 |
 | --- | --- | --- |
-| `AGENTSTACK_AUTO_OPEN_CHILD` | `0` | `1` で Claude / Codex child 起動後に OS terminal を自動表示する。tmux session と Deck の Open tmux は常に独立 |
-| `AGENTSTACK_FOCUS_CHILD` | 未設定 | 自動表示が有効な場合、`1` で前面に出す。単独では自動表示を有効にしない |
+| `AGENTSTACK_AUTO_OPEN_CHILD` | `1` | `0` で Claude / Codex child 起動後の OS terminal 自動表示だけを止める。tmux session と Deck の Open tmux は維持 |
+| `AGENTSTACK_FOCUS_CHILD` | 未設定 | 自動表示する window は既定で背面。`1` で前面に出す。`AGENTSTACK_AUTO_OPEN_CHILD=0` のときは効果なし |
 | `AGENTSTACK_STRICT_AGENT_NAMES` | 未設定 | `1` で off-list な child 名を警告ではなくエラーにする |
 | `AGENTSTACK_MONITOR_DANGER_CHECK` | `0` | `1` で monitor の危険コマンド検知を有効にする。既定は passive |
 | `AGENTSTACK_CODEX_CHILD_APPROVAL` | `never` | Codex child の `--ask-for-approval`。installer の `--codex-approval` で永続化 |
@@ -182,9 +183,9 @@ Codex child の起動フラグは製品が組み立てます。`~/.codex/bin/` �
 
 worktree root を変える場合は、たとえば `AGENTSTACK_WORKTREE_ROOT=/srv/agent-worktrees ./scripts/install.sh ...` として installer に渡します。相対 path は受け付けません。`Syncthing` / `Obsidian` を含む path は launcher が引き続き拒否します。旧既定の `/tmp/cc-worktrees` は移動も削除もせず、新規 spawn だけが永続 root を使います。`agentstack-doctor` は現在の root のうち live でも active registration でもない directory を報告しますが、削除は operator に任せます。
 
-`spawn_child.sh` は既定では OS terminal を自動表示しません。child は独立した detached tmux session で動き、必要なときだけ Deck の Open tmux から開けます。`AGENTSTACK_TERMINAL=auto` はそのための terminal 選択として維持します。`none` は手動 Open tmux も無効にするため、自動表示だけを止める用途には使いません。
+`spawn_child.sh` は既定で利用可能な OS terminal を背面に自動表示します。child 自体は独立した detached tmux session で動き、Deck の Open tmux から必要な session を手動で開く経路も維持します。`AGENTSTACK_TERMINAL=auto` は terminal adapter の選択です。`none` は手動 Open tmux も無効にするため、自動表示だけを止める用途には使いません。
 
-起動直後から全 child の画面を見たい場合は、`AGENTSTACK_AUTO_OPEN_CHILD=1 ./scripts/install.sh ...` として installer に渡してください。設定は `env.sh`、Dashboard service、install-state に保存され、再インストールでも保持されます。未設定の旧 install は `0` へ移行し、明示した `0` / `1` が保存値より優先されます。既存の `AGENTSTACK_FOCUS_CHILD=1` だけでは自動表示されなくなります。直接 shell から起動する場合は、その shell に同じ変数を export します。child から孫への新規起動と、Codex session の再開先へも設定を渡します。Gemini の別 launcher に OS terminal 自動表示を追加する設定ではありません。
+Dashboard 中心で使い、自動表示だけを止めたい場合は `AGENTSTACK_AUTO_OPEN_CHILD=0 ./scripts/install.sh ...` として installer に渡してください。設定は `env.sh`、Dashboard service、install-state に保存され、再インストールでも保持されます。未設定の旧 install は `1` を採用し、明示した `0` / `1` が保存値より優先されます。`AGENTSTACK_FOCUS_CHILD=1` は自動表示が有効な場合だけ window を前面に出します。直接 shell から起動する場合は、その shell に同じ変数を export します。child から孫への新規起動と、Codex session の再開先へも設定を渡します。Gemini の別 launcher に OS terminal 自動表示を追加する設定ではありません。
 
 child の model は spawner の単一 model catalog と正規化関数から決まります。Claude の無指定 / `opus` は `claude-opus-5-5`、`sonnet` は `claude-sonnet-5`、Codex の無指定 / `sol` は `gpt-5.6-sol` です。旧 `claude-opus-5`、`claude-opus-4-8`、`claude-sonnet-4-6`、`gpt-5.5` の明示指定は引き続き有効です。generic な `opus[1m]` / `sonnet[1m]` は既知の legacy 1M model に正規化されます。
 

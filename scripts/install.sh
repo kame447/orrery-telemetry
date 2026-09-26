@@ -299,7 +299,7 @@ if [[ -n "$CODEX_BIN_SETTING" ]]; then
 fi
 # Product defaults are written out explicitly so env.sh, the service definition
 # and install-state.json all say what a child actually gets.
-AUTO_OPEN_CHILD_SETTING="${AUTO_OPEN_CHILD_SETTING:-0}"
+AUTO_OPEN_CHILD_SETTING="${AUTO_OPEN_CHILD_SETTING:-1}"
 CODEX_CHILD_APPROVAL_SETTING="${CODEX_CHILD_APPROVAL_SETTING:-never}"
 CODEX_NETWORK_SETTING="${CODEX_NETWORK_SETTING:-on}"
 CHILD_RESUME_RETENTION_DAYS_SETTING="${CHILD_RESUME_RETENTION_DAYS_SETTING:-30}"
@@ -3674,7 +3674,7 @@ main() {
   say "spawn dirs: ${SPAWN_DIRS_SETTING:-(default: ~)}"
   say "spawn roots: ${SPAWN_ROOTS_SETTING:-(default: \$HOME)}"
   say "worktree root: $WORKTREE_ROOT_SETTING"
-  say "automatically open child terminals: $AUTO_OPEN_CHILD_SETTING"
+  say "automatically open child terminals: $AUTO_OPEN_CHILD_SETTING (set AGENTSTACK_AUTO_OPEN_CHILD=0 on reinstall to disable auto-open while keeping Deck Open tmux)"
   say "codex child approval: $CODEX_CHILD_APPROVAL_SETTING"
   say "codex child config overlay: ${CODEX_CHILD_CONFIG_OVERLAY_SETTING:-(disabled)}"
   say "codex network: $CODEX_NETWORK_SETTING"
