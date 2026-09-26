@@ -3606,7 +3606,12 @@ def _verified_codex_index(
 _CODEX_BINDING_REASONS = {
     "awaiting_hook": "Waiting for this run's history binding receipt.",
     "binding_missing": "This launch has no verified registration binding.",
-    "hook_not_observed": "This run did not produce a verified history binding receipt.",
+    "hook_not_observed": (
+        "This run did not produce a verified history binding receipt. "
+        "Check that the AgentStack Codex plugin is installed and enabled, "
+        "review/approve its lifecycle hooks in Codex /hooks, then start a new "
+        "Codex process."
+    ),
     "no_transcript": "This run did not provide a usable transcript file.",
     "id_mismatch": "The runtime session ID did not match the rollout metadata.",
     "write_failed": "The verified history receipt could not be written.",
@@ -5114,7 +5119,8 @@ SPAWN_SCRIPT = _env_path(
 SOURCE_REPO = HERE  # vault 外、自前 git の親 repo
 # Claude Code の local catalog が使えない場合の bundled fallback。
 # _SPAWN_MODELS は既存 extension との互換性のため mapping のまま保つ。
-_CLAUDE_DEFAULT_MODEL = "claude-sonnet-5"
+# Matches the CLI launcher default; discovery must not change it.
+_CLAUDE_SPAWN_DEFAULT_MODEL = "claude-opus-5-5"
 _SPAWN_MODELS = {
     "claude-sonnet-5": ("claude-code", "claude-sonnet-5"),
     "claude-opus-5-5": ("claude-code", "claude-opus-5-5"),
@@ -5144,8 +5150,8 @@ def _claude_models() -> list[str]:
 
 
 def _claude_default_model(models: list[str]) -> str:
-    if _CLAUDE_DEFAULT_MODEL in models:
-        return _CLAUDE_DEFAULT_MODEL
+    if _CLAUDE_SPAWN_DEFAULT_MODEL in models:
+        return _CLAUDE_SPAWN_DEFAULT_MODEL
     return models[0] if models else ""
 
 
