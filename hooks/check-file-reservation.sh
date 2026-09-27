@@ -38,7 +38,25 @@ RENEW_SECONDS="${FILE_RESERVATION_RENEW_SECONDS:-900}"
 RETRY_DELAY_SECONDS="${FILE_RESERVATION_RETRY_DELAY_SECONDS:-0.5}"
 
 TOOL_INPUT=$(cat)
-reservation_resolve_tool_context "$TOOL_INPUT" || exit 0
+reservation_resolve_tool_context "$TOOL_INPUT"
+RESOLVE_STATUS=$?
+case "$RESOLVE_STATUS" in
+    0) ;;
+    1) exit 0 ;;
+    3)
+        # Nothing was classified and nothing was sent: the selected project
+        # does not own this workspace, so neither its roots nor its namespace
+        # can decide whether this edit is coordinated.
+        echo "AGENT PROJECT CONTEXT MISMATCH: project '$(agentstack_resolve_project_key "" "" 0)' is not valid for this session's workspace." >&2
+        echo "Start the session from the intended project (agent-start DIR) or correct AGENTSTACK_PROJECT_KEY, then retry the edit." >&2
+        exit 2
+        ;;
+    *)
+        echo "AGENT PROJECT CONTEXT UNRESOLVED: cannot validate this edit's workspace." >&2
+        echo "The hook payload must carry the session cwd as an existing absolute directory." >&2
+        exit 2
+        ;;
+esac
 # Asked before anything decides which identity wins: the precedence resolver
 # returns on AGENT_NAME alone, so asking it about conflicts left named sessions
 # unchecked.

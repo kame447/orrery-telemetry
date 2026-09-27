@@ -126,12 +126,20 @@ installer の project key 解決順は `--project-key` / process の
 初回 install でどれも無い場合は repo checkout を project と推測せず、変更前に
 exit 2 で停止します。永続設定には `AGENTSTACK_PROJECT_KEY` を推奨します。
 
-hook と helper の実行時は `AGENTSTACK_PROJECT_KEY` → `PROJECT_KEY` →
-`${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh` → 現在の cwd の順です。installed
-`env.sh` は source せず、`AGENTSTACK_PROJECT_KEY`（protected root の fallback では
-`AGENTSTACK_PROTECTED_ROOTS` も）だけを literal として読み取ります。このため install
-済みの editor を別 directory から起動しても reservation と registration は同じ project
-key を使い、同時に `env.sh` 内の任意 shell code は実行されません。
+予約 hook が選択 project key を読む順序は `AGENTSTACK_PROJECT_KEY` → `PROJECT_KEY` →
+`${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh` です。installed `env.sh` は source せず、
+`AGENTSTACK_PROJECT_KEY`（protected roots の参照では `AGENTSTACK_PROTECTED_ROOTS` も）
+だけを literal として読み取り、任意 shell code は実行しません。
+
+選択した key は、そのまま予約操作の権限にはなりません。予約 hook は payload の `cwd` を
+存在する絶対 directory として解決し、その workspace に選択 key が属することを検証してから、
+canonical project key で照会・解除します。key が未選択なら workspace から導出します。
+hook process 自身の cwd では代用しません。workspace が不明または選択 key が不一致なら、
+編集前の guard は Mail に接続せず block し、解除 hook は log を残して送信を skip します。
+
+実際の worktree root は常に保護対象です。設定済み `AGENTSTACK_PROTECTED_ROOTS` は、
+同じ repository に属する別 worktree の root だけを追加でき、実際の workspace を置き換えたり、
+別 repository の root を予約対象へ混ぜたりしません。詳細は [予約 hook](hooks.md) を参照してください。
 
 installer は `AGENTSTACK_MAIL_DB`、`AGENTSTACK_MAIL_ENV`、`AGENTSTACK_SIGNALS_DIR`
 を state / render から導出し、`env.sh` へ state root と

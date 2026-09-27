@@ -71,9 +71,12 @@ def _registration_payload(session_id: str) -> str:
 
 
 def _edit_payload(session_id: str, file_path: Path) -> str:
+    # Claude Code sends the session cwd with every hook; the reservation guard
+    # resolves the workspace from it (the edited file's project here).
     return (
-        '{"session_id": "%s", "hook_event_name": "PreToolUse", '
-        '"tool_name": "Edit", "tool_input": {"file_path": "%s"}}' % (session_id, file_path)
+        '{"session_id": "%s", "hook_event_name": "PreToolUse", "cwd": "%s", '
+        '"tool_name": "Edit", "tool_input": {"file_path": "%s"}}'
+        % (session_id, file_path.parent, file_path)
     )
 
 
