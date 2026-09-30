@@ -126,6 +126,9 @@ cat > "$INNER" <<EOF
 cd $(printf '%q' "$DIR") || exit 1
 unset AGENT_NAME PARENT_AGENT CHILD_REGISTRATION_TOKEN AGENTSTACK_RESERVED_IDENTITY 2>/dev/null || true
 $(printf '%q' "$TMUX_BIN") new-session -s $(printf '%q' "$SESSION") -c $(printf '%q' "$DIR") \
+  -e $(printf '%q' "AGENTSTACK_PROJECT_KEY=${AGENTSTACK_PROJECT_KEY:-}") \
+  -e $(printf '%q' "PROJECT_KEY=${PROJECT_KEY:-}") \
+  -e $(printf '%q' "AGENTSTACK_PROTECTED_ROOTS=${AGENTSTACK_PROTECTED_ROOTS:-}") \
   -e $(printf '%q' "AGENT_NAME=$SESSION_AGENT_NAME") \
   -e CLAUDECODE=1 \
   -e PARENT_AGENT= -e CHILD_REGISTRATION_TOKEN= -e AGENTSTACK_RESERVED_IDENTITY= \

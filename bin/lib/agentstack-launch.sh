@@ -17,13 +17,19 @@ AGS_PROG="${AGS_PROG:-agentstack}"
 
 ags_die() { printf '%s: %s\n' "$AGS_PROG" "$*" >&2; exit 1; }
 
-# Pull in installer-written AGENTSTACK_* values. Variables already set in the
-# environment win (env.sh uses `export KEY=val`, so we load it first and let the
-# caller's explicit overrides be re-applied by the caller if needed).
+# Preserve the invoking shell's non-empty project selector while loading the
+# other installed settings. A project namespace may intentionally span several
+# repositories; neither it nor the protected roots is inferred from the cwd.
 ags_load_env() {
   local envf="${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh"
+  local selected_project_key="${AGENTSTACK_PROJECT_KEY:-${PROJECT_KEY:-}}"
   # shellcheck disable=SC1090
   [[ -f "$envf" ]] && . "$envf"
+  if [[ -z "$selected_project_key" ]]; then
+    selected_project_key="${AGENTSTACK_PROJECT_KEY:-${PROJECT_KEY:-}}"
+  fi
+  export AGENTSTACK_PROJECT_KEY="$selected_project_key"
+  export PROJECT_KEY="$selected_project_key"
   return 0
 }
 

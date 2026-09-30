@@ -25,6 +25,12 @@ agent-start
 
 優先順位は明示引数、`fzf` picker、現在 directory の順です。
 
+## トップレベル起動時の project key
+
+`agent-start`・`agent-start-codex`・`agent-start-gemini` は、起動元の空でない `AGENTSTACK_PROJECT_KEY`、起動元の空でない `PROJECT_KEY`、インストール済み `env.sh` の順で project key を選びます。選択後は両変数を同じ値に揃え、既存の tmux server に古い値があっても新しい session へ明示的に渡します。空の値は指定なしとして扱います。
+
+例えば `AGENTSTACK_PROJECT_KEY=/path/to/project agent-start-codex /path/to/workspace` なら、`env.sh` に別の値があっても指定した project を維持します。作業ディレクトリから project や保護範囲を自動的に変更することはありません。読み込んだ `AGENTSTACK_PROTECTED_ROOTS` も session へ渡すため、別 repository や vault を保護する設定を維持できます。子の起動、resume、Dashboard の NEW AGENT の選択ルールは変更しません。
+
 ## tmux session
 
 tmux 外から起動すると、新しい named session を作って現在の terminal tab を置き換えます。tmux 内からは current session を rename し、その場で CLI を `exec` します。
