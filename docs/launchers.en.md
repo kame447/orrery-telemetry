@@ -25,6 +25,12 @@ agent-start
 
 The precedence order is an explicit argument, the `fzf` picker, then the current directory.
 
+## Project key for top-level launches
+
+`agent-start`, `agent-start-codex`, and `agent-start-gemini` select the first non-empty project key from the invoking shell's `AGENTSTACK_PROJECT_KEY`, its `PROJECT_KEY`, and the installed `env.sh`, in that order. Both variables are then synchronized and passed explicitly to the new tmux session, even when an existing server holds stale values. Empty values count as unspecified.
+
+For example, `AGENTSTACK_PROJECT_KEY=/path/to/project agent-start-codex /path/to/workspace` preserves the selected project despite a different installed value. The working directory does not automatically select a project or rewrite protected roots. The loaded `AGENTSTACK_PROTECTED_ROOTS` is also passed to the session, preserving configurations that protect another repository or a vault. Child launches, resume, and Dashboard NEW AGENT selection rules are unchanged.
+
 ## tmux session
 
 When launched from outside tmux, the launcher creates a new named session and replaces the current terminal tab. From inside tmux, it renames the current session and runs the CLI in place with `exec`.
