@@ -80,7 +80,7 @@ with open(log, "a", encoding="utf-8") as fh:
 # which would mean this suite never exercises a *successful* tokenless launch.
 body = {}
 if tool == "register_agent":
-    body = {"name": args.get("name") or "StubAgent", "registration_token": "stub-token"}
+    body = {"name": os.environ.get("CURL_STUB_RETURN_NAME") or args.get("name") or "StubAgent", "registration_token": "stub-token"}
 elif tool == "ensure_project":
     body = {"id": 1, "human_key": args.get("human_key")}
 elif tool == "check_agent_name_available":
@@ -323,8 +323,46 @@ def test_agent_start_registers_and_reaches_the_launch_stage():
         log = _stub_bin(bindir)
         workdir = root / "work"
         workdir.mkdir()
-        _write_exec(bindir / "claude", "#!/bin/bash\nprintf 'claude-stub\\n'\n")
+        expected_workdir = str(workdir.resolve())
+        _write_exec(bindir / "claude", '''#!/usr/bin/env python3
+import json, os
+with open(os.environ["CLAUDE_STUB_MARKER"], "w") as handle:
+    json.dump({"agent_name": os.environ.get("AGENT_NAME"), "cwd": os.getcwd()}, handle)
+print("claude-stub")
+''')
+        # This test exercises registration and the launch boundary even on a
+        # host without tmux. Execute the actual pane command with its -c/-e
+        # inputs, rather than treating a successful stub exit as a launch.
+        _write_exec(bindir / "tmux", '''#!/usr/bin/env python3
+import json, os, subprocess, sys
+args = sys.argv[1:]
+with open(os.environ["TMUX_STUB_LOG"], "a") as handle:
+    handle.write(json.dumps(args) + "\\n")
+if args[0] == "set-environment":
+    raise SystemExit(0)
+assert args.pop(0) == "new-session", args
+env, cwd, session = dict(os.environ), None, None
+while args and args[0].startswith("-"):
+    option, value = args.pop(0), args.pop(0)
+    if option == "-s": session = value
+    elif option == "-c": cwd = value
+    elif option == "-e":
+        key, value = value.split("=", 1)
+        env[key] = value
+    else: raise AssertionError(option)
+assert session and cwd and len(args) == 1, (session, cwd, args)
+subprocess.run(["/bin/bash", "-c", args[0]], cwd=cwd, env=env, check=False)
+''')
         env = _agent_start_env(root, bindir, workdir, log)
+        # Force the fixture even on macOS, where the normal resolver prefers an
+        # absolute Homebrew tmux over PATH. The real-tmux test below is unchanged.
+        pathlib.Path(env["AGENTSTACK_HOME"]).mkdir()
+        (pathlib.Path(env["AGENTSTACK_HOME"]) / "env.sh").write_text(
+            'ags_resolve_tmux() { printf "%s\\n" "$TEST_TMUX"; }\n', encoding="utf-8")
+        env["TEST_TMUX"] = str(bindir / "tmux")
+        env["TMUX_STUB_LOG"] = str(root / "tmux.jsonl")
+        env["CLAUDE_STUB_MARKER"] = str(root / "claude.json")
+        env["CURL_STUB_RETURN_NAME"] = "CanonicalCurie"
         env["TMUX_TMPDIR"] = str(root)        # isolate from the user's tmux server
         env["SHELL"] = "/usr/bin/false"
         r = subprocess.run(
@@ -334,6 +372,8 @@ def test_agent_start_registers_and_reaches_the_launch_stage():
         )
         calls = _curl_calls(log)
         clipboard = (root / "pbcopy.txt").read_text(encoding="utf-8") if (root / "pbcopy.txt").exists() else ""
+        launched = json.loads((root / "claude.json").read_text()) if (root / "claude.json").exists() else {}
+        tmux_calls = [json.loads(line) for line in (root / "tmux.jsonl").read_text().splitlines()] if (root / "tmux.jsonl").exists() else []
     combined = r.stdout + r.stderr
     assert "unbound variable" not in combined, combined
     assert "registration failed" not in combined, (
@@ -341,14 +381,18 @@ def test_agent_start_registers_and_reaches_the_launch_stage():
         f"have covered the real launch path.\n{combined}"
     )
     registered = [c for c in calls if c["tool"] == "register_agent"]
-    assert registered, [c["tool"] for c in calls]
-    name = registered[-1]["args"].get("name")
-    assert name, registered[-1]
+    assert registered, ([c["tool"] for c in calls], combined)
+    name = "CanonicalCurie"
+    assert registered[-1]["args"].get("name") != name, registered[-1]
     assert f"launching Claude agent in tmux session '{name}'" in combined, (
         "agent-start did not reach the launch stage under the registered identity — "
         f"this is the reported silent `cc` death.\n{combined}"
     )
     assert name in clipboard, (name, clipboard)
+    new_session = next((args for args in tmux_calls if args[0] == "new-session"), [])
+    assert new_session and new_session[new_session.index("-s") + 1] == name, tmux_calls
+    assert new_session[new_session.index("-c") + 1] == expected_workdir, tmux_calls
+    assert launched == {"agent_name": name, "cwd": expected_workdir}, (launched, combined)
 
 
 def test_agent_start_actually_execs_claude_inside_tmux():

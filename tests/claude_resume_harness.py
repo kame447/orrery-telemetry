@@ -31,9 +31,16 @@ class StandInMail(http.server.BaseHTTPRequestHandler):
             result = {"structuredContent": {"status": "ok"}}
         elif name == "ensure_project":
             result = {"structuredContent": {"id": 1}}
+        elif name == "whois":
+            # Reserved SessionStart refresh first reads an exact public row.
+            # Both identity replies match the bundled Mail projection.
+            result = {"structuredContent": {
+                "id": 73, "name": arguments.get("agent_name"),
+                "program": "claude-code", "project_id": 1,
+                "retired_at": StandInMail.retired_at}}
         elif name == "register_agent":
             result = {"structuredContent": {"id": 73, "name": arguments.get("name"),
-                                            "registration_token": arguments.get("registration_token", ""),
+                                            "program": "claude-code", "project_id": 1,
                                             "retired_at": StandInMail.retired_at}}
         elif name in {"retire_agent", "unretire_agent"}:
             result = {"structuredContent": {

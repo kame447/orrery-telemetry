@@ -44,6 +44,7 @@ def resume(monkeypatch, tmp_path):
                     "retired_at": "2026-01-01T00:00:00Z"}
     monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
     monkeypatch.setattr(server, "RUNTIME_DIR", str(runtime))
+    monkeypatch.setattr(server, "SESSION_INDEX_DIR", str(runtime / "session_index"))
     monkeypatch.setattr(server, "HOOKS_DIR", str(ROOT / "hooks"))
     monkeypatch.setattr(server, "ABS_CLAUDE", str(cli))
     monkeypatch.setattr(server, "_agent_program", lambda _n: "claude-code")

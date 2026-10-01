@@ -65,13 +65,19 @@ def _run(args: list[str], env: dict[str, str] | None = None
          ) -> subprocess.CompletedProcess[str]:
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = pathlib.Path(tmp)
+        home = tmpdir / "home"
+        home.mkdir()
         lib = tmpdir / "fake-register.sh"
         lib.write_text(_FAKE_LIB, encoding="utf-8")
         run_env = os.environ.copy()
         run_env.update({
+            "HOME": str(home),
             "AGENTSTACK_REGISTER_LIB": str(lib),
             "AGENTSTACK_ENV_FILE": "",
             "AGENTSTACK_HOME": str(tmpdir),
+            # Preregistration persists a real canonical token/identity receipt;
+            # the naming stub must never write those into the developer's home.
+            "AGENTSTACK_RUNTIME_DIR": str(tmpdir / "runtime"),
             "AGENTSTACK_LABEL_PREFIX": TEST_LABEL_PREFIX,
             "AGENTSTACK_PROJECT_KEY": "/p",
             "AGENTSTACK_STRICT_AGENT_NAMES": "",

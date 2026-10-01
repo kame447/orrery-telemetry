@@ -64,6 +64,11 @@ def test_terminal_resume_unretires_an_authenticated_retired_owner(resume, mail, 
     session_start(runtime, registration, tmp_path, source=source)
     registers = [arguments for method, arguments in mail if method == "register_agent"]
     assert registers and registers[-1]["registration_token"] == TOKEN
+    assert registers[-1]["existing_agent_id"] == 73
+    assert registers[-1]["refresh_existing"] is True
+    lookup = next(arguments for method, arguments in mail if method == "whois")
+    assert lookup["agent_name"] == NAME and "registration_token" not in lookup
+    assert not any(method == "ensure_project" for method, _ in mail)
     assert unretires(mail) == [{"project_key": registration["project_key"], "agent_name": NAME}]
     assert (runtime / f"agent_token_{NAME}").read_text().strip() == TOKEN
 

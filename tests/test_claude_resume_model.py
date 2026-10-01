@@ -7,6 +7,7 @@ whatever model the tmux server's environment carried) over the original.
 from __future__ import annotations
 
 import json
+import shlex
 
 import pytest
 
@@ -19,12 +20,15 @@ def session_start_models(launches, tmp_path, mail):
     payload = json.dumps({"session_id": "sess-resume-1", "hook_event_name": "SessionStart",
                           "cwd": str(tmp_path)})
     process = run_resumed(launches, tmp_path,
-                          f"printf '%s' {json.dumps(payload)!r} | "
+                          f"printf '%s' {shlex.quote(payload)} | "
                           f"AGENTSTACK_REGISTER_LIB={ROOT / 'bin/lib/agentstack-register.sh'} "
                           f"/bin/bash {ROOT / 'hooks/session-start-reminder.sh'} >/dev/null\n")
     assert process.returncode == 0, process.stderr
     registers = [arguments for method, arguments in mail if method == "register_agent"]
     assert registers, mail
+    assert all(arguments["existing_agent_id"] == 73 and arguments["refresh_existing"] is True
+               for arguments in registers)
+    assert not any(method == "ensure_project" for method, _ in mail)
     return {arguments["model"] for arguments in registers}
 
 
