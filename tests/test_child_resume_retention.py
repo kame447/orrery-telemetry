@@ -537,6 +537,9 @@ def test_failure_before_codex_exec_discards_home_but_keeps_retired_credential(
     monkeypatch.setenv("AGENTSTACK_HOME", str(install_home))
     monkeypatch.setenv("AGENTSTACK_PYTHON", sys.executable)
     monkeypatch.setattr(server, "RUNTIME_DIR", str(runtime))
+    # Keep identity receipts inside the same private fixture as the token.
+    # RUNTIME_DIR alone does not change this import-time-derived constant.
+    monkeypatch.setattr(server, "SESSION_INDEX_DIR", str(runtime / "session_index"))
     monkeypatch.setattr(server, "_codex_transcript_path", lambda _name: str(rollout))
     monkeypatch.setattr(
         server,

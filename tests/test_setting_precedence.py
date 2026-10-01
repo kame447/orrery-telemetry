@@ -623,12 +623,15 @@ def test_first_install_still_uses_product_defaults(tmp_path):
     project = tmp_path / "project"
     home.mkdir()
     project.mkdir()
-    result = _dry_run(home, "--project-key", str(project), AGENTSTACK_PYTHON=sys.executable)
-    out = result.stdout
-    assert result.returncode == 0, out + result.stderr
-    assert "dashboard port: 8770" in out
-    assert "label prefix: org.agentstack\n" in out
-    assert "terminal: auto" in out
+    # This is a setting-resolution assertion, not a listener-adoption test.
+    # Stop before preflight so an operator's real default-port Mail service
+    # cannot participate in this otherwise isolated first-install fixture.
+    values = _resolve_like_the_installer(
+        home, "PORT", "LABEL_PREFIX", "TERMINAL", "MCP_URL",
+        args=("--project-key", str(project)),
+        env={"AGENTSTACK_PYTHON": sys.executable},
+    )
+    assert values == ["8770", "org.agentstack", "auto", "http://127.0.0.1:18765/mcp"]
 
 
 # Written to env.sh but derived by the installer every time, never chosen:
