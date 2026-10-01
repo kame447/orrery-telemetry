@@ -25,7 +25,7 @@ CHILD = "CozyPlanck"
 
 
 class _Mail(http.server.BaseHTTPRequestHandler):
-    """health_check, ensure_project and register_agent, nothing else."""
+    """health_check, whois, ensure_project and register_agent, nothing else."""
 
     calls: list[str] = []
 
@@ -37,6 +37,12 @@ class _Mail(http.server.BaseHTTPRequestHandler):
         _Mail.calls.append(name)
         if name == "health_check":
             result = {"structuredContent": {"status": "ok"}}
+        elif name == "whois":
+            args = params.get("arguments") or {}
+            if args.get("agent_name") == CHILD and "registration_token" not in args:
+                result = {"structuredContent": {"id": AGENT_ID, "name": CHILD, "program": "claude-code", "project_id": 1}}
+            else:
+                result = None
         elif name == "ensure_project":
             result = {"structuredContent": {"id": 1}}
         elif name == "register_agent":
@@ -44,6 +50,7 @@ class _Mail(http.server.BaseHTTPRequestHandler):
             _Mail.register_args.append(dict(args))
             result = {"structuredContent": {
                 "id": AGENT_ID, "name": args.get("name"),
+                "program": args.get("program"), "project_id": 1,
                 "registration_token": args.get("registration_token", ""),
             }}
         else:
@@ -83,7 +90,8 @@ def mail() -> object:
 
 
 def _run_child_session_start(
-    tmp_path: Path, mcp_url: str, *, with_transcript: bool = True, extra_env: dict | None = None
+    tmp_path: Path, mcp_url: str, *, with_transcript: bool = True, extra_env: dict | None = None,
+    process_cwd: Path | None = None,
 ):
     runtime = tmp_path / "runtime"
     runtime.mkdir()
@@ -111,10 +119,10 @@ def _run_child_session_start(
         "AGENTSTACK_REGISTER_LIB": str(REPO_ROOT / "bin" / "lib" / "agentstack-register.sh"),
     }
     env.update(extra_env or {})
-    (tmp_path / "home").mkdir()
+    (tmp_path / "home").mkdir(exist_ok=True)
     result = subprocess.run(
         ["/bin/bash", str(HOOK)], input=json.dumps(payload),
-        capture_output=True, text=True, timeout=60, env=env,
+        capture_output=True, text=True, timeout=60, env=env, cwd=process_cwd,
     )
     assert result.returncode == 0, result.stderr
     return result, runtime, transcript
@@ -136,6 +144,7 @@ def test_shell_registration_without_a_handed_model_still_names_the_program(mail:
 
 def test_shell_registration_writes_the_session_index(mail: str, tmp_path: Path) -> None:
     result, runtime, transcript = _run_child_session_start(tmp_path, mail)
+    assert "whois" in _Mail.calls, _Mail.calls
     assert "register_agent" in _Mail.calls, _Mail.calls
     assert "already registered" in result.stdout, result.stdout
     record = json.loads((runtime / "session_index" / f"{AGENT_ID}.json").read_text(encoding="utf-8"))
@@ -144,6 +153,38 @@ def test_shell_registration_writes_the_session_index(mail: str, tmp_path: Path) 
     assert record["transcript_path"] == str(transcript)
     assert record["schema_version"] == 2 and record["binding_kind"] == "self"
     assert record["registered_by"] == CHILD, "the child bound itself, not a parent"
+
+
+@pytest.mark.parametrize("namespace_source", ["explicit", "legacy", "installed", "cwd"])
+def test_shell_registration_uses_payload_workspace_and_keeps_namespace_precedence(
+    mail: str, tmp_path: Path, namespace_source: str,
+) -> None:
+    # A broken ambient repository would fail the real shared validator if PWD
+    # were passed instead of the independently valid SessionStart payload cwd.
+    ambient = tmp_path / "ambient"
+    ambient.mkdir()
+    (ambient / ".git").write_text("gitdir: /missing/ambient-metadata\n")
+    installed = tmp_path / "home" / ".agentstack" / "env.sh"
+    installed.parent.mkdir(parents=True)
+    if namespace_source != "cwd":
+        installed.write_text("export AGENTSTACK_PROJECT_KEY=installed-project\n")
+    env = {"AGENTSTACK_PROJECT_KEY": "", "PROJECT_KEY": ""}
+    if namespace_source == "explicit":
+        env.update(AGENTSTACK_PROJECT_KEY="explicit-project", PROJECT_KEY="legacy-project")
+        expected = "explicit-project"
+    elif namespace_source == "legacy":
+        env["PROJECT_KEY"] = "legacy-project"
+        expected = "legacy-project"
+    elif namespace_source == "installed":
+        expected = "installed-project"
+    else:
+        expected = str(tmp_path / "project")
+    result, _, _ = _run_child_session_start(
+        tmp_path, mail, extra_env=env, process_cwd=ambient,
+    )
+    assert "already registered" in result.stdout, result.stdout
+    assert _Mail.register_args[-1]["project_key"] == expected
+    assert _Mail.register_args[-1]["task_description"] == f"Claude session in {tmp_path / 'project'}"
 
 
 def test_the_index_is_exact_authority_for_the_dashboard(mail: str, tmp_path: Path, monkeypatch) -> None:

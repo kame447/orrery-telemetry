@@ -11,10 +11,12 @@ export PATH="$HOME/.agentstack/bin:$PATH"
 
 agent-start ~/code/my-project
 agent-start-codex ~/code/my-project
+agent-start-gemini ~/code/my-project
 ```
 
 - `agent-start`: Claude Code
 - `agent-start-codex`: Codex CLI
+- `agent-start-gemini`: Antigravity CLI
 
 If the directory argument is omitted and `fzf` is available, you can select a directory under `AGENTSTACK_BASE_DIR`. Otherwise, the current directory is used.
 
@@ -24,6 +26,24 @@ agent-start
 ```
 
 The precedence order is an explicit argument, the `fzf` picker, then the current directory.
+
+## Top-level project selection
+
+Before registration, all three top-level launchers print the selected project, where it came from, the working directory, and the reservation-protected roots. Project precedence is `--project-key KEY`, the launching shell's `AGENTSTACK_PROJECT_KEY`, the launching shell's `PROJECT_KEY`, the installed `env.sh`, then the physical launch directory. A project key is a coordination namespace; even a path-shaped key is not proof of repository ownership. The launcher does not switch projects based on the repository. `AGENTSTACK_PROTECTED_ROOTS` preserves configured-root order and appends the actual worktree root (the working directory for non-Git targets) without duplicates. Existing reservation paths remain relative to their original first matching root. Older configurations that implicitly protected a path-shaped project key retain that protection too.
+
+```bash
+agent-start-codex --project-key "$HOME/shared-vault" ~/code/my-project
+```
+
+The shell treats the selected key as opaque namespace data. The bundled Mail service requires an absolute path-shaped human key when creating a project; accepting a logical string during launch resolution does not guarantee that a Mail server will register it. The namespace path need not be the launch repository.
+
+The selected `--project-key` is passed explicitly into a new tmux session even if an existing tmux server carries a different value. To prevent accidental omission, set `AGENTSTACK_REQUIRE_EXPLICIT_PROJECT_KEY=1`; then a top-level launch without `--project-key` stops before registration and prints the required form. This opt-in applies only to `agent-start`, `agent-start-codex`, and `agent-start-gemini`, not to child launches, resume flows, or Dashboard NEW AGENT.
+
+Each launch resolves the actual repository, worktree root, and working directory from the target, exporting `AGENTSTACK_PROJECT_REPOSITORY`, `AGENTSTACK_PROJECT_WORKTREE_ROOT`, and `AGENTSTACK_PROJECT_WORK_DIR`. Linked worktrees share repository identity but retain their separate working directories. A non-Git directory also retains the selected namespace.
+
+Inherited `GIT_DIR`, `GIT_WORK_TREE`, and `GIT_COMMON_DIR` are ignored during resolution and removed from the launched process. Broken Git metadata stops the launch before registration rather than selecting another directory or namespace. Existing tmux server-global state is left untouched; values passed to the new session replace stale workspace context. The three Git selectors are also marked for removal in that newly created session so later windows do not inherit them again. `AGENTSTACK_VAULT`, Codex sandbox/approval flags, and OAuth handling are unchanged.
+
+An extra root cannot be distinguished reliably as an intentional shared vault or a stale shell value. Workspace provenance is therefore recomputed from the target, while configured protection is never silently reduced. This deliberately differs from discarding every stale root. Remove unwanted extra roots in configuration, and reopen shells carrying old settings. The actual launch target remains protected regardless of extra-root settings.
 
 ## tmux session
 

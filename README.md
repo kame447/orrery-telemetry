@@ -52,6 +52,8 @@ installer は、あなたの Claude Code / Codex の設定に触れる前に変�
 
 **成功**: 最後に `Install complete: http://127.0.0.1:8770/` と出て、`~/.agentstack/` ができています。
 
+**既存 Mail の更新:** reserved child/resume の登録には Mail の `register_agent(existing_agent_id, refresh_existing)` 対応が必要です。helper と同時に同梱 Mail service も更新してください。古い版や別途運用する未対応 schema では停止し、通常の新規登録へ黙って fallback しません。source の checkout だけでは実行中 service は更新されません。[Upgrade](docs/install.md#upgrade) と[登録の診断](docs/troubleshooting.md)を参照してください。
+
 ### 2. 動くか確かめる
 
 ```bash

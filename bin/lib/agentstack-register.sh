@@ -6,6 +6,11 @@ if [ -n "${BASH_SOURCE:-}" ]; then _ags_register_src="${BASH_SOURCE[0]}"; else _
 AGS_REGISTER_LIB_DIR="$(cd "$(dirname "$_ags_register_src")" && pwd)"
 # shellcheck source=agentstack-scientists.sh
 . "$AGS_REGISTER_LIB_DIR/agentstack-scientists.sh"
+AGS_PROJECT_CONTEXT_LIB="${AGENTSTACK_PROJECT_CONTEXT_LIB:-$AGS_REGISTER_LIB_DIR/../../hooks/project-context.sh}"
+if [[ -f "$AGS_PROJECT_CONTEXT_LIB" ]] && ! command -v agentstack_validate_project_context >/dev/null 2>&1; then
+  # shellcheck disable=SC1090
+  . "$AGS_PROJECT_CONTEXT_LIB"
+fi
 
 # These are private per-call channels. Never let ambient environment select
 # the diagnostic transport or an arbitrary diagnostic output path.
@@ -226,10 +231,19 @@ import sys
 args = {}
 for item in sys.argv[1:]:
     key, value = item.split("=", 1)
-    args[key] = value
+    if key == "existing_agent_id":
+        if not value.isascii() or not value.isdecimal() or int(value) <= 0:
+            raise SystemExit(1)
+        args[key] = int(value)
+    elif key == "refresh_existing":
+        if value not in ("true", "false"):
+            raise SystemExit(1)
+        args[key] = value == "true"
+    else:
+        args[key] = value
 print(json.dumps(args, separators=(",", ":")))
 PY
-)"
+)" || return 1
   payload="$(python3 - "$tool" "$args_json" <<'PY'
 import json
 import sys
@@ -241,7 +255,7 @@ print(json.dumps({
     "params": {"name": sys.argv[1], "arguments": json.loads(sys.argv[2])},
 }, separators=(",", ":")))
 PY
-)"
+)" || return 1
   local auth=()
   [[ -n "${MCP_AGENT_MAIL_TOKEN:-}" ]] && auth=(-H "Authorization: Bearer $MCP_AGENT_MAIL_TOKEN")
   if [[ -n "${AGS_MCP_DIAG_FILE:-}" ]]; then
@@ -790,8 +804,51 @@ ags_pick_available_agent_name() {
   return 1
 }
 
+# Read an exact identity from a supported MCP response without combining fields
+# from different payloads. Both whois and the authenticated refresh must name
+# the same numeric agent/project and exact name/program before local side effects.
+ags_existing_agent_identity() {
+  python3 -c '
+import json
+import sys
+
+name, program = sys.argv[1:]
+try:
+    data = json.load(sys.stdin)
+except (ValueError, TypeError):
+    raise SystemExit(1)
+
+def payloads(value, depth=0):
+    if depth > 4 or not isinstance(value, dict):
+        return
+    if "jsonrpc" not in value and "result" not in value:
+        yield value
+    for key in ("result", "structuredContent"):
+        yield from payloads(value.get(key), depth + 1)
+    content = value.get("content")
+    if isinstance(content, list):
+        for part in content:
+            if not isinstance(part, dict) or not isinstance(part.get("text"), str):
+                continue
+            try:
+                decoded = json.loads(part["text"])
+            except ValueError:
+                continue
+            yield from payloads(decoded, depth + 1)
+
+for value in payloads(data):
+    agent_id, project_id = value.get("id"), value.get("project_id")
+    if (value.get("name") == name and value.get("program") == program
+            and type(agent_id) is int and agent_id > 0
+            and type(project_id) is int and project_id > 0):
+        print(f"{agent_id}:{project_id}")
+        raise SystemExit(0)
+raise SystemExit(1)
+' "$1" "$2"
+}
+
 ags_register_session() {
-  local project_key="$1" program="$2" model="$3" prefix="$4" work_dir="$5" requested_name="${6:-}" requested_mode="${7:-reserved}"
+  local project_key="$1" program="$2" model="$3" prefix="$4" work_dir="$5" requested_name="${6:-}" requested_mode="${7-reserved}"
   AGS_REGISTERED_AGENT_NAME=""
   AGS_REGISTERED_AGENT_ID=""
   AGS_REGISTERED_RETIRED_AT=""
@@ -799,7 +856,62 @@ ags_register_session() {
   AGS_REQUESTED_AGENT_NAME=""
   AGS_SERVER_RETURNED_AGENT_NAME=""
   AGS_AGENT_NAME_SUBSTITUTED=0
+  AGS_REGISTRATION_REQUIRES_EXISTING_REFRESH=0
   ags_registration_diag_reset
+
+  case "$requested_mode" in
+    reserved)
+      if [[ -z "$requested_name" ]]; then
+        ags_registration_diag_set "identity-check" "input-missing"
+        echo "agentstack: reserved registration requires an existing agent name." >&2
+        return 1
+      fi
+      ;;
+    candidate) ;;
+    *)
+      ags_registration_diag_set "identity-check" "input-missing"
+      echo "agentstack: registration mode must be candidate or reserved." >&2
+      return 1
+      ;;
+  esac
+
+  local context_json="" registration_token="" existing_agent_id="" identity="" refreshed_identity=""
+  command -v agentstack_validate_project_context >/dev/null 2>&1 || {
+    echo "agentstack: project context validator is unavailable; refusing registration." >&2
+    return 1
+  }
+  context_json="$(agentstack_validate_project_context "$work_dir" "$project_key")" || {
+    echo "agentstack: cannot resolve registration workspace context for '$work_dir'." >&2
+    return 1
+  }
+  project_key="$(agentstack_context_field "$context_json" project_key)" || return 1
+
+  # whois remains tokenless and only selects an exact existing identity. The
+  # explicit refresh_existing path authenticates and updates that row atomically;
+  # ordinary register_agent could claim a NULL-owner row or generate a new name.
+  # Unsupported older Mail schemas must fail closed, never retry ordinary upsert.
+  if [[ "$requested_mode" == "reserved" && -n "$requested_name" ]]; then
+    registration_token="${CHILD_REGISTRATION_TOKEN:-}"
+    if [[ -z "$registration_token" ]]; then
+      registration_token="$(ags_load_registration_token "$requested_name" 2>/dev/null || true)"
+    fi
+    [[ -n "$registration_token" ]] || {
+      ags_registration_diag_set "local-token" "credential-unavailable"
+      return 1
+    }
+    if ! ags_mcp_call_diagnosed "identity-check" "whois" \
+        "project_key=$project_key" "agent_name=$requested_name"; then
+      echo "agentstack: cannot confirm reserved identity '$requested_name' in '$project_key'." >&2
+      return 1
+    fi
+    if ! identity="$(printf '%s' "$AGS_MCP_RESPONSE" | ags_existing_agent_identity "$requested_name" "$program")"; then
+      ags_registration_diag_set "identity-check" "invalid-response"
+      echo "agentstack: cannot confirm exact reserved identity '$requested_name' in '$project_key'." >&2
+      return 1
+    fi
+    existing_agent_id="${identity%%:*}"
+    AGS_REGISTRATION_REQUIRES_EXISTING_REFRESH=1
+  fi
 
   local task_description="Agent session in $work_dir"
   case "$program" in
@@ -815,27 +927,19 @@ ags_register_session() {
   fi
   AGS_REQUESTED_AGENT_NAME="$agent_name"
 
-  if ! ags_mcp_call_diagnosed "ensure_project" "ensure_project" "human_key=$project_key"; then
-    return 1
-  fi
-  if ! printf '%s' "$AGS_MCP_RESPONSE" | ags_mcp_response_has_project; then
-    ags_registration_diag_set "ensure_project" "invalid-response"
-    return 1
-  fi
-
-  # Ambient owner credentials are valid only for an explicitly verified
-  # reserved identity. Candidate/top-level registration must not adopt a token
-  # inherited from another tmux session.
-  local registration_token=""
-  if [[ "$requested_mode" == "reserved" && -n "$requested_name" ]]; then
-    registration_token="${CHILD_REGISTRATION_TOKEN:-}"
-    if [[ -z "$registration_token" ]]; then
-      registration_token="$(ags_load_registration_token "$agent_name" 2>/dev/null || true)"
+  if [[ -z "$existing_agent_id" ]]; then
+    if ! ags_mcp_call_diagnosed "ensure_project" "ensure_project" "human_key=$project_key"; then
+      return 1
+    fi
+    if ! printf '%s' "$AGS_MCP_RESPONSE" | ags_mcp_response_has_project; then
+      ags_registration_diag_set "ensure_project" "invalid-response"
+      return 1
     fi
   fi
-  # Mint a fresh owner token only for a name the server positively reports as
-  # free. An 'unknown' answer must not mint one: that is how an unverified name
-  # used to get claimed on top of a live agent.
+
+  # Candidate/top-level registration never adopts an ambient owner token.
+  # Mint a fresh token only for a name Mail positively reports as free. An
+  # 'unknown' answer must not mint one: that could claim a live identity.
   if [[ -z "$registration_token" ]] && ags_agent_name_available "$project_key" "$agent_name"; then
     registration_token="$(ags_generate_registration_token)" || return 1
   fi
@@ -848,9 +952,15 @@ ags_register_session() {
     "task_description=$task_description"
   )
   [[ -n "$registration_token" ]] && register_args+=("registration_token=$registration_token")
+  if [[ -n "$existing_agent_id" ]]; then
+    register_args+=("existing_agent_id=$existing_agent_id" "refresh_existing=true")
+  fi
 
   local result registered registered_token
   if ! ags_mcp_call_diagnosed "register_agent" "register_agent" "${register_args[@]}"; then
+    if [[ -n "$existing_agent_id" ]]; then
+      echo "agentstack: reserved identity refresh failed; Mail must support register_agent(existing_agent_id, refresh_existing) and accept the existing owner token. Refusing ordinary registration." >&2
+    fi
     return 1
   fi
   result="$AGS_MCP_RESPONSE"
@@ -872,8 +982,21 @@ ags_register_session() {
       return 2
     fi
   fi
-  registered_token="$(printf '%s' "$result" | ags_extract_registration_token)"
-  [[ -n "$registered_token" ]] || registered_token="$registration_token"
+  if [[ -n "$existing_agent_id" ]]; then
+    refreshed_identity="$(printf '%s' "$result" | ags_existing_agent_identity "$agent_name" "$program")" || refreshed_identity=""
+    if [[ "$refreshed_identity" != "$identity" ]]; then
+      ags_registration_diag_set "identity-check" "invalid-response"
+      return 1
+    fi
+  fi
+  if [[ -n "$existing_agent_id" ]]; then
+    # An exact-owner refresh cannot rotate ownership. Retain the credential
+    # that authenticated it, even if a nonconforming response includes another.
+    registered_token="$registration_token"
+  else
+    registered_token="$(printf '%s' "$result" | ags_extract_registration_token)"
+    [[ -n "$registered_token" ]] || registered_token="$registration_token"
+  fi
   if [[ -n "$registered_token" ]]; then
     CHILD_REGISTRATION_TOKEN="$registered_token"
     AGS_REGISTERED_REGISTRATION_TOKEN="$registered_token"

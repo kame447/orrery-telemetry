@@ -37,7 +37,8 @@ import anyio
 from fastmcp import Context, FastMCP
 from git import Repo
 from git.exc import InvalidGitRepositoryError, NoSuchPathError
-from sqlalchemy import asc as _sa_asc, bindparam, delete as _sa_delete, desc as _sa_desc, func, or_ as _sa_or, select as _sa_select, text, update as _sa_update
+from pydantic import StrictBool, StrictInt
+from sqlalchemy import asc as _sa_asc, bindparam, case, delete as _sa_delete, desc as _sa_desc, func, or_ as _sa_or, select as _sa_select, text, update as _sa_update
 from sqlalchemy.exc import IntegrityError, NoResultFound, OperationalError, TimeoutError as SATimeoutError
 from sqlalchemy.orm import aliased
 
@@ -3574,6 +3575,88 @@ async def _get_or_create_agent(
     return agent
 
 
+async def _refresh_existing_owned_agent(
+    project: Project,
+    agent: Agent,
+    model: str,
+    task_description: str,
+    settings: Settings,
+) -> Agent:
+    """Refresh an authenticated snapshot only while its exact authority survives.
+
+    The caller has checked the supplied identity and owner credential. Repeat
+    that authority in the write predicate, including the row's incarnation and
+    credential generation, rather than updating an ORM object after the read.
+    No identity, policy, retirement, or window-association field is changed.
+    """
+    now = _aware_utc()
+    authority = (
+        cast(Any, Agent.id == agent.id),
+        cast(Any, Agent.project_id == project.id),
+        cast(Any, Agent.name == agent.name),
+        cast(Any, Agent.program == agent.program),
+        cast(Any, Agent.registration_token == agent.registration_token),
+        cast(Any, Agent.inception_ts == agent.inception_ts),
+        cast(Any, Agent.credential_generation == agent.credential_generation),
+        select(Project.id).where(
+            cast(Any, Project.id == project.id),
+            cast(Any, Project.human_key == project.human_key),
+            cast(Any, Project.created_at == project.created_at),
+        ).exists(),
+    )
+    async with get_session() as session:
+        outcome = await session.execute(
+            update(Agent)
+            .where(*authority)
+            .values(
+                model=model,
+                task_description=task_description,
+                last_active_ts=case(
+                    (or_(cast(Any, Agent.last_active_ts).is_(None),
+                         cast(Any, Agent.last_active_ts) < now), now),
+                    else_=Agent.last_active_ts,
+                ),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if outcome.rowcount != 1:
+            await session.rollback()
+            raise ValueError("Existing-owner identity or credential changed during refresh")
+        await session.commit()
+
+    # Never initialize or write an archive for a rejected guarded UPDATE. Git
+    # is a separate persistence boundary; a synchronization failure cannot
+    # undo the committed database refresh and must be reported as such.
+    try:
+        archive = await ensure_archive(settings, project.slug)
+        async with _archive_write_lock(archive):
+            # Successful concurrent refreshes can reach this lock out of commit
+            # order. Archive the current owned row, never the preliminary
+            # snapshot, and do not resurrect a deleted/replaced identity.
+            async with get_session() as session:
+                current = await session.execute(select(Agent).where(*authority))
+                refreshed = current.scalar_one_or_none()
+            if refreshed is None:
+                raise ValueError("Existing-owner authority changed before archive synchronization")
+            profile = _agent_to_dict(refreshed)
+            profile_path = archive.root / "agents" / refreshed.name / "profile.json"
+            if profile_path.exists():
+                previous = json.loads(await asyncio.to_thread(profile_path.read_text, encoding="utf-8"))
+                for field in ("window_id", "window_display_name"):
+                    if field in previous:
+                        profile[field] = previous[field]
+            await write_agent_profile(archive, profile)
+    except Exception as exc:
+        raise ToolExecutionError(
+            "PROFILE_ARCHIVE_SYNC_FAILED",
+            "Existing-owner refresh committed, but its archive profile could not be synchronized. "
+            "Retry the same exact-owner refresh to synchronize it.",
+            recoverable=True,
+            data={"agent_id": agent.id, "database_updated": True},
+        ) from exc
+    return refreshed
+
+
 async def _touch_agent_activity(agent: Agent) -> None:
     """Mark an agent as alive right now.
 
@@ -5421,7 +5504,8 @@ def build_mcp_server() -> FastMCP:
         attachments_policy: str = "auto",
         registration_token: Optional[str] = None,
         format: Optional[str] = None,
-        existing_agent_id: Optional[int] = None,
+        existing_agent_id: Optional[StrictInt] = None,
+        refresh_existing: StrictBool = False,
     ) -> dict[str, Any]:
         """
         Create or update an agent identity within a project and persist its profile to Git.
@@ -5464,7 +5548,12 @@ def build_mcp_server() -> FastMCP:
         existing_agent_id : Optional[int]
             Authenticate only this already-owned identity, with exact name,
             human project key and program. Requires its registration_token.
-            Does not create, claim, rename or update the identity or its profile.
+            By default, does not create, claim, rename or update its profile.
+        refresh_existing : bool
+            Opt in to an atomic model/task/activity refresh of existing_agent_id.
+            Requires the same exact identity and existing nonempty owner token.
+            Preserves attachments/contact policy, ownership, inception, retirement
+            and window identity. Cannot be used without existing_agent_id.
 
         Returns
         -------
@@ -5494,6 +5583,8 @@ def build_mcp_server() -> FastMCP:
         - Use the same `project_key` consistently across cooperating agents.
         """
         _validate_program_model(program, model)
+        if refresh_existing and existing_agent_id is None:
+            raise ValueError("refresh_existing requires existing_agent_id")
         project = await _get_project_by_identifier(project_key)
         if existing_agent_id is not None:
             if type(existing_agent_id) is not int or existing_agent_id <= 0:
@@ -5511,7 +5602,12 @@ def build_mcp_server() -> FastMCP:
                 if not agent.registration_token or not agent.registration_token.strip():
                     raise ValueError("Existing identity has no registered owner")
                 _resolve_registration_token(agent.registration_token, registration_token)
-                return _agent_to_dict(agent)
+                if not refresh_existing:
+                    return _agent_to_dict(agent)
+            agent = await _refresh_existing_owned_agent(
+                project, agent, model, task_description, settings,
+            )
+            return _agent_to_dict(agent)
         if settings.tools_log_enabled:
             try:
                 import importlib as _imp

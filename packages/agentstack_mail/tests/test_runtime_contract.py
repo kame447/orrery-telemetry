@@ -204,13 +204,17 @@ def test_actual_tool_schemas_match_the_frozen_live_contract() -> None:
 
     actual = asyncio.run(inspect_server())
 
-    # #140 adds one optional, existing-owner-only recovery guard. Keep the
+    # Existing-owner recovery/refresh adds optional guards. Keep the
     # predecessor fixture frozen and compare every original field unchanged.
     registration_schema = actual["register_agent"]["inputSchema"]
     assert registration_schema["properties"].pop("existing_agent_id") == {
         "anyOf": [{"type": "integer"}, {"type": "null"}], "default": None,
     }
     assert "existing_agent_id" not in registration_schema.get("required", [])
+    assert registration_schema["properties"].pop("refresh_existing") == {
+        "type": "boolean", "default": False,
+    }
+    assert "refresh_existing" not in registration_schema.get("required", [])
     assert actual == expected
     tools = asyncio.run(build_mcp_server().get_tools())
     assert {

@@ -44,7 +44,7 @@ def test_existing_owner_authentication_never_creates_claims_or_updates(monkeypat
                     return [row.model_dump(mode="json") for row in result.scalars()]
 
             before = await rows()
-            archive = tmp_path / "archive" / "agents"
+            archive = tmp_path / "archive" / "projects"
             def forbid_registration(*_args, **_kwargs):
                 raise AssertionError("Authentication entered identity creation/profile mutation")
             monkeypatch.setattr(app, "_get_or_create_agent", forbid_registration)

@@ -10,6 +10,10 @@
 
 ## Unreleased
 
+### 予約済み identity の更新を同じ所有済み row に限定しました
+
+Mail の `register_agent` に `existing_agent_id` と組み合わせる明示 opt-in `refresh_existing=true` を追加しました。exact project・ID・name・program・非空 owner token を条件に同じ row の model/task/活動時刻を原子的に更新し、NULL-owner の claim、新規作成、別名生成を行いません。活動時刻は後退せず、既定の existing-ID 認証専用動作と attachments/contact policy・retirement は維持します。reserved child/resume と reregister は token なしの `whois` 後にこの経路を使い、未対応の古い Mail schema では停止します。通常登録への fallback はありません。実行中 Mail service の更新が必要で、source checkout だけでは配備されません。dashboard HTTP API の変更ではないため、その API 世代は上げません。
+
 ### 登録のたびに、contact policy の設定が 1 回失敗していました（#51）
 
 登録の helper は `set_contact_policy` を owner token 付きで先に呼んでいました。同梱の ORRERY Mail の `set_contact_policy` は `registration_token` を受け付けないので、この呼び出しは毎回失敗し、token なしの呼び直しで設定されていました。token なしを先に呼び、失敗したときだけ token 付きで呼び直すようにしました。owner token を求める古い Mail にも、2 回目で設定されます。

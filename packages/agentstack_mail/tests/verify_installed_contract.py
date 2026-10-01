@@ -67,12 +67,16 @@ async def verify() -> None:
         raise SystemExit("installed wheel must publish zero MCP resource templates")
     if prompts:
         raise SystemExit("installed wheel must publish zero MCP prompts")
-    # Pin the additive #140 recovery guard separately from the frozen surface.
+    # Pin additive existing-owner recovery/refresh guards separately from the frozen surface.
     registration_schema = actual["register_agent"]["inputSchema"]
     recovery_guard = registration_schema["properties"].pop("existing_agent_id", None)
     if (recovery_guard != {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": None}
             or "existing_agent_id" in registration_schema.get("required", [])):
         raise SystemExit("installed wheel existing-owner authentication schema mismatch")
+    refresh_guard = registration_schema["properties"].pop("refresh_existing", None)
+    if (refresh_guard != {"type": "boolean", "default": False}
+            or "refresh_existing" in registration_schema.get("required", [])):
+        raise SystemExit("installed wheel existing-owner refresh schema mismatch")
     if actual != expected:
         mismatched = sorted(
             name for name in expected if actual.get(name) != expected[name]

@@ -121,6 +121,14 @@ agentstack_load_installed_env() {
     local env_file="${1:-${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh}"
     local name value count=0 i=0 live_project_key="" live_protected_roots=""
     local names=() values=()
+    AGS_PROJECT_KEY_SOURCE="directory fallback"
+    if [ -n "${AGENTSTACK_PROJECT_KEY:-}" ]; then
+        AGS_PROJECT_KEY_SOURCE="AGENTSTACK_PROJECT_KEY"
+    elif [ -n "${PROJECT_KEY:-}" ]; then
+        AGS_PROJECT_KEY_SOURCE="PROJECT_KEY"
+    elif [ -n "$(agentstack_installed_env_value AGENTSTACK_PROJECT_KEY "$env_file")" ]; then
+        AGS_PROJECT_KEY_SOURCE="installed env.sh"
+    fi
     [ -f "$env_file" ] || return 0
     for name in $AGENTSTACK_INHERITED_SETTINGS; do
         value="${!name:-}"
@@ -149,6 +157,154 @@ agentstack_load_installed_env() {
         export AGENTSTACK_PROTECTED_ROOTS="$value"
     fi
     return 0
+}
+
+# A top-level launch must add its actual workspace to reservation protection
+# without dropping deliberately configured extra roots (for example a writable
+# shared vault). Capture only the declared setting before the generic loader
+# derives a namespace-shaped default. The usual setting precedence stays here.
+agentstack_load_top_level_env() {
+    local env_file="${1:-${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh}"
+    local inherited_key=""
+    AGS_CONFIGURED_PROTECTED_ROOTS="$(agentstack_resolve_setting \
+        AGENTSTACK_PROTECTED_ROOTS "${AGENTSTACK_PROTECTED_ROOTS:-}" "" "$env_file")"
+    if [ -z "$AGS_CONFIGURED_PROTECTED_ROOTS" ]; then
+        # Older installs protected a path-shaped namespace by default. Keep
+        # that existing protection too; it is not workspace ownership evidence.
+        inherited_key="$(agentstack_resolve_project_key "" "$env_file" 0)"
+        case "$inherited_key" in
+            /*|\~/*) AGS_CONFIGURED_PROTECTED_ROOTS="$inherited_key" ;;
+        esac
+    fi
+    agentstack_load_installed_env "$env_file"
+}
+
+agentstack_physical_dir() {
+    [ -n "${1:-}" ] && [ -d "$1" ] || return 1
+    (CDPATH= cd -- "$1" 2>/dev/null && pwd -P)
+}
+
+# Resolve one top-level invocation into two independent dimensions:
+# - project_key is the ORRERY Mail coordination namespace and follows the
+#   published runtime precedence (explicit override > live key > installed key
+#   > cwd fallback);
+# - repository/work_dir/worktree_root describe the actual target workspace.
+# A namespace may intentionally span repositories. Workspace provenance and
+# mandatory protection come from TARGET. The launcher separately retains
+# configured extra roots; a namespace path is never workspace ownership proof.
+agentstack_resolve_invocation_context() {
+    [ "$#" -ge 1 ] && [ "$#" -le 2 ] || return 2
+    local target="$1" explicit_key="${2:-}"
+    local work_dir="" worktree_root="" common="" common_abs=""
+    local repository="" project_key="" probe=""
+
+    work_dir="$(agentstack_physical_dir "$target")" || {
+        printf 'agentstack: invocation target must be an existing directory\n' >&2
+        return 1
+    }
+
+    command -v git >/dev/null 2>&1 || {
+        printf 'agentstack: git is required to resolve invocation target\n' >&2
+        return 1
+    }
+    worktree_root="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+        git -C "$work_dir" rev-parse --show-toplevel 2>/dev/null)" || worktree_root=""
+    common="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+        git -C "$work_dir" rev-parse --git-common-dir 2>/dev/null)" || common=""
+    if [ -z "$worktree_root" ] || [ -z "$common" ]; then
+        # Do not reinterpret a broken repository marker as an ordinary non-Git
+        # workspace and then authorize an unrelated explicit namespace.
+        # Check ancestors too: launching in a subdirectory of a broken
+        # worktree must not turn it into an unowned non-Git workspace.
+        probe="$work_dir"
+        while :; do
+            if [ -f "$probe/.git" ] || [ -L "$probe/.git" ] ||
+               [ -e "$probe/.git/HEAD" ] || [ -e "$probe/.git/config" ] ||
+               [ -d "$probe/.git/objects" ] || [ -d "$probe/.git/refs" ] ||
+               { [ "$probe" = "$work_dir" ] && [ -d "$probe/.git" ]; } ||
+               [ -n "$common" ]; then
+                printf 'agentstack: cannot resolve repository metadata for invocation target\n' >&2
+                return 1
+            fi
+            [ "$probe" != / ] || break
+            probe="$(dirname "$probe")"
+        done
+        worktree_root=""
+        common=""
+    else
+        worktree_root="$(agentstack_physical_dir "$worktree_root")" || return 1
+        case "$work_dir/" in
+            "${worktree_root%/}/"*) ;;
+            *)
+                printf 'agentstack: invocation target is outside its resolved Git worktree\n' >&2
+                return 1
+                ;;
+        esac
+        case "$common" in
+            /*) common_abs="$(agentstack_physical_dir "$common")" || return 1 ;;
+            *) common_abs="$(agentstack_physical_dir "$work_dir/$common")" || return 1 ;;
+        esac
+        if [ "$(basename "$common_abs")" = ".git" ]; then
+            repository="$(dirname "$common_abs")"
+        else
+            repository="$common_abs"
+        fi
+    fi
+
+    if [ -n "$explicit_key" ]; then
+        # Mail project keys are opaque human keys. Even a path-shaped key is
+        # namespace data, not proof that TARGET belongs to that repository.
+        project_key="$explicit_key"
+    else
+        project_key="$(agentstack_resolve_project_key "$work_dir")" || return 1
+    fi
+    [ -n "$project_key" ] || {
+        printf 'agentstack: cannot resolve project namespace for invocation target\n' >&2
+        return 1
+    }
+
+    "${AGENTSTACK_PYTHON:-python3}" - \
+        "$project_key" "$repository" "$work_dir" "$worktree_root" <<'PY'
+import json
+import sys
+
+project_key, repository, work_dir, worktree_root = sys.argv[1:]
+print(json.dumps({
+    "project_key": project_key,
+    "repository_key": repository or None,
+    "work_dir": work_dir,
+    "worktree_root": worktree_root or None,
+    "protected_roots": [worktree_root or work_dir],
+}, separators=(",", ":")))
+PY
+}
+
+agentstack_context_field() {
+    "${AGENTSTACK_PYTHON:-python3}" - "$1" "$2" <<'PY'
+import json
+import sys
+
+data = json.loads(sys.argv[1])
+value = data.get(sys.argv[2])
+if value is None:
+    value = ""
+if not isinstance(value, str):
+    raise SystemExit(1)
+print(value)
+PY
+}
+
+# Validate a registration target without treating its Mail namespace as proof
+# of repository ownership. Recompute workspace provenance from TARGET, while
+# retaining intentional cross-repository and logical coordination namespaces.
+# Validation does not alter the caller's protected-root configuration.
+agentstack_validate_project_context() {
+    local target="$1" selected="$2" context="" project=""
+    [ -n "$selected" ] || return 1
+    context="$(agentstack_resolve_invocation_context "$target" "$selected")" || return 1
+    project="$(agentstack_context_field "$context" project_key)" || return 1
+    [ "$project" = "$selected" ] || return 1
+    printf '%s\n' "$context"
 }
 
 # Priority: live AGENTSTACK_PROJECT_KEY, live PROJECT_KEY, installed env, cwd.
@@ -196,8 +352,12 @@ agentstack_resolve_protected_roots() {
     printf '%s\n' "${installed:-$resolved_project_key}"
 }
 
-if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+if [ -n "${BASH_SOURCE:-}" ] && [ "${BASH_SOURCE[0]}" = "$0" ]; then
     case "${1:-}" in
+        resolve-invocation-context)
+            shift
+            agentstack_resolve_invocation_context "$@"
+            ;;
         resolve-project-key)
             shift
             agentstack_resolve_project_key "${1:-}" "${2:-}" "${3:-1}"

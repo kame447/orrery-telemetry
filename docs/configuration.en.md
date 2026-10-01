@@ -111,6 +111,8 @@ export AGENTSTACK_DELIVERABLE_ROOTS="$HOME/project-a/logs:$HOME/shared logs"
 | `AGENTSTACK_CLAUDE_SETTINGS` | `~/.claude/settings.json` | Settings merge target |
 | `AGENTSTACK_CLAUDE_MD_SCOPE` | `project` | Where `agentstack-claude-setup` writes managed blocks: `project / global / both` |
 
+Top-level launchers always include the actual launch workspace in reservation protection and retain the order of explicitly configured extra roots (including shared vaults). An older path-shaped project-key fallback is also preserved. See [launchers](launchers.en.md#top-level-project-selection) for the boundary; this does not change installer setting precedence.
+
 When a healthy ORRERY Mail listener already exists, the installer adopts the deployment metadata recorded with its immutable render without updating or restarting the server. A managed render created before that metadata existed is adopted only when its render ID maps uniquely and deterministically to a candidate directory. The generated `AGENTSTACK_MAIL_ENV` and `AGENTSTACK_MAIL_ENROLL_BIN` in `env.sh` therefore identify the same deployment. If a known legacy render has no enrollment CLI, Mail and its existing autostart remain usable while enrollment is recorded as unavailable.
 
 When a healthy listener uses the expected database but its service environment cannot be identified, an ordinary unpinned reinstall reuses the listener unchanged. In this degraded state deployment and enrollment paths are empty, and the installer updates neither the enrollment connection profile nor Mail autostart. Existing triggers are not deleted or stopped, but the installer cannot guarantee restart at the next login. Installation instead stops explicitly, without switching the listener, when an explicit `AGENTSTACK_MAIL_SERVICE_VENV` / `AGENTSTACK_MAIL_SERVICE_ENV` cannot be matched to the running deployment, known metadata is invalid, or metadata promises an enrollment CLI that is missing.
@@ -128,6 +130,7 @@ The installer derives `AGENTSTACK_MAIL_DB`, `AGENTSTACK_MAIL_ENV`, and `AGENTSTA
 | Environment variable | Default | Meaning |
 | --- | --- | --- |
 | `AGENTSTACK_BASE_DIR` | `$HOME` | `fzf` picker root |
+| `AGENTSTACK_REQUIRE_EXPLICIT_PROJECT_KEY` | `0` | Set to `1` to require `--project-key` on top-level launchers; does not apply to child / resume / Dashboard spawn |
 | `AGENTSTACK_CLAUDE_BIN` | `claude` | Claude CLI |
 | `AGENTSTACK_CLAUDE_MODEL` | `claude-code` | Claude registration model label. Children and dashboard-resumed sessions use their own model (`CLAUDE_CHILD_MODEL`) first. A new window in a child's tmux session inherits that value, so `unset CLAUDE_CHILD_MODEL` before opening another agent there with `AGENT_NAME=<name> claude --resume`; otherwise it registers with the child's model |
 | `AGENTSTACK_CODEX_BIN` | `codex` resolved in the operator's shell at install time that answers `--version` (under WSL, a Windows install under `/mnt/<drive>/` is skipped; `--codex-bin` to override) | Codex CLI. The dashboard runs under launchd / systemd with the minimal PATH, so a codex under nvm / nodebrew / `~/.npm-global` is reachable only through this value |

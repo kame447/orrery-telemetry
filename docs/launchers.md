@@ -11,10 +11,12 @@ export PATH="$HOME/.agentstack/bin:$PATH"
 
 agent-start ~/code/my-project
 agent-start-codex ~/code/my-project
+agent-start-gemini ~/code/my-project
 ```
 
 - `agent-start`: Claude Code
 - `agent-start-codex`: Codex CLI
+- `agent-start-gemini`: Antigravity CLI
 
 directory 引数を省略すると、`fzf` があれば `AGENTSTACK_BASE_DIR` 以下を選択できます。なければ現在 directory を使います。
 
@@ -24,6 +26,24 @@ agent-start
 ```
 
 優先順位は明示引数、`fzf` picker、現在 directory の順です。
+
+## top-level の project 選択
+
+3つの top-level launcher は登録前に、選ばれた project、その選択元、作業 directory、reservation の保護範囲を表示します。project の優先順位は `--project-key KEY`、起動 shell の `AGENTSTACK_PROJECT_KEY`、起動 shell の `PROJECT_KEY`、install 済み `env.sh`、起動先 directory の物理 path の順です。project key は coordination namespace であり、path 形式でも repository ownership の証明には使いません。repository を見て project を自動変更しません。`AGENTSTACK_PROTECTED_ROOTS` は設定済み root の順序を保ち、実際の worktree root（non-Git では作業 directory）を重複なく追加します。最初に一致する root からの相対 path を使う既存予約との互換性を保つためです。明示 root のない旧設定で path 形式の project key を保護していた場合も、その保護を残します。
+
+```bash
+agent-start-codex --project-key "$HOME/shared-vault" ~/code/my-project
+```
+
+shell は選んだ key を namespace の値として扱います。同梱 Mail は project 作成時の human key に絶対 path 形式を要求するため、launcher が logical string を解決できても Mail が登録を受け付けるとは限りません。namespace の path は起動先 repository と同じである必要はありません。
+
+既存 tmux server が別の project 値を持っていても、`--project-key` で選んだ値は新しい session に明示的に渡されます。付け忘れを防ぎたい場合は `AGENTSTACK_REQUIRE_EXPLICIT_PROJECT_KEY=1` を設定すると、`--project-key` の無い top-level 起動は登録前に停止して指定方法を表示します。この opt-in は `agent-start`、`agent-start-codex`、`agent-start-gemini` だけに適用され、child、resume、Dashboard の NEW AGENT には適用されません。
+
+起動先の repository、worktree root、実際の作業 directory は起動ごとに解決し、`AGENTSTACK_PROJECT_REPOSITORY`、`AGENTSTACK_PROJECT_WORKTREE_ROOT`、`AGENTSTACK_PROJECT_WORK_DIR` として渡します。同じ repository の linked worktree は repository identity を共有しますが、作業場所は別に保ちます。non-Git directory でも選んだ namespace は変えません。
+
+引き継いだ `GIT_DIR`、`GIT_WORK_TREE`、`GIT_COMMON_DIR` は起動先の判定に使わず、起動するプロセスから取り除きます。Git の metadata が壊れている場合は、別の directory や namespace に切り替えず登録前に停止します。既存 tmux server の global environment は変更せず、新しい session に渡す値で古い workspace context を置き換えます。上の3つの Git 変数は、その新規 session だけで削除指定し、後から作る window にも再継承されないようにします。`AGENTSTACK_VAULT`、Codex の sandbox/approval、OAuth の扱いは変わりません。
+
+追加 root が意図的な shared vault か、古い shell から残った値かは区別できません。そのため、workspace provenance は毎回起動先から取り直す一方、追加の保護範囲は自動では縮めません。これは stale root をすべて捨てる方式とは異なります。不要な追加 root は設定側で整理し、古い環境を読み込んだ shell は開き直してください。起動先の保護は追加 root の設定にかかわらず必須です。
 
 ## tmux session
 

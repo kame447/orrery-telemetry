@@ -118,6 +118,8 @@ export AGENTSTACK_DELIVERABLE_ROOTS="$HOME/project-a/logs:$HOME/shared logs"
 | `AGENTSTACK_CLAUDE_SETTINGS` | `~/.claude/settings.json` | merge 対象 settings |
 | `AGENTSTACK_CLAUDE_MD_SCOPE` | `project` | `agentstack-claude-setup` が managed block を書く先。`project / global / both` |
 
+top-level launcher は実際の起動先を必ず reservation 保護 root に含め、明示設定された追加 root（shared vault 等）も保持します。旧設定の path 形式 project key による fallback 保護も残します。[launcher の説明](launchers.md#top-level-の-project-選択)を参照してください。installer の設定優先順位は変更しません。
+
 健康な ORRERY Mail listener が既にある場合、installer は server を更新・再起動せず、稼働中の immutable render に記録された deployment metadata を採用します。metadata 導入前の managed render は、render ID と candidate directory の決定論的対応が一意な場合だけ採用します。生成する `env.sh` の `AGENTSTACK_MAIL_ENV` と `AGENTSTACK_MAIL_ENROLL_BIN` は同じ deployment を指します。既知の legacy render に enrollment CLI が無い場合は Mail と既設 autostart を維持し、enrollment だけ unavailable として保存します。
 
 DB が一致する健康な listener でも service env を特定できない場合、明示 pin が無い通常の再 install は listener をそのまま再利用します。この degraded 状態では deployment / enrollment の path を空にし、enrollment profile と Mail autostart を更新しません。既設 trigger は削除・停止せず残しますが、installer は次回 login での再起動を保証しません。明示した `AGENTSTACK_MAIL_SERVICE_VENV` / `AGENTSTACK_MAIL_SERVICE_ENV` を稼働 deployment と照合できない場合、既知 metadata が不正な場合、または metadata が約束した enrollment CLI が無い場合は、listener を切り替えず明示エラーで停止します。
@@ -150,6 +152,7 @@ installer は `AGENTSTACK_MAIL_DB`、`AGENTSTACK_MAIL_ENV`、`AGENTSTACK_SIGNALS
 | 環境変数 | 既定値 | 意味 |
 | --- | --- | --- |
 | `AGENTSTACK_BASE_DIR` | `$HOME` | `fzf` picker root |
+| `AGENTSTACK_REQUIRE_EXPLICIT_PROJECT_KEY` | `0` | `1` で top-level launcher に `--project-key` を必須化。child / resume / Dashboard spawn には適用しない |
 | `AGENTSTACK_CLAUDE_BIN` | `claude` | Claude CLI |
 | `AGENTSTACK_CLAUDE_MODEL` | `claude-code` | Claude 登録 model label。子と dashboard から resume した session は、その session の model（`CLAUDE_CHILD_MODEL`）を優先します。子の tmux session に開いた新しい window はこの値を継ぐので、そこで別の agent を `AGENT_NAME=<name> claude --resume` で開くときは、先に `unset CLAUDE_CHILD_MODEL` してください（しないと子の model で登録されます） |
 | `AGENTSTACK_CODEX_BIN` | install 時に operator の shell で解決した、`--version` に答える `codex`（WSL では `/mnt/<drive>/` 配下の Windows 版を除く。`--codex-bin` で明示可） | Codex CLI。dashboard は launchd / systemd の最小 PATH で動くので、nvm / nodebrew / `~/.npm-global` の codex はこの値で届く |

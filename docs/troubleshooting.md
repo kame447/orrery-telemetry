@@ -339,7 +339,7 @@ AGENTSTACK_PROJECT_KEY=/absolute/project/path \
 を実行します。
 
 失敗時の stderr は、秘密を含まない定型診断です。たとえば
-`stage=ensure_project reason=transport-failed curl_exit=7` は通信前半、
+`stage=identity-check reason=transport-failed curl_exit=7` は通信前半、
 `stage=register_agent reason=http-rejected http_status=403` は HTTP 拒否、
 `stage=response-parse reason=invalid-response` は応答形式で止まったことを示します。
 `rpc-error` / `tool-error` はそれぞれ JSON-RPC / tool 層の失敗です。
@@ -534,3 +534,7 @@ manifest がない状態で推測削除は行いません。settings や mail da
 - [Codex App 統合](codex-app.md)
 - [Dashboard](dashboard.md)
 - [設定](configuration.md)
+
+### Existing-owner refresh capability
+
+reserved child/resume と `agentstack-reregister` には、`register_agent` の `existing_agent_id` と `refresh_existing=true` に対応する Mail schema が必要です。token なしの exact identity 確認後に失敗した場合、`required_capability=existing-owner-refresh` が付きます。これは必要な契約を示し、token 不一致や古い server と断定するものではありません。未対応 schema は拒否し、通常登録で再試行しません。helper と同時に実際の同梱 Mail service を更新するか、別途運用する Mail の管理者と対応を確認してください。source checkout や dashboard の API 世代だけでは、実行中 Mail の schema は確認できません。明示 opt-in は model/task/活動時刻の更新を維持し、省略時は従来の認証専用動作を維持します。

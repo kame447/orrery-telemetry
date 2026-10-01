@@ -574,8 +574,9 @@ def test_failure_before_codex_exec_discards_home_but_keeps_retired_credential(
     assert token_file.is_file()
 
 
+@pytest.mark.parametrize("mail_knows_agent", [True, False])
 def test_real_resume_command_can_cleanup_and_resume_again(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mail_knows_agent: bool
 ) -> None:
     """Exercise the actual shell registration/prepare/cleanup command chain."""
 
@@ -653,7 +654,9 @@ def test_real_resume_command_can_cleanup_and_resume_again(
             if name == "ensure_project":
                 result = {"id": 1, "human_key": str(project)}
             elif name == "register_agent":
-                if arguments.get("registration_token") != TOKEN or not remote["retired"]:
+                if (arguments.get("registration_token") != TOKEN or not remote["retired"]
+                        or arguments.get("existing_agent_id") != AGENT_ID
+                        or arguments.get("refresh_existing") is not True):
                     error = "credential registration rejected"
                     result = {}
                 else:
@@ -661,6 +664,7 @@ def test_real_resume_command_can_cleanup_and_resume_again(
                         "id": AGENT_ID,
                         "name": AGENT,
                         "program": "codex",
+                        "project_id": 1,
                         "registration_token": TOKEN,
                     }
             elif name == "unretire_agent":
@@ -683,7 +687,15 @@ def test_real_resume_command_can_cleanup_and_resume_again(
                     error = "fresh child binding missing"
                 else:
                     remote["retired"] = False
-                result = {"id": AGENT_ID, "name": AGENT}
+                result = {"id": AGENT_ID, "name": AGENT, "program": "codex", "project_id": 1}
+            elif name == "whois":
+                # A reserved identity must already exist in the target project
+                # before register_agent. Real Mail's whois also finds retired agents.
+                if mail_knows_agent:
+                    result = {"id": AGENT_ID, "name": AGENT, "program": "codex", "project_id": 1}
+                else:
+                    error = f"Agent '{AGENT}' not found in project '{project}'."
+                    result = {}
             elif name == "retire_agent":
                 if arguments.get("registration_token") != TOKEN:
                     error = "owner credential missing"
@@ -833,6 +845,14 @@ def test_real_resume_command_can_cleanup_and_resume_again(
     monkeypatch.setattr(server, "_open_terminal_tmux", run_terminal)
     try:
         first = server._do_resume_codex(AGENT)
+        if not mail_knows_agent:
+            assert first["ok"] is False, first
+            assert "could not be registered" in first["error"], first
+            methods = [name for name, _args in calls]
+            assert "whois" in methods
+            assert "register_agent" not in methods
+            assert "unretire_agent" not in methods
+            return
         assert first["ok"] is True, first
         assert remote["retired"] is True
         assert not (runtime / "child-agents" / f"{AGENT}.codex-home").exists()

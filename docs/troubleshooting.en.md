@@ -317,7 +317,7 @@ AGENTSTACK_PROJECT_KEY=/absolute/project/path \
 ```
 
 On failure, stderr contains a fixed, secret-free diagnostic. For example,
-`stage=ensure_project reason=transport-failed curl_exit=7` identifies the first
+`stage=identity-check reason=transport-failed curl_exit=7` identifies the first
 transport step; `stage=register_agent reason=http-rejected http_status=403`
 identifies an HTTP rejection; and `stage=response-parse reason=invalid-response`
 identifies an unexpected response shape. `rpc-error` and `tool-error` identify
@@ -515,3 +515,7 @@ Without a manifest, it does not guess what to delete, preventing accidental remo
 - [Codex App integration](codex-app.en.md)
 - [Dashboard](dashboard.en.md)
 - [Configuration](configuration.en.md)
+
+### Existing-owner refresh capability
+
+Reserved child/resume and `agentstack-reregister` require a Mail schema accepting both `existing_agent_id` and `refresh_existing=true` on `register_agent`. After tokenless exact-identity lookup, a failure includes `required_capability=existing-owner-refresh`; this identifies the required contract, not proof that the token is wrong or that the server is outdated. Unsupported schemas fail closed and are never retried through ordinary registration. Update the actual bundled Mail service together with the helpers, or coordinate the same capability with an independently managed Mail operator. A new checkout or dashboard API generation does not establish the running Mail schema. The opt-in refresh preserves model/task/activity updates; omitting it retains the existing authentication-only behavior.

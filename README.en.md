@@ -52,6 +52,8 @@ Before touching your Claude Code / Codex configuration the installer shows each 
 
 **Success**: the last line reads `Install complete: http://127.0.0.1:8770/` and `~/.agentstack/` exists.
 
+**Existing Mail installations:** reserved child/resume registration now requires Mail’s `register_agent(existing_agent_id, refresh_existing)` capability. Upgrade the bundled Mail service with the helpers; an older or separate Mail schema fails closed, with no silent enrollment fallback. A source checkout alone does not update a running service. See [Upgrade](docs/install.en.md#upgrade) and [registration diagnostics](docs/troubleshooting.en.md).
+
 ### 2. Check that it works
 
 ```bash
