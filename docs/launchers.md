@@ -29,7 +29,7 @@ agent-start
 
 ## top-level の project 選択
 
-3つの top-level launcher は登録前に、選ばれた project、その選択元、作業 directory、reservation の保護範囲を表示します。project の優先順位は `--project-key KEY`、起動 shell の `AGENTSTACK_PROJECT_KEY`、起動 shell の `PROJECT_KEY`、install 済み `env.sh`、起動先 directory の物理 path の順です。project key は coordination namespace であり、path 形式でも repository ownership の証明には使いません。repository を見て project を自動変更しません。`AGENTSTACK_PROTECTED_ROOTS` は設定済み root の順序を保ち、実際の worktree root（non-Git では作業 directory）を重複なく追加します。最初に一致する root からの相対 path を使う既存予約との互換性を保つためです。明示 root のない旧設定で path 形式の project key を保護していた場合も、その保護を残します。
+3つの top-level launcher は登録前に、選ばれた project、その選択元、作業 directory、reservation の保護範囲を表示します。project の優先順位は `--project-key KEY`、起動 shell の `AGENTSTACK_PROJECT_KEY`、起動 shell の `PROJECT_KEY`、install 済み `env.sh`、起動先 directory の物理 path の順です。project key は coordination namespace であり、path 形式でも repository ownership の証明には使いません。repository を見て project を自動変更しません。`AGENTSTACK_EXTRA_PROTECTED_ROOTS` は意図的に設定した追加 root だけを表します。各起動はその元の順序を保ち、実際の worktree root（non-Git では作業 directory）を重複なく追加して runtime の `AGENTSTACK_PROTECTED_ROOTS` を計算します。相対 reservation path は最初に一致する root から決まります。project key の path と旧計算済み root は追加 root の設定として扱いません。
 
 ```bash
 agent-start-codex --project-key "$HOME/shared-vault" ~/code/my-project
@@ -43,7 +43,7 @@ shell は選んだ key を namespace の値として扱います。同梱 Mail �
 
 引き継いだ `GIT_DIR`、`GIT_WORK_TREE`、`GIT_COMMON_DIR` は起動先の判定に使わず、起動するプロセスから取り除きます。Git の metadata が壊れている場合は、別の directory や namespace に切り替えず登録前に停止します。既存 tmux server の global environment は変更せず、新しい session に渡す値で古い workspace context を置き換えます。上の3つの Git 変数は、その新規 session だけで削除指定し、後から作る window にも再継承されないようにします。`AGENTSTACK_VAULT`、Codex の sandbox/approval、OAuth の扱いは変わりません。
 
-追加 root が意図的な shared vault か、古い shell から残った値かは区別できません。そのため、workspace provenance は毎回起動先から取り直す一方、追加の保護範囲は自動では縮めません。これは stale root をすべて捨てる方式とは異なります。不要な追加 root は設定側で整理し、古い環境を読み込んだ shell は開き直してください。起動先の保護は追加 root の設定にかかわらず必須です。
+旧 root が意図的な shared vault か、古い workspace 値かは区別できません。新しい managed 起動は警告を出し、旧 `AGENTSTACK_PROTECTED_ROOTS` を設定としては無視します。意図的な追加 root だけを `AGENTSTACK_EXTRA_PROTECTED_ROOTS` に移してください（空を含む live の明示値が installed `env.sh` より優先）。旧 root を除くと相対名が変わりうるため、移行前に作業を終えるか active reservation を解放し、影響する session をまとめて再起動してください。既存 session の環境は restart まで残ります。[移行の詳細](configuration.md#reservation-の保護範囲と移行)を参照してください。
 
 ## tmux session
 
@@ -256,7 +256,7 @@ ORRERY Telemetry の委譲は、必ず先頭の slash を付けて `/delegate ..
 
 Codex child の MCP は既定で `inherit`（従来互換）です。`/delegate --codex-mcp orrery-only` は認証済み ORRERY Mail と session-binding plugin を残して、他の継承 MCP/plugin を無効化します。plugin skill や外部 app tool が必要な task では使いません。
 
-Claude の世代名は `spawn_child.sh`、Codex のモデル・effort規則は `dashboard/codex_models.py` が正本です。Claude は無指定 / `opus` が `claude-opus-5-5`、`sonnet` が `claude-sonnet-5`、Codex は無指定と `sol` のどちらも起動対象 CLI が 0.159.0 以上なら `gpt-6.1-sol`、古い版なら `gpt-6-sol` です。版不明なら新鮮な catalog で判定します。GPT-6.1 Sol には Codex CLI 0.159.0 以上が必要で、doctor が fallback と更新方法を note に出します。旧世代を固定する場合は `gpt-6-sol` のように正式 ID を指定します。`claude-opus-5` / `opus-5` は旧世代を明示指定する互換形として有効です。`luna` は `gpt-6-luna`、`terra` は `gpt-5.6-terra`、`astra` は `gpt-6-astra` のaliasです。旧世代の正式 ID は互換性のため有効なままですが、warm pool を claim するのは catalog が示す current 200K Opus / Sonnet と完全一致するときだけです。Opus 5.5 には Claude Code 2.1.280 以上が必要です。
+Claude の世代名は `spawn_child.sh`、Codex のモデル・effort規則は `dashboard/codex_models.py` が正本です。Claude は無指定 / `opus` が `claude-opus-5-5`、`sonnet` が `claude-sonnet-5`、Codex は無指定と `sol` のどちらも起動対象 CLI が 0.159.0 以上なら `gpt-6.1-sol`、古い版なら `gpt-6-sol` です。版不明なら新鮮な catalog で判定します。GPT-6.1 Sol には Codex CLI 0.159.0 以上が必要で、doctor が fallback と更新方法を note に出します。旧世代を固定する場合は `gpt-6-sol` のように正式 ID を指定します。`claude-opus-5` / `opus-5` は旧世代を明示指定する互換形として有効です。`luna` は `gpt-6-luna`、`terra` は `gpt-5.6-terra`、`astra` は `gpt-6-astra` のaliasです。旧世代の正式 ID は互換性のため有効なままです。事前登録した Claude child は毎回 cold start します。起動済み warm-pool process には新しく選んだ workspace と reservation root を反映できないためです。warm pool の再利用ではなく通常の CLI 初期化を含むため、一定の起動時間は保証しません。Opus 5.5 には Claude Code 2.1.280 以上が必要です。
 
 1. 対象 resource、排他性、失敗点、可逆性から risk と監視頻度を決める
 2. `agentstack-preregister-child` で child-owned token と canonical name を作る

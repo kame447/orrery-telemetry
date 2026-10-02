@@ -4,9 +4,17 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${AGENTSTACK_ENV_FILE:-$HERE/../env.sh}"
+# Unlike computed per-session roots, explicit extras are service configuration.
+# Preserve an explicit live value, including empty, when loading saved settings.
+EXTRA_PROTECTED_ROOTS_GIVEN="${AGENTSTACK_EXTRA_PROTECTED_ROOTS+x}"
+EXTRA_PROTECTED_ROOTS_LIVE="${AGENTSTACK_EXTRA_PROTECTED_ROOTS-}"
 if [[ -f "$ENV_FILE" ]]; then
   # shellcheck disable=SC1090
   . "$ENV_FILE"
+fi
+
+if [[ -n "$EXTRA_PROTECTED_ROOTS_GIVEN" ]]; then
+  export AGENTSTACK_EXTRA_PROTECTED_ROOTS="$EXTRA_PROTECTED_ROOTS_LIVE"
 fi
 
 LABEL_PREFIX="${AGENTSTACK_LABEL_PREFIX:-org.agentstack}"
@@ -24,7 +32,15 @@ MAIL_HTTP_BEARER_MODE="${AGENTSTACK_MAIL_HTTP_BEARER_MODE:-auto}"
 SIGNALS_DIR="${AGENTSTACK_SIGNALS_DIR:-$MAIL_HOME/signals}"
 MCP_URL="${AGENTSTACK_MCP_URL:-http://127.0.0.1:18765/mcp}"
 PROJECT_KEY="${AGENTSTACK_PROJECT_KEY:-}"
-PROTECTED_ROOTS="${AGENTSTACK_PROTECTED_ROOTS:-$PROJECT_KEY}"
+EXTRA_PROTECTED_ROOTS="${AGENTSTACK_EXTRA_PROTECTED_ROOTS-}"
+PROTECTION_CONFIG_NAME=AGENTSTACK_EXTRA_PROTECTED_ROOTS
+PROTECTION_CONFIG_VALUE="$EXTRA_PROTECTED_ROOTS"
+if [[ "${AGENTSTACK_EXTRA_PROTECTED_ROOTS+x}" != x && -n "${AGENTSTACK_PROTECTED_ROOTS:-}" ]]; then
+  # Keep unmigrated configuration for legacy hooks. Managed launches ignore it
+  # and still warn, because no explicit EXTRA setting has been synthesized.
+  PROTECTION_CONFIG_NAME=AGENTSTACK_PROTECTED_ROOTS
+  PROTECTION_CONFIG_VALUE="$AGENTSTACK_PROTECTED_ROOTS"
+fi
 DELIVERABLE_ROOTS="${AGENTSTACK_DELIVERABLE_ROOTS:-}"
 LANG_SETTING="${AGENTSTACK_LANG:-}"
 MURMUR_SETTING="${AGENTSTACK_MURMUR:-}"
@@ -80,7 +96,8 @@ render_plist() {
     -e "s|__TERMINAL__|$(sed_escape "$TERMINAL")|g" \
     -e "s|__AUTO_OPEN_CHILD__|$(sed_escape "$AUTO_OPEN_CHILD_SETTING")|g" \
     -e "s|__PROJECT_KEY__|$(sed_escape "$PROJECT_KEY")|g" \
-    -e "s|__PROTECTED_ROOTS__|$(sed_escape "$PROTECTED_ROOTS")|g" \
+    -e "s|AGENTSTACK_EXTRA_PROTECTED_ROOTS|$PROTECTION_CONFIG_NAME|g" \
+    -e "s|__EXTRA_PROTECTED_ROOTS__|$(xml_sed_escape "$PROTECTION_CONFIG_VALUE")|g" \
     -e "s|__DELIVERABLE_ROOTS__|$(sed_escape "$DELIVERABLE_ROOTS")|g" \
     -e "s|__LANG__|$(sed_escape "$LANG_SETTING")|g" \
     -e "s|__MURMUR__|$(sed_escape "$MURMUR_SETTING")|g" \
@@ -137,7 +154,9 @@ export_background_env() {
   export AGENTSTACK_TERMINAL="$TERMINAL"
   export AGENTSTACK_AUTO_OPEN_CHILD="$AUTO_OPEN_CHILD_SETTING"
   export AGENTSTACK_PROJECT_KEY="$PROJECT_KEY"
-  export AGENTSTACK_PROTECTED_ROOTS="$PROTECTED_ROOTS"
+  # The dashboard is not an AI workspace; child/resume launches derive theirs.
+  unset AGENTSTACK_PROTECTED_ROOTS AGENTSTACK_EXTRA_PROTECTED_ROOTS
+  export "$PROTECTION_CONFIG_NAME=$PROTECTION_CONFIG_VALUE"
   export AGENTSTACK_DELIVERABLE_ROOTS="$DELIVERABLE_ROOTS"
   export AGENTSTACK_LANG="$LANG_SETTING"
   export AGENTSTACK_MURMUR="$MURMUR_SETTING"

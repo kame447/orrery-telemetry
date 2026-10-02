@@ -139,6 +139,18 @@ except Exception:
         FILE_PATH="$(pwd)/$FILE_PATH"
     fi
 
+    # New managed launches export physical roots. Resolve file aliases/.. into
+    # that same coordinate system (also for a not-yet-created Write target),
+    # while retaining the legacy lexical contract for already-running sessions.
+    if [[ "${AGENTSTACK_PROTECTION_CONTEXT:-}" == workspace-v1 ]]; then
+        FILE_PATH="$(python3 - "$FILE_PATH" <<'PYFILE'
+import os
+import sys
+print(os.path.realpath(sys.argv[1]))
+PYFILE
+)" || return 1
+    fi
+
     MATCHED_ROOT=""
     if [[ -n "$PROTECTED_ROOTS" ]]; then
         local old_ifs="$IFS"
@@ -149,7 +161,7 @@ except Exception:
             [[ -z "$root" ]] && continue
             [[ "$root" != "/" ]] && root="${root%/}"
             case "$FILE_PATH" in
-                "$root"|"$root/"*)
+                "$root"|"${root%/}/"*)
                     MATCHED_ROOT="$root"
                     break
                     ;;
@@ -159,7 +171,7 @@ except Exception:
     fi
     [ -n "$MATCHED_ROOT" ] || return 1
 
-    REL_PATH="${FILE_PATH#$MATCHED_ROOT/}"
+    REL_PATH="${FILE_PATH#"${MATCHED_ROOT%/}/"}"
     if [[ "$REL_PATH" == "$FILE_PATH" ]]; then
         REL_PATH="$(basename "$FILE_PATH")"
     fi

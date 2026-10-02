@@ -29,7 +29,7 @@ These six terms are all you need to read this README and the guides.
 | child | Another agent that an agent started by asking it to do a job. The one that asked is the parent. A parent creates a child with `/delegate`; when the child is done it reports back to the parent and goes away. |
 | ORRERY Mail | The small bundled server through which agents message each other and that manages names and file reservations. |
 | dashboard | The page you open in a browser. It shows every agent's state, the parent-child tree, and the messages going back and forth. |
-| project key | The absolute path of the project folder the agents work on. It is the key that tells which project an agent belongs to. |
+| project key | The coordination namespace shared by agents. Usually an absolute project path, it may also coordinate agents working in different repositories. |
 | skill | A playbook that tells an agent "when asked like this, follow these steps". You call one with a leading slash, as in `/delegate`. This tool ships two: `/delegate` and `/log` ([explained below](#the-two-bundled-skills)). |
 
 ## Quick start
@@ -46,7 +46,7 @@ cd orrery-telemetry
 ./scripts/install.sh --project-key /absolute/path/to/your-project
 ```
 
-`--project-key` is the absolute path of the project folder you want the agents to work on, not the path of this repository.
+`--project-key` selects the shared coordination namespace; use the absolute path of your project for a typical first install. Each AI launch independently protects its actual workspace. Add only deliberately shared roots with `AGENTSTACK_EXTRA_PROTECTED_ROOTS`; a path-shaped project key does not add that path to protection. Existing installs should follow the [protection migration](docs/configuration.en.md#reservation-protection-and-migration).
 
 Before touching your Claude Code / Codex configuration the installer shows each change and asks for `yes` four times in total. Existing settings are kept, and a backup of the previous state goes to `~/.agentstack/backups`. Add `--dry-run` to see the planned changes without applying them.
 

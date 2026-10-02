@@ -79,6 +79,12 @@ def _run_child(tmp_path, shell, script, task_file):
         "AGENTSTACK_CODEX_ADD_DIRS_RESOLVED": "",
         "AGENTSTACK_HOOKS_DIR": str(tmp_path / "hooks"),
         "AGENTSTACK_CODEX_PROMPT_FILE": str(task_file),
+        # Model the explicit per-session values provided by both real launch
+        # paths, rather than inheriting a global tmux server context.
+        "AGENTSTACK_LAUNCH_WORK_DIR": str(workdir),
+        "AGENTSTACK_LAUNCH_PROJECT_KEY": "fixture-mail",
+        "AGENTSTACK_LAUNCH_EXTRA_PROTECTED_ROOTS": "",
+        "AGENTSTACK_LAUNCH_CONTEXT_HELPER": str(ROOT / "hooks" / "project-context.sh"),
     }
     result = subprocess.run([shell, "-c", script], cwd=workdir, env=env,
                             capture_output=True, text=True, timeout=20)

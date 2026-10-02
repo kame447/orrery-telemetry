@@ -146,8 +146,13 @@ to generate it. Never use this route to work around an identity conflict.
 
 Claude agents are hard-blocked by a PreToolUse hook from editing shared files
 without a reservation. **Codex has no such hook, so enforcement is on you.**
-Before you Edit/Write any file under the project, use the same connection route
+Before you Edit/Write any file under the actual workspace or an explicit shared root, use the same connection route
 selected above to take a reservation so another agent does not clobber it:
+
+Managed launches compute `AGENTSTACK_PROTECTED_ROOTS` from deliberate
+`AGENTSTACK_EXTRA_PROTECTED_ROOTS` (in their configured order), followed by the
+actual worktree root or non-Git working directory. Do not carry a previous
+workspace or a path-shaped project key into that root list.
 
 - Bound proxy: follow its actual schema and use `reserve_files`. Do not add
   caller identity, project, or token fields that the schema does not accept.
@@ -155,7 +160,9 @@ selected above to take a reservation so another agent does not clobber it:
 - Raw/direct MCP: acquire with `macro_file_reservation_cycle` (or
   `file_reservation_paths`), passing
   `project_key="__AGENTSTACK_PROJECT_KEY__"`, your agent name, and the paths
-  (project-relative). Renew with `renew_file_reservations` and release with
+  (relative to the first matching root in `AGENTSTACK_PROTECTED_ROOTS`).
+  The namespace may name a different path; do not derive reservation paths from it.
+  Renew with `renew_file_reservations` and release with
   `release_file_reservations`.
 - On either route, **`ttl_seconds` must be at least 600**: composing the edit
   takes tens of seconds and a shorter reservation expires before you write.

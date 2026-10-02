@@ -2382,6 +2382,37 @@ def _open_terminal_tmux(tmux_args: list[str], title: str) -> dict:
         return {"ok": False, "error": f"{adapter} launch failed: {e}"}
 
 
+def _validate_resume_workspace(cwd: str, project_key: str, hooks_dir: str) -> None:
+    """Reject invalid targets/settings before Mail state or a retained home changes."""
+    environment = dict(os.environ)
+    environment["AGENTSTACK_HOME"] = os.environ.get("AGENTSTACK_HOME") or os.path.dirname(HERE)
+    try:
+        result = subprocess.run(
+            ["/bin/bash", os.path.join(hooks_dir, "project-context.sh"),
+             "workspace-context-exports", cwd, project_key],
+            env=environment, capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise _ResumeCapabilityError("config_unrestorable", "Resume workspace could not be validated") from exc
+    if result.returncode:
+        raise _ResumeCapabilityError("config_unrestorable", "Resume workspace or extra protected roots are invalid")
+
+
+def _resume_workspace_prelude(cwd: str, project_key: str, hooks_dir: str, *, failure: str = "exit $?") -> str:
+    """Recompute after login; never adopt a tmux server's runtime roots/extras."""
+    command = ["env", "-u", "AGENTSTACK_EXTRA_PROTECTED_ROOTS",
+               "AGENTSTACK_HOME=" + (os.environ.get("AGENTSTACK_HOME") or os.path.dirname(HERE))]
+    # Absence means read the explicit installed setting. Empty means deliberately
+    # no extras. In both cases, another tmux session's configuration is ignored.
+    if "AGENTSTACK_EXTRA_PROTECTED_ROOTS" in os.environ:
+        command.append("AGENTSTACK_EXTRA_PROTECTED_ROOTS=" + os.environ["AGENTSTACK_EXTRA_PROTECTED_ROOTS"])
+    command.extend(["/bin/bash", os.path.join(hooks_dir, "project-context.sh"),
+                    "workspace-context-exports", cwd, project_key])
+    return (f'_ags_workspace_context=$({shlex.join(command)}) || {failure}; '
+            'eval "$_ags_workspace_context"; unset _ags_workspace_context; '
+            f'cd "$AGENTSTACK_PROJECT_WORK_DIR" || {failure}; ')
+
+
 def _resume_opens_terminal(open_terminal: bool | None = None) -> bool:
     return open_terminal if open_terminal is not None else _env_text("AGENTSTACK_AUTO_OPEN_CHILD", "1") != "0"
 
@@ -3109,6 +3140,7 @@ def do_resume(session: str, *, open_terminal: bool | None = None, replace_husk: 
     resume_started = False
     try:
         registration, token, child_state = _claude_resume_material(session)
+        _validate_resume_workspace(cwd, registration["project_key"], HOOKS_DIR)
         legacy = child_state is not None and "_legacy_sha256" in child_state
         if child_state is not None:
             module = _child_resume_module()
@@ -3176,6 +3208,7 @@ def do_resume(session: str, *, open_terminal: bool | None = None, replace_husk: 
     resume_environment["CLAUDE_CHILD_MODEL"] = registration.get("model") or "claude-code"
     inner = ('unset CHILD_REGISTRATION_TOKEN PARENT_AGENT CLAUDE_CHILD_MCP_CONFIG AGENTSTACK_CLAUDE_LAUNCH_ID; '
              + "".join(f"export {key}={shlex.quote(value)}; " for key, value in resume_environment.items()) + inner)
+    inner = _resume_workspace_prelude(cwd, registration["project_key"], HOOKS_DIR) + inner
     cleanup = os.path.join(HOOKS_DIR, "cleanup-child-agent.sh")
     exit_warning = None
     if child_state is not None:
@@ -3721,6 +3754,7 @@ def _launch_claude_conversation(session: str, sid: str, cwd: str, reason: str, *
             registration, current = _claude_conversation_reason(session)
             if current != reason:
                 raise _ResumeCapabilityError("identity_mismatch", "Claude resume prerequisites changed")
+            _validate_resume_workspace(cwd, registration["project_key"], HOOKS_DIR)
             fields = _conversation_mail_fields(reason)
             environment = {
                 "AGENT_NAME": session, "CLAUDECODE": "1", "AGENTSTACK_RESERVED_IDENTITY": "1",
@@ -3738,6 +3772,7 @@ def _launch_claude_conversation(session: str, sid: str, cwd: str, reason: str, *
                      'export PATH="$HOME/.local/bin:$PATH"; ' +
                      ''.join(f"export {key}={shlex.quote(value)}; " for key, value in environment.items()) +
                      "printf '%s\n' " + shlex.quote(notice) + "; exec " + shlex.join(command))
+            inner = _resume_workspace_prelude(cwd, registration["project_key"], HOOKS_DIR) + inner
             launch = _launch_claude_resume_tmux(
                 ["tmux", "new-session", "-A", "-s", session, "-c", cwd,
                  *[arg for key, value in environment.items() for arg in ("-e", f"{key}={value}")],
@@ -4372,7 +4407,9 @@ def _do_resume_codex(session: str, *, open_terminal: bool | None = None) -> dict
     launch_origin = provenance.get("launch_origin") if provenance else None
     child_home = ""
     child_profile = ""
+    install_home = os.environ.get("AGENTSTACK_HOME") or os.path.dirname(HERE)
     try:
+        _validate_resume_workspace(cwd, registration["project_key"], os.path.join(install_home, "hooks"))
         if launch_origin == "child":
             child_home, child_profile = _codex_resume_child_home(
                 session, registration
@@ -4398,7 +4435,12 @@ def _do_resume_codex(session: str, *, open_terminal: bool | None = None) -> dict
     # The product bootstrap clears inherited launch pairs, re-registers the
     # reserved identity and persists a fresh launch generation.  `&&` is the
     # safety boundary: a bootstrap/prepare failure must not reach Codex exec.
-    src = f'source {shlex.quote(bootstrap)} {shlex.quote(cwd)}'
+    workspace_setup = _resume_workspace_prelude(
+        cwd, registration["project_key"], os.path.join(install_home, "hooks"), failure="return $?")
+    # Keep workspace failure inside the same conditional as bootstrap failure,
+    # so a rebuilt child home is discarded and its retained identity stays safe.
+    src = (f'agentstack_resume_workspace() {{ {workspace_setup} }}; '
+           f'agentstack_resume_workspace && source {shlex.quote(bootstrap)} {shlex.quote(cwd)}')
     launch_prefix = (
         'export PATH="$HOME/.local/bin:$PATH"; '
         f'export AGENT_NAME={shlex.quote(session)}; '

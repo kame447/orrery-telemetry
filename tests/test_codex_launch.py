@@ -506,8 +506,10 @@ def test_both_launch_paths_use_the_shared_model_catalog():
     assert text.count('validate_codex_effort "$CHILD_MODEL" "$CODEX_EFFORT"') == 2
     assert text.count('normalize_claude_model "$CLAUDE_MODEL"') == 2
     assert '${CLAUDE_MODEL:-gpt-5.5}' not in text
-    assert '"$CLAUDE_WARM_OPUS_MODEL")' in text
-    assert '"$CLAUDE_WARM_SONNET_MODEL")' in text
+    # Already-running warm providers cannot adopt the new child's workspace
+    # context, so all children now use the normalized cold-start model.
+    assert 'WARM_CLAIMED=false' in text
+    assert '"$WARM_POOL" claim' not in text
 
 
 def test_launcher_no_longer_hardcodes_full_auto():

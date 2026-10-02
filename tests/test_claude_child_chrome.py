@@ -32,13 +32,16 @@ REMINDER = ROOT / "hooks" / "session-start-reminder.sh"
 
 # The Claude child's inner launch script before --claude-chrome existed
 # (hooks/spawn_child.sh at 0a43a3c, both launch sites).
-PRE_CHROME_INNER = (
+LEGACY_PROVIDER_INNER = (
     'export PATH="$HOME/.local/bin:$PATH"; MCP_ARGS=(); '
     '[[ -n "$CLAUDE_CHILD_MCP_CONFIG" ]] && MCP_ARGS=(--mcp-config '
     '"$CLAUDE_CHILD_MCP_CONFIG" --strict-mcp-config); '
     'claude --model "$CLAUDE_CHILD_MODEL" "${MCP_ARGS[@]}"; '
     '/bin/bash "$AGENTSTACK_HOOKS_DIR/cleanup-child-agent.sh"'
 )
+# Dynamic protection is resolved before the unchanged provider command.
+WORKSPACE_PRELUDE = 'cd "$AGENTSTACK_LAUNCH_WORK_DIR" || exit $?; _ags_workspace_context="$(AGENTSTACK_EXTRA_PROTECTED_ROOTS="$AGENTSTACK_LAUNCH_EXTRA_PROTECTED_ROOTS" /bin/bash "$AGENTSTACK_LAUNCH_CONTEXT_HELPER" workspace-context-exports "$PWD" "$AGENTSTACK_LAUNCH_PROJECT_KEY")" || exit $?; eval "$_ags_workspace_context"; unset _ags_workspace_context AGENTSTACK_LAUNCH_WORK_DIR AGENTSTACK_LAUNCH_PROJECT_KEY AGENTSTACK_LAUNCH_EXTRA_PROTECTED_ROOTS AGENTSTACK_LAUNCH_CONTEXT_HELPER; '
+PRE_CHROME_INNER = WORKSPACE_PRELUDE + LEGACY_PROVIDER_INNER
 CHROME_INNER = PRE_CHROME_INNER.replace(
     '"${MCP_ARGS[@]}";', '"${MCP_ARGS[@]}" --chrome;'
 )
@@ -161,7 +164,7 @@ def _builder_output(chrome: bool) -> str:
     ).stdout
 
 
-def test_builder_is_byte_identical_to_the_pre_chrome_command_when_not_requested():
+def test_builder_preserves_provider_command_after_workspace_setup():
     # Covers the legacy launch site too: both sites call this one builder.
     assert _builder_output(False) == f"/bin/bash -lc '{PRE_CHROME_INNER}'"
 
@@ -207,6 +210,15 @@ def test_default_spawn_matches_the_pre_chrome_launcher_exactly(tmp_path):
                 assert launch[index] == "-e"
                 del launch[index:index + 2]
             launch[-1] = launch[-1].replace(ARGV_PROMPT, "")
+            launch[-1] = launch[-1].replace(WORKSPACE_PRELUDE, "")
+            workspace_fields = ("AGENTSTACK_PROJECT_REPOSITORY=", "AGENTSTACK_PROJECT_WORK_DIR=",
+                                "AGENTSTACK_PROJECT_WORKTREE_ROOT=", "AGENTSTACK_PROTECTED_ROOTS=",
+                                "AGENTSTACK_EXTRA_PROTECTED_ROOTS=", "AGENTSTACK_PROTECTION_CONTEXT=",
+                                "AGENTSTACK_PROJECT_CONTEXT=", "AGENTSTACK_LOOKUP_PROJECT_KEY=",
+                                "AGENTSTACK_LAUNCH_")
+            for index in range(len(launch) - 2, 0, -1):
+                if launch[index].startswith(workspace_fields) and launch[index - 1] == "-e":
+                    del launch[index - 1:index + 1]
             prompts[label] = log.split("ARGV_TASK\034600\034", 1)[1].split("CALL", 1)[0]
             assert "\034load-buffer\034" not in log and "\034paste-buffer\034" not in log
         launches[label] = launch
@@ -214,16 +226,17 @@ def test_default_spawn_matches_the_pre_chrome_launcher_exactly(tmp_path):
     # exactly the prompt it got before; only how the prompt travels changed.
     assert launches["new"] == launches["old"]
     assert prompts["new"] == prompts["old"] and "SameChild" in prompts["new"]
-    assert launches["new"][-1].endswith(f"-lc '{PRE_CHROME_INNER}'")
+    assert launches["new"][-1].endswith(f"-lc '{LEGACY_PROVIDER_INNER}'")
 
 
 @pytest.mark.parametrize("warm_model", ["opus", "sonnet"])
-def test_default_spawn_still_claims_a_ready_warm_session(tmp_path, warm_model):
+def test_default_spawn_cold_starts_to_apply_workspace_context(tmp_path, warm_model):
     env, workdir = _launch_env(tmp_path)
     env["AGENTSTACK_HOOKS_DIR"] = str(_hooks_with_warm_pool(tmp_path))
     result = _spawn(tmp_path, env, workdir, "WarmChild", "--model", warm_model)
     assert result.returncode == 0, result.stderr
-    assert (tmp_path / "warm.log").read_text() == "claim WarmChild\n"
+    assert not (tmp_path / "warm.log").exists()
+    assert "workspace-context-exports" in _new_session(env)[-1]
 
 
 def test_chrome_request_skips_a_ready_warm_session_and_adds_chrome(tmp_path):
@@ -289,7 +302,7 @@ def test_codex_child_process_does_not_inherit_the_chrome_env(tmp_path):
     tmux_env = dict(
         session[i + 1].split("=", 1)
         for i, arg in enumerate(session[:-1])
-        if arg == "-e" and session[i + 1].startswith("AGENTSTACK_CODEX_PROMPT_FILE=")
+        if arg == "-e" and session[i + 1].startswith(("AGENTSTACK_CODEX_PROMPT_FILE=", "AGENTSTACK_LAUNCH_"))
     )
     assert tmux_env, session
 

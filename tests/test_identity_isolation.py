@@ -309,6 +309,8 @@ def test_reserved_bootstrap_refuses_to_resume_without_prepare_helper(tmp_path):
         encoding="utf-8",
     )
     missing_hooks = tmp_path / "missing-hooks"
+    missing_hooks.mkdir()
+    (missing_hooks / "project-context.sh").write_text(_read("hooks/project-context.sh"), encoding="utf-8")
     script = (
         f'source "{bootstrap}" . >/dev/null 2>"{tmp_path / "stderr"}"; '
         "printf '%s\n' $?"
@@ -383,7 +385,7 @@ def _bootstrap_resume_fixture(
     hooks.mkdir()
     bootstrap = bindir / "agentstack-codex-bootstrap"
     bootstrap.write_text(_read("bin/agentstack-codex-bootstrap"), encoding="utf-8")
-    for helper in ("prepare-codex-session-binding.py", "child_resume.py"):
+    for helper in ("prepare-codex-session-binding.py", "child_resume.py", "project-context.sh"):
         shutil.copy2(
             pathlib.Path(__file__).resolve().parents[1] / "hooks" / helper, hooks
         )

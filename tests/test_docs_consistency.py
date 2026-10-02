@@ -107,3 +107,20 @@ def test_api_docs_state_the_served_api_generation_and_when_it_changes() -> None:
         doc = _read(rel)
         assert f'"api":{served.group(1)}}}' in doc, f"{rel} shows another api generation"
         assert rule in doc and "CHANGELOG" in doc, f"{rel} does not say when api goes up"
+
+
+def test_protection_configuration_and_migration_are_documented_in_both_languages() -> None:
+    example = _read(".env.example")
+    assert "AGENTSTACK_EXTRA_PROTECTED_ROOTS=/path/to/shared-vault" in example
+    assert "AGENTSTACK_PROTECTED_ROOTS=" not in example
+    for rel in ("README.md", "README.en.md", "docs/configuration.md", "docs/configuration.en.md",
+                "docs/install.md", "docs/install.en.md", "docs/hooks.md", "docs/hooks.en.md",
+                "docs/launchers.md", "docs/launchers.en.md", "docs/persistent-agents.md",
+                "docs/persistent-agents.en.md", "claude/CLAUDE.md", "codex/AGENTS.md"):
+        assert "AGENTSTACK_EXTRA_PROTECTED_ROOTS" in _read(rel), rel
+    for rel in ("docs/configuration.md", "docs/configuration.en.md"):
+        doc = _read(rel)
+        assert "AGENTSTACK_EXTRA_PROTECTED_ROOTS=" in doc, rel
+        assert "AGENTSTACK_PROTECTED_ROOTS" in doc, rel
+    assert '"AGENTSTACK_EXTRA_PROTECTED_ROOTS": os.environ["AGENTSTACK_INSTALL_EXTRA_PROTECTED_ROOTS"]' in INSTALLER
+    assert 'agentstack_warn_legacy_protected_roots "$INSTALL_DIR/env.sh"' in INSTALLER

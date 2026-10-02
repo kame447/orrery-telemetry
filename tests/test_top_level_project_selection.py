@@ -138,7 +138,7 @@ ags_register_session() {
 
         (self.install / "env.sh").write_text(
             "export AGENTSTACK_PROJECT_KEY=installed-project\n"
-            f"export AGENTSTACK_PROTECTED_ROOTS={shlex.quote(str(self.protected))}\n",
+            f"export AGENTSTACK_EXTRA_PROTECTED_ROOTS={shlex.quote(str(self.protected))}\n",
             encoding="utf-8",
         )
 

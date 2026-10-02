@@ -122,7 +122,7 @@ def _previous_install(
     project.mkdir()
     chosen = {
         "PROJECT_KEY": str(project),
-        "PROTECTED_ROOTS": str(project),
+        "EXTRA_PROTECTED_ROOTS": str(tmp_path / "shared-vault"),
         "PORT": "19876",
         "LABEL_PREFIX": "org.agentstack.test.inherit",
         "MAIL_LAUNCHD_LABEL_SETTING": "org.agentstack.test.inherit.mail-service",
@@ -510,6 +510,7 @@ def test_p2_3_the_launchd_plist_escapes_every_value(tmp_path):
         "LABEL": "org.agentstack.test.plist.agentdashboard",
         "LABEL_PREFIX": "org.agentstack.test.plist", "VAULT_SETTING": awkward,
         "PROJECT_KEY": awkward, "CODEX_CHILD_CONFIG_OVERLAY_SETTING": awkward,
+        "EXTRA_PROTECTED_ROOTS": awkward,
     }
     script = (
         "plan() { :; }\n"
@@ -530,6 +531,7 @@ def test_p2_3_the_launchd_plist_escapes_every_value(tmp_path):
     with plist.open("rb") as handle:
         document = plistlib.load(handle)
     variables = document["EnvironmentVariables"]
+    assert variables["AGENTSTACK_EXTRA_PROTECTED_ROOTS"] == awkward
     assert variables["AGENTSTACK_VAULT"] == awkward
     assert variables["AGENTSTACK_PROJECT_KEY"] == awkward
     assert variables["AGENTSTACK_CODEX_CHILD_CONFIG_OVERLAY"] == awkward
@@ -675,6 +677,191 @@ def test_every_inherited_setting_is_one_the_installer_records():
     start = installer.index("write_env_file() {")
     written = set(re.findall(r'"(AGENTSTACK_[A-Z0-9_]+)":', installer[start:installer.index("\nPY\n}\n", start)]))
     assert names and set(names) <= written, sorted(set(names) - written)
+
+
+
+# --- Dynamic launch protection: persist intent, not an installed workspace ---
+
+
+def _saved_protection(home: pathlib.Path) -> dict[str, str]:
+    env_file = home / ".agentstack" / "env.sh"
+    values = {}
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        if line.startswith("export AGENTSTACK_"):
+            name, raw = line.removeprefix("export ").split("=", 1)
+            if name in {"AGENTSTACK_PROTECTED_ROOTS", "AGENTSTACK_EXTRA_PROTECTED_ROOTS"}:
+                values[name] = shlex.split(raw)[0]
+    return values
+
+
+def test_fresh_install_persists_no_workspace_default(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    project = str(tmp_path / "namespace-only")
+    assert _resolve_like_the_installer(
+        home, "EXTRA_PROTECTED_ROOTS", "PRESERVE_LEGACY_PROTECTED_ROOTS",
+        args=("--project-key", project),
+    ) == ["", "false"]
+    _write_env_sh_like_the_installer(home, {"PROJECT_KEY": project, "EXTRA_PROTECTED_ROOTS": ""})
+    assert _saved_protection(home) == {"AGENTSTACK_EXTRA_PROTECTED_ROOTS": ""}
+
+
+def test_extra_roots_inherit_override_and_clear_without_project_fallback(tmp_path):
+    home, chosen = _previous_install(tmp_path)
+    extras = chosen["EXTRA_PROTECTED_ROOTS"]
+    assert _resolve_like_the_installer(home, "EXTRA_PROTECTED_ROOTS") == [extras]
+    assert _resolve_like_the_installer(
+        home, "EXTRA_PROTECTED_ROOTS", args=("--reset-settings",)
+    ) == [extras]
+    assert _resolve_like_the_installer(
+        home, "EXTRA_PROTECTED_ROOTS", args=("--project-key", "/different/namespace")
+    ) == [extras]
+    for explicit in ("/shared/vault:/shared/vault/nested", ""):
+        assert _resolve_like_the_installer(
+            home, "EXTRA_PROTECTED_ROOTS", "PRESERVE_LEGACY_PROTECTED_ROOTS",
+            env={"AGENTSTACK_EXTRA_PROTECTED_ROOTS": explicit},
+        ) == [explicit, "false"]
+        _write_env_sh_like_the_installer(home, {**chosen, "EXTRA_PROTECTED_ROOTS": explicit})
+        assert _saved_protection(home) == {"AGENTSTACK_EXTRA_PROTECTED_ROOTS": explicit}
+
+
+def test_unmigrated_reinstall_warns_retains_legacy_and_first_launch_recomputes(tmp_path):
+    home, chosen = _previous_install(tmp_path)
+    env_file = home / ".agentstack" / "env.sh"
+    legacy = f"{tmp_path}/old-workspace:{tmp_path}/shared-vault"
+    original = re.sub(
+        r"^export AGENTSTACK_EXTRA_PROTECTED_ROOTS=.*$",
+        f"export AGENTSTACK_PROTECTED_ROOTS={shlex.quote(legacy)}",
+        env_file.read_text(encoding="utf-8"), flags=re.M,
+    )
+    env_file.write_text(original, encoding="utf-8")
+    dry_run = _dry_run(home)
+    assert dry_run.returncode == 0, dry_run.stdout + dry_run.stderr
+    assert legacy in dry_run.stderr
+    assert "retaining legacy protected-root configuration" in dry_run.stderr
+    assert "finish or release active reservations" in dry_run.stderr
+    assert env_file.read_text(encoding="utf-8") == original
+    extras, preserve, old = _resolve_like_the_installer(
+        home, "EXTRA_PROTECTED_ROOTS", "PRESERVE_LEGACY_PROTECTED_ROOTS", "LEGACY_PROTECTED_ROOTS"
+    )
+    assert (extras, preserve, old) == ("", "true", legacy)
+    _write_env_sh_like_the_installer(home, {
+        **chosen, "EXTRA_PROTECTED_ROOTS": extras,
+        "PRESERVE_LEGACY_PROTECTED_ROOTS": preserve, "LEGACY_PROTECTED_ROOTS": old,
+    })
+    assert _saved_protection(home) == {"AGENTSTACK_PROTECTED_ROOTS": legacy}
+    target = tmp_path / "new-workspace"
+    target.mkdir()
+    script = (
+        f"set -euo pipefail\n. {shlex.quote(str(CONTEXT))}\n"
+        "agentstack_load_top_level_env\n"
+        f"agentstack_apply_workspace_context {shlex.quote(str(target))}\n"
+        'printf "%s\\n" "$AGENTSTACK_PROJECT_KEY" "$AGENTSTACK_PROTECTED_ROOTS"\n'
+    )
+    launch = subprocess.run([BASH, "-c", script], env=_scrubbed_env(home),
+                            text=True, capture_output=True)
+    assert launch.returncode == 0, launch.stderr
+    assert launch.stdout.splitlines() == [chosen["PROJECT_KEY"], str(target.resolve())]
+    assert legacy in launch.stderr and "AGENTSTACK_EXTRA_PROTECTED_ROOTS" in launch.stderr
+
+
+def test_explicit_migration_can_keep_wanted_extras_or_clear_all(tmp_path):
+    home, chosen = _previous_install(tmp_path)
+    env_file = home / ".agentstack" / "env.sh"
+    for explicit in ("/wanted/shared-vault", ""):
+        env_file.write_text(
+            f'export AGENTSTACK_PROJECT_KEY={shlex.quote(chosen["PROJECT_KEY"])}\n'
+            'export AGENTSTACK_PROTECTED_ROOTS=/stale/workspace:/wanted/shared-vault\n',
+            encoding="utf-8",
+        )
+        extras, preserve = _resolve_like_the_installer(
+            home, "EXTRA_PROTECTED_ROOTS", "PRESERVE_LEGACY_PROTECTED_ROOTS",
+            env={"AGENTSTACK_EXTRA_PROTECTED_ROOTS": explicit},
+        )
+        assert (extras, preserve) == (explicit, "false")
+        _write_env_sh_like_the_installer(home, {
+            **chosen, "EXTRA_PROTECTED_ROOTS": extras,
+            "PRESERVE_LEGACY_PROTECTED_ROOTS": preserve,
+        })
+        assert _saved_protection(home) == {"AGENTSTACK_EXTRA_PROTECTED_ROOTS": explicit}
+
+
+
+def test_protected_root_settings_roundtrip_quotes_spaces_and_backslashes(tmp_path):
+    home, chosen = _previous_install(tmp_path)
+    awkward = str(tmp_path / 'Shared "quoted" & notes \\vault')
+    for preserve in ("false", "true"):
+        _write_env_sh_like_the_installer(home, {
+            **chosen, "EXTRA_PROTECTED_ROOTS": awkward, "LEGACY_PROTECTED_ROOTS": awkward,
+            "PRESERVE_LEGACY_PROTECTED_ROOTS": preserve,
+        })
+        expected = "AGENTSTACK_PROTECTED_ROOTS" if preserve == "true" else "AGENTSTACK_EXTRA_PROTECTED_ROOTS"
+        assert _saved_protection(home) == {expected: awkward}
+        if preserve == "false":
+            assert _resolve_like_the_installer(home, "EXTRA_PROTECTED_ROOTS") == [awkward]
+        else:
+            assert _resolve_like_the_installer(home, "LEGACY_PROTECTED_ROOTS") == [awkward]
+
+
+def test_service_renderers_preserve_protection_configuration_provenance(tmp_path):
+    import plistlib
+
+    text = INSTALLER.read_text(encoding="utf-8")
+    launchd = text[text.index("render_launchd_plist() {"):text.index("render_systemd_unit() {")]
+    systemd = text[text.index("render_systemd_unit() {"):text.index("start_service() {")]
+    home = tmp_path / "home"
+    home.mkdir()
+    for preserve in ("false", "true"):
+        values = {
+            "DRY_RUN": "false", "PYTHON_BIN": sys.executable, "REPO_ROOT": str(ROOT),
+            "LABEL": "org.agentstack.test.protection.agentdashboard",
+            "LABEL_PREFIX": "org.agentstack.test.protection", "DASHBOARD_DIR": str(ROOT / "dashboard"),
+            "EXTRA_PROTECTED_ROOTS": "/shared/vault", "LEGACY_PROTECTED_ROOTS": "/old/workspace",
+            "PRESERVE_LEGACY_PROTECTED_ROOTS": preserve,
+        }
+        script = ("plan() { :; }\n" + "".join(f"{k}={shlex.quote(v)}\n" for k,v in values.items())
+                  + launchd + systemd + "render_launchd_plist\nrender_systemd_unit\n")
+        result = subprocess.run([BASH, "-c", script], env=_scrubbed_env(home),
+                                text=True, capture_output=True)
+        assert result.returncode == 0, result.stderr
+        plist = home / "Library/LaunchAgents/org.agentstack.test.protection.agentdashboard.plist"
+        variables = plistlib.loads(plist.read_bytes())["EnvironmentVariables"]
+        expected = "AGENTSTACK_PROTECTED_ROOTS" if preserve == "true" else "AGENTSTACK_EXTRA_PROTECTED_ROOTS"
+        other = "AGENTSTACK_EXTRA_PROTECTED_ROOTS" if preserve == "true" else "AGENTSTACK_PROTECTED_ROOTS"
+        assert variables[expected] == ("/old/workspace" if preserve == "true" else "/shared/vault")
+        assert other not in variables
+        unit = home / ".config/systemd/user/org.agentstack.test.protection.agentdashboard.service"
+        assert f'Environment="{expected}=' in unit.read_text()
+        assert f'Environment="{other}=' not in unit.read_text()
+
+
+def test_dashboard_service_preserves_live_extra_empty_and_legacy_absence(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    env_file = home / "env.sh"
+    text = (ROOT / "dashboard/agentctl.sh").read_text()
+    head = text[:text.index("sed_escape() {")]
+    head = head.replace('HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+                        f"HERE={shlex.quote(str(ROOT / 'dashboard'))}")
+    start = text.index("export_background_env() {")
+    end = text.index("\n}\n", start) + 3
+    for saved, extra, expected in (
+        ("export AGENTSTACK_EXTRA_PROTECTED_ROOTS=/saved/vault\n", {}, ["set", "/saved/vault", "unset", ""]),
+        ("export AGENTSTACK_EXTRA_PROTECTED_ROOTS=/saved/vault\n", {"AGENTSTACK_EXTRA_PROTECTED_ROOTS": ""}, ["set", "", "unset", ""]),
+        ("export AGENTSTACK_PROTECTED_ROOTS=/old/workspace\n", {}, ["unset", "", "set", "/old/workspace"]),
+        ("export AGENTSTACK_PROTECTED_ROOTS=/old/workspace\n", {"AGENTSTACK_EXTRA_PROTECTED_ROOTS": ""}, ["set", "", "unset", ""]),
+    ):
+        env_file.write_text(saved)
+        script = head + text[start:end] + (
+            '\nexport_background_env\n'
+            'printf "%s\\n" "${AGENTSTACK_EXTRA_PROTECTED_ROOTS+set}" "${AGENTSTACK_EXTRA_PROTECTED_ROOTS-}" '
+            '"${AGENTSTACK_PROTECTED_ROOTS+set}" "${AGENTSTACK_PROTECTED_ROOTS-}"\n'
+        )
+        result = subprocess.run([BASH, "-c", script],
+                                env=_scrubbed_env(home, AGENTSTACK_ENV_FILE=str(env_file), **extra),
+                                text=True, capture_output=True)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.splitlines() == ["" if v == "unset" else v for v in expected]
 
 
 # --- #33: the launchers -----------------------------------------------------

@@ -105,7 +105,7 @@ Codex CLI 0.154.0 の interactive session で、事前設定済みの stdio MCP 
 
 - **既定は inherit**。指定しない child の起動コマンドは従来と同じで、`--chrome` も `--no-chrome` も付けません。Chrome を使えるかどうかは利用者自身の Claude 設定（`claudeInChromeDefaultEnabled` など）で決まります。既定は「ブラウザ無効」ではありません。
 - **deviceId は選択ポリシー**。同じアカウントに複数のブラウザ（例: Mac の Chrome と Windows の Brave）がつながっているときに、どれを使うかを child に指示します。child は `list_connected_browsers` で deviceId が接続中であることを確かめ、`select_browser` が成功してから自分のタブを作ります。一覧に無い・切断されているときはブラウザ作業を止めて報告し、先頭や local のブラウザへ切り替えません。deviceId を渡さないときは、`list_connected_browsers` 以外のブラウザ操作をせず、親に deviceId を尋ねます。**これは child への指示であって、技術的な隔離ではありません**。Claude Code には Claude in Chrome を特定のブラウザに固定する CLI フラグがないためです。誤操作を確実に避けたい検証では、対象外のブラウザの拡張を切断して候補を減らしてください。
-- **保証する範囲は新規の cold 起動です**。cold start と legacy のどちらでも `--chrome` が付き、最初のプロンプトでブラウザの選び方を伝えます。warm pool のセッションは `--chrome` なしで起動済みなので claim せず、cold start します。
+- **保証する範囲は新規の cold 起動です**。cold start と legacy のどちらでも `--chrome` が付き、最初のプロンプトでブラウザの選び方を伝えます。事前登録した Claude child は、選んだ workspace と reservation root を process に渡すため毎回 cold start します。browser 設定によらず warm-pool session は claim しません。
 - **resume は補助機能です**。起動の記録は agent 名ではなく会話（session ID）に結び付けます。launcher は tmux の起動前にその起動専用の仮の記録を書きます。child の最初の SessionStart hook が、それを自分の session ID の記録（`AGENTSTACK_RUNTIME_DIR/child-agents/<name>.claude-launch.<session-id>.json`）に確定させます。同じ名前で後から起動し直しても、起動に失敗しても、前の会話の記録は変わりません（失敗した起動の仮の記録は消します）。dashboard からの resume は、次の 3 つだけで判断します。会話の本文（プロンプトやツールの出力）は使いません。
   - 再開する session ID の正常な記録がある: その記録から `--chrome` とブラウザの選び方を復元し、起動の ID も渡します（resume 後の `/clear` も同じ起動に結び付きます）。
   - 記録はあるが、壊れている・別の agent や session のもの・権限が 0600 でない: resume を止めて理由を返します。
@@ -145,7 +145,7 @@ launcher が確かめていない「人が頼んだ」といった主張は書�
 
 1 つの引数に収まらない長いタスク（Linux・WSL は 1 引数 128 KiB）は、子だけが読める file に置き、引数にはその file を読むようにという短い文だけを渡します。引数で渡したタスクは、子が動いている間 process の一覧（`ps`）から見えます。Codex の子も同じです。
 
-warm pool（`hooks/warm_pool.sh`）の session は起動済みなので、タスクは今も貼り付けで渡します。warm pool を使う場合は、事前起動の時に同じ system prompt を渡してください。Codex の子は前からタスクを引数で受け取っています。
+事前登録した Claude child は毎回、新しい process に現在の workspace・意図的な追加 root・task 引数を渡して起動します。起動済み warm-pool process にはその環境を反映できないため claim しません。通常の CLI 初期化を含み、warm pool による起動短縮は保証しません。Codex の子は前からタスクを引数で受け取っています。
 
 **モデルが変わったら回す:** `scripts/canary-embed-task.sh` は、モデル × vault の内外ごとに一時の子を起動し、それぞれを「実行した／Mail 以外で報告した／断った／時間切れ」に分けて表にします。CI には入れず、手で回します。子は最後に必ず終了させ、retire します。live の ORRERY Mail に一時の identity を作るので、始める前に確認を求めます。
 

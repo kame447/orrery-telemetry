@@ -35,7 +35,7 @@ LABEL_PREFIX="${AGENTSTACK_LABEL_PREFIX:-}"
 TERMINAL="${AGENTSTACK_TERMINAL:-}"
 AUTO_OPEN_CHILD_SETTING="${AGENTSTACK_AUTO_OPEN_CHILD:-}"
 PROJECT_KEY="${AGENTSTACK_PROJECT_KEY:-${PROJECT_KEY:-}}"
-PROTECTED_ROOTS="${AGENTSTACK_PROTECTED_ROOTS:-}"
+EXTRA_PROTECTED_ROOTS="${AGENTSTACK_EXTRA_PROTECTED_ROOTS:-}"
 DELIVERABLE_ROOTS="${AGENTSTACK_DELIVERABLE_ROOTS:-}"
 LANG_SETTING="${AGENTSTACK_LANG:-}"
 MURMUR_SETTING="${AGENTSTACK_MURMUR:-}"
@@ -122,8 +122,8 @@ Options:
                          existing env.sh, else auto)
   --reset-settings       Do not inherit settings from the existing env.sh:
                          anything not given explicitly goes back to its
-                         default. Kept even then: the project key, protected
-                         roots, the ORRERY Mail state/service roots and
+                         default. Kept even then: the project key, explicit
+                         extra protected roots, the ORRERY Mail state/service roots and
                          socket, the label prefix, the Mail launchd label and
                          the MCP URL. An empty explicit value (for example
                          AGENTSTACK_VAULT= or --codex-add-dirs "") resets
@@ -207,7 +207,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --project-key)
       PROJECT_KEY="$2"
-      PROTECTED_ROOTS="${AGENTSTACK_PROTECTED_ROOTS:-$PROJECT_KEY}"
       shift 2
       ;;
     --port)
@@ -288,13 +287,26 @@ if [[ ! -f "$PROJECT_CONTEXT_LIB" ]]; then
 fi
 # shellcheck disable=SC1090
 . "$PROJECT_CONTEXT_LIB"
-PROJECT_KEY_INPUT="$PROJECT_KEY"
 PROJECT_KEY="$(agentstack_resolve_project_key "" "$INSTALL_DIR/env.sh" 0)"
 if [[ -z "$PROJECT_KEY" ]]; then
   echo "error: project key is required on first install; pass --project-key /absolute/path/to/project or set AGENTSTACK_PROJECT_KEY" >&2
   exit 2
 fi
-PROTECTED_ROOTS="$(agentstack_resolve_protected_roots "$PROJECT_KEY" "$PROJECT_KEY_INPUT" "$INSTALL_DIR/env.sh")"
+# New installs persist only deliberate extras. Preserve an unmigrated legacy
+# field for old/direct hooks, but never reinterpret it as new managed extras.
+agentstack_warn_legacy_protected_roots "$INSTALL_DIR/env.sh"
+EXTRA_PROTECTED_ROOTS="$(agentstack_resolve_extra_protected_roots "$INSTALL_DIR/env.sh")"
+PRESERVE_LEGACY_PROTECTED_ROOTS=false
+LEGACY_PROTECTED_ROOTS=""
+if [[ "${AGENTSTACK_EXTRA_PROTECTED_ROOTS+x}" != x &&
+      "$(agentstack_installed_env_value AGENTSTACK_EXTRA_PROTECTED_ROOTS "$INSTALL_DIR/env.sh" present)" != 1 ]]; then
+  LEGACY_PROTECTED_ROOTS="${AGENTSTACK_PROTECTED_ROOTS:-$(agentstack_installed_env_value AGENTSTACK_PROTECTED_ROOTS "$INSTALL_DIR/env.sh")}"
+  if [[ -n "$LEGACY_PROTECTED_ROOTS" ]]; then
+    PRESERVE_LEGACY_PROTECTED_ROOTS=true
+    echo "notice: retaining legacy protected-root configuration until deliberate migration; new managed launches ignore it" >&2
+    echo "notice: finish or release active reservations before migration, then restart affected sessions together (relative reservation names can change)" >&2
+  fi
+fi
 case "$RESET_SETTINGS" in
   0|"") RESET_SETTINGS=0 ;;
   1) ;;
@@ -318,10 +330,11 @@ esac
 #   choice: it keeps the status it had. An option is always a request. Only
 #   an env.sh with the record can be echoed; before it, the value is explicit.
 # - --reset-settings drops the previous choices. What names the data and the
-#   services running on it (project key, protected roots, the Mail state and
+#   services running on it (project key, the Mail state and
 #   service roots and socket, the label prefix, the Mail launchd label, the MCP
 #   URL) is kept: resetting those left the old Mail job running on the same
-#   database next to a new one (review of #146).
+#   database next to a new one (review of #146). Explicit extra protected
+#   roots are also kept to avoid silently dropping shared reservations.
 SETTINGS_ENV_FILE="$INSTALL_DIR/env.sh"
 CHOSEN_SETTINGS=""
 SETTING_SOURCE=""
@@ -2524,6 +2537,9 @@ write_env_file() {
     return
   fi
   umask 077
+  AGENTSTACK_INSTALL_EXTRA_PROTECTED_ROOTS="${EXTRA_PROTECTED_ROOTS:-}" \
+  AGENTSTACK_INSTALL_LEGACY_PROTECTED_ROOTS="${LEGACY_PROTECTED_ROOTS:-}" \
+  AGENTSTACK_INSTALL_PRESERVE_LEGACY_PROTECTED_ROOTS="${PRESERVE_LEGACY_PROTECTED_ROOTS:-false}" \
   "$PYTHON_BIN" - "$ENV_FILE" <<PY
 import os
 import pathlib
@@ -2547,7 +2563,7 @@ values = {
     "AGENTSTACK_TERMINAL": "$TERMINAL",
     "AGENTSTACK_AUTO_OPEN_CHILD": "$AUTO_OPEN_CHILD_SETTING",
     "AGENTSTACK_PROJECT_KEY": "$PROJECT_KEY",
-    "AGENTSTACK_PROTECTED_ROOTS": "$PROTECTED_ROOTS",
+    "AGENTSTACK_EXTRA_PROTECTED_ROOTS": os.environ["AGENTSTACK_INSTALL_EXTRA_PROTECTED_ROOTS"],
     "AGENTSTACK_DELIVERABLE_ROOTS": "$DELIVERABLE_ROOTS",
     "AGENTSTACK_LANG": "$LANG_SETTING",
     "AGENTSTACK_MURMUR": "$MURMUR_SETTING",
@@ -2587,6 +2603,9 @@ values.update({
     "AGENTSTACK_MAIL_STATE_ROOT": "$NATIVE_MAIL_STATE_ROOT",
     "AGENTSTACK_MAIL_HTTP_BEARER_MODE": "$MAIL_HTTP_BEARER_MODE",
 })
+if os.environ["AGENTSTACK_INSTALL_PRESERVE_LEGACY_PROTECTED_ROOTS"] == "true":
+    values.pop("AGENTSTACK_EXTRA_PROTECTED_ROOTS", None)
+    values.update({"AGENTSTACK_PROTECTED_ROOTS": os.environ["AGENTSTACK_INSTALL_LEGACY_PROTECTED_ROOTS"]})
 lines = ["# Generated by ORRERY Telemetry install.sh", "# Do not put secrets in this file.", ""]
 for key, value in values.items():
     lines.append(f"export {key}={shlex.quote(value)}")
@@ -4076,7 +4095,9 @@ render_launchd_plist() {
       __TERMINAL__ "$TERMINAL"
       __AUTO_OPEN_CHILD__ "$AUTO_OPEN_CHILD_SETTING"
       __PROJECT_KEY__ "$PROJECT_KEY"
-      __PROTECTED_ROOTS__ "$PROTECTED_ROOTS"
+      __EXTRA_PROTECTED_ROOTS__ "$EXTRA_PROTECTED_ROOTS"
+      __LEGACY_PROTECTED_ROOTS__ "${LEGACY_PROTECTED_ROOTS:-}"
+      __PRESERVE_LEGACY_PROTECTED_ROOTS__ "${PRESERVE_LEGACY_PROTECTED_ROOTS:-false}"
       __DELIVERABLE_ROOTS__ "$DELIVERABLE_ROOTS"
       __LANG__ "$LANG_SETTING"
       __MURMUR__ "$MURMUR_SETTING"
@@ -4116,6 +4137,10 @@ pairs = sys.argv[4:]
 repl = dict(zip(pairs[0::2], pairs[1::2]))
 repl["__CLAUDE_MODELS__"] = os.environ.get("AGENTSTACK_CLAUDE_MODELS", "")
 text = src.read_text(encoding="utf-8")
+if repl.pop("__PRESERVE_LEGACY_PROTECTED_ROOTS__") == "true":
+    text = text.replace("AGENTSTACK_EXTRA_PROTECTED_ROOTS", "AGENTSTACK_PROTECTED_ROOTS")
+    repl["__EXTRA_PROTECTED_ROOTS__"] = repl["__LEGACY_PROTECTED_ROOTS__"]
+repl.pop("__LEGACY_PROTECTED_ROOTS__")
 for key, value in repl.items():
     text = text.replace(key, xml.sax.saxutils.escape(value))
 overlay_marker = "    <key>AGENTSTACK_CODEX_CHILD_APPROVAL</key>"
@@ -4140,6 +4165,9 @@ render_systemd_unit() {
   plan "render systemd user unit $unit"
   if [[ "$DRY_RUN" != true ]]; then
     mkdir -p "$dir"
+    AGENTSTACK_INSTALL_EXTRA_PROTECTED_ROOTS="${EXTRA_PROTECTED_ROOTS:-}" \
+    AGENTSTACK_INSTALL_LEGACY_PROTECTED_ROOTS="${LEGACY_PROTECTED_ROOTS:-}" \
+    AGENTSTACK_INSTALL_PRESERVE_LEGACY_PROTECTED_ROOTS="${PRESERVE_LEGACY_PROTECTED_ROOTS:-false}" \
     "$PYTHON_BIN" - "$unit" <<PY
 import os
 import pathlib
@@ -4159,7 +4187,7 @@ env = {
     "AGENTSTACK_TERMINAL": "$TERMINAL",
     "AGENTSTACK_AUTO_OPEN_CHILD": "$AUTO_OPEN_CHILD_SETTING",
     "AGENTSTACK_PROJECT_KEY": "$PROJECT_KEY",
-    "AGENTSTACK_PROTECTED_ROOTS": "$PROTECTED_ROOTS",
+    "AGENTSTACK_EXTRA_PROTECTED_ROOTS": os.environ["AGENTSTACK_INSTALL_EXTRA_PROTECTED_ROOTS"],
     "AGENTSTACK_DELIVERABLE_ROOTS": "$DELIVERABLE_ROOTS",
     "AGENTSTACK_LANG": "$LANG_SETTING",
     "AGENTSTACK_MURMUR": "$MURMUR_SETTING",
@@ -4188,6 +4216,9 @@ env = {
     "AGENTSTACK_VAULT": "$VAULT_SETTING",
     "PATH": "$PATH_VALUE",
 }
+if os.environ["AGENTSTACK_INSTALL_PRESERVE_LEGACY_PROTECTED_ROOTS"] == "true":
+    env.pop("AGENTSTACK_EXTRA_PROTECTED_ROOTS", None)
+    env.update({"AGENTSTACK_PROTECTED_ROOTS": os.environ["AGENTSTACK_INSTALL_LEGACY_PROTECTED_ROOTS"]})
 def esc(v):
     return str(v).replace("\\\\", "\\\\\\\\").replace('"', '\\"')
 lines = [
@@ -4422,6 +4453,9 @@ write_manifest() {
       requested_service_env "${NEW_NATIVE_MAIL_ENV:-}" requested_candidate_venv "${NEW_NATIVE_MAIL_VENV:-}" \
       database_backup "$MAIL_UPDATE_BACKUP")"
   fi
+  AGENTSTACK_INSTALL_EXTRA_PROTECTED_ROOTS="${EXTRA_PROTECTED_ROOTS:-}" \
+  AGENTSTACK_INSTALL_LEGACY_PROTECTED_ROOTS="${LEGACY_PROTECTED_ROOTS:-}" \
+  AGENTSTACK_INSTALL_PRESERVE_LEGACY_PROTECTED_ROOTS="${PRESERVE_LEGACY_PROTECTED_ROOTS:-false}" \
   AGENTSTACK_INSTALL_MAIL_UPDATE="$mail_update" \
   "$PYTHON_BIN" - "$tmp" "$service_kind" "$service_path" \
     "$mail_service_kind" "$mail_service_path" "$AGENT_MAIL_NAME_CAPABILITY_JSON" \
@@ -4574,7 +4608,7 @@ manifest = {
         "AGENTSTACK_PORT": "$PORT",
         "AGENTSTACK_LABEL_PREFIX": "$LABEL_PREFIX",
         "AGENTSTACK_PROJECT_KEY": "$PROJECT_KEY",
-        "AGENTSTACK_PROTECTED_ROOTS": "$PROTECTED_ROOTS",
+        "AGENTSTACK_EXTRA_PROTECTED_ROOTS": os.environ["AGENTSTACK_INSTALL_EXTRA_PROTECTED_ROOTS"],
         "AGENTSTACK_DELIVERABLE_ROOTS": "$DELIVERABLE_ROOTS",
         "AGENTSTACK_LANG": "$LANG_SETTING",
         "AGENTSTACK_MURMUR": "$MURMUR_SETTING",
@@ -4644,6 +4678,9 @@ manifest = {
         "Claude MCP user config uses an explicit-confirm, fixed-name structural merge.",
     ],
 }
+if os.environ["AGENTSTACK_INSTALL_PRESERVE_LEGACY_PROTECTED_ROOTS"] == "true":
+    manifest["env"].pop("AGENTSTACK_EXTRA_PROTECTED_ROOTS", None)
+    manifest["env"].update({"AGENTSTACK_PROTECTED_ROOTS": os.environ["AGENTSTACK_INSTALL_LEGACY_PROTECTED_ROOTS"]})
 manifest["agent_mail"]["provider"] = "agentstack"
 manifest["agent_mail"]["state_root"] = "$NATIVE_MAIL_STATE_ROOT"
 manifest["agent_mail"]["candidate_venv"] = "$NATIVE_MAIL_VENV"

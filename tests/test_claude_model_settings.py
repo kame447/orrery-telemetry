@@ -45,7 +45,7 @@ def test_controller_exports_models_without_changing_ambient_profile(tmp_path, pr
     text = (ROOT / "dashboard/agentctl.sh").read_text()
     start = text.index('export_background_env() {')
     end = text.index('\nstart_background()', start)
-    command = text[start:end] + '\nCLAUDE_MODELS_SETTING="claude-test-9"\nexport_background_env\nprintf "%s\\n%s\\n" "$AGENTSTACK_CLAUDE_MODELS" "${CLAUDE_CONFIG_DIR-unset}"'
+    command = text[start:end] + '\nPROTECTION_CONFIG_NAME=AGENTSTACK_EXTRA_PROTECTED_ROOTS\nPROTECTION_CONFIG_VALUE=\nCLAUDE_MODELS_SETTING="claude-test-9"\nexport_background_env\nprintf "%s\\n%s\\n" "$AGENTSTACK_CLAUDE_MODELS" "${CLAUDE_CONFIG_DIR-unset}"'
     env = {"HOME": str(tmp_path), "PATH": os.environ["PATH"]}
     if profile is not None:
         env["CLAUDE_CONFIG_DIR"] = profile

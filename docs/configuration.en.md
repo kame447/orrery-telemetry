@@ -97,7 +97,8 @@ export AGENTSTACK_DELIVERABLE_ROOTS="$HOME/project-a/logs:$HOME/shared logs"
 | `AGENTSTACK_MAIL_ENROLL_BIN` | derived from the adopted Mail deployment | Matching `agentstack-enroll` saved by the installer in `env.sh`; normally not set by hand |
 | `AGENTSTACK_MAIL_HTTP_BEARER_MODE` | `disabled` | Do not use the legacy HTTP bearer |
 | `AGENTSTACK_PROJECT_KEY` | existing `env.sh` on reinstall; required initially | Human project key. `--project-key` has highest priority |
-| `AGENTSTACK_PROTECTED_ROOTS` | live project key, then existing `env.sh`, then resolved project key | Roots protected by the reservation hook |
+| `AGENTSTACK_EXTRA_PROTECTED_ROOTS` | explicit live value (empty clears), then existing `env.sh`, then empty | `:`-separated deliberate additional reservation roots; never includes a derived workspace default |
+| `AGENTSTACK_PROTECTED_ROOTS` | computed at each managed AI launch | Runtime compatibility output: explicit extras, then the actual workspace; not persistent extra-root configuration |
 | `AGENTSTACK_RELEASE_GRACE_SECONDS` | `90` | Debounce seconds before releasing a reservation after successful Edit / Write. Legacy `FILE_RESERVATION_RELEASE_GRACE_SECONDS` is also accepted as a fallback |
 | `AGENTSTACK_DELIVERABLE_ROOTS` | unset | `:`-separated Output-index scan roots, saved to env / service / manifest |
 | `AGENTSTACK_LANG` | unset | `ja` / `en` murmur override; browser-selected when unset |
@@ -111,19 +112,35 @@ export AGENTSTACK_DELIVERABLE_ROOTS="$HOME/project-a/logs:$HOME/shared logs"
 | `AGENTSTACK_CLAUDE_SETTINGS` | `~/.claude/settings.json` | Settings merge target |
 | `AGENTSTACK_CLAUDE_MD_SCOPE` | `project` | Where `agentstack-claude-setup` writes managed blocks: `project / global / both` |
 
-Top-level launchers always include the actual launch workspace in reservation protection and retain the order of explicitly configured extra roots (including shared vaults). An older path-shaped project-key fallback is also preserved. See [launchers](launchers.en.md#top-level-project-selection) for the boundary; this does not change installer setting precedence.
+Managed AI launches always include the actual launch workspace in reservation protection and retain the order of explicitly configured extra roots (including shared vaults). A path-shaped project key does not imply a protected root. See [launchers](launchers.en.md#top-level-project-selection) and the migration section below.
 
 When a healthy ORRERY Mail listener already exists, the installer adopts the deployment metadata recorded with its immutable render without updating or restarting the server. A managed render created before that metadata existed is adopted only when its render ID maps uniquely and deterministically to a candidate directory. The generated `AGENTSTACK_MAIL_ENV` and `AGENTSTACK_MAIL_ENROLL_BIN` in `env.sh` therefore identify the same deployment. If a known legacy render has no enrollment CLI, Mail and its existing autostart remain usable while enrollment is recorded as unavailable.
 
 When a healthy listener uses the expected database but its service environment cannot be identified, an ordinary unpinned reinstall reuses the listener unchanged. In this degraded state deployment and enrollment paths are empty, and the installer updates neither the enrollment connection profile nor Mail autostart. Existing triggers are not deleted or stopped, but the installer cannot guarantee restart at the next login. Installation instead stops explicitly, without switching the listener, when an explicit `AGENTSTACK_MAIL_SERVICE_VENV` / `AGENTSTACK_MAIL_SERVICE_ENV` cannot be matched to the running deployment, known metadata is invalid, or metadata promises an enrollment CLI that is missing.
 
-On a re-install, the settings in the table above that a person chooses (project key, protected roots, port, label prefix, terminal, MCP URL, `PATH`, Python, the Mail state / service roots, `LANG` / `MURMUR` / `DELIVERABLE_ROOTS`, and so on) are decided as explicit value → previous `env.sh` → default. The list is `AGENTSTACK_INHERITED_SETTINGS` in `hooks/project-context.sh`; see "What a re-install inherits" under Upgrade in [install.en.md](install.en.md) for how to return to the defaults.
+On a re-install, the settings in the table above that a person chooses (project key, explicit extra protected roots, port, label prefix, terminal, MCP URL, `PATH`, Python, the Mail state / service roots, `LANG` / `MURMUR` / `DELIVERABLE_ROOTS`, and so on) are decided as explicit value → previous `env.sh` → default. The list is `AGENTSTACK_INHERITED_SETTINGS` in `hooks/project-context.sh`; see "What a re-install inherits" under Upgrade in [install.en.md](install.en.md) for how to return to the defaults.
 
 The installer's project-key precedence is `--project-key` / process `AGENTSTACK_PROJECT_KEY` → `PROJECT_KEY` → existing `env.sh` at the install destination. If none exist on first install, it does not guess that the repository checkout is the project; it stops with exit 2 before making changes. `AGENTSTACK_PROJECT_KEY` is recommended for persistent configuration.
 
-At hook and helper runtime the precedence is `AGENTSTACK_PROJECT_KEY` → `PROJECT_KEY` → `${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh` → current cwd. The installed `env.sh` is not sourced; only `AGENTSTACK_PROJECT_KEY`, and `AGENTSTACK_PROTECTED_ROOTS` when falling back for protected roots, are read literally. Thus an installed editor started from another directory uses the same project key for reservation and registration without executing arbitrary shell code from `env.sh`.
+At hook and helper runtime the precedence is `AGENTSTACK_PROJECT_KEY` → `PROJECT_KEY` → `${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh` → current cwd. The shared project/extra-root resolvers read `AGENTSTACK_PROJECT_KEY` and `AGENTSTACK_EXTRA_PROTECTED_ROOTS` from installed `env.sh` literally, without sourcing shell code. Thus an installed editor started from another directory uses the same project key for reservation and registration without executing arbitrary shell code from `env.sh`.
 
 The installer derives `AGENTSTACK_MAIL_DB`, `AGENTSTACK_MAIL_ENV`, and `AGENTSTACK_SIGNALS_DIR` from state / render and stores the state root together with `AGENTSTACK_MAIL_HTTP_BEARER_MODE=disabled` in `env.sh`.
+
+## Reservation protection and migration
+
+`AGENTSTACK_EXTRA_PROTECTED_ROOTS` is the only persistent setting for additional reservation roots. Use colon-separated absolute or `~/` paths (spaces are supported; colons inside a path are not). Managed launches resolve physical paths, collapse symlink/trailing-slash aliases, and deduplicate without reordering. Its precedence is the launching process's explicitly set value (including an empty string), then the literal value in the installed `env.sh`, then empty. Reinstalling keeps the selected extras, including under `--reset-settings`; pass `AGENTSTACK_EXTRA_PROTECTED_ROOTS=` to clear them. New or deliberately migrated installs write only these extras to `env.sh`, dashboard service settings, and install-state, never a workspace derived during installation. A reinstall with only the legacy setting retains that field and leaves the new setting absent until deliberate migration, preserving compatibility for existing/direct hooks; it still warns that new managed launches ignore the legacy list.
+
+Every new managed AI launch resolves its actual workspace again: the worktree root for a Git target, or the working directory for a non-Git target. It exports computed `AGENTSTACK_PROTECTED_ROOTS` as deliberate extras in their original order followed by that workspace, without duplicates. A new child or resume resolves its own target too. Dashboard resume uses the current explicit/installed extras, not a historical runtime-root snapshot; a one-launch-only extra from the original session is not necessarily restored. Project-key precedence is unchanged, and the namespace's path is not automatically protected. `AGENTSTACK_VAULT` does not add reservation protection by itself.
+
+Older `AGENTSTACK_PROTECTED_ROOTS` settings mixed deliberate shared roots with installation defaults and previous workspaces. New managed launches do not guess which entries were intended: the legacy list is ignored as configuration, with a migration warning. Review the old value and copy **only roots you deliberately want shared** into `AGENTSTACK_EXTRA_PROTECTED_ROOTS`, preserving their order. Do not copy an entire old list just to silence the warning, and do not add the current workspace just to obtain its default protection.
+
+```bash
+AGENTSTACK_EXTRA_PROTECTED_ROOTS="$HOME/shared-vault" ./scripts/install.sh
+# Or deliberately keep no additional roots:
+AGENTSTACK_EXTRA_PROTECTED_ROOTS= ./scripts/install.sh
+```
+
+Before migrating, let agents finish or coordinate release of active reservations. Relative reservation names use the first matching protected root; removing an old enclosing or unrelated root can change those names. Keep deliberate nested/vault roots in their original order, then restart affected sessions together. An existing session keeps its current environment until restarted; a reinstall does not rewrite it. Reopen shells carrying old settings, or unset the old variable after configuring the new one.
 
 ## Launcher
 
@@ -146,7 +163,7 @@ The installer derives `AGENTSTACK_MAIL_DB`, `AGENTSTACK_MAIL_ENV`, and `AGENTSTA
 | `AGENTSTACK_TCC_DIRS` | `$HOME/Desktop:$HOME/Downloads:$HOME/Documents` | `:`-separated TCC probe targets |
 | `AGENTSTACK_SCIENTISTS_JSON` | bundled JSON | Scientist vocabulary override |
 
-The launchers (`agent-start`, `agent-start-codex`, `agent-start-gemini`) load `env.sh` at startup but do not overwrite a value from `AGENTSTACK_INHERITED_SETTINGS` that was already set. For example `AGENTSTACK_PROJECT_KEY=/path/to/other ./agent-start` registers under `/path/to/other`, not the installed project, and its protected roots follow that project unless given explicitly. Without an explicit value, `env.sh` supplies it.
+The launchers (`agent-start`, `agent-start-codex`, `agent-start-gemini`) load `env.sh` at startup but do not overwrite a value from `AGENTSTACK_INHERITED_SETTINGS` that was already set. For example `AGENTSTACK_PROJECT_KEY=/path/to/other ./agent-start` registers under `/path/to/other`; reservation protection is still derived from the actual launch workspace plus deliberate extras. Without an explicit project key, `env.sh` supplies the namespace.
 
 The canonical `AGENTSTACK_TCC_DIRS` syntax is colon-separated so paths may contain spaces. Legacy whitespace-separated values without a colon are also interpreted for compatibility.
 

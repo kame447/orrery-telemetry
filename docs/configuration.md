@@ -104,7 +104,8 @@ export AGENTSTACK_DELIVERABLE_ROOTS="$HOME/project-a/logs:$HOME/shared logs"
 | `AGENTSTACK_MAIL_ENROLL_BIN` | 採用した Mail deployment から導出 | installer が `env.sh` に保存する対応済み `agentstack-enroll`。通常は手動設定しない |
 | `AGENTSTACK_MAIL_HTTP_BEARER_MODE` | `disabled` | legacy HTTP bearer を使用しない |
 | `AGENTSTACK_PROJECT_KEY` | 再 install 時は既存 `env.sh`、初回は必須 | project human key。`--project-key` が最優先 |
-| `AGENTSTACK_PROTECTED_ROOTS` | live project key、次に既存 `env.sh`、最後に resolved project key | reservation hook の保護 root |
+| `AGENTSTACK_EXTRA_PROTECTED_ROOTS` | live の明示値（空なら解除）→既存 `env.sh`→空 | `:` 区切りの意図的な追加 reservation root。workspace の既定値は保存しない |
+| `AGENTSTACK_PROTECTED_ROOTS` | managed AI 起動ごとに計算 | runtime 互換出力。明示した追加 root の後に実 workspace を追加。永続的な追加 root 設定には使わない |
 | `AGENTSTACK_RELEASE_GRACE_SECONDS` | `90` | 成功した Edit / Write 後、reservation を解放するまでの debounce 秒数。旧 `FILE_RESERVATION_RELEASE_GRACE_SECONDS` も fallback として利用可 |
 | `AGENTSTACK_DELIVERABLE_ROOTS` | 未設定 | Output index の `:` 区切り走査 root。env / service / manifest へ保存 |
 | `AGENTSTACK_LANG` | 未設定 | murmur の `ja` / `en` override。未設定時は browser 判定 |
@@ -118,13 +119,13 @@ export AGENTSTACK_DELIVERABLE_ROOTS="$HOME/project-a/logs:$HOME/shared logs"
 | `AGENTSTACK_CLAUDE_SETTINGS` | `~/.claude/settings.json` | merge 対象 settings |
 | `AGENTSTACK_CLAUDE_MD_SCOPE` | `project` | `agentstack-claude-setup` が managed block を書く先。`project / global / both` |
 
-top-level launcher は実際の起動先を必ず reservation 保護 root に含め、明示設定された追加 root（shared vault 等）も保持します。旧設定の path 形式 project key による fallback 保護も残します。[launcher の説明](launchers.md#top-level-の-project-選択)を参照してください。installer の設定優先順位は変更しません。
+managed AI 起動は実際の起動先を必ず reservation 保護 root に含め、明示設定された追加 root（shared vault 等）の順序も保持します。path 形式の project key だけでは保護 root を追加しません。[launcher の説明](launchers.md#top-level-の-project-選択)と下の移行手順を参照してください。
 
 健康な ORRERY Mail listener が既にある場合、installer は server を更新・再起動せず、稼働中の immutable render に記録された deployment metadata を採用します。metadata 導入前の managed render は、render ID と candidate directory の決定論的対応が一意な場合だけ採用します。生成する `env.sh` の `AGENTSTACK_MAIL_ENV` と `AGENTSTACK_MAIL_ENROLL_BIN` は同じ deployment を指します。既知の legacy render に enrollment CLI が無い場合は Mail と既設 autostart を維持し、enrollment だけ unavailable として保存します。
 
 DB が一致する健康な listener でも service env を特定できない場合、明示 pin が無い通常の再 install は listener をそのまま再利用します。この degraded 状態では deployment / enrollment の path を空にし、enrollment profile と Mail autostart を更新しません。既設 trigger は削除・停止せず残しますが、installer は次回 login での再起動を保証しません。明示した `AGENTSTACK_MAIL_SERVICE_VENV` / `AGENTSTACK_MAIL_SERVICE_ENV` を稼働 deployment と照合できない場合、既知 metadata が不正な場合、または metadata が約束した enrollment CLI が無い場合は、listener を切り替えず明示エラーで停止します。
 
-再 install では、上の表の設定のうち利用者が選ぶもの（project key、protected roots、
+再 install では、上の表の設定のうち利用者が選ぶもの（project key、明示した追加 protected roots、
 port、label prefix、terminal、MCP URL、`PATH`、Python、Mail の state / service root、
 `LANG` / `MURMUR` / `DELIVERABLE_ROOTS` など）を、明示した値 → 前回の `env.sh` → 既定値
 の順で決めます。一覧は `hooks/project-context.sh` の `AGENTSTACK_INHERITED_SETTINGS`、
@@ -137,15 +138,31 @@ installer の project key 解決順は `--project-key` / process の
 exit 2 で停止します。永続設定には `AGENTSTACK_PROJECT_KEY` を推奨します。
 
 hook と helper の実行時は `AGENTSTACK_PROJECT_KEY` → `PROJECT_KEY` →
-`${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh` → 現在の cwd の順です。installed
-`env.sh` は source せず、`AGENTSTACK_PROJECT_KEY`（protected root の fallback では
-`AGENTSTACK_PROTECTED_ROOTS` も）だけを literal として読み取ります。このため install
+`${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh` → 現在の cwd の順です。共通の project/追加 root resolver は installed
+`env.sh` を source せず、`AGENTSTACK_PROJECT_KEY` と
+`AGENTSTACK_EXTRA_PROTECTED_ROOTS` を literal として読み取ります。このため install
 済みの editor を別 directory から起動しても reservation と registration は同じ project
 key を使い、同時に `env.sh` 内の任意 shell code は実行されません。
 
 installer は `AGENTSTACK_MAIL_DB`、`AGENTSTACK_MAIL_ENV`、`AGENTSTACK_SIGNALS_DIR`
 を state / render から導出し、`env.sh` へ state root と
 `AGENTSTACK_MAIL_HTTP_BEARER_MODE=disabled` を一緒に保存します。
+
+## Reservation の保護範囲と移行
+
+`AGENTSTACK_EXTRA_PROTECTED_ROOTS` だけを、追加の reservation root の永続設定として使います。絶対 path または `~/` path を colon 区切りで指定します（空白は可、path 内の colon は不可）。managed 起動は物理 path に解決し、symlink・末尾 slash の別表記をまとめ、順序を変えずに重複を除きます。優先順位は起動 process の明示値（空も含む）→ install 済み `env.sh` の literal 値 → 空です。再 install と `--reset-settings` でも追加 root を引き継ぎます。解除には `AGENTSTACK_EXTRA_PROTECTED_ROOTS=` を明示してください。新規または明示的に移行した install はこの追加分だけを `env.sh`・dashboard service 設定・install-state に保存し、install 時の workspace を既定値として保存しません。旧設定しかない再 install では、明示的な移行まで旧 field を保持し、新設定は未設定のままにして existing/direct hook の互換性を保ちます。ただし、新しい managed 起動は旧 list を無視する旨を警告します。
+
+新しい managed AI 起動は毎回、実 workspace を解決し直します。Git target は worktree root、non-Git target は作業 directory です。計算した `AGENTSTACK_PROTECTED_ROOTS` には、意図的な追加 root を元の順序で並べ、実 workspace を重複なく末尾に追加します。child と resume も各自の起動先から解決し直します。Dashboard resume は過去の runtime root snapshot ではなく、現在の explicit/installed 追加 root を使います。元 session の一回限りの追加 root は復元されるとは限りません。project key の優先順位は変わらず、namespace の path は自動では保護しません。`AGENTSTACK_VAULT` だけでも reservation の保護は追加しません。
+
+旧 `AGENTSTACK_PROTECTED_ROOTS` には、意図的な共有 root と install 時の既定値・前の workspace が混在していました。新しい managed 起動は意図を推測せず、旧 list を設定としては無視し、移行の警告を表示します。旧値を確認し、**今後も共有したい root だけ**を元の順序のまま `AGENTSTACK_EXTRA_PROTECTED_ROOTS` に移してください。警告を消すために旧 list 全体をコピーしないでください。現在の workspace は既定で保護されるので、それだけのために追加する必要もありません。
+
+```bash
+AGENTSTACK_EXTRA_PROTECTED_ROOTS="$HOME/shared-vault" ./scripts/install.sh
+# 追加 root を使わないと明示する場合:
+AGENTSTACK_EXTRA_PROTECTED_ROOTS= ./scripts/install.sh
+```
+
+移行前に agent の作業を終えるか、active reservation の解放を調整してください。相対 reservation 名は最初に一致した保護 root から決まるため、旧 enclosing root や無関係な root を除くと名前が変わりえます。意図的な nested/vault root の元の順序を保ち、影響する session をまとめて再起動してください。既存 session の環境は restart まで残り、再 install では書き換わりません。旧設定を持つ shell は開き直すか、新設定の後で旧変数を unset してください。
 
 ## Launcher
 
@@ -171,8 +188,8 @@ installer は `AGENTSTACK_MAIL_DB`、`AGENTSTACK_MAIL_ENV`、`AGENTSTACK_SIGNALS
 launcher（`agent-start`・`agent-start-codex`・`agent-start-gemini`）は起動時に
 `env.sh` を読み込みますが、起動前に設定されていた `AGENTSTACK_INHERITED_SETTINGS` の
 値は上書きしません。たとえば `AGENTSTACK_PROJECT_KEY=/path/to/other ./agent-start` は
-install 時の project ではなく `/path/to/other` に登録し、protected roots も（明示しない限り）
-その project になります。明示しなければ `env.sh` の値を使います。
+`/path/to/other` に登録します。保護範囲は実際の起動 workspace と意図的な追加 root
+から決まります。project key を明示しなければ `env.sh` の namespace を使います。
 
 `AGENTSTACK_TCC_DIRS` は空白を含む path も保持できる `:` 区切りが正本です。colon を含まない旧 whitespace 区切りも legacy compatibility として解釈します。
 

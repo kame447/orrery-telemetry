@@ -17,7 +17,7 @@ PROVIDERS = ("claude", "codex", "gemini")
 LAUNCHERS = {"claude": "agent-start", "codex": "agent-start-codex", "gemini": "agent-start-gemini"}
 KEYS = ("AGENTSTACK_PROJECT_KEY", "PROJECT_KEY", "AGENTSTACK_PROJECT_REPOSITORY",
         "AGENTSTACK_PROJECT_WORK_DIR", "AGENTSTACK_PROJECT_WORKTREE_ROOT",
-        "AGENTSTACK_PROTECTED_ROOTS", "AGENTSTACK_PROJECT_CONTEXT",
+        "AGENTSTACK_PROTECTED_ROOTS", "AGENTSTACK_EXTRA_PROTECTED_ROOTS", "AGENTSTACK_PROTECTION_CONTEXT", "AGENTSTACK_PROJECT_CONTEXT",
         "AGENTSTACK_LOOKUP_PROJECT_KEY", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
 
 
@@ -206,7 +206,8 @@ raise SystemExit(int(os.environ.get("TEST_PROVIDER_EXIT", "0")))
         self.assertEqual(env["AGENTSTACK_PROJECT_REPOSITORY"], str(repository))
         self.assertEqual(env["AGENTSTACK_PROJECT_WORK_DIR"], str(target))
         self.assertEqual(env["AGENTSTACK_PROJECT_WORKTREE_ROOT"], str(worktree))
-        self.assertEqual(env["AGENTSTACK_PROTECTED_ROOTS"], f"{self.other}:{worktree}")
+        self.assertEqual(env["AGENTSTACK_PROTECTED_ROOTS"], str(worktree))
+        self.assertEqual(env["AGENTSTACK_PROTECTION_CONTEXT"], "workspace-v1")
         for name in ("AGENTSTACK_PROJECT_CONTEXT", "AGENTSTACK_LOOKUP_PROJECT_KEY",
                      "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
             self.assertFalse(env[name], (name, env[name]))
@@ -284,7 +285,7 @@ raise SystemExit(int(os.environ.get("TEST_PROVIDER_EXIT", "0")))
                     self.assertEqual(env["PROJECT_KEY"], key)
                     self.assertEqual(env["AGENTSTACK_PROJECT_REPOSITORY"], "")
                     self.assertEqual(env["AGENTSTACK_PROJECT_WORK_DIR"], str(self.plain))
-                    self.assertEqual(env["AGENTSTACK_PROTECTED_ROOTS"], f"{self.other}:{self.plain}")
+                    self.assertEqual(env["AGENTSTACK_PROTECTED_ROOTS"], str(self.plain))
 
     def test_explicit_physical_project_key_is_namespace_not_repository_authority(self) -> None:
         namespace_alias = self.root / "namespace alias"
@@ -366,7 +367,7 @@ raise SystemExit(int(os.environ.get("TEST_PROVIDER_EXIT", "0")))
     def test_explicit_additional_protected_roots_override_installed_roots_and_deduplicate(self) -> None:
         extra_roots = f"{self.plain}:{self.repo}"
         result = self.run_launcher("codex", self.repo, inside=True,
-                                   extra={"AGENTSTACK_PROTECTED_ROOTS": extra_roots})
+                                   extra={"AGENTSTACK_EXTRA_PROTECTED_ROOTS": extra_roots})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.read("provider")["env"]["AGENTSTACK_PROTECTED_ROOTS"], extra_roots)
 
@@ -375,7 +376,7 @@ raise SystemExit(int(os.environ.get("TEST_PROVIDER_EXIT", "0")))
         target.mkdir()
         note = target / "note.md"
         result = self.run_launcher("codex", target, ambient=False, inside=True,
-                                   extra={"AGENTSTACK_PROTECTED_ROOTS": str(self.plain)})
+                                   extra={"AGENTSTACK_EXTRA_PROTECTED_ROOTS": str(self.plain)})
         self.assertEqual(result.returncode, 0, result.stderr)
         launch_env = self.read("provider")["env"]
         self.assertEqual(launch_env["AGENTSTACK_PROTECTED_ROOTS"], f"{self.plain}:{target}")
@@ -389,7 +390,7 @@ raise SystemExit(int(os.environ.get("TEST_PROVIDER_EXIT", "0")))
         self.assertEqual(hook.returncode, 0, hook.stderr)
         self.assertEqual(hook.stdout.strip(), f"{self.plain}|project/note.md")
 
-    def test_legacy_physical_namespace_protection_is_not_lost(self) -> None:
+    def test_legacy_physical_namespace_is_not_implicitly_protected(self) -> None:
         (self.install / "env.sh").write_text(
             f"export AGENTSTACK_PROJECT_KEY={shlex.quote(str(self.plain))}\n")
         result = self.run_launcher("codex", self.repo, ambient=False, inside=True)
@@ -397,7 +398,7 @@ raise SystemExit(int(os.environ.get("TEST_PROVIDER_EXIT", "0")))
         env = self.read("provider")["env"]
         self.assertEqual(env["AGENTSTACK_PROJECT_KEY"], str(self.plain))
         self.assertEqual(env["AGENTSTACK_PROJECT_REPOSITORY"], str(self.repo))
-        self.assertEqual(env["AGENTSTACK_PROTECTED_ROOTS"], f"{self.plain}:{self.repo}")
+        self.assertEqual(env["AGENTSTACK_PROTECTED_ROOTS"], str(self.repo))
 
     def test_logical_namespace_without_declared_roots_protects_only_target(self) -> None:
         (self.install / "env.sh").write_text("export AGENTSTACK_PROJECT_KEY=shared-project\n")
@@ -405,12 +406,177 @@ raise SystemExit(int(os.environ.get("TEST_PROVIDER_EXIT", "0")))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.read("provider")["env"]["AGENTSTACK_PROTECTED_ROOTS"], str(self.repo))
 
+    def test_a_to_b_launch_replaces_derived_roots_but_keeps_intentional_extras(self) -> None:
+        for provider in PROVIDERS:
+            for inside in (False, True):
+                with self.subTest(provider=provider, inside=inside):
+                    first = self.run_launcher(provider, self.repo, inside=inside,
+                        extra={"AGENTSTACK_EXTRA_PROTECTED_ROOTS": str(self.plain)})
+                    self.assertEqual(first.returncode, 0, first.stderr)
+                    previous = {key: value for key, value in self.read("provider")["env"].items()
+                                if value is not None}
+                    second = self.run_launcher(provider, self.other, inside=inside, extra=previous)
+                    self.assertEqual(second.returncode, 0, second.stderr)
+                    env = self.read("provider")["env"]
+                    self.assertEqual(env["AGENTSTACK_PROTECTED_ROOTS"], f"{self.plain}:{self.other}")
+                    self.assertEqual(env["AGENTSTACK_EXTRA_PROTECTED_ROOTS"], str(self.plain))
+                    self.assertEqual(env["AGENTSTACK_PROJECT_WORK_DIR"], str(self.other))
+                    self.assertNotIn(str(self.repo), env["AGENTSTACK_PROTECTED_ROOTS"].split(":"))
+
+    def test_empty_extra_roots_override_installed_and_tmux_server_settings(self) -> None:
+        with (self.install / "env.sh").open("a") as stream:
+            stream.write(f'export AGENTSTACK_EXTRA_PROTECTED_ROOTS={shlex.quote(str(self.plain))}\n')
+        server = {**self.server_stale, "AGENTSTACK_EXTRA_PROTECTED_ROOTS": str(self.other)}
+        for provider in PROVIDERS:
+            with self.subTest(provider=provider):
+                result = self.run_launcher(provider, self.repo, extra={
+                    "AGENTSTACK_EXTRA_PROTECTED_ROOTS": "", "TEST_SERVER_ENV": json.dumps(server)})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                env = self.read("provider")["env"]
+                self.assertEqual(env["AGENTSTACK_EXTRA_PROTECTED_ROOTS"], "")
+                self.assertEqual(env["AGENTSTACK_PROTECTED_ROOTS"], str(self.repo))
+
+    def test_installed_unquoted_empty_extras_are_deliberate_migration(self) -> None:
+        with (self.install / "env.sh").open("a") as stream:
+            stream.write('export AGENTSTACK_EXTRA_PROTECTED_ROOTS= # intentionally no extras\n')
+        result = self.run_launcher("codex", self.repo, ambient=False, inside=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.read("provider")["env"]["AGENTSTACK_EXTRA_PROTECTED_ROOTS"], "")
+        self.assertEqual(self.read("provider")["env"]["AGENTSTACK_PROTECTED_ROOTS"], str(self.repo))
+        self.assertNotIn("legacy AGENTSTACK_PROTECTED_ROOTS ignored", result.stderr)
+
+    def test_installed_extra_roots_survive_namespace_change(self) -> None:
+        with (self.install / "env.sh").open("a") as stream:
+            stream.write(f'export AGENTSTACK_EXTRA_PROTECTED_ROOTS={shlex.quote(str(self.plain))}\n')
+        result = self.run_launcher("codex", "--project-key", "selected", self.linked)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        env = self.read("provider")["env"]
+        self.assertEqual(env["AGENTSTACK_EXTRA_PROTECTED_ROOTS"], str(self.plain))
+        self.assertEqual(env["AGENTSTACK_PROTECTED_ROOTS"], f"{self.plain}:{self.linked}")
+        self.assertNotIn("legacy AGENTSTACK_PROTECTED_ROOTS ignored", result.stderr)
+
+    def test_legacy_roots_are_visible_in_preview_but_not_reclassified_as_extras(self) -> None:
+        result = self.run_launcher("gemini", "--dry-run", self.repo)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"legacy AGENTSTACK_PROTECTED_ROOTS ignored for this launch: {self.other}", result.stderr)
+        self.assertIn("migrate only intentional shared folders", result.stderr)
+        self.assertIn(f"protected_roots={self.repo}\n", result.stderr)
+        self.assertFalse(list(self.output.glob("*.json")))
+
+    def test_extra_root_aliases_are_canonicalized_and_deduplicated_in_order(self) -> None:
+        alias = self.root / "vault alias"
+        alias.symlink_to(self.plain, target_is_directory=True)
+        extras = f"{alias}/:{self.plain}:{self.repo}/"
+        result = self.run_launcher("codex", self.repo, inside=True,
+                                   extra={"AGENTSTACK_EXTRA_PROTECTED_ROOTS": extras})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        env = self.read("provider")["env"]
+        self.assertEqual(env["AGENTSTACK_EXTRA_PROTECTED_ROOTS"], f"{self.plain}:{self.repo}")
+        self.assertEqual(env["AGENTSTACK_PROTECTED_ROOTS"], f"{self.plain}:{self.repo}")
+
+    def test_managed_file_alias_matches_canonical_vault_reservation_path(self) -> None:
+        target = self.plain / "project"
+        target.mkdir()
+        alias = self.root / "vault alias"
+        alias.symlink_to(self.plain, target_is_directory=True)
+        result = self.run_launcher("codex", target, ambient=False, inside=True,
+            extra={"AGENTSTACK_EXTRA_PROTECTED_ROOTS": str(alias)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        env = {**self.env, **{key: value for key, value in self.read("provider")["env"].items()
+                            if value is not None}}
+        script = '. "$1"; reservation_resolve_tool_context "$2"; printf "%s|%s\\n" "$MATCHED_ROOT" "$REL_PATH"'
+        for path in (alias / "project/note.md", target / "child/../note.md"):
+            with self.subTest(path=path):
+                result = subprocess.run(["/bin/bash", "-e", "-c", script, "test",
+                    str(ROOT / "hooks/reservation-common.sh"),
+                    json.dumps({"tool_input": {"file_path": str(path)}})],
+                    cwd=target, env=env, capture_output=True, text=True, timeout=20)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), f"{self.plain}|project/note.md")
+        # A legacy session with the original alias-root contract is untouched.
+        env.pop("AGENTSTACK_PROTECTION_CONTEXT")
+        env["AGENTSTACK_PROTECTED_ROOTS"] = str(alias)
+        result = subprocess.run(["/bin/bash", "-e", "-c", script, "test",
+            str(ROOT / "hooks/reservation-common.sh"),
+            json.dumps({"tool_input": {"file_path": str(alias / "project/note.md")}})],
+            cwd=target, env=env, capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), f"{alias}|project/note.md")
+
+    def test_filesystem_root_extra_keeps_full_relative_reservation_path(self) -> None:
+        result = self.run_launcher("codex", self.repo, inside=True,
+            extra={"AGENTSTACK_EXTRA_PROTECTED_ROOTS": "/"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        env = {**self.env, **{key: value for key, value in self.read("provider")["env"].items()
+                            if value is not None}}
+        note = self.repo / "note.md"
+        result = subprocess.run(["bash", "-e", "-c",
+            '. "$1"; reservation_resolve_tool_context "$2"; printf "%s" "$REL_PATH"',
+            "test", str(ROOT / "hooks/reservation-common.sh"),
+            json.dumps({"tool_input": {"file_path": str(note)}})],
+            env=env, cwd=self.repo, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, str(note).lstrip("/"))
+
+    def test_cli_context_exports_quote_extra_paths_as_data(self) -> None:
+        extra = self.root / "shared '$HOME;$(touch UNEXPECTED)"
+        extra.mkdir()
+        script = ('context="$(bash "$1" workspace-context-exports "$2" shared)" || exit $?; '
+                  'eval "$context"; printf "%s\\n" "$AGENTSTACK_PROTECTED_ROOTS"')
+        result = subprocess.run(["/bin/bash", "-c", script, "test",
+            str(ROOT / "hooks/project-context.sh"), str(self.repo)], cwd=self.root,
+            env={**self.env, "AGENTSTACK_EXTRA_PROTECTED_ROOTS": str(extra)},
+            capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), f"{extra}:{self.repo}")
+        self.assertFalse((self.root / "UNEXPECTED").exists())
+
+    def test_relative_or_control_character_extra_root_fails_before_launch(self) -> None:
+        for extras in ("relative/shared", str(self.plain) + "\ninvalid", str(self.plain) + "\n"):
+            with self.subTest(extras=extras):
+                result = self.run_launcher("codex", self.repo,
+                    extra={"AGENTSTACK_EXTRA_PROTECTED_ROOTS": extras})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(list(self.output.glob("*.json")))
+
     def test_control_character_in_key_is_rejected(self) -> None:
         for key in ("bad\nkey", "bad\n", "bad\r"):
             with self.subTest(key=key):
                 result = self.run_launcher("codex", "--project-key", key, self.repo)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(list(self.output.glob("*.json")))
+
+    def test_context_resolution_with_git_only_path_does_not_need_env_or_dirname(self) -> None:
+        bindir = self.root / "git-only-bin"
+        bindir.mkdir()
+        fake_git = bindir / "git"
+        fake_git.write_text('#!/bin/sh\nprintf "git\\n" >> "$TEST_GIT_CALLS"\nexit 128\n')
+        fake_git.chmod(0o755)
+        calls = self.root / "git-calls"
+        env = {**self.env, "PATH": str(bindir), "TEST_GIT_CALLS": str(calls)}
+        command = ["/bin/bash", str(ROOT / "hooks/project-context.sh"),
+                   "resolve-invocation-context", str(self.plain), "shared"]
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=3)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["work_dir"], str(self.plain))
+        self.assertEqual(calls.read_text().splitlines(), ["git", "git"])
+        with (self.install / "env.sh").open("a") as stream:
+            stream.write(f'export AGENTSTACK_EXTRA_PROTECTED_ROOTS={shlex.quote(str(self.other))}\n')
+        configured = subprocess.run(["/bin/bash", str(ROOT / "hooks/project-context.sh"),
+            "workspace-context-json", str(self.plain), "shared"],
+            env=env, capture_output=True, text=True, timeout=3)
+        self.assertEqual(configured.returncode, 0, configured.stderr)
+        configured_env = json.loads(configured.stdout)["environment"]
+        self.assertEqual(configured_env["AGENTSTACK_EXTRA_PROTECTED_ROOTS"], str(self.other))
+        self.assertEqual(configured_env["AGENTSTACK_PROTECTED_ROOTS"], f"{self.other}:{self.plain}")
+        nested = self.plain / "nested"
+        nested.mkdir()
+        (self.plain / ".git").mkdir()
+        (self.plain / ".git/HEAD").write_text("broken metadata")
+        command[-2] = str(nested)
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=3)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot resolve repository metadata", result.stderr)
 
     def test_missing_python_cannot_launch_with_stale_context(self) -> None:
         result = self.run_launcher("codex", self.repo, extra={"AGENTSTACK_PYTHON": "/missing/python"})
@@ -430,7 +596,7 @@ raise SystemExit(int(os.environ.get("TEST_PROVIDER_EXIT", "0")))
     def test_codex_permissions_vault_and_oauth_behavior_do_not_change(self) -> None:
         result = self.run_launcher("codex", self.repo, inside=True,
                                    extra={"AGENTSTACK_VAULT": str(self.plain),
-                                          "AGENTSTACK_PROTECTED_ROOTS": str(self.plain),
+                                          "AGENTSTACK_EXTRA_PROTECTED_ROOTS": str(self.plain),
                                           "OPENAI_API_KEY": "must-strip"})
         self.assertEqual(result.returncode, 0, result.stderr)
         record = self.read("provider")

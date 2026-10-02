@@ -12,7 +12,13 @@ agentstack_installed_env_value() {
         *[!A-Z0-9_]*|"") return 0 ;;
     esac
     [ -f "$env_file" ] || return 0
-    python3 - "$env_file" "$name" <<'PY' 2>/dev/null || true
+    local reader="${AGENTSTACK_PYTHON:-python3}"
+    command -v "$reader" >/dev/null 2>&1 || reader=python3
+    command -v "$reader" >/dev/null 2>&1 || {
+        printf 'agentstack: Python is required to read installed configuration\n' >&2
+        return 1
+    }
+    "$reader" - "$env_file" "$name" "${3:-value}" <<'PY' 2>/dev/null
 import pathlib
 import re
 import shlex
@@ -34,8 +40,10 @@ for line in raw.splitlines():
         values = shlex.split(match.group(1), comments=True, posix=True)
     except ValueError:
         raise SystemExit(0)
-    if len(values) == 1:
-        print(values[0], end="")
+    # `export NAME=` (with optional whitespace/comment) is an explicit empty
+    # assignment just like the installer's quoted `export NAME=''` spelling.
+    if len(values) <= 1:
+        print("1" if sys.argv[3] == "present" else (values[0] if values else ""), end="")
     raise SystemExit(0)
 PY
 }
@@ -53,6 +61,7 @@ PY
 AGENTSTACK_INHERITED_SETTINGS="
 AGENTSTACK_PROJECT_KEY
 AGENTSTACK_PROTECTED_ROOTS
+AGENTSTACK_EXTRA_PROTECTED_ROOTS
 AGENTSTACK_PORT
 AGENTSTACK_LABEL_PREFIX
 AGENTSTACK_MAIL_LAUNCHD_LABEL
@@ -132,7 +141,7 @@ agentstack_load_installed_env() {
     [ -f "$env_file" ] || return 0
     for name in $AGENTSTACK_INHERITED_SETTINGS; do
         value="${!name:-}"
-        if [ -n "$value" ]; then
+        if [ -n "$value" ] || { [ "$name" = AGENTSTACK_EXTRA_PROTECTED_ROOTS ] && [ "${AGENTSTACK_EXTRA_PROTECTED_ROOTS+x}" = x ]; }; then
             names[$count]="$name"
             values[$count]="$value"
             count=$((count + 1))
@@ -145,7 +154,11 @@ agentstack_load_installed_env() {
     while [ "$i" -lt "$count" ]; do
         name="${names[$i]}"
         value="${!name:-}"
-        export "$name=$(agentstack_pick_setting "${values[$i]}" "$value")"
+        if [ "$name" = AGENTSTACK_EXTRA_PROTECTED_ROOTS ]; then
+            export "$name=${values[$i]}"
+        else
+            export "$name=$(agentstack_pick_setting "${values[$i]}" "$value")"
+        fi
         i=$((i + 1))
     done
     if [ -n "$live_project_key" ]; then
@@ -159,24 +172,43 @@ agentstack_load_installed_env() {
     return 0
 }
 
-# A top-level launch must add its actual workspace to reservation protection
-# without dropping deliberately configured extra roots (for example a writable
-# shared vault). Capture only the declared setting before the generic loader
-# derives a namespace-shaped default. The usual setting precedence stays here.
+# Explicit extras are configuration; PROTECTED_ROOTS is a runtime result.
+# Presence, not non-emptiness, matters: EXTRA_PROTECTED_ROOTS= clears installed
+# extras. Never infer extras from a legacy root list or a path-shaped namespace.
+agentstack_resolve_extra_protected_roots() {
+    local env_file="${1:-${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh}"
+    if [ "${AGENTSTACK_EXTRA_PROTECTED_ROOTS+x}" = x ]; then
+        printf '%s' "$AGENTSTACK_EXTRA_PROTECTED_ROOTS"
+    else
+        agentstack_installed_env_value AGENTSTACK_EXTRA_PROTECTED_ROOTS "$env_file"
+    fi
+}
+
+agentstack_warn_legacy_protected_roots() {
+    local env_file="${1:-${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh}"
+    local legacy=""
+    if [ "${AGENTSTACK_EXTRA_PROTECTED_ROOTS+x}" = x ] ||
+       [ "$(agentstack_installed_env_value AGENTSTACK_EXTRA_PROTECTED_ROOTS "$env_file" present)" = 1 ]; then
+        return 0
+    fi
+    legacy="${AGENTSTACK_PROTECTED_ROOTS:-$(agentstack_installed_env_value AGENTSTACK_PROTECTED_ROOTS "$env_file")}"
+    if [ -n "$legacy" ]; then
+        printf 'agentstack: legacy AGENTSTACK_PROTECTED_ROOTS ignored for this launch: %s\n' "$legacy" >&2
+        printf 'agentstack: migrate only intentional shared folders to AGENTSTACK_EXTRA_PROTECTED_ROOTS; the launch workspace is protected automatically.\n' >&2
+        printf 'agentstack: finish/release existing reservations before changing root order or migrating active sessions.\n' >&2
+    fi
+}
+
 agentstack_load_top_level_env() {
     local env_file="${1:-${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh}"
-    local inherited_key=""
-    AGS_CONFIGURED_PROTECTED_ROOTS="$(agentstack_resolve_setting \
-        AGENTSTACK_PROTECTED_ROOTS "${AGENTSTACK_PROTECTED_ROOTS:-}" "" "$env_file")"
-    if [ -z "$AGS_CONFIGURED_PROTECTED_ROOTS" ]; then
-        # Older installs protected a path-shaped namespace by default. Keep
-        # that existing protection too; it is not workspace ownership evidence.
-        inherited_key="$(agentstack_resolve_project_key "" "$env_file" 0)"
-        case "$inherited_key" in
-            /*|\~/*) AGS_CONFIGURED_PROTECTED_ROOTS="$inherited_key" ;;
-        esac
-    fi
-    agentstack_load_installed_env "$env_file"
+    local extras=""
+    agentstack_warn_legacy_protected_roots "$env_file"
+    extras="$(agentstack_resolve_extra_protected_roots "$env_file" || exit $?; printf .)" || return 1
+    extras="${extras%.}"
+    agentstack_load_installed_env "$env_file" || return 1
+    # Export even an empty choice so tmux/children cannot recover stale extras
+    # from their server environment or a later env.sh load.
+    export AGENTSTACK_EXTRA_PROTECTED_ROOTS="$extras"
 }
 
 agentstack_physical_dir() {
@@ -207,9 +239,9 @@ agentstack_resolve_invocation_context() {
         printf 'agentstack: git is required to resolve invocation target\n' >&2
         return 1
     }
-    worktree_root="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+    worktree_root="$(unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR
         git -C "$work_dir" rev-parse --show-toplevel 2>/dev/null)" || worktree_root=""
-    common="$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+    common="$(unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR
         git -C "$work_dir" rev-parse --git-common-dir 2>/dev/null)" || common=""
     if [ -z "$worktree_root" ] || [ -z "$common" ]; then
         # Do not reinterpret a broken repository marker as an ordinary non-Git
@@ -227,7 +259,8 @@ agentstack_resolve_invocation_context() {
                 return 1
             fi
             [ "$probe" != / ] || break
-            probe="$(dirname "$probe")"
+            probe="${probe%/*}"
+            [ -n "$probe" ] || probe=/
         done
         worktree_root=""
         common=""
@@ -244,8 +277,9 @@ agentstack_resolve_invocation_context() {
             /*) common_abs="$(agentstack_physical_dir "$common")" || return 1 ;;
             *) common_abs="$(agentstack_physical_dir "$work_dir/$common")" || return 1 ;;
         esac
-        if [ "$(basename "$common_abs")" = ".git" ]; then
-            repository="$(dirname "$common_abs")"
+        if [ "${common_abs##*/}" = ".git" ]; then
+            repository="${common_abs%/*}"
+            [ -n "$repository" ] || repository=/
         else
             repository="$common_abs"
         fi
@@ -277,6 +311,83 @@ print(json.dumps({
     "protected_roots": [worktree_root or work_dir],
 }, separators=(",", ":")))
 PY
+}
+
+# Recompute the entire runtime tuple at every AI launch boundary. This is also
+# used by child and resume launchers, independently of identity registration.
+# Validate all data before exporting anything. Ordered extras precede the
+# mandatory workspace to retain existing first-matching-root reservation names.
+agentstack_apply_workspace_context() {
+    [ "$#" -ge 1 ] && [ "$#" -le 2 ] || return 2
+    local target="$1" selected_key="${2:-}" context="" extras="" decoded="" value=""
+    local fields=()
+    case "$target$selected_key" in
+        *$'\n'*|*$'\r'*) printf 'agentstack: control characters cannot be passed to the launcher\n' >&2; return 1 ;;
+    esac
+    agentstack_warn_legacy_protected_roots
+    extras="$(agentstack_resolve_extra_protected_roots || exit $?; printf .)" || return 1
+    extras="${extras%.}"
+    context="$(agentstack_resolve_invocation_context "$target" "$selected_key")" || return 1
+    decoded="$("${AGENTSTACK_PYTHON:-python3}" - "$context" "$extras" <<'PYCONTEXT'
+import json
+import os
+import sys
+
+try:
+    data = json.loads(sys.argv[1])
+    fields = [data["project_key"], data["repository_key"] or "",
+              data["work_dir"], data["worktree_root"] or ""]
+    workspace_roots = data["protected_roots"]
+    if not isinstance(workspace_roots, list) or not workspace_roots:
+        raise ValueError("protected roots must be a nonempty array")
+    if not all(isinstance(value, str) for value in fields + workspace_roots):
+        raise ValueError("context fields must be strings")
+    if not fields[0] or not fields[2] or any(not root for root in workspace_roots):
+        raise ValueError("context contains an empty key or workspace")
+    if any(any(ord(char) < 32 or ord(char) == 127 for char in value)
+           for value in fields + workspace_roots + [sys.argv[2]]):
+        raise ValueError("control characters cannot be passed to the launcher")
+    if any(":" in root for root in workspace_roots):
+        raise ValueError("protected roots containing ':' cannot use the legacy environment")
+    extras = []
+    for root in sys.argv[2].split(":"):
+        if not root:
+            continue
+        root = os.path.expanduser(root)
+        if not os.path.isabs(root):
+            raise ValueError("extra protected roots must be absolute paths (or ~/ paths)")
+        # Match the physical workspace coordinate system; collapse aliases and
+        # trailing slashes before deduplication without changing root order.
+        root = os.path.realpath(root)
+        if ":" in root:
+            raise ValueError("protected roots containing ':' cannot use the legacy environment")
+        if root not in extras:
+            extras.append(root)
+    roots = list(extras)
+    for root in workspace_roots:
+        if root not in roots:
+            roots.append(root)
+    print("\n".join(fields + [":".join(roots), ":".join(extras), "end"]))
+except (KeyError, TypeError, ValueError) as exc:
+    print(f"agentstack: invalid launch context: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+PYCONTEXT
+)" || return 1
+    while IFS= read -r value; do fields+=("$value"); done <<< "$decoded"
+    [ "${#fields[@]}" -eq 7 ] || return 1
+    AGENTSTACK_PROJECT_KEY="${fields[0]}"
+    PROJECT_KEY="${fields[0]}"
+    AGENTSTACK_PROJECT_REPOSITORY="${fields[1]}"
+    AGENTSTACK_PROJECT_WORK_DIR="${fields[2]}"
+    AGENTSTACK_PROJECT_WORKTREE_ROOT="${fields[3]}"
+    AGENTSTACK_PROTECTED_ROOTS="${fields[4]}"
+    AGENTSTACK_EXTRA_PROTECTED_ROOTS="${fields[5]}"
+    export AGENTSTACK_PROJECT_KEY PROJECT_KEY AGENTSTACK_PROJECT_REPOSITORY
+    export AGENTSTACK_PROJECT_WORK_DIR AGENTSTACK_PROJECT_WORKTREE_ROOT
+    export AGENTSTACK_PROTECTED_ROOTS AGENTSTACK_EXTRA_PROTECTED_ROOTS
+    export AGENTSTACK_PROTECTION_CONTEXT=workspace-v1
+    unset AGENTSTACK_PROJECT_CONTEXT AGENTSTACK_LOOKUP_PROJECT_KEY
+    unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR
 }
 
 agentstack_context_field() {
@@ -357,6 +468,29 @@ if [ -n "${BASH_SOURCE:-}" ] && [ "${BASH_SOURCE[0]}" = "$0" ]; then
         resolve-invocation-context)
             shift
             agentstack_resolve_invocation_context "$@"
+            ;;
+        workspace-context-exports|workspace-context-json)
+            output_mode="$1"
+            shift
+            agentstack_apply_workspace_context "$@" || exit 1
+            "${AGENTSTACK_PYTHON:-python3}" - "$output_mode" <<'PYEXPORTS'
+import json
+import os
+import shlex
+import sys
+names = ("AGENTSTACK_PROJECT_KEY", "PROJECT_KEY", "AGENTSTACK_PROJECT_REPOSITORY",
+         "AGENTSTACK_PROJECT_WORK_DIR", "AGENTSTACK_PROJECT_WORKTREE_ROOT",
+         "AGENTSTACK_PROTECTED_ROOTS", "AGENTSTACK_EXTRA_PROTECTED_ROOTS",
+         "AGENTSTACK_PROTECTION_CONTEXT")
+values = {name: os.environ[name] for name in names}
+unset = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "AGENTSTACK_PROJECT_CONTEXT", "AGENTSTACK_LOOKUP_PROJECT_KEY"]
+if sys.argv[1] == "workspace-context-json":
+    print(json.dumps({"environment": values, "unset": unset}))
+else:
+    print("unset " + " ".join(unset))
+    for name, value in values.items():
+        print("export " + name + "=" + shlex.quote(value))
+PYEXPORTS
             ;;
         resolve-project-key)
             shift

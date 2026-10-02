@@ -72,6 +72,11 @@ cd orrery-telemetry
 ./scripts/install.sh --project-key /absolute/project/path --dry-run
 ```
 
+The project key is a coordination namespace, not the reservation scope. Each
+AI launch protects its actual workspace; persist only deliberately shared roots
+in `AGENTSTACK_EXTRA_PROTECTED_ROOTS`. For an older install, review the migration
+in `docs/configuration.md` before copying any legacy protected-root values.
+
 Read the dry run with the user. It prints the planned service mode, the
 ORRERY Mail database it resolved, and the settings diff. If the resolved
 database is not the one they actually use, stop and ask — that is worth more

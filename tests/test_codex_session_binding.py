@@ -431,6 +431,7 @@ def _codex_entrypoint_layout(tmp_path: Path, layout: str) -> dict[str, Path]:
             "bin/lib/agentstack-register.sh",
             "bin/lib/agentstack-scientists.sh",
             "hooks/spawn_child.sh",
+            "hooks/project-context.sh",
             "dashboard/codex_models.py",
             "hooks/child_resume.py",
             "hooks/prepare-codex-session-binding.py",

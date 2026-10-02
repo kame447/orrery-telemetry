@@ -10,6 +10,11 @@
 
 ## Unreleased
 
+### 保護する workspace と、明示した追加の共有 folder を分離しました
+
+新しい managed launch の保護 root は、起動先の実際の Git worktree（non-Git では作業 directory）から毎回計算します。追加の共有 folder は `AGENTSTACK_EXTRA_PROTECTED_ROOTS` にだけ設定します。明示した空値は install 済みの追加設定を解除します。`AGENTSTACK_PROTECTED_ROOTS` は起動ごとの計算結果であり、前の project の値や path 形式の Mail namespace を追加 root として再利用しません。旧設定は自動で推測して移さず警告し、必要な共有 folder だけを明示して移行します。追加 root の順序を保ち、その後に workspace を足すので、vault 配下の既存の first-match 相対予約 path は変えません。root の変更・移行前には進行中の予約を完了・解放してください。既存 session の hook 契約は再起動まで従来どおりです。 起動済み warm provider は cwd と保護 root を変更できないため、pre-registered Claude の子は cold-start します。
+
+
 ### 予約済み identity の更新を同じ所有済み row に限定しました
 
 Mail の `register_agent` に `existing_agent_id` と組み合わせる明示 opt-in `refresh_existing=true` を追加しました。exact project・ID・name・program・非空 owner token を条件に同じ row の model/task/活動時刻を原子的に更新し、NULL-owner の claim、新規作成、別名生成を行いません。活動時刻は後退せず、既定の existing-ID 認証専用動作と attachments/contact policy・retirement は維持します。reserved child/resume と reregister は token なしの `whois` 後にこの経路を使い、未対応の古い Mail schema では停止します。通常登録への fallback はありません。実行中 Mail service の更新が必要で、source checkout だけでは配備されません。dashboard HTTP API の変更ではないため、その API 世代は上げません。

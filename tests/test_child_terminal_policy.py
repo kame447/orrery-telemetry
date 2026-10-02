@@ -195,10 +195,11 @@ def test_agentctl_renders_and_exports_observer_policy(tmp_path, setting):
     variables = set(re.findall(r'\$([A-Z][A-Z_0-9]*)', render + background))
     env = {**os.environ, **{name: "" for name in variables}}
     env.update(HOME=str(tmp_path), AUTO_OPEN_CHILD_SETTING=setting, TERMINAL="ghostty",
+               PYTHON=sys.executable, PROTECTION_CONFIG_NAME="AGENTSTACK_EXTRA_PROTECTED_ROOTS",
                PLIST_TEMPLATE=str(ROOT / "dashboard/agentdashboard.plist.template"),
                PLIST_DST=str(tmp_path / "dashboard.plist"))
     result = _shell("\n".join([
-        _function(path, "sed_escape"), render, background,
+        _function(path, "sed_escape"), _function(path, "xml_sed_escape"), render, background,
         'render_plist', 'export_background_env',
         'printf "%s:%s" "$AGENTSTACK_AUTO_OPEN_CHILD" "$AGENTSTACK_TERMINAL"',
     ]), env)
