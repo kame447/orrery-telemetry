@@ -190,6 +190,7 @@ def _invoke_resume_entry(monkeypatch, tmp_path, project, runtime):
     bootstrap.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     installed_hooks = install_home / "hooks"
     installed_hooks.mkdir()
+    shutil.copy2(ROOT / "hooks" / "project-context.sh", installed_hooks)
     shutil.copy2(ROOT / "hooks" / "child_resume.py", installed_hooks)
     runner = (
         install_home
@@ -280,6 +281,7 @@ def test_resume_sources_the_installed_product_bootstrap(policy_env, monkeypatch)
     bootstrap.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     hooks = install_home / "hooks"
     hooks.mkdir()
+    shutil.copy2(ROOT / "hooks" / "project-context.sh", hooks)
     shutil.copy2(ROOT / "hooks" / "child_resume.py", hooks)
     runner = (
         install_home / "integrations" / "codex_app" / "plugin" / "scripts" / "run-mcp.sh"
@@ -321,8 +323,7 @@ def test_resume_sources_the_installed_product_bootstrap(policy_env, monkeypatch)
     assert len(launched) == 1
     inner = launched[0][-1]
     # Claude in Chrome defaults must not reach a Codex child (tmux server env).
-    assert inner.startswith(
-        "unset AGENTSTACK_CLAUDE_CHILD_CHROME AGENTSTACK_CLAUDE_CHILD_CHROME_DEVICE; ")
+    assert "unset AGENTSTACK_CLAUDE_CHILD_CHROME AGENTSTACK_CLAUDE_CHILD_CHROME_DEVICE; " in inner
     assert f"source {shlex.quote(str(bootstrap))}" in inner
     assert "AGENTSTACK_CODEX_LAUNCH_KIND=resume" in inner
     assert f"AGENTSTACK_CODEX_RESUME_SESSION_ID={session_id}" in inner
@@ -355,6 +356,8 @@ def test_standalone_resume_uses_current_home_without_child_lifecycle(
     bootstrap = install_home / "bin" / "agentstack-codex-bootstrap"
     bootstrap.parent.mkdir(parents=True)
     bootstrap.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (install_home / "hooks").mkdir()
+    shutil.copy2(ROOT / "hooks" / "project-context.sh", install_home / "hooks")
     token = runtime / f"agent_token_{AGENT}"
     _write_private(token, OWNER_TOKEN)
     receipt = runtime / "session_index" / f"{AGENT_ID}.json"
@@ -440,6 +443,7 @@ def test_deck_resume_exec_receives_the_fresh_launch_pair(policy_env, monkeypatch
     hooks = install_home / "hooks"
     libdir.mkdir(parents=True)
     hooks.mkdir(parents=True)
+    shutil.copy2(ROOT / "hooks" / "project-context.sh", hooks)
     shutil.copy2(ROOT / "bin" / "agentstack-codex-bootstrap", bindir)
     shutil.copy2(ROOT / "hooks" / "prepare-codex-session-binding.py", hooks)
     for name in (
@@ -1010,6 +1014,7 @@ def test_resume_valid_state_without_home_regenerates_private_home(
     bootstrap.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
     installed_hooks = install_home / "hooks"
     installed_hooks.mkdir()
+    shutil.copy2(ROOT / "hooks" / "project-context.sh", installed_hooks)
     shutil.copy2(ROOT / "hooks" / "child_resume.py", installed_hooks)
     runner = (
         install_home / "integrations" / "codex_app" / "plugin" / "scripts" / "run-mcp.sh"
@@ -1052,6 +1057,7 @@ def test_installed_bootstrap_creates_a_fresh_resume_generation(policy_env):
     hooks = install_home / "hooks"
     libdir.mkdir(parents=True)
     hooks.mkdir(parents=True)
+    shutil.copy2(ROOT / "hooks" / "project-context.sh", hooks)
     bootstrap = bindir / "agentstack-codex-bootstrap"
     bootstrap.write_text(
         (ROOT / "bin" / "agentstack-codex-bootstrap").read_text(encoding="utf-8"),
@@ -1134,6 +1140,7 @@ def test_top_level_bootstrap_records_standalone_origin(policy_env):
     hooks = install_home / "hooks"
     libdir.mkdir(parents=True)
     hooks.mkdir(parents=True)
+    shutil.copy2(ROOT / "hooks" / "project-context.sh", hooks)
     bootstrap = bindir / "agentstack-codex-bootstrap"
     shutil.copy2(ROOT / "bin" / "agentstack-codex-bootstrap", bootstrap)
     shutil.copy2(ROOT / "hooks" / "prepare-codex-session-binding.py", hooks)
@@ -1239,6 +1246,8 @@ def test_reserved_resume_stops_before_exec_when_binding_preconditions_fail(
         (ROOT / "bin" / "agentstack-codex-bootstrap").read_text(encoding="utf-8"),
         encoding="utf-8",
     )
+    (install_home / "hooks").mkdir()
+    shutil.copy2(ROOT / "hooks" / "project-context.sh", install_home / "hooks")
     health_status = 1 if failure_mode == "health_unreachable" else 0
     (libdir / "agentstack-register.sh").write_text(
         "ags_mail_load_token() { :; }\n"

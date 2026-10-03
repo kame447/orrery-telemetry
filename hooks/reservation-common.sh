@@ -139,27 +139,44 @@ except Exception:
         FILE_PATH="$(pwd)/$FILE_PATH"
     fi
 
+    # New managed launches export physical roots. Resolve file aliases/.. into
+    # that same coordinate system (also for a not-yet-created Write target),
+    # while retaining the legacy lexical contract for already-running sessions.
+    if [[ "${AGENTSTACK_PROTECTION_CONTEXT:-}" == workspace-v1 ]]; then
+        FILE_PATH="$(python3 - "$FILE_PATH" <<'PYFILE'
+import os
+import sys
+print(os.path.realpath(sys.argv[1]))
+PYFILE
+)" || return 1
+    fi
+
     MATCHED_ROOT=""
     if [[ -n "$PROTECTED_ROOTS" ]]; then
-        local old_ifs="$IFS"
-        local root
-        IFS=":"
-        for root in $PROTECTED_ROOTS; do
+        local remaining="$PROTECTED_ROOTS" root
+        # Split only on the protocol delimiter. An unquoted shell word would
+        # expand literal [, *, or ? in a physical workspace into sibling paths.
+        # This leaves the caller's IFS and pathname-expansion options untouched.
+        while [[ -n "$remaining" ]]; do
+            root="${remaining%%:*}"
+            case "$remaining" in
+                *:*) remaining="${remaining#*:}" ;;
+                *) remaining="" ;;
+            esac
             root="$(expand_path "$root")"
             [[ -z "$root" ]] && continue
             [[ "$root" != "/" ]] && root="${root%/}"
             case "$FILE_PATH" in
-                "$root"|"$root/"*)
+                "$root"|"${root%/}/"*)
                     MATCHED_ROOT="$root"
                     break
                     ;;
             esac
         done
-        IFS="$old_ifs"
     fi
     [ -n "$MATCHED_ROOT" ] || return 1
 
-    REL_PATH="${FILE_PATH#$MATCHED_ROOT/}"
+    REL_PATH="${FILE_PATH#"${MATCHED_ROOT%/}/"}"
     if [[ "$REL_PATH" == "$FILE_PATH" ]]; then
         REL_PATH="$(basename "$FILE_PATH")"
     fi

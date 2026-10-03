@@ -24,9 +24,48 @@
 WORK_DIR="${1:-.}"
 if [ -n "${BASH_SOURCE:-}" ]; then _ags_bootstrap_src="${BASH_SOURCE[0]}"; else _ags_bootstrap_src="$0"; fi
 SCRIPT_DIR="$(cd "$(dirname "$_ags_bootstrap_src")" && pwd)"
-if [ -z "${AGENTSTACK_PROJECT_KEY:-}" ] && [ -f "$SCRIPT_DIR/../env.sh" ]; then . "$SCRIPT_DIR/../env.sh"; fi
+_ags_context_helper="$SCRIPT_DIR/../hooks/project-context.sh"
+[ -f "$_ags_context_helper" ] || _ags_context_helper="${AGENTSTACK_HOOKS_DIR:-$SCRIPT_DIR/../hooks}/project-context.sh"
+# Preserve an explicitly empty extra-root selection across the legacy env load.
+_ags_legacy_roots_set="${AGENTSTACK_PROTECTED_ROOTS+x}"
+_ags_legacy_roots="${AGENTSTACK_PROTECTED_ROOTS:-}"
+_ags_extra_roots_set="${AGENTSTACK_EXTRA_PROTECTED_ROOTS+x}"
+_ags_extra_roots="${AGENTSTACK_EXTRA_PROTECTED_ROOTS:-}"
+if [ -z "${AGENTSTACK_PROJECT_KEY:-}" ] && [ -f "$SCRIPT_DIR/../env.sh" ]; then
+  # Protection assignments must be literal before the legacy env is sourced.
+  if ! /bin/bash "$_ags_context_helper" installed-env-value AGENTSTACK_PROTECTED_ROOTS "$SCRIPT_DIR/../env.sh" >/dev/null ||
+     ! /bin/bash "$_ags_context_helper" installed-env-value AGENTSTACK_EXTRA_PROTECTED_ROOTS "$SCRIPT_DIR/../env.sh" >/dev/null; then
+    echo "warning: invalid installed protection configuration; refusing to start." >&2
+    return 1 2>/dev/null || exit 1
+  fi
+  . "$SCRIPT_DIR/../env.sh"
+fi
+if [ "$_ags_extra_roots_set" = x ]; then
+  export AGENTSTACK_EXTRA_PROTECTED_ROOTS="$_ags_extra_roots"
+fi
+if [ "$_ags_legacy_roots_set" = x ]; then
+  export AGENTSTACK_PROTECTED_ROOTS="$_ags_legacy_roots"
+else
+  unset AGENTSTACK_PROTECTED_ROOTS
+fi
+unset _ags_extra_roots_set _ags_extra_roots _ags_legacy_roots_set _ags_legacy_roots
 
 PROJECT_KEY="${AGENTSTACK_PROJECT_KEY:-}"
+# Resolve protection before registration or any provider exec. This also runs
+# for dashboard resumes, where tmux may still carry a different session's roots.
+# The helper emits portable quoted exports for both bash and zsh callers.
+_ags_selected_project_key="$PROJECT_KEY"
+if ! _ags_workspace_context="$(AGENTSTACK_HOME="${AGENTSTACK_HOME:-$SCRIPT_DIR/..}" /bin/bash "$_ags_context_helper" \
+    workspace-context-exports "$WORK_DIR" "$PROJECT_KEY")"; then
+  echo "warning: workspace context could not be resolved; refusing to start." >&2
+  return 1 2>/dev/null || exit 1
+fi
+eval "$_ags_workspace_context"
+WORK_DIR="$AGENTSTACK_PROJECT_WORK_DIR"
+# Keep the existing missing-namespace identity policy: protection resolution
+# must not manufacture registration authority for a reserved/resumed session.
+export PROJECT_KEY="$_ags_selected_project_key" AGENTSTACK_PROJECT_KEY="$_ags_selected_project_key"
+unset _ags_workspace_context _ags_selected_project_key _ags_context_helper
 MCP_URL="${AGENTSTACK_MCP_URL:-http://127.0.0.1:18765/mcp}"
 MAIL_ENV="${AGENTSTACK_MAIL_ENV:-}"
 MANAGED_FILE="${AGENTSTACK_MANAGED_AGENTS_FILE:-}"

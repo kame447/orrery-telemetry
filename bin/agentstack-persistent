@@ -45,6 +45,22 @@ CLAUDE_EXTRA_SETTINGS_FLAGS = frozenset({"--settings", "--setting-sources", "--s
 CLAUDE_GIT_DISCOVERY_ENV = frozenset(
     {"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"}
 )
+WORKSPACE_CONTEXT_ENV = frozenset(
+    {
+        "AGENTSTACK_PROJECT_KEY",
+        "PROJECT_KEY",
+        "AGENTSTACK_PROJECT_REPOSITORY",
+        "AGENTSTACK_PROJECT_WORK_DIR",
+        "AGENTSTACK_PROJECT_WORKTREE_ROOT",
+        "AGENTSTACK_PROTECTED_ROOTS",
+        "AGENTSTACK_EXTRA_PROTECTED_ROOTS",
+        "AGENTSTACK_PROTECTION_CONTEXT",
+    }
+)
+WORKSPACE_CONTEXT_UNSET = CLAUDE_GIT_DISCOVERY_ENV | {
+    "AGENTSTACK_PROJECT_CONTEXT",
+    "AGENTSTACK_LOOKUP_PROJECT_KEY",
+}
 CLAUDE_PLUGIN_COMPONENT_FIELDS = frozenset(
     {
         "skills",
@@ -82,9 +98,12 @@ ALLOWED_PROFILE_KEYS = {
 
 
 class PersistentError(RuntimeError):
-    def __init__(self, reason: str, *, path: Path | None = None) -> None:
+    def __init__(
+        self, reason: str, *, path: Path | None = None, guidance: str | None = None,
+    ) -> None:
         super().__init__(reason)
         self.path = path
+        self.guidance = guidance
 
 
 class _DuplicateJsonMember(ValueError):
@@ -1323,6 +1342,8 @@ def _runtime_manifest(
     profile: dict[str, Any],
     inspected: dict[str, Any],
     wake_socket: Path | None,
+    *,
+    workspace_warning: str = "",
 ) -> Path:
     path = runtime_dir / "persistent" / f"{profile['name']}.json"
     value: dict[str, Any] = {
@@ -1342,14 +1363,122 @@ def _runtime_manifest(
     if wake_socket is not None:
         value["wake_socket"] = str(wake_socket)
         value["bridge_contract"] = BRIDGE_CONTRACT
+    if workspace_warning:
+        value["workspace_warning"] = workspace_warning
     _atomic_json(path, value)
     return path
 
 
+def _validate_codex_working_directory(profile: dict[str, Any], workdir: str) -> None:
+    """Keep interactive Codex cwd options within the declared launch workspace."""
+    if profile["provider"] != "codex" or profile["interaction"] != "interactive":
+        return
+    command = profile["command"]
+    declared = Path(workdir).resolve()
+    index = 1
+    while index < len(command):
+        item = command[index]
+        if item == "--":
+            break  # Everything after the option delimiter is literal input.
+        value = None
+        if item in {"-C", "--cd"}:
+            index += 1
+            value = command[index] if index < len(command) else ""
+        elif item.startswith("--cd="):
+            value = item[len("--cd="):]
+        elif item.startswith("-C"):
+            value = item[2:]
+            if value.startswith("="):
+                value = value[1:]
+        if value is not None:
+            selected = Path(value)
+            if not selected.is_absolute():
+                selected = declared / selected
+            try:
+                matches = bool(value) and selected.resolve() == declared
+            except (OSError, RuntimeError):
+                matches = False
+            if not matches:
+                raise PersistentError(
+                    "profile-command-working-directory-conflict",
+                    guidance=("Set the profile working_directory to the intended Codex workspace "
+                              "and remove conflicting -C/--cd arguments from command."),
+                )
+        index += 1
+
+
+def _workspace_environment(
+    profile: dict[str, Any], environment: dict[str, str]
+) -> tuple[dict[str, str], str]:
+    # Use the helper belonging to this launcher version, independently of the
+    # optional hooks override used by other integrations. Derive from the final
+    # profile environment so an explicit empty extras value clears installed
+    # extras, and never promote inherited computed roots into configuration.
+    helper = Path(__file__).resolve().parent.parent / "hooks" / "project-context.sh"
+    if not helper.is_file():
+        raise PersistentError("workspace-context-helper-unavailable", path=helper)
+    workdir = Path(profile["working_directory"])
+    if not workdir.is_dir():
+        raise PersistentError("working-directory-unavailable")
+    try:
+        result = subprocess.run(
+            [
+                "/bin/bash",
+                str(helper),
+                "workspace-context-json",
+                str(workdir),
+                profile["project_key"],
+            ],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise PersistentError("workspace-context-unavailable", path=workdir) from exc
+    if result.returncode != 0:
+        raise PersistentError("workspace-context-unavailable", path=workdir)
+    try:
+        context = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise PersistentError("workspace-context-invalid", path=workdir) from exc
+    if not isinstance(context, dict):
+        raise PersistentError("workspace-context-invalid", path=workdir)
+    exported = context.get("environment")
+    removed = context.get("unset")
+    if (
+        not isinstance(exported, dict)
+        or set(exported) != WORKSPACE_CONTEXT_ENV
+        or any(
+            not isinstance(value, str)
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)
+            for value in exported.values()
+        )
+        or not isinstance(removed, list)
+        or any(not isinstance(name, str) for name in removed)
+        or set(removed) != WORKSPACE_CONTEXT_UNSET
+        or exported["AGENTSTACK_PROJECT_KEY"] != profile["project_key"]
+        or exported["PROJECT_KEY"] != profile["project_key"]
+        or exported["AGENTSTACK_PROTECTION_CONTEXT"] != "workspace-v1"
+        or not os.path.isabs(exported["AGENTSTACK_PROJECT_WORK_DIR"])
+        or not exported["AGENTSTACK_PROTECTED_ROOTS"]
+    ):
+        raise PersistentError("workspace-context-invalid", path=workdir)
+    resolved = dict(environment)
+    for name in removed:
+        resolved.pop(name, None)
+    resolved.update(exported)
+    # Do not interleave migration diagnostics with the launcher's structured
+    # failure record if enrollment or provider setup rejects this launch later.
+    return resolved, result.stderr
+
+
 def _validated(
-    profile_path: Path,
+    profile_path: Path, *, profile: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], Path, dict[str, Any], Path, Path]:
-    profile = _profile(profile_path)
+    if profile is None:
+        profile = _profile(profile_path)
     connection_path, connection_value, runtime_dir = _connection(profile)
     inspected = _enroll_inspect(profile, connection_path)
     if inspected["server_instance_id"] != connection_value["expected_server_instance_id"]:
@@ -1389,12 +1518,7 @@ def _inspect_output(profile: dict[str, Any], inspected: dict[str, Any]) -> dict[
 
 
 def _run(profile_path: Path) -> NoReturn:
-    profile, inspected, _connection_path, connection, runtime_dir, state_dir = _validated(
-        profile_path
-    )
-    _instance_lock(state_dir)
-    token_file = runtime_dir / f"agent_token_{profile['name']}"
-    runner, proxy_env = _proxy_env(profile, connection, runtime_dir, token_file)
+    profile = _profile(profile_path)
     environment = dict(os.environ)
     for key in (
         "PARENT_AGENT",
@@ -1409,6 +1533,16 @@ def _run(profile_path: Path) -> NoReturn:
     ):
         environment.pop(key, None)
     environment.update(profile.get("environment", {}))
+    # Fail before enrollment inspection, state creation, locks, or provider
+    # configuration writes when this launch workspace cannot be established.
+    environment, workspace_warning = _workspace_environment(profile, environment)
+    _validate_codex_working_directory(profile, environment["AGENTSTACK_PROJECT_WORK_DIR"])
+    profile, inspected, _connection_path, connection, runtime_dir, state_dir = _validated(
+        profile_path, profile=profile
+    )
+    _instance_lock(state_dir)
+    token_file = runtime_dir / f"agent_token_{profile['name']}"
+    runner, proxy_env = _proxy_env(profile, connection, runtime_dir, token_file)
     environment.update(
         {
             "AGENT_NAME": profile["name"],
@@ -1464,13 +1598,16 @@ def _run(profile_path: Path) -> NoReturn:
             raise PersistentError("headless-wake-socket-unsafe") from exc
         environment["AGENTSTACK_PERSISTENT_WAKE_SOCKET"] = str(wake_socket)
         environment["AGENTSTACK_PERSISTENT_BRIDGE_CONTRACT"] = BRIDGE_CONTRACT
-    manifest = _runtime_manifest(runtime_dir, profile_path, profile, inspected, wake_socket)
+    manifest = _runtime_manifest(
+        runtime_dir, profile_path, profile, inspected, wake_socket,
+        workspace_warning=workspace_warning,
+    )
     environment["AGENTSTACK_PERSISTENT_RUNTIME_MANIFEST"] = str(manifest)
     executable = command[0]
     resolved = executable if os.path.isabs(executable) else shutil.which(executable, path=environment.get("PATH"))
     if not resolved or not Path(resolved).is_file() or not os.access(resolved, os.X_OK):
         raise PersistentError("profile-command-unavailable")
-    os.chdir(profile["working_directory"])
+    os.chdir(environment["AGENTSTACK_PROJECT_WORK_DIR"])
     os.execvpe(str(resolved), command, environment)
     raise AssertionError("unreachable")
 
@@ -1490,6 +1627,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         error = {"ok": False, "reason": str(exc), "docs": DOCS}
         if exc.path is not None:
             error["path"] = str(exc.path)
+        if exc.guidance is not None:
+            error["guidance"] = exc.guidance
         print(
             json.dumps(error, sort_keys=True, separators=(",", ":")),
             file=sys.stderr,

@@ -342,6 +342,7 @@ def test_resume_bootstrap_preserves_child_provenance_before_unretire(
     libdir = bindir / "lib"
     libdir.mkdir(parents=True)
     hooks.mkdir(parents=True)
+    shutil.copy2(ROOT / "hooks" / "project-context.sh", hooks)
     bootstrap = bindir / "agentstack-codex-bootstrap"
     shutil.copy2(ROOT / "bin" / "agentstack-codex-bootstrap", bootstrap)
     shutil.copy2(ROOT / "hooks" / "prepare-codex-session-binding.py", hooks)
@@ -508,6 +509,7 @@ def test_failure_before_codex_exec_discards_home_but_keeps_retired_credential(
     install_home = tmp_path / "agentstack"
     hooks = install_home / "hooks"
     hooks.mkdir(parents=True)
+    shutil.copy2(ROOT / "hooks" / "project-context.sh", hooks)
     shutil.copy2(ROOT / "hooks" / "child_resume.py", hooks)
     bootstrap = install_home / "bin" / "agentstack-codex-bootstrap"
     bootstrap.parent.mkdir(parents=True)
@@ -613,6 +615,7 @@ def test_real_resume_command_can_cleanup_and_resume_again(
     hooks = install_home / "hooks"
     libdir.mkdir(parents=True)
     hooks.mkdir(parents=True)
+    shutil.copy2(ROOT / "hooks" / "project-context.sh", hooks)
     for source, target in (
         (ROOT / "bin" / "agentstack-codex-bootstrap", bindir / "agentstack-codex-bootstrap"),
         (ROOT / "bin" / "lib" / "agentstack-register.sh", libdir / "agentstack-register.sh"),
