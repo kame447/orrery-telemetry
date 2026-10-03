@@ -25,6 +25,16 @@ agent-start
 
 優先順位は明示引数、`fzf` picker、現在 directory の順です。
 
+## 起動 workspace と reservation の保護範囲
+
+namespace の選択は変えません。既存の環境設定で上書きしなければ、installed `AGENTSTACK_PROJECT_KEY` を協調 namespace として使います。path 形式の key でも異なる repository の agent をまとめられ、その path 自体は保護に追加しません。作業 directory の選択で namespace は変わりません。
+
+managed 起動ごとに、設定順の `AGENTSTACK_EXTRA_PROTECTED_ROOTS` の後へ、実際の物理 Git worktree root（non-Git では作業 directory）を足して `AGENTSTACK_PROTECTED_ROOTS` を計算します。別名と重複は順序を変えずにまとめます。extras が明示的に空でも実 workspace の保護は必須です。child、persistent run、resume も自分の起動先を再解決し、前 session の計算済み root を再利用しません。
+
+継承した `GIT_DIR`、`GIT_WORK_TREE`、`GIT_COMMON_DIR` は workspace の判定に使わず、起動 process から取り除きます。Git metadata が壊れていれば別 directory へ切り替えず起動を停止します。新しい tmux session には server に残った旧 root ではなく現在の workspace context を渡し、server の global environment は変えません。`AGENTSTACK_VAULT`、Codex の sandbox/approval、OAuth の扱いは変えません。
+
+install/update は installed の旧保護 list を一度だけ自動移行します。ambient shell/tmux の `AGENTSTACK_PROTECTED_ROOTS` は取り込まず、非空で installed と異なる旧値は extras があっても警告します。相対 reservation 名は最初に一致する root から決まるため、cutover 前に作業を完了するか予約を解放し、更新後に影響する session をまとめて再起動してください。[保護設定の自動移行](configuration.md#reservation-の保護範囲と移行)を参照してください。
+
 ## tmux session
 
 tmux 外から起動すると、新しい named session を作って現在の terminal tab を置き換えます。tmux 内からは current session を rename し、その場で CLI を `exec` します。
@@ -236,7 +246,13 @@ ORRERY Telemetry の委譲は、必ず先頭の slash を付けて `/delegate ..
 
 Codex child の MCP は既定で `inherit`（従来互換）です。`/delegate --codex-mcp orrery-only` は認証済み ORRERY Mail と session-binding plugin を残して、他の継承 MCP/plugin を無効化します。plugin skill や外部 app tool が必要な task では使いません。
 
-Claude の別名の行き先は `dashboard/claude_models.py`、Codex のモデル・effort規則は `dashboard/codex_models.py` が正本です。Claude の無指定 / `opus` / `sonnet` / `haiku` / `fable` は、Claude Code のローカル model catalog がその系統の現行として示すモデルに解決し、catalog が使えないときは同梱の表（今は `claude-opus-5-5` / `claude-sonnet-5-5` / `claude-haiku-4-5-20251001` / `claude-fable-5-1`）を使います。どちらを使ったかは launcher の出力と doctor に出ます。`sonnet-5-5`（`sonnet55`・`Sonnet 5.5` も可）・`sonnet-5`・`opus-5-5` のような版つきの別名は世代を固定し、`spawn_child.sh` にあります。Codex は無指定と `sol` のどちらも起動対象 CLI が 0.159.0 以上なら `gpt-6.1-sol`、古い版なら `gpt-6-sol` です。版不明なら新鮮な catalog で判定します。GPT-6.1 Sol には Codex CLI 0.159.0 以上が必要で、doctor が fallback と更新方法を note に出します。旧世代を固定する場合は `gpt-6-sol` のように正式 ID を指定します。`claude-opus-5` / `opus-5` は旧世代を明示指定する互換形として有効です。`luna` は `gpt-6-luna`、`terra` は `gpt-5.6-terra`、`astra` は `gpt-6-astra` のaliasです。旧世代の正式 ID は互換性のため有効なままですが、warm pool を使うのは、要求モデルが `opus` / `sonnet` の別名の解決結果で、pool の status がその正式 ID を括弧で示す（例 `opus ready (claude-opus-5-5)`）ときだけです。claim は `warm_pool.sh claim-model <種類> <子の名前> <正式 ID>` で行い、pool はそのモデルで事前起動した session だけを不可分に claim して `<子の名前> <正式 ID>` を出力する必要があります（status を見た後に pool が入れ替わっても、別のモデルを渡さないため）。`claim-model` の無い pool や、拒否した pool は cold start になります。別のモデルを報告した claim は、その session を止めて起動を中止します。子は、`hooks/claude-child-bin.sh` が子の login shell（`~/.local/bin` を先頭）で見つけた `claude` の path を実行し、別名の版の確認もその binary で行います。dashboard も、モデル省略の起動の前と起動時に同じ script を実行し、NEW AGENT の既定もその結果で決めます。起動の前の実行が失敗した（timeout など）ときは、前の答えで決めずに、登録の前にエラーで止めます。モデルを明示した起動と dry run はこの実行をしません。Opus 5.5 には Claude Code 2.1.280 以上が必要です。
+Claude の別名の行き先は `dashboard/claude_models.py`、Codex のモデル・effort規則は `dashboard/codex_models.py` が正本です。Claude の無指定 / `opus` / `sonnet` / `haiku` / `fable` は、Claude Code のローカル model catalog がその系統の現行として示すモデルに解決し、catalog が使えないときは同梱の表（今は `claude-opus-5-5` / `claude-sonnet-5-5` / `claude-haiku-4-5-20251001` / `claude-fable-5-1`）を使います。どちらを使ったかは launcher の出力と doctor に出ます。`sonnet-5-5`（`sonnet55`・`Sonnet 5.5` も可）・`sonnet-5`・`opus-5-5` のような版つきの別名は世代を固定し、`spawn_child.sh` にあります。Codex は無指定と `sol` のどちらも起動対象 CLI が 0.159.0 以上なら `gpt-6.1-sol`、古い版なら `gpt-6-sol` です。版不明なら新鮮な catalog で判定します。GPT-6.1 Sol には Codex CLI 0.159.0 以上が必要で、doctor が fallback と更新方法を note に出します。旧世代を固定する場合は `gpt-6-sol` のように正式 ID を指定します。`claude-opus-5` / `opus-5` は旧世代を明示指定する互換形として有効です。`luna` は `gpt-6-luna`、`terra` は `gpt-5.6-terra`、`astra` は `gpt-6-astra` のaliasです。旧世代の正式 ID は互換性のため有効なままです。custom warm pool は current model と起動 workspace context の完全一致が必要です。旧版・model だけを見る pool は安全に cold start します（下記参照）。子は、`hooks/claude-child-bin.sh` が子の login shell（`~/.local/bin` を先頭）で見つけた `claude` の path を実行し、別名の版の確認もその binary で行います。dashboard も、モデル省略の起動の前と起動時に同じ script を実行し、NEW AGENT の既定もその結果で決めます。起動の前の実行が失敗した（timeout など）ときは、前の答えで決めずに、登録の前にエラーで止めます。モデルを明示した起動と dry run はこの実行をしません。Opus 5.5 には Claude Code 2.1.280 以上が必要です。
+
+### Warm pool の互換性
+
+`warm_pool.sh` は同梱しません。custom pool は current の `opus` / `sonnet` 別名の model に限り、ready status に同じ正式 ID を表示し、`capabilities` が `claim-workspace-v1` と完全一致する行を返す場合だけ対象です。launcher は `claim-workspace-v1 TYPE CHILD MODEL WORK_DIR PROJECT_KEY REPOSITORY WORKTREE_ROOT PROTECTED_ROOTS EXTRA_PROTECTED_ROOTS` を呼びます。pool は渡された全 field を稼働中 provider の実際の起動 context と不可分に比較し、不一致なら変更せず拒否し、成功時は `CHILD MODEL workspace-v1` を正確に返す必要があります。tmux の環境だけの変更では不十分です。capability が無い、または拒否した場合は新しい cold 起動へ進みます。不正な成功応答は claim 済み session を停止して起動を中止します。browser/tool の制限時は引き続き cold start です。一定の起動時間は保証しません。
+
+### 子の起動手順
 
 1. 対象 resource、排他性、失敗点、可逆性から risk と監視頻度を決める
 2. `agentstack-preregister-child` で child-owned token と canonical name を作る

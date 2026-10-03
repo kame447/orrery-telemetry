@@ -107,3 +107,63 @@ def test_api_docs_state_the_served_api_generation_and_when_it_changes() -> None:
         doc = _read(rel)
         assert f'"api":{served.group(1)}}}' in doc, f"{rel} shows another api generation"
         assert rule in doc and "CHANGELOG" in doc, f"{rel} does not say when api goes up"
+
+
+def test_protection_setting_is_documented_across_launch_and_agent_guides() -> None:
+    example = _read(".env.example")
+    assert "AGENTSTACK_EXTRA_PROTECTED_ROOTS=/path/to/shared-vault" in example
+    assert "AGENTSTACK_PROTECTED_ROOTS=" not in example
+    for rel in (
+        "AGENTS.md", "README.md", "README.en.md",
+        "docs/configuration.md", "docs/configuration.en.md",
+        "docs/install.md", "docs/install.en.md", "docs/hooks.md", "docs/hooks.en.md",
+        "docs/launchers.md", "docs/launchers.en.md",
+        "docs/delegation.md", "docs/delegation.en.md",
+        "docs/persistent-agents.md", "docs/persistent-agents.en.md",
+        "claude/CLAUDE.md", "codex/AGENTS.md",
+    ):
+        assert "AGENTSTACK_EXTRA_PROTECTED_ROOTS" in _read(rel), rel
+    for rel in ("claude/CLAUDE.md", "codex/AGENTS.md"):
+        assert "first matching root" in _read(rel), rel
+        assert "Do not carry a previous" in _read(rel), rel
+
+
+def test_automatic_protection_migration_and_cutover_are_documented() -> None:
+    # The empty marker and installed-file source are safety boundaries, not
+    # optional cleanup advice; both install guides and references must say so.
+    for rel in ("docs/configuration.md", "docs/configuration.en.md",
+                "docs/install.md", "docs/install.en.md"):
+        doc = _read(rel)
+        for needle in ("AGENTSTACK_EXTRA_PROTECTED_ROOTS=", "AGENTSTACK_PROTECTED_ROOTS",
+                       "--dry-run", "--reset-settings", "shell/tmux", "marker",
+                       "direct/unmanaged", "cutover"):
+            assert needle in doc, (rel, needle)
+    english = _read("docs/configuration.en.md")
+    for needle in ("using presence rather than non-emptiness", "copied exactly once",
+                   "literal value and order intact", "no manual copy is needed",
+                   "source, value, and destination", "before the installed file is overwritten",
+                   "even when extras already exist", "first matching protected root",
+                   "restart affected sessions together", "Namespace selection is unchanged"):
+        assert needle in english, needle
+    japanese = _read("docs/configuration.md")
+    for needle in ("設定の有無", "そのまま一度だけ", "手動コピーは不要", "移行元・値・保存先",
+                   "上書きする前", "extras が既に存在しても警告", "最初に一致する保護 root",
+                   "session をまとめて再起動", "namespace の選択は変えず"):
+        assert needle in japanese, needle
+    assert '"AGENTSTACK_EXTRA_PROTECTED_ROOTS": os.environ["AGENTSTACK_INSTALL_EXTRA_PROTECTED_ROOTS"]' in INSTALLER
+    assert "would migrate installed AGENTSTACK_PROTECTED_ROOTS to AGENTSTACK_EXTRA_PROTECTED_ROOTS once" in INSTALLER
+    assert "source=%s value=%q destination=%s:AGENTSTACK_EXTRA_PROTECTED_ROOTS" in INSTALLER
+    assert "ignoring ambient roots (never migrated)" in INSTALLER
+
+
+def test_launcher_docs_require_workspace_aware_warm_pool_capability() -> None:
+    child = _read("hooks/spawn_child.sh")
+    assert "claim-workspace-v1" in child
+    for rel in ("docs/launchers.md", "docs/launchers.en.md",
+                "docs/delegation.md", "docs/delegation.en.md"):
+        assert "claim-workspace-v1" in _read(rel), rel
+    for rel in ("docs/launchers.md", "docs/launchers.en.md"):
+        doc = _read(rel)
+        assert "CHILD MODEL workspace-v1" in doc, rel
+        assert "WORK_DIR PROJECT_KEY REPOSITORY WORKTREE_ROOT PROTECTED_ROOTS EXTRA_PROTECTED_ROOTS" in doc, rel
+        assert "agent-start-codex --project-key" not in doc, rel

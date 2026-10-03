@@ -348,13 +348,22 @@ export AGENTSTACK_TCC_DIRS="$HOME/Desktop:$HOME/Documents:$HOME/Downloads"
 
 ## Upgrade
 
+保護設定の更新前に作業を完了するか active file reservation を解放し、更新後に影響する session をまとめて再起動してください。先に選択される root を preview します。
+
 ```bash
 git pull
+./scripts/install.sh --dry-run
 ./scripts/install.sh
 ~/.agentstack/bin/agentstack-doctor
 ```
 
 installer は payload と `VERSION` を更新し、service を再登録して、managed merge を再び preview します。同梱 ORRERY Mail の candidate と state を検証して再利用します。
+
+### Reservation 保護設定の移行
+
+新しい managed AI 起動は、順序付き `AGENTSTACK_EXTRA_PROTECTED_ROOTS` の後に、物理 Git worktree root（non-Git では作業 directory）を必ず保護します。namespace の選択と installed project key は変えません。install/update は process extras（空も含む）、installed extras（空も含む）、installed の旧 `AGENTSTACK_PROTECTED_ROOTS` の literal 値と順序をそのまま一度だけ、最後に空、の順で自動選択します。ambient shell/tmux の旧 root は取り込みません。移行元・値・保存先を `--dry-run` でも表示し、不正・曖昧な旧設定は上書き前に停止します。
+
+空でも extras marker を永続化するため、旧 list を再取り込みしません。installed の旧 field は direct/unmanaged hook 互換のためだけに保持し、managed 起動は無視します。shell/tmux の旧値が非空で installed 値と異なれば、extras があっても警告します。`--reset-settings` は extras を保持し、`AGENTSTACK_EXTRA_PROTECTED_ROOTS=` で明示的に解除できます。相対 reservation 名は最初に一致する root から決まるため、cutover 前に作業を完了するか active reservation を解放し、更新後に影響する session をまとめて再起動してください。[設定と移行の詳細](configuration.md#reservation-の保護範囲と移行)を参照してください。
 
 ### 前回の設定の引き継ぎ
 
@@ -364,13 +373,13 @@ installer は payload と `VERSION` を更新し、service を再登録して、
 2. 前回の install が書いた `~/.agentstack/env.sh` の値
 3. 既定値
 
-したがって、既定値から変えた設定は、環境変数のない新しい端末で `./scripts/install.sh` を実行しても保たれます。対象は project key と protected roots、dashboard port（`AGENTSTACK_PORT`）、label prefix（`AGENTSTACK_LABEL_PREFIX`）とそこから決まる ORRERY Mail の launchd label、terminal、MCP URL、service の `PATH`、Python、ORRERY Mail の state root（DB の場所）と service root と management socket、`AGENTSTACK_LANG` / `AGENTSTACK_MURMUR` / `AGENTSTACK_DELIVERABLE_ROOTS`、`AGENTSTACK_VAULT`、`AGENTSTACK_MANAGED_AGENTS_FILE`、dashboard の log と再起動の設定（`AGENTSTACK_DASHBOARD_LOG` / `_LOG_MAX_BYTES` / `_LOG_BACKUPS` / `_RESTART_DELAY`）、spawn の dirs / roots、worktree root、Codex child の設定、`AGENTSTACK_CODEX_BIN`、portraits、model catalog です。一覧は `hooks/project-context.sh` の `AGENTSTACK_INHERITED_SETTINGS` が正本です。
+したがって、既定値から変えた設定は、環境変数のない新しい端末で `./scripts/install.sh` を実行しても保たれます。対象は project key と明示した追加 protected roots、dashboard port（`AGENTSTACK_PORT`）、label prefix（`AGENTSTACK_LABEL_PREFIX`）とそこから決まる ORRERY Mail の launchd label、terminal、MCP URL、service の `PATH`、Python、ORRERY Mail の state root（DB の場所）と service root と management socket、`AGENTSTACK_LANG` / `AGENTSTACK_MURMUR` / `AGENTSTACK_DELIVERABLE_ROOTS`、`AGENTSTACK_VAULT`、`AGENTSTACK_MANAGED_AGENTS_FILE`、dashboard の log と再起動の設定（`AGENTSTACK_DASHBOARD_LOG` / `_LOG_MAX_BYTES` / `_LOG_BACKUPS` / `_RESTART_DELAY`）、spawn の dirs / roots、worktree root、Codex child の設定、`AGENTSTACK_CODEX_BIN`、portraits、model catalog です。一覧は `hooks/project-context.sh` の `AGENTSTACK_INHERITED_SETTINGS` が正本です。
 
-- **引き継ぐのは選んだ値だけです。** `env.sh` には既定値も含めてすべての値が書かれるので、どれを明示して選んだかを `AGENTSTACK_CHOSEN_SETTINGS` に一緒に記録し、次の install はそれだけを引き継ぎます。選んでいない値（書き出された既定値、installer が探して見つけた Python や PATH）は、次の版で既定値が変われば新しい既定値になります。この記録が無い以前の版の `env.sh` では、今の既定値と違う値を選んだものとみなします（PATH と Python は installer が自分で決めていたので除きます）。`AGENTSTACK_CODEX_BIN` は探して見つけた場所も引き継ぎます（使えなくなっていれば探し直します）。
+- **通常の設定で引き継ぐのは選んだ値だけです。** `env.sh` には既定値も含めてすべての値が書かれるので、どれを明示して選んだかを `AGENTSTACK_CHOSEN_SETTINGS` に一緒に記録し、次の install はそれだけを引き継ぎます。選んでいない値（書き出された既定値、installer が探して見つけた Python や PATH）は、次の版で既定値が変われば新しい既定値になります。この記録が無い以前の版の `env.sh` では、今の既定値と違う値を選んだものとみなします（PATH と Python は installer が自分で決めていたので除きます）。`AGENTSTACK_CODEX_BIN` は探して見つけた場所も引き継ぎます（使えなくなっていれば探し直します）。保護の追加 root は `AGENTSTACK_CHOSEN_SETTINGS` にかかわらず、上記の設定の有無による移行順に従います。
 - 前回の値を変えるには、その option か環境変数を明示します（例: `./scripts/install.sh --port 8771`）。
 - **1 つだけ既定値に戻すには、空の値を明示します**（例: `AGENTSTACK_VAULT= ./scripts/install.sh`、`./scripts/install.sh --codex-add-dirs ""`）。
-- 選んだ値をまとめて既定値に戻すには `--reset-settings`（または `AGENTSTACK_RESET_SETTINGS=1`）を付けます。ただし、データの置き場所と、そこで動いている service の名前は reset でも引き継ぎます。project key、protected roots、ORRERY Mail の state root・service root・management socket、label prefix、ORRERY Mail の launchd label、MCP URL です。これらを reset で既定値に戻すと、前の service が登録されたまま、同じ DB に別の名前の ORRERY Mail が立つためです。変えるときは明示してください（前の service は自分で止める必要があります）。
-- 環境変数の値が `env.sh` に記録された値と同じ場合は、`env.sh` を読み込んだ shell や ORRERY cockpit の更新 script から来た値とみなし、新しく選んだ値としては扱いません（前回の扱いを保ち、`--reset-settings` では既定値に戻ります）。option で渡した値は常に明示です。選んだ設定の記録が無い以前の版の `env.sh` に対しては、同じ値でも明示として扱います（毎回明示してきた値を既定値に戻さないため）。
+- 選んだ値をまとめて既定値に戻すには `--reset-settings`（または `AGENTSTACK_RESET_SETTINGS=1`）を付けます。ただし、データの置き場所と、そこで動いている service の名前は reset でも引き継ぎます。project key、ORRERY Mail の state root・service root・management socket、label prefix、ORRERY Mail の launchd label、MCP URL です。これらを reset で既定値に戻すと、前の service が登録されたまま、同じ DB に別の名前の ORRERY Mail が立つためです。変えるときは明示してください（前の service は自分で止める必要があります）。共有 reservation の保護を黙って外さないため、明示した追加 protected roots も reset で引き継ぎます。解除には `AGENTSTACK_EXTRA_PROTECTED_ROOTS=` を明示してください。
+- 通常の設定では、環境変数の値が `env.sh` に記録された値と同じ場合は、`env.sh` を読み込んだ shell や ORRERY cockpit の更新 script から来た値とみなし、新しく選んだ値としては扱いません（前回の扱いを保ち、`--reset-settings` では既定値に戻ります）。option で渡した値は常に明示です。選んだ設定の記録が無い以前の版の `env.sh` に対しては、同じ値でも明示として扱います（毎回明示してきた値を既定値に戻さないため）。
 - 前回記録した Python が無くなっていた・古すぎる場合は、通知を出して探し直します（明示した `AGENTSTACK_PYTHON` が使えない場合は従来どおり停止します）。
 - `AGENTSTACK_CLAUDE_JSON` は引き継ぎません。試験用に別の場所へ入れるための差し替え口で、次の通常の install は `~/.claude.json` に書きます。
 - ORRERY Mail の service env（`AGENTSTACK_MAIL_ENV`）と DB path（`AGENTSTACK_MAIL_DB`）は引き継ぐ設定ではなく、state root と render から毎回決め直します（下記）。

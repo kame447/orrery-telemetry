@@ -29,7 +29,7 @@ Claude Code、Codex CLI、Gemini など、提供元の異なる coding agent を
 | child | ある agent が「この作業をやって」と頼んで起動した別の agent。頼んだ側が親です。親が `/delegate` を使うと child が生まれ、child は終わると親に報告して消えます |
 | ORRERY Mail | agent 同士がメッセージを送り合い、名前と file の予約を管理する同梱の小さなサーバー |
 | dashboard | ブラウザで開く画面。全 agent の状態、親子関係、メッセージの往来を表示します |
-| project key | agent たちに作業させる project フォルダの絶対パス。「どの project の agent か」を区別する鍵です |
+| project key | agent 同士が共有する協調 namespace。通常は project の絶対パスですが、異なる repository で作業する agent をまとめることもできます |
 | skill | agent に「こういう頼まれ方をしたらこの手順で動け」と教える手順書。`/delegate` のように先頭に slash を付けて呼びます。このツールは `/delegate` と `/log` の 2 つを同梱します（[下で説明](#同梱する-2-つの-skill)） |
 
 ## クイックスタート
@@ -46,7 +46,7 @@ cd orrery-telemetry
 ./scripts/install.sh --project-key /absolute/path/to/your-project
 ```
 
-`--project-key` には、agent に作業させたい project フォルダの絶対パスを渡します。この repository 自体のパスではありません。
+`--project-key` は共有の協調 namespace を選びます。通常の初回 install では、作業する project の絶対パスを渡してください。保護する実 workspace は managed AI の起動ごとに独立して決まります。共有したい追加 root だけを `AGENTSTACK_EXTRA_PROTECTED_ROOTS` に設定します。path 形式の project key だけではその path を保護に追加しません。install/update は install 済みの旧保護 list を一度だけ追加 root へ自動移行します。`--dry-run` で[保護設定の移行](docs/configuration.md#reservation-の保護範囲と移行)を確認し、作業完了または active reservation の解放後に更新して、影響する session をまとめて再起動してください。
 
 installer は、あなたの Claude Code / Codex の設定に触れる前に変更内容を表示し、合計 4 回 `yes` を求めます。既存の設定は保持し、変更前の backup を `~/.agentstack/backups` に置きます。先に変更内容だけ見たいときは `--dry-run` を付けます。
 

@@ -72,6 +72,15 @@ cd orrery-telemetry
 ./scripts/install.sh --project-key /absolute/project/path --dry-run
 ```
 
+The project key is a coordination namespace, not the reservation scope. Each
+managed AI launch protects its actual workspace plus `AGENTSTACK_EXTRA_PROTECTED_ROOTS`.
+Install/update automatically migrates the installed legacy protection list once,
+preserving its literal value and order; it never imports a shell's old runtime
+roots. Review the migration source, value, and destination in `--dry-run`.
+Finish work or release active reservations before cutover, then restart affected
+sessions together after updating. See `docs/configuration.md` for precedence,
+explicit empty values, and invalid legacy settings that stop the update.
+
 Read the dry run with the user. It prints the planned service mode, the
 ORRERY Mail database it resolved, and the settings diff. If the resolved
 database is not the one they actually use, stop and ask — that is worth more

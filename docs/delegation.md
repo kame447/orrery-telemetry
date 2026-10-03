@@ -145,7 +145,7 @@ launcher が確かめていない「人が頼んだ」といった主張は書�
 
 1 つの引数に収まらない長いタスク（Linux・WSL は 1 引数 128 KiB）は、子だけが読める file に置き、引数にはその file を読むようにという短い文だけを渡します。引数で渡したタスクは、子が動いている間 process の一覧（`ps`）から見えます。Codex の子も同じです。
 
-warm pool（`hooks/warm_pool.sh`）の session は起動済みなので、タスクは今も貼り付けで渡します。warm pool を使う場合は、事前起動の時に同じ system prompt を渡してください。Codex の子は前からタスクを引数で受け取っています。
+cold 起動の Claude child は、新しい process に現在の workspace、順序付き `AGENTSTACK_EXTRA_PROTECTED_ROOTS`、task 引数を渡します。起動済み warm process の環境は後から変更できません。custom pool は `claim-workspace-v1` を宣言し、実際に稼働する provider の model・workspace・namespace・保護 context が完全一致すると不可分に確認した場合だけ claim できます。旧版・model だけを見る pool や context 不一致では安全に cold start します（[pool の契約](launchers.md#warm-pool-の互換性)）。互換 warm session は既に動いているため task を貼り付けます。事前起動時にも同じ system prompt を渡してください。Codex の子は前から task を引数で受け取っています。
 
 **モデルが変わったら回す:** `scripts/canary-embed-task.sh` は、モデル × vault の内外ごとに一時の子を起動し、それぞれを「実行した／Mail 以外で報告した／断った／時間切れ」に分けて表にします。CI には入れず、手で回します。子は最後に必ず終了させ、retire します。live の ORRERY Mail に一時の identity を作るので、始める前に確認を求めます。
 

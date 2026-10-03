@@ -145,7 +145,7 @@ The task used to be pasted into the input box. Claude Code wraps a paste in `<pa
 
 A task too long for one argument (128 KiB per argument on Linux and WSL) is kept in a file only the child can read, and the argument only says to read that file. A task passed as an argument is visible in the process list (`ps`) while the child runs, as it already was for Codex children.
 
-A warm-pool session (`hooks/warm_pool.sh`) is already running, so its task is still pasted. If you use a warm pool, give it the same system prompt when it is pre-started. Codex children already received their task as an argument.
+Cold Claude children receive their current workspace, ordered `AGENTSTACK_EXTRA_PROTECTED_ROOTS`, and task argument in a fresh process. A warm process cannot acquire new launch settings after it starts: a custom pool is eligible only when it advertises `claim-workspace-v1` and atomically verifies an exact match with the running provider's model, workspace, namespace, and protection context before claiming. Older/model-only pools and context mismatches cold-start safely; see the [pool contract](launchers.en.md#warm-pool-compatibility). A compatible warm session is already running, so its task is still pasted; give it the same system prompt when pre-starting it. Codex children already received their task as an argument.
 
 **Run after a model changes:** `scripts/canary-embed-task.sh` starts short-lived children for each model and place (inside or outside the vault) and tabulates them as started, reported outside Mail, declined, or timed out. It is run by hand, not in CI. Every child is ended and retired at the end. It creates temporary identities in the live ORRERY Mail, so it asks before starting.
 

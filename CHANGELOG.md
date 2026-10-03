@@ -8,6 +8,12 @@
 
 ---
 
+## Unreleased
+
+### 起動先の保護を毎回計算し、既存の追加 root を自動移行します
+
+managed 起動は順序付き `AGENTSTACK_EXTRA_PROTECTED_ROOTS` と実際の物理 workspace を保護し、古い runtime root を再利用しません。namespace の選択と installed project key は変えません。install/update は process extras → installed extras → installed 旧 root の literal 値・順序を一度だけ → 空、の順で選び、空も保存します。ambient shell/tmux の旧 root は取り込まず、不正・曖昧な旧設定は上書き前に停止します。移行元・値・保存先は `--dry-run` でも表示します。`--reset-settings` は extras を保持します。旧 field は direct/unmanaged hook 互換用に残し、異なる非空の ambient 旧値は extras があっても警告します。相対予約名は最初に一致する root から決まるため、cutover 前に作業完了・予約解放、更新後に影響する session をまとめて再起動してください。custom warm pool は `claim-workspace-v1` で稼働 provider の context の完全一致を不可分に検証できる場合だけ再利用し、旧版 pool は cold start します。
+
 ## 2026.10.03.1
 
 ### Mail を更新した後、前から開いていた端末からの update が止まっていました
