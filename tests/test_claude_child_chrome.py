@@ -11,6 +11,8 @@ import json
 import os
 import pathlib
 import re
+import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -23,6 +25,7 @@ from test_spawn_child_embed_task import (  # noqa: E402
 )
 
 import dashboard.server as server  # noqa: E402
+from hooks import child_tools  # noqa: E402
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -50,7 +53,9 @@ CHROME_INNER = PRE_CHROME_INNER.replace(
 # argument, read once from a private file (see claude_child_launch_command).
 ARGV_PROMPT = (' --append-system-prompt "$CLAUDE_CHILD_SYSTEM_PROMPT"'
                ' "$(cat "$CLAUDE_CHILD_PROMPT_FILE"; rm -f "$CLAUDE_CHILD_PROMPT_FILE")"')
-LAUNCHED_CHROME_INNER = CHROME_INNER.replace("--chrome;", "--chrome" + ARGV_PROMPT + ";")
+CHROME_APPROVAL = " --allowed-tools " + ",".join(child_tools.claude_chrome_allowed_tools())
+LAUNCHED_CHROME_INNER = CHROME_INNER.replace(
+    " --chrome;", CHROME_APPROVAL + " --chrome" + ARGV_PROMPT + ";")
 
 
 # --------------------------------------------------------------------------- #
@@ -61,7 +66,7 @@ def _hooks_with_warm_pool(tmp_path: pathlib.Path) -> pathlib.Path:
 
     No warm_pool.sh ships today; the fake proves that a Chrome request skips
     the claim itself, not merely that no pool exists. It implements the
-    `claim-workspace-v1` contract: it claims only a session whose actual model
+    `claim-model` contract: it claims only a session whose actual model
     (FAKE_WARM_ACTUAL, which may differ from what status said) is the one
     asked for. FAKE_WARM_OLD=1 is a pool with only the old `claim`, and
     FAKE_WARM_REPORT makes it report something else after claiming."""
@@ -69,6 +74,8 @@ def _hooks_with_warm_pool(tmp_path: pathlib.Path) -> pathlib.Path:
     hooks.mkdir()
     for entry in (ROOT / "hooks").iterdir():
         (hooks / entry.name).symlink_to(entry)
+    from _installed_client_payload import copy_client_library
+    copy_client_library(tmp_path)
     _executable(
         hooks / "warm_pool.sh",
         "#!/bin/bash\n"
@@ -76,20 +83,14 @@ def _hooks_with_warm_pool(tmp_path: pathlib.Path) -> pathlib.Path:
         "  status) printf '%b\\n' \"${FAKE_WARM_STATUS:-opus ready (claude-opus-5-5)\\nsonnet ready (claude-sonnet-5-5)}\" ;;\n"
         "  claim) printf 'claim %s\\n' \"$3\" >> \"$FAKE_WARM_LOG\"; "
         "tmux new-session -d -s \"$3\" warm; printf '%s\\n' \"$3\" ;;\n"
-        "  capabilities) [[ -z \"${FAKE_WARM_OLD:-}\" ]] || exit 2; printf 'claim-workspace-v1\\n' ;;\n"
-        "  claim-workspace-v1)\n"
+        "  claim-model)\n"
         "    [[ -z \"${FAKE_WARM_OLD:-}\" ]] || exit 2\n"
         "    actual=\" ${FAKE_WARM_ACTUAL:-opus=claude-opus-5-5 sonnet=claude-sonnet-5-5} \"\n"
         "    [[ \"$actual\" == *\" $2=$4 \"* ]] || exit 1\n"
-        "    [[ \"${FAKE_WARM_WORK_DIR:-$AGENTSTACK_PROJECT_WORK_DIR}\" == \"$5\" ]] || exit 1\n"
-        "    [[ \"${FAKE_WARM_PROJECT_KEY:-$AGENTSTACK_PROJECT_KEY}\" == \"$6\" ]] || exit 1\n"
-        "    [[ \"${FAKE_WARM_REPOSITORY:-$AGENTSTACK_PROJECT_REPOSITORY}\" == \"$7\" ]] || exit 1\n"
-        "    [[ \"${FAKE_WARM_WORKTREE:-$AGENTSTACK_PROJECT_WORKTREE_ROOT}\" == \"$8\" ]] || exit 1\n"
-        "    [[ \"${FAKE_WARM_ROOTS:-$AGENTSTACK_PROTECTED_ROOTS}\" == \"$9\" ]] || exit 1\n"
-        "    [[ \"${FAKE_WARM_EXTRAS-$AGENTSTACK_EXTRA_PROTECTED_ROOTS}\" == \"${10}\" ]] || exit 1\n"
-        "    printf 'claim-workspace-v1 %s %s\\n' \"$3\" \"$4\" >> \"$FAKE_WARM_LOG\"\n"
+        "    printf 'claim-model %s %s\\n' \"$3\" \"$4\" >> \"$FAKE_WARM_LOG\"\n"
         "    tmux new-session -d -s \"$3\" warm\n"
-        "    printf '%s\\n' \"${FAKE_WARM_REPORT:-$3 $4 workspace-v1}\" ;;\n"
+        "    printf '%s\\n' \"$3\" > \"$FAKE_TMUX_LOG.warm-name\"\n"
+        "    printf '%s\\n' \"${FAKE_WARM_REPORT:-$3 $4}\" ;;\n"
         "esac\n",
     )
     return hooks
@@ -254,13 +255,16 @@ def test_default_spawn_matches_the_pre_chrome_launcher_exactly(tmp_path):
 
 
 @pytest.mark.parametrize("warm_model", ["opus", "sonnet"])
-def test_default_spawn_still_claims_a_ready_warm_session(tmp_path, warm_model):
+def test_workspace_protection_uses_cold_start_even_when_pool_model_matches(tmp_path, warm_model):
     env, workdir = _launch_env(tmp_path)
     env["AGENTSTACK_HOOKS_DIR"] = str(_hooks_with_warm_pool(tmp_path))
     result = _spawn(tmp_path, env, workdir, "WarmChild", "--model", warm_model)
     assert result.returncode == 0, result.stderr
     model = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5"}[warm_model]
-    assert (tmp_path / "warm.log").read_text() == f"claim-workspace-v1 WarmChild {model}\n"
+    assert not (tmp_path / "warm.log").exists()
+    assert "Cold start" in result.stderr
+    assert f"CLAUDE_CHILD_MODEL={model}" in _new_session(env)
+    assert "workspace-context-exports" in _new_session(env)[-1]
 
 
 @pytest.mark.parametrize("pool", [
@@ -281,26 +285,16 @@ def test_a_claim_that_cannot_promise_the_model_falls_back_to_cold_start(tmp_path
     assert "CLAUDE_CHILD_MODEL=claude-opus-5-5" in launch
 
 
-@pytest.mark.parametrize("setting", ["WORK_DIR", "PROJECT_KEY", "REPOSITORY", "WORKTREE", "ROOTS", "EXTRAS"])
-def test_warm_context_mismatch_cold_starts_without_claim(tmp_path, setting):
-    env, workdir = _launch_env(tmp_path)
-    env["AGENTSTACK_HOOKS_DIR"] = str(_hooks_with_warm_pool(tmp_path))
-    env["FAKE_WARM_" + setting] = "/another/workspace"
-    result = _spawn(tmp_path, env, workdir, "ContextChild", "--model", "opus")
-    assert result.returncode == 0, result.stderr
-    assert not (tmp_path / "warm.log").exists()
-    assert "Cold start" in result.stderr
-    assert "workspace-context-exports" in _new_session(env)[-1]
 
-
-def test_a_claim_reporting_another_model_is_stopped(tmp_path):
+def test_workspace_launch_does_not_ask_an_unverifiable_pool_to_claim(tmp_path):
     env, workdir = _launch_env(tmp_path)
     env["AGENTSTACK_HOOKS_DIR"] = str(_hooks_with_warm_pool(tmp_path))
     env["FAKE_WARM_REPORT"] = "LyingChild claude-opus-7"
     result = _spawn(tmp_path, env, workdir, "LyingChild", "--model", "opus")
-    assert result.returncode != 0
-    assert "reported 'LyingChild claude-opus-7' instead of 'LyingChild claude-opus-5-5 workspace-v1'" in result.stderr
-    assert "Cold start" not in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "warm.log").exists()
+    assert "Cold start" in result.stderr
+    assert "CLAUDE_CHILD_MODEL=claude-opus-5-5" in _new_session(env)
 
 
 @pytest.mark.parametrize("status", ["opus ready\nsonnet ready", "opus ready (claude-opus-5)\nsonnet ready (claude-sonnet-5)"])
@@ -346,9 +340,9 @@ def test_cli_device_wins_over_env_device(tmp_path):
 
 def _codex_inner(env) -> str:
     command = _new_session(env)[-1]
-    prefix, _, rest = command.partition(" -lc '")
-    assert rest.endswith("'"), command
-    return rest[:-1]
+    argv = shlex.split(command)
+    assert argv[-2] == "-lc", command
+    return argv[-1]
 
 
 def test_env_default_is_ignored_for_codex_children(tmp_path):
@@ -387,6 +381,7 @@ def test_codex_child_process_does_not_inherit_the_chrome_env(tmp_path):
     _executable(fake_codex, f"#!/bin/bash\nenv > {dump}\n")
     hooks = tmp_path / "noop-hooks"
     hooks.mkdir()
+    shutil.copy2(ROOT / "hooks" / "codex-bin.sh", hooks)
     _executable(hooks / "cleanup-child-agent.sh", "#!/bin/bash\nexit 0\n")
     run_env = {
         "PATH": "/usr/bin:/bin",
@@ -398,8 +393,9 @@ def test_codex_child_process_does_not_inherit_the_chrome_env(tmp_path):
         "AGENTSTACK_CLAUDE_CHILD_CHROME_DEVICE": "from-server",
         **tmux_env,
     }
-    subprocess.run(["/bin/bash", "-c", inner], env=run_env, cwd=workdir,
-                   capture_output=True, text=True, timeout=60, check=False)
+    result = subprocess.run(["/bin/bash", "-c", inner], env=run_env, cwd=workdir,
+                            capture_output=True, text=True, timeout=60, check=False)
+    assert result.returncode == 0, result.stderr
     seen = dump.read_text(encoding="utf-8")
     assert "AGENTSTACK_CODEX_MODEL=gpt-6-sol" in seen  # the fake really ran
     assert "AGENTSTACK_CLAUDE_CHILD_CHROME" not in seen
@@ -538,6 +534,8 @@ def test_chrome_spawn_stops_when_the_record_cannot_be_written(tmp_path):
     for entry in (ROOT / "hooks").iterdir():
         if entry.name != "claude_chrome_policy.py":
             (hooks / entry.name).symlink_to(entry)
+    from _installed_client_payload import copy_client_library
+    copy_client_library(tmp_path)
     _executable(hooks / "claude_chrome_policy.py",
                 "import sys\nif sys.argv[1] == 'prepare': sys.exit(1)\n"
                 f"exec(open({str(POLICY)!r}).read())\n")
@@ -693,7 +691,8 @@ def test_resume_of_a_chrome_child_adds_chrome(monkeypatch, tmp_path):
     _bound_record(tmp_path)
     _result, launched = _resume(monkeypatch, tmp_path)
     inner = launched[0][-1]
-    assert inner.endswith(f"--resume {SID} -n ResumeChild --chrome")
+    assert inner.endswith(f"--resume {SID} -n ResumeChild --chrome" + CHROME_APPROVAL)
+    assert inner.count("--allowed-tools") == 1
     assert f"export AGENTSTACK_CLAUDE_LAUNCH_ID={LAUNCH}; " in inner
     assert f"export AGENTSTACK_RUNTIME_DIR={tmp_path / 'runtime'}; " in inner
 
@@ -824,6 +823,7 @@ def test_new_agent_rejects_invalid_requests(monkeypatch, payload, message):
 def test_new_agent_strips_the_cli_env_defaults_from_the_launcher(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENTSTACK_CLAUDE_CHILD_CHROME", "1")
     monkeypatch.setenv("AGENTSTACK_CLAUDE_CHILD_CHROME_DEVICE", "from-env")
+    monkeypatch.setenv("AGENTSTACK_CHILD_DEFAULT_TOOLS", "browser,screen:operate")
     launcher = tmp_path / "launcher.sh"
     launcher.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
     launcher.chmod(0o755)
@@ -843,6 +843,8 @@ def test_new_agent_strips_the_cli_env_defaults_from_the_launcher(monkeypatch, tm
     monkeypatch.setattr(server, "_spawn_name_status", lambda _: "available")
     monkeypatch.setattr(server, "_mcp_call", mcp)
     monkeypatch.setattr(server, "_spawn_unavailable_error", lambda: None)
+    from _legacy_dashboard_transport import install_legacy_transport
+    install_legacy_transport(monkeypatch, tmp_path, server, lambda *a, **kw: subprocess.CompletedProcess([], 1, "", ""))
     monkeypatch.setattr(server.subprocess, "Popen", popen)
     spec = server.SpawnLaunchSpec(
         provider="claude", program="claude-code", model="claude-opus-5-5",
@@ -857,6 +859,7 @@ def test_new_agent_strips_the_cli_env_defaults_from_the_launcher(monkeypatch, tm
     assert "--claude-chrome" not in args and "--claude-chrome-device" not in args
     assert "AGENTSTACK_CLAUDE_CHILD_CHROME" not in env
     assert "AGENTSTACK_CLAUDE_CHILD_CHROME_DEVICE" not in env
+    assert "AGENTSTACK_CHILD_DEFAULT_TOOLS" not in env
 
 
 def test_new_agent_form_offers_chrome_only_for_claude():
@@ -866,3 +869,15 @@ def test_new_agent_form_offers_chrome_only_for_claude():
     assert "Unchecked follows your Claude settings." in html
     assert "payload.provider==='claude'&&SPM('spm-chrome')" in html
     assert "provider.id==='claude'" in html
+
+
+
+def test_workspace_launch_cannot_inherit_a_warm_pool_identity(tmp_path):
+    env,workdir=_launch_env(tmp_path)
+    env['AGENTSTACK_HOOKS_DIR']=str(_hooks_with_warm_pool(tmp_path))
+    env['FAKE_WARM_IDENTITY_OVERRIDE']='AnotherIdentity'
+    result=_spawn(tmp_path,env,workdir,'WarmChild','--model','opus')
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / 'warm.log').exists()
+    assert 'Cold start' in result.stderr
+    assert 'AGENT_NAME=WarmChild' in _new_session(env)

@@ -1,5 +1,18 @@
 #!/bin/bash
 
+# Decide explicit global context before loading any legacy environment/state.
+_ags_global_loader="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin/lib" && pwd)/global-client-loader.sh"
+. "$_ags_global_loader"
+_ags_legacy_consumer="$(dirname "$_ags_global_loader")/legacy-tmux-consumer.sh"
+if [[ -f "$_ags_legacy_consumer" ]]; then . "$_ags_legacy_consumer"; fi || exit 2
+if declare -F ags_client_entry >/dev/null; then
+  if ags_client_entry end-session "$@"; then exit 0; else _ags_global_rc=$?; fi
+  if [[ "$_ags_global_rc" != 125 ]]; then
+    exit "$_ags_global_rc"
+  fi
+
+fi
+
 # Conversation-only resume must not touch ORRERY Mail or owner material.
 if [[ "${AGENTSTACK_MAIL_DISABLED:-0}" == "1" ]]; then
     exit 0
@@ -184,7 +197,7 @@ conn.close()
 # reservations of, or retire, a copy still in use (#143 review). Evidence is a
 # live tmux pane other than ours whose pane metadata names the agent, or a
 # SessionStart lease whose provider PID is still running (ours has exited).
-# When tmux cannot be read from inside tmux, the answer is unknown: say yes.
+# When tmux cannot be read, the answer is unknown: keep the identity.
 identity_live_elsewhere() {
     local name="$1" panes pane key lease pid
     if panes="$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null)"; then
@@ -196,7 +209,7 @@ identity_live_elsewhere() {
                 return 0
             fi
         done <<< "$panes"
-    elif [[ -n "${TMUX:-}" ]]; then
+    else
         return 0
     fi
     # A lease written before this machine booted names a PID that may now be

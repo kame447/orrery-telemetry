@@ -22,6 +22,7 @@ import json
 import logging
 import math
 import os
+from pathlib import Path
 import pathlib
 import re
 import secrets
@@ -42,12 +43,27 @@ import urllib.parse
 import urllib.request
 from urllib.parse import urlparse, parse_qs
 
+# Public dashboard compatibility generation (docs/tests read this source).
+API_GENERATION = 19
+# Mode admission is shared with hooks and operator/service entry points.
+import runpy as _runtime_runpy
+_MODE_API = _runtime_runpy.run_path(str(Path(__file__).resolve().parents[1] / 'bin/lib/runtime_client.py'))
+_MODE_SELECTION = _MODE_API['selected'](bootstrap=__name__ == '__main__')
+GLOBAL_MODE = _MODE_SELECTION['mode'] == 'global'
+GLOBAL_SERVER_CONFIG = str(_MODE_SELECTION['server_config'] or '')
+if __name__ == '__main__':
+    os.environ['AGENTSTACK_RUNTIME_MODE'] = _MODE_SELECTION['mode']
+    if GLOBAL_SERVER_CONFIG:
+        os.environ['AGENTSTACK_GLOBAL_SERVER_CONFIG'] = GLOBAL_SERVER_CONFIG
+
 # `server.py` is both an executable script and an importable dashboard module
 # in the tests.  Support both import roots without coupling callers to cwd.
 try:
-    from dashboard import codex_models
+    from dashboard import codex_models, mail_signals, provider_stalls
 except ModuleNotFoundError:  # direct `python dashboard/server.py`
     import codex_models
+    import mail_signals
+    import provider_stalls
 
 try:
     from dashboard.providers.codex_app import CodexAppRuntimeProvider
@@ -169,14 +185,22 @@ BIND_HOST = _env_text("AGENTSTACK_BIND_HOST", "127.0.0.1")
 HERE = os.path.dirname(os.path.abspath(__file__))
 INDEX_HTML = os.path.join(HERE, "index.html")
 THEME_ASSETS = {
+    **{"/"+name:(os.path.join(HERE,name),"text/javascript; charset=utf-8" if name.endswith(".js") else "text/css; charset=utf-8") for name in ("global_ui.js","global_ui.css","mail_flow.js","mail_flow.css","network_node.js","runtime_node.js","operator_session.js","mail_controller.js","operation_controller.js")},
+    **{"/assets/"+name+".svg": (os.path.join(HERE,"assets",name+".svg"), "image/svg+xml") for name in ("anthropic","openai","google")},
     "/theme_core.js": (os.path.join(HERE, "theme_core.js"), "text/javascript; charset=utf-8"),
     "/theme_controller.js": (
         os.path.join(HERE, "theme_controller.js"),
         "text/javascript; charset=utf-8",
     ),
     "/theme_light.css": (os.path.join(HERE, "theme_light.css"), "text/css; charset=utf-8"),
+    # The help map is served the same way: a fixed file next to the page.
+    "/help_map.js": (os.path.join(HERE, "help_map.js"), "text/javascript; charset=utf-8"),
+    "/help_map.css": (os.path.join(HERE, "help_map.css"), "text/css; charset=utf-8"),
+    # The cockpit tour's cue inside this page (tour_cue.js).
+    "/tour_cue.js": (os.path.join(HERE, "tour_cue.js"), "text/javascript; charset=utf-8"),
+    "/tour_cue.css": (os.path.join(HERE, "tour_cue.css"), "text/css; charset=utf-8"),
 }
-DB_PATH = _resolve_mail_db()
+DB_PATH = "" if GLOBAL_MODE else _resolve_mail_db()
 MAIL_ENV_PATH = _env_path("AGENTSTACK_MAIL_ENV", "~/.agentstack/mail/.env")
 MAIL_HTTP_BEARER_MODE = _env_text(
     "AGENTSTACK_MAIL_HTTP_BEARER_MODE", "auto"
@@ -194,9 +218,15 @@ MAIL_HOME = _env_path("AGENTSTACK_MAIL_HOME", "~/.agentstack/mail")
 SIGNALS_DIR = _env_path("AGENTSTACK_SIGNALS_DIR", os.path.join(MAIL_HOME, "signals"))
 MAIL_WATCHER_LABEL = f"{LABEL_PREFIX}.mail-watcher"
 NOTIFY_DAEMON_LABEL = f"{LABEL_PREFIX}.notify-daemon"
+# Per-user default (matches watch_agent_mail_signals.sh): a shared /tmp path
+# let a second account on the same Mac collide with the first one's lock.
+MAIL_WATCHER_LOCK_DIR = _env_path(
+    "AGENTSTACK_MAIL_WATCHER_LOCK_DIR",
+    os.path.join(RUNTIME_DIR, "mail-watcher.lock"),
+)
 MAIL_WATCHER_PIDFILE = _env_path(
     "AGENTSTACK_MAIL_WATCHER_PIDFILE",
-    "/tmp/orrery-mail-watcher.lock/watcher.pid",
+    os.path.join(MAIL_WATCHER_LOCK_DIR, "watcher.pid"),
 )
 MAIL_WATCHER_HEARTBEAT = _env_path(
     "AGENTSTACK_MAIL_WATCHER_HEARTBEAT",
@@ -230,6 +260,12 @@ def _render_dashboard_index(
         + ";"
     ).encode()
     return source.replace(_DASHBOARD_CONFIG_MARKER, replacement, 1)
+
+
+def _global_dashboard_index(source):
+    try:from dashboard.global_page import render
+    except ModuleNotFoundError:from global_page import render
+    return render(_render_dashboard_index(source))
 
 
 def _resolve_version() -> str:
@@ -529,10 +565,128 @@ WARMUP_NAMES = {"warm-opus", "warm-sonnet"}
 # --------------------------------------------------------------------------- #
 # tmux
 # --------------------------------------------------------------------------- #
+
+# One consumer per tmux endpoint, kept while that endpoint's socket is the same
+# file. Building one resolves and verifies the endpoint (a display-message
+# process each time); _tmux_run used to build one per tmux command, about a
+# fifth of a /api/agents computation. What is reused is only the endpoint
+# resolution. Every use, kept or new, first passes the same entry check as a
+# build (_tmux_helper_entry: the installed helper, or the negative admission
+# when it is missing), and the key is the exact socket path the shared resolver
+# picks now (runtime_tmux.legacy_endpoint), so an alias that now points
+# elsewhere is a new endpoint. Every command is still admitted
+# by the consumer. A restarted server makes a new socket file: rebuilt.
+_TMUX_CONSUMER_LOCK = threading.Lock()
+_TMUX_CONSUMER_CACHE: dict = {"key": None, "consumer": None, "entry": None}
+
+
+def _reset_tmux_consumer_cache():
+    with _TMUX_CONSUMER_LOCK:
+        _TMUX_CONSUMER_CACHE.update(key=None, consumer=None, entry=None)
+
+
+def _tmux_helper_entry():
+    """The installed transport helper a consumer is built from. When it is
+    missing: refused for a global or unproven placement, None (bare tmux) for a
+    proven pure legacy one. Run before every use, kept consumer or not."""
+    path=Path(HOOKS_DIR).parent/'bin/lib/runtime_tmux.py'
+    if not path.is_file():
+        # Mode admission above already rejected an unresolved global install.
+        if GLOBAL_MODE or _MODE_API['unproven_client_placement'](Path(HOOKS_DIR).parent):raise RuntimeError('GLOBAL_TARGET_HELPER_UNAVAILABLE')
+        return None
+    return path, path.with_name('legacy_consumer.py').is_file()
+
+
+def _consumer_still_current(consumer) -> bool:
+    transport = getattr(consumer, 'transport', None)
+    tmux = getattr(consumer, 'tmux', None)
+    identity = getattr(transport, 'identity', None)
+    if identity is None or not isinstance(tmux, dict) or 'validate_socket' not in tmux:
+        return False
+    try:
+        return tmux['validate_socket'](transport.path) == identity
+    except Exception:
+        return False
+
+
+def _tmux_consumer_key():
+    """The endpoint the shared resolver picks now (its own legacy_endpoint, no
+    process): a retargeted TMUX_TMPDIR alias or another TMUX is another key.
+    None when it cannot be told this way; then nothing is kept."""
+    try:
+        api = _MODE_API['runtime_tmux_api']() if 'runtime_tmux_api' in _MODE_API else None
+        endpoint = api.get('legacy_endpoint') if isinstance(api, dict) else None
+        if endpoint is None:
+            return None
+        path, server_pid = endpoint(environ=os.environ)
+    except Exception:
+        return None
+    return (HOOKS_DIR, os.environ.get('AGENTSTACK_HOME'), str(path), server_pid, id(_MODE_API))
+
+
+def _consumer_matches_key(consumer, key) -> bool:
+    """The consumer's actual socket is exactly the endpoint the key names (the
+    path the shared resolver picks now). The key and the build resolve at
+    different moments, so an alias moved in between must not leave a consumer
+    of one endpoint under the key of another."""
+    transport = getattr(consumer, 'transport', None)
+    path = getattr(transport, 'path', None)
+    return path is not None and str(Path(path)) == key[2]
+
+
+def _legacy_tmux_consumer():
+    try:
+        entry = _tmux_helper_entry()  # the same check a build makes, every time
+    except RuntimeError:
+        _reset_tmux_consumer_cache()  # refused: nothing kept carries past a refusal
+        raise
+    if entry is None:
+        _reset_tmux_consumer_cache()
+        return None
+    key = _tmux_consumer_key()
+    with _TMUX_CONSUMER_LOCK:
+        if key is not None and _TMUX_CONSUMER_CACHE["key"] == key and _TMUX_CONSUMER_CACHE["entry"] == entry:
+            consumer = _TMUX_CONSUMER_CACHE["consumer"]
+            if (consumer is not None and _consumer_matches_key(consumer, key)
+                    and _consumer_still_current(consumer)):
+                return consumer
+    consumer = _build_legacy_tmux_consumer(entry)
+    with _TMUX_CONSUMER_LOCK:
+        if (key is not None and consumer is not None and _consumer_matches_key(consumer, key)
+                and _consumer_still_current(consumer)):
+            _TMUX_CONSUMER_CACHE.update(key=key, consumer=consumer, entry=entry)
+        else:
+            _TMUX_CONSUMER_CACHE.update(key=None, consumer=None, entry=None)
+    return consumer
+
+
+def _build_legacy_tmux_consumer(entry=None):
+    entry = _tmux_helper_entry() if entry is None else entry
+    if entry is None:
+        return None
+    path, has_factory = entry
+    api=(_MODE_API['runtime_tmux_api']() if 'runtime_tmux_api' in _MODE_API else _runtime_runpy.run_path(str(path)))
+    home=Path(os.environ.get('AGENTSTACK_HOME',str(Path(HOOKS_DIR).parent)))
+    if 'LegacyConsumer' in api:return api['LegacyConsumer'](home)
+    factory=path.with_name('legacy_consumer.py')
+    if has_factory:
+        return _runtime_runpy.run_path(str(factory))['LegacyConsumer'](home,transport_api=api)
+    # An older complete transport may prove a pure legacy placement; otherwise
+    # absence of the adapter is not permission to type into an unknown pane.
+    if 'global_inventory' in api:
+        inventory=api['global_inventory'](home)
+        if inventory['global_complete'] and not inventory['proofs']:return None
+    raise RuntimeError('GLOBAL_TARGET_HELPER_UNAVAILABLE')
+
+def _tmux_run(args,**kwargs):
+    consumer=_legacy_tmux_consumer()
+    if consumer is None:return subprocess.run(['tmux',*args],**kwargs)
+    return consumer.command(args,**kwargs)
+
 def _tmux(args: list[str]) -> str:
     try:
-        out = subprocess.run(
-            ["tmux", *args],
+        out = _tmux_run(
+            args,
             capture_output=True,
             text=True,
             timeout=5,
@@ -960,6 +1114,55 @@ class _SingleFlight:
 
 
 _HTTP_SINGLE_FLIGHT = _SingleFlight()
+
+
+def _is_live_roster_row(row: dict) -> bool:
+    """The rows a live roster shows: running agents, never warm-up sessions.
+
+    The same test a live-roster client applies to the full answer itself."""
+    return bool(row.get("running") or row.get("category") == "agent") \
+        and row.get("category") != "warmup"
+
+
+class _AgentsAnswer:
+    """One /api/agents computation, written at most once per scope.
+
+    `scope=live` is for a client that shows only the live roster: about 3 %
+    of the rows of the 30-day window. It carries the
+    live rows unchanged plus `retired`, the names the full answer marks retired
+    (a client unpins those). Any other scope, or none, is the full answer,
+    byte for byte as before.
+    """
+
+    def __init__(self, history_days: float | None) -> None:
+        self.payload = {
+            "ts": int(time.time()),
+            "history_days": history_days,
+            "agents": build_agents(history_days),
+        }
+        self._lock = threading.Lock()
+        self._bodies: dict[str, bytes] = {}
+
+    def body(self, scope: str) -> bytes:
+        scope = "live" if scope == "live" else ""
+        with self._lock:
+            body = self._bodies.get(scope)
+            if body is None:
+                body = json.dumps(self._view(scope), ensure_ascii=False).encode()
+                self._bodies[scope] = body
+            return body
+
+    def _view(self, scope: str) -> dict:
+        if scope != "live":
+            return self.payload
+        rows = self.payload["agents"]
+        return {
+            "ts": self.payload["ts"],
+            "history_days": self.payload["history_days"],
+            "scope": "live",
+            "agents": [row for row in rows if _is_live_roster_row(row)],
+            "retired": [row["name"] for row in rows if row.get("category") == "retired"],
+        }
 
 
 def _with_registration_batch(function):
@@ -1529,6 +1732,7 @@ def build_agents(history_days: float | None = HISTORY_DAYS_DEFAULT) -> list[dict
                     (m or {}).get("model_raw") or (m or {}).get("model")),
                 "ctx_used": rt.get("ctx_used"),
                 "act_state": rt.get("act_state"),
+                "provider_stall": _provider_stall_view(name, s) if running else None,
                 "work_disp": rt.get("work_disp"),
                 "last_disp": rt.get("last_disp"),
                 "task": (m or {}).get("task", ""),
@@ -1764,6 +1968,8 @@ def _deliverable_roots() -> list[str]:
     configured = os.environ.get("AGENTSTACK_DELIVERABLE_ROOTS", "").strip()
     if configured:
         candidates = configured.split(os.pathsep)
+    elif GLOBAL_MODE:
+        return []
     else:
         base = PROJECT_KEY if os.path.isabs(PROJECT_KEY) else ""
         if not base:
@@ -1808,7 +2014,7 @@ def _deliverable_roots() -> list[str]:
 
 def _deliverable_location(path: str, root: str) -> tuple[str, str]:
     """Return ``(relative_path, obsidian_vault_name)`` for one result."""
-    if VAULT:
+    if VAULT and not GLOBAL_MODE:
         vault_root = os.path.realpath(VAULT)
         real_path = os.path.realpath(path)
         try:
@@ -1844,6 +2050,8 @@ def _deliverables_index() -> dict:
                     continue
                 fp = os.path.join(dp, fn)
                 real_fp = os.path.realpath(fp)
+                if GLOBAL_MODE and not _is_within_root(real_fp, root):
+                    continue
                 if real_fp in seen_files:
                     continue
                 seen_files.add(real_fp)
@@ -2212,6 +2420,7 @@ def graph_payload(days: float, show_all: bool) -> dict:
             "sig": round(sig, 3) if running else 0.0,
             "ctx_used": rt.get("ctx_used"),
             "act_state": rt.get("act_state"),
+            "provider_stall": _provider_stall_view(name, s) if running else None,
             "ctx_window": rt.get("ctx_window"),  # ペイン直読み（権威）
             "work_disp": rt.get("work_disp"),    # work 中の経過（live）
             "work_secs": rt.get("work_secs"),
@@ -2312,9 +2521,13 @@ def _valid(session: str) -> bool:
 
 
 def _has_session(session: str) -> bool:
-    return subprocess.run(
-        ["tmux", "has-session", "-t", f"={session}"], capture_output=True
-    ).returncode == 0
+    # The tmux consumer refuses has-session on a missing target
+    # (TMUX_TARGET_UNAVAILABLE) instead of answering "no", so read absence
+    # from the session list and ask has-session only for a listed name.
+    listed = _tmux_run(['list-sessions', '-F', '#{session_name}'], capture_output=True, text=True)
+    if listed.returncode == 0 and session not in (listed.stdout or "").splitlines():
+        return False
+    return _tmux_run(['has-session', '-t', f'={session}'], capture_output=True).returncode == 0
 
 
 ITERM_OSA = """
@@ -2437,11 +2650,29 @@ def _write_wt_launcher(tmux_args: list[str], title: str) -> str:
     return path
 
 
+def _legacy_terminal_argv(tmux_args: list[str]) -> list[str]:
+    """Admit now and re-admit inside the actual terminal/ttyd child."""
+    if not tmux_args or tmux_args[0] != 'tmux':
+        return tmux_args
+    consumer = _legacy_tmux_consumer()
+    if consumer is None:
+        return tmux_args
+    consumer.admitted_argv(tmux_args[1:])
+    helper = Path(HOOKS_DIR).parent / 'bin/lib/runtime_tmux_consumer.py'
+    transport = consumer.transport
+    fixed = ['env', 'AGENTSTACK_HOME='+str(consumer.home)]
+    if transport.identity is not None:
+        fixed.append('TMUX='+str(transport.path)+','+str(transport.server_pid)+',0')
+    else:
+        fixed = ['env', '-u', 'TMUX', 'AGENTSTACK_HOME='+str(consumer.home), 'TMUX_TMPDIR='+str(transport.path.parent.parent)]
+    return [*fixed, sys.executable, str(helper), *tmux_args[1:]]
+
+
 def _open_terminal_tmux(tmux_args: list[str], title: str) -> dict:
     adapter = _terminal_adapter()
-    if adapter == "none":
-        return _terminal_unsupported()
+    if adapter == "none":return _terminal_unsupported()
     try:
+        tmux_args = _legacy_terminal_argv(tmux_args)
         if adapter == "ghostty":
             cmd = [
                 "env", "-u", "TMUX", "-u", "TMUX_PANE",
@@ -2522,8 +2753,11 @@ def _launch_resume_tmux(tmux_args: list[str], title: str, open_terminal: bool | 
     # -A would attach to an existing session and block the HTTP request.
     detached = ["-d" if arg == "-A" else arg for arg in tmux_args]
     try:
-        result = subprocess.run(["env", "-u", "TMUX", "-u", "TMUX_PANE", *detached],
-                                capture_output=True, text=True, timeout=8)
+        if detached and detached[0]=='tmux':
+            result = _tmux_run(detached[1:],capture_output=True,text=True,timeout=8)
+        else:
+            result = subprocess.run(["env", "-u", "TMUX", "-u", "TMUX_PANE", *detached],
+                                    capture_output=True,text=True,timeout=8)
     except Exception as exc:
         return {"ok": False, "error": f"detached tmux launch failed: {exc}"}
     if result.returncode:
@@ -2544,7 +2778,7 @@ def _launch_claude_resume_tmux(tmux_args: list[str], title: str,
     control_env = {key: value for key, value in os.environ.items() if key not in {"TMUX", "TMUX_PANE"}}
 
     def tmux(*args):
-        result = subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=8, env=control_env)
+        result = _tmux_run([*args], capture_output=True, text=True, timeout=8, env=control_env)
         if result.returncode:
             raise RuntimeError("tmux resume preparation failed")
         return result.stdout.strip()
@@ -2594,8 +2828,7 @@ def _launch_claude_resume_tmux(tmux_args: list[str], title: str,
             # The tmux request can time out after creating the gated session.
             # Its unique name is safe to clean even when no receipt was returned.
             try:
-                subprocess.run(["tmux", "kill-session", "-t", f"={staging}"],
-                               capture_output=True, text=True, timeout=8, env=control_env)
+                _tmux_run(['kill-session', '-t', f'={staging}'], capture_output=True, text=True, timeout=8, env=control_env)
             except Exception:
                 errors.append("Prepared Claude session cleanup could not be confirmed")
         if old_renamed:
@@ -2912,11 +3145,7 @@ def _transcript_path(session: str) -> str | None:
     chosen_score = 0
 
     # 1) 稼働中: tmux ペイン cwd 由来
-    out = subprocess.run(
-        ["tmux", "display-message", "-p", "-t", session,
-         "#{pane_current_path}"],
-        capture_output=True, text=True, timeout=4,
-    )
+    out = _tmux_run(['display-message', '-p', '-t', session, '#{pane_current_path}'], capture_output=True, text=True, timeout=4)
     cwd = (out.stdout or "").strip()
     if out.returncode == 0 and cwd:
         d = os.path.join(CLAUDE_PROJECTS, re.sub(r"[^A-Za-z0-9]", "-", cwd))
@@ -3088,7 +3317,7 @@ def _claude_child_tools(session: str, sid: str) -> tuple[dict | None, str]:
     if state is None:
         return None, ""
     spec = {"base": state["base"], "tools": state["tools"]}
-    return (spec if tools_module.restrictive(spec) else None), ""
+    return (spec if state["version"] == 4 or tools_module.restrictive(spec) else None), ""
 
 
 def _claude_resume_tools(session: str, sid: str, cwd: str,
@@ -3222,6 +3451,11 @@ def do_resume(session: str, *, open_terminal: bool | None = None, replace_husk: 
             f'exec {shlex.quote(ABS_CLAUDE)} --resume {sid} -n {session}'
             + (' --chrome' if chrome else '')
         )
+        if chrome and tools_plan is None:
+            # Legacy Chrome records have no base/tools selection to rebuild.
+            # Restore the launch's browser approvals without changing MCP scope.
+            allowed = _child_tools_module().claude_chrome_allowed_tools()
+            inner += ' --allowed-tools ' + shlex.quote(','.join(allowed))
 
     try:
         _, conversation_reason = _claude_conversation_reason(session)
@@ -3474,6 +3708,26 @@ class _ResumeCapabilityError(ValueError):
 _CHILD_RESUME_MODULES: dict[str, object] = {}
 
 
+def global_child_resume(body: dict) -> dict:
+    """Explicit stable client root only; no legacy registration lookup."""
+    name = body.get('client_name')
+    config = body.get('client_config')
+    if not isinstance(name,str) or not isinstance(config,str):
+        return {'ok':False,'error':'CONTEXT_REQUIRED'}
+    prepare = body.get('prepare_only') is True and body.get('open') in (None, False)
+    execute = body.get('prepare_only') is False and body.get('open') is True
+    if not prepare and not execute:
+        return {'ok':False,'error':'GLOBAL_EXECUTION_CONFIRMATION_REQUIRED'}
+    library = pathlib.Path(__file__).resolve().parents[1] / 'bin/lib/agentstack-register.sh'
+    command=['/bin/bash',str(library),'resume-child','--context',config,
+        '--client-name',name,'--detached']
+    if prepare:command.append('--prepare-only')
+    completed = subprocess.run(command,capture_output=True,text=True,timeout=60)
+    if completed.returncode:
+        return {'ok':False,'error':completed.stderr.strip() or 'GLOBAL_RESUME_FAILED'}
+    return json.loads(completed.stdout)
+
+
 def _child_resume_helper_path() -> str:
     configured = os.environ.get("AGENTSTACK_CHILD_RESUME_HELPER", "").strip()
     install_home = os.environ.get("AGENTSTACK_HOME", "").strip()
@@ -3628,8 +3882,15 @@ def _codex_resume_child_home(
                 import tomllib  # only here: build-home already needs Python 3.11
 
                 config_path = os.path.join(source_home, "config.toml")
-                with open(config_path, "rb") as handle:
-                    config = tomllib.load(handle)
+                config = tomllib.loads(pathlib.Path(config_path).read_text()) if os.path.exists(config_path) else {}
+                overlay = os.environ.get("AGENTSTACK_CODEX_CHILD_CONFIG_OVERLAY", "").strip()
+                if overlay:
+                    try:
+                        extra = tomllib.loads(pathlib.Path(overlay).read_text())
+                        module._drop_protected_overlay_tables(extra)
+                        module._deep_merge(config, extra)
+                    except (ValueError, OSError):
+                        pass
                 tools_module.codex_apply(config, spec)
         except (OSError, ValueError) as exc:
             raise _ResumeCapabilityError(
@@ -4484,7 +4745,8 @@ def _rebuild_codex_child_home(
     ]
     try:
         result = subprocess.run(
-            command, capture_output=True, text=True, timeout=30, check=False
+            command, capture_output=True, text=True, timeout=30, check=False,
+            env={**os.environ, "AGENTSTACK_TOOLS_CHANGE_GENERATION": _child_resume_module().tools_change_generation()},
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise _ResumeCapabilityError(
@@ -4575,6 +4837,9 @@ def _do_resume_codex(session: str, *, open_terminal: bool | None = None) -> dict
         f'export AGENTSTACK_CODEX_LAUNCH_ORIGIN={shlex.quote(launch_origin)}; '
     )
     if launch_origin == "child":
+        generation = _child_resume_module().tools_change_generation()
+        if generation:
+            launch_prefix += f'export AGENTSTACK_TOOLS_CHANGE_GENERATION={shlex.quote(generation)}; '
         child_home_env = (
             f'export CODEX_HOME={shlex.quote(child_home)}; '
             f'export CODEX_SHARED_CODEX_DIR={shlex.quote(child_home)}; '
@@ -5082,45 +5347,126 @@ def _events_from_codex_jsonl(path: str) -> list[dict]:
     try:
         with open(path, encoding="utf-8") as f:
             for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    o = json.loads(line)
-                except ValueError:
-                    continue
-                if o.get("type") != "response_item":
-                    continue
-                payload = o.get("payload") or {}
-                if payload.get("type") != "message":
-                    continue
-                role = payload.get("role")
-                if role not in ("user", "assistant"):
-                    continue
-                ts = o.get("timestamp", "")
-                content = payload.get("content")
-                if isinstance(content, str):
-                    if content.strip():
-                        events.append({"role": role, "kind": "text",
-                                       "text": content, "ts": ts})
-                    continue
-                if not isinstance(content, list):
-                    continue
-                for blk in content:
-                    if not isinstance(blk, dict):
-                        continue
-                    btype = blk.get("type", "text")
-                    txt = blk.get("text", "") or ""
-                    # Codex は input_text / output_text を使う (Claude の text と等価)
-                    if btype in ("text", "input_text", "output_text") and txt.strip():
-                        events.append({"role": role, "kind": "text",
-                                       "text": txt, "ts": ts})
-                    elif btype in ("image", "image_url", "input_image"):
-                        events.append({"role": role, "kind": "image",
-                                       "text": "", "ts": ts})
+                events.extend(_codex_line_events(line))
     except OSError:
         pass
     return events
+
+
+def _codex_line_events(line: str) -> list[dict]:
+    """The history events of one Codex rollout line (see _events_from_codex_jsonl)."""
+    line = line.strip()
+    if not line:
+        return []
+    try:
+        o = json.loads(line)
+    except ValueError:
+        return []
+    if not isinstance(o, dict) or o.get("type") != "response_item":
+        return []
+    payload = o.get("payload") or {}
+    if payload.get("type") != "message":
+        return []
+    role = payload.get("role")
+    if role not in ("user", "assistant"):
+        return []
+    ts = o.get("timestamp", "")
+    content = payload.get("content")
+    if isinstance(content, str):
+        return [{"role": role, "kind": "text", "text": content, "ts": ts}] if content.strip() else []
+    if not isinstance(content, list):
+        return []
+    events = []
+    for blk in content:
+        if not isinstance(blk, dict):
+            continue
+        btype = blk.get("type", "text")
+        txt = blk.get("text", "") or ""
+        # Codex は input_text / output_text を使う (Claude の text と等価)
+        if btype in ("text", "input_text", "output_text") and txt.strip():
+            events.append({"role": role, "kind": "text", "text": txt, "ts": ts})
+        elif btype in ("image", "image_url", "input_image"):
+            events.append({"role": role, "kind": "image", "text": "", "ts": ts})
+    return events
+
+
+def _claude_line_events(line: str) -> list[dict]:
+    """The history events of one Claude Code transcript line."""
+    line = line.strip()
+    if not line:
+        return []
+    try:
+        o = json.loads(line)
+    except ValueError:
+        return []
+    if not isinstance(o, dict):
+        return []
+    typ = o.get("type")
+    if typ not in ("user", "assistant"):
+        return []
+    msg = o.get("message") or {}
+    role = msg.get("role", typ)
+    ts = o.get("timestamp", "")
+    return [{"role": role, "kind": kind, "text": txt, "ts": ts}
+            for kind, txt in _block_text(msg.get("content"))]
+
+
+_HISTORY_TAIL_BLOCK = 1 << 20
+
+
+def _tail_events(path: str, line_events, limit: int) -> tuple[list[dict], bool]:
+    """The last `limit` events of a JSONL transcript, read from the end.
+
+    A transcript can be hundreds of megabytes; reading it whole on every
+    HISTORY open took seconds. This reads backwards a block at a time and
+    stops once more than `limit` events are known (or the file starts), so
+    `has_more` is exact: True only when an older event exists. Events keep
+    their order within a line; a line is decoded only when it is complete.
+    """
+    collected: list[list[dict]] = []  # per line, newest first
+    count = 0
+
+    def take(raw: bytes) -> bool:
+        """Add one complete line; True once more than `limit` events are known."""
+        nonlocal count
+        try:
+            events = line_events(raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            return False
+        if events:
+            collected.append(events)
+            count += len(events)
+        return count > limit
+
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        position = f.tell()
+        # The line that starts before the block just read and continues into
+        # newer bytes, kept as pieces (oldest first): a line of many blocks is
+        # joined once, when its start is found, never re-copied per block.
+        partial: list[bytes] = []
+        done = False
+        while position > 0 and not done:
+            start = max(0, position - _HISTORY_TAIL_BLOCK)
+            f.seek(start)
+            block = f.read(position - start)
+            position = start
+            pieces = block.split(b"\n")
+            if len(pieces) == 1:  # no line starts inside this block
+                partial.insert(0, block)
+                continue
+            # pieces[-1] begins after the last newline: it completes the line
+            # held in `partial`. pieces[0] may continue in an older block.
+            complete = [pieces[-1] + b"".join(partial), *reversed(pieces[1:-1])]
+            partial = [pieces[0]]
+            for raw in complete:
+                if take(raw):
+                    done = True
+                    break
+        if not done and position == 0 and partial:
+            take(b"".join(partial))  # the file's first line
+    ordered = [event for events in reversed(collected) for event in events]
+    return ordered[-limit:], count > limit
 
 
 def history_payload(session: str, limit: int) -> dict:
@@ -5163,35 +5509,35 @@ def history_payload(session: str, limit: int) -> dict:
             "error": "transcript が見つかりません"
             "（このエージェント名の会話ログがディスク上に存在しない）",
         }
-    if is_codex:
-        events = _events_from_codex_jsonl(path)
-    else:
-        events = []
+    line_events = _codex_line_events if is_codex else _claude_line_events
+    window = {}
+    if limit > 0:
+        # Only the newest `limit` events are shown: read them from the end.
+        # The total is not counted (that needs the whole file), so `total`
+        # equals `shown` and `has_more` says whether older events exist.
         try:
-            with open(path, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        o = json.loads(line)
-                    except ValueError:
-                        continue
-                    typ = o.get("type")
-                    if typ not in ("user", "assistant"):
-                        continue
-                    msg = o.get("message") or {}
-                    role = msg.get("role", typ)
-                    ts = o.get("timestamp", "")
-                    for kind, txt in _block_text(msg.get("content")):
-                        events.append(
-                            {"role": role, "kind": kind, "text": txt, "ts": ts}
-                        )
+            events, has_more = _tail_events(path, line_events, limit)
         except OSError as e:
-            return {"ok": False, "error": f"read 失敗: {e}"}
-    total = len(events)
-    if limit and total > limit:
-        events = events[-limit:]
+            if is_codex:
+                events, has_more = [], False
+            else:
+                return {"ok": False, "error": f"read 失敗: {e}"}
+        total = len(events)
+        window = {"history_window": "tail", "has_more": has_more}
+    else:
+        if is_codex:
+            events = _events_from_codex_jsonl(path)
+        else:
+            events = []
+            try:
+                with open(path, encoding="utf-8") as f:
+                    for line in f:
+                        events.extend(_claude_line_events(line))
+            except OSError as e:
+                return {"ok": False, "error": f"read 失敗: {e}"}
+        total = len(events)
+        if limit and total > limit:
+            events = events[-limit:]
     result = {
         "ok": True,
         "session": session,
@@ -5200,6 +5546,7 @@ def history_payload(session: str, limit: int) -> dict:
         "total": total,
         "shown": len(events),
         "events": events,
+        **window,
     }
     if is_codex:
         result.update(history_binding="bound", history_binding_reason="")
@@ -5781,6 +6128,10 @@ def agent_history_payload(name: str = "", hours: int | None = 24,
     return payload
 
 
+try:
+    from dashboard.terminal_state import (_CTX_RE, _CTX_CODEX_LEFT_RE, _CTX_CODEX_USED_RE, _WORK_RE, _WORK_CLAUDE_TASK_RE, _WORK_CODEX_RE, _ASK_Q_RE, _ASK_OPT_RE, _ASK_YN_RE, _ASK_CODEX_RE, _QUESTION_RE)
+except ModuleNotFoundError:
+    from terminal_state import (_CTX_RE, _CTX_CODEX_LEFT_RE, _CTX_CODEX_USED_RE, _WORK_RE, _WORK_CLAUDE_TASK_RE, _WORK_CODEX_RE, _ASK_Q_RE, _ASK_OPT_RE, _ASK_YN_RE, _ASK_CODEX_RE, _QUESTION_RE)
 # --------------------------------------------------------------------------- #
 # Agent runtime probe — コンテキスト残量(HP) + 動作状態を tmux ペインから読む
 #   Claude Code / Codex の TUI 表示を read-only パース。新データ源は持たない。
@@ -5792,18 +6143,10 @@ def agent_history_payload(name: str = "", hours: int | None = 24,
 #     N% left" は Codex のみ）なので両方 try しても誤マッチしない。各 Codex
 #     書式は実ペインで確証済み（cxprobe 観測 2026-06-02）。
 # --------------------------------------------------------------------------- #
-_CTX_RE = re.compile(r"ctx:\s*(\d+)%\s*used")
 # Codex ステータスライン: "gpt-5.5 medium · Context 70% left · ~/path"。
 #   "left"=残量(→used=100-N) / "used"=使用率。Claude の _CTX_RE と排他。
-_CTX_CODEX_LEFT_RE = re.compile(r"Context\s+(\d+)%\s*left", re.IGNORECASE)
-_CTX_CODEX_USED_RE = re.compile(r"Context\s+(\d+)%\s*used", re.IGNORECASE)
 # 生成中: 入力ロック中ヒント or 経過時間+トークンカウンタの作業ステータス行
 #   実測例: "✽ Stewing… (2m 46s · ↓ 8.5k tokens · thought for 1s)"
-_WORK_RE = re.compile(
-    r"esc to interrupt"
-    r"|·\s*[↑↓]?\s*[\d.]+k?\s*tokens"
-    r"|\(\s*\d+m\s+\d+s\s*·"
-)
 # Claude Code 新TUI (2026-08 実測): タスクwidget 稼働時のスピナー行は
 #   "✽ <進行中タスク名>…" だけになり、esc to interrupt・経過時間・token 数が
 #   一切出ない → _WORK_RE 全滅で work が wait に化ける。グリフ行＋折返し2行以内の
@@ -5818,33 +6161,19 @@ _WORK_RE = re.compile(
 #         スピナーは末尾が duration でないので巻き添えにならない）
 #   全 tmux 37 セッションで現行版と比較し、落ちるのは誤検知1体のみ・正しい
 #   work 判定は不変であることを実測済み。
-_WORK_CLAUDE_TASK_RE = re.compile(
-    r"(?m)"
-    r"^[ \t\xa0]*[✢✳✶✻✽✺·][ \t\xa0]+"
-    r"(?![^\n]*\bfor\s+(?:\d+h\s*)?(?:\d+m\s*)?\d+s\s*$)"
-    r"\S(?:[^\n]*\S[^\n]*\n){0,2}[^\n]*…"
-    r"|^[ \t\xa0]*[✢✳✶✻✽✺][ \t\xa0]*$")
 # Codex 生成中スピナー行: "• Working (1s • esc to interrupt)" / "• Thinking (…"。
 #   "esc to interrupt" は _WORK_RE でも拾えるが、文言変更に備え spinner+経過尺
 #   (… (Ns) という形)も正本にする。prose 誤マッチを避けるため経過尺を必須化。
-_WORK_CODEX_RE = re.compile(
-    r"(?m)^\s*[•▌●]\s*(?:Working|Thinking)\b[^\n]*\(\s*\d+\s*s\b")
 # 承認待ち: 権限プロンプト "Do you want to …?" + 番号付き選択(❯ 1. …)。
 #   旧 y/n 系もフォールバック。※実プロンプトで書式確定させること。
-_ASK_Q_RE = re.compile(r"Do you want to .+\?|Would you like to proceed")
-_ASK_OPT_RE = re.compile(r"(?m)^\s*[❯>›]?\s*1\.\s")
-_ASK_YN_RE = re.compile(r"\?\s*[\[(]y/n[\])]", re.IGNORECASE)
 # Codex 承認待ちモーダルの確定フッター。番号付き選択のセレクタが › (U+203A)
 #   で Claude と別字形なので、常時出るこのフッター行を正本にする。
 #   実ペイン: "Press enter to confirm or esc to cancel"。
-_ASK_CODEX_RE = re.compile(
-    r"Press\s+enter\s+to\s+confirm\s+or\s+esc\s+to\s+cancel", re.IGNORECASE)
 # AskUserQuestion ウィジェット: フッターに "Enter to select" + "Esc to cancel" が
 # 同じ 1 行に並ぶ（中黒 · や Tab/Arrow keys を挟む）。DOTALL にすると過去スク
 # ロールに残った報告本文等にも誤マッチするため敢えて単一行にする。
 # 2026-05-20 FrostyEinstein が完了報告本文に regex 文字列を書いた瞬間、自分自身が
 # question 判定される自己マッチ事故が発生。
-_QUESTION_RE = re.compile(r"Enter to select.{0,80}Esc to cancel")
 # コンテキスト窓: ステータスラインの "Opus 4.7 (1M context)" を直読み。
 #   登録モデル文字列より確実（実セッションが報告する値そのもの）。
 _WIN_RE = re.compile(r"\(\s*([\d.]+\s*[MK])\s*context\s*\)", re.IGNORECASE)
@@ -5938,6 +6267,107 @@ _RT_TTL = 4.5
 _RT_STICKY_KEYS = ("pane_model", "ctx_window")
 _rt_cache: dict[str, tuple[float, str, dict]] = {}
 _rt_lock = threading.Lock()
+# Kept separately so provider-specific evidence does not change runtime parsing.
+_provider_captures: dict[str, tuple[str, float, dict]] = {}
+_provider_monitor = None
+_provider_thread = None
+_provider_stop = threading.Event()
+
+
+def _provider_generation(session: dict) -> str:
+    return _runtime_generation(session.get("created"), session.get("session_id")) + ":" + str(session.get("pane_pid", 0))
+
+
+def _provider_stall_view(name: str, session: dict):
+    if _provider_monitor is None:
+        return None
+    return _provider_monitor.view(name, _provider_generation(session))
+
+
+@_with_registration_batch
+def _provider_stall_samples():
+    samples = []
+    sessions = tmux_state()
+    agents, _ = agentmail_state()
+    tree = _process_tree_snapshot() if agents else None
+    for name, session in sessions.items():
+        agent = agents.get(name)
+        if not agent or agent.get("program") not in {"codex", "codex-cli"}:
+            continue
+        try:
+            if not _tmux_row_state(name, session, agent, tree)[2]:
+                continue
+            registration = _codex_registration(name)
+            if not registration:
+                continue
+            _agent_runtime(name, session.get("created"), session.get("session_id"))
+            with _rt_lock:
+                captured = _provider_captures.get(name)
+            generation = _runtime_generation(session.get("created"), session.get("session_id"))
+            if not captured or captured[0] != generation:
+                continue
+            env = _tmux(["show-environment", "-t", "=" + name, "PARENT_AGENT"]).strip()
+            parent = env.removeprefix("PARENT_AGENT=") if env.startswith("PARENT_AGENT=") else ""
+            samples.append(dict(name=name, agent_id=registration["agent_id"],
+                project_key=registration["project_key"], generation=_provider_generation(session),
+                parent=parent, capture_id=captured[1], evidence=captured[2]))
+        except Exception:
+            logging.warning("Provider-stop sample unavailable for %s", name)
+    return samples
+
+
+def _provider_stall_send(row: dict, event: dict) -> str:
+    """Use the child's canonical owner material and the existing Mail helper."""
+    name, parent = row["name"], row["parent"]
+    if not _valid(name) or not _valid(parent) or parent == name:
+        return "parent_unverified"
+    session = tmux_state().get(name)
+    if not session or _provider_generation(session) != row["generation"]:
+        return "parent_unverified"
+    env = _tmux(["show-environment", "-t", "=" + name, "PARENT_AGENT"]).strip()
+    if env != "PARENT_AGENT=" + parent:
+        return "parent_unverified"
+    registration = _codex_registration(name)
+    if not registration or registration["agent_id"] != row["agent_id"] or registration["project_key"] != row["project_key"]:
+        return "parent_unverified"
+    if not _resume_registration(parent, {"codex", "codex-cli", "claude", "claude-code"}):
+        return "parent_unverified"
+    try:
+        module = _child_resume_module()
+        state = module._load_state(Path(RUNTIME_DIR) / "child-agents" / (name + ".json"))
+        module._validate_identity(state, agent_name=name, agent_id=row["agent_id"],
+                                  project_key=row["project_key"], program="codex")
+        token = _runtime_agent_token(name)
+        if state.get("parent_agent") != parent or not token or not secrets.compare_digest(token, state.get("registration_token", "")):
+            return "parent_unverified"
+    except Exception:
+        return "parent_unverified"
+    result = _mcp_call("send_message", dict(project_key=row["project_key"],
+        sender_name=name, sender_token=token, to=[parent], importance="high",
+        subject=f"{name} が model の容量エラーで停止", body_md=provider_stalls.message(event)), timeout=3)
+    # An HTTP failure may occur after Mail commits. Never create a second send.
+    if result.get("ok"):
+        return "sent"
+    return "failed" if result.get("rejected") else "delivery_unknown"
+
+
+def _start_provider_stall_monitor():
+    global _provider_monitor, _provider_thread
+    if GLOBAL_MODE or os.name == "nt" or _provider_monitor is not None:
+        return
+    _provider_stop.clear()
+    _provider_monitor = provider_stalls.Monitor(Path(RUNTIME_DIR) / "provider-stalls.json",
+        _provider_stall_send, session_names=mail_signals.session_names)
+    _provider_thread = threading.Thread(target=_provider_monitor.run,
+        args=(_provider_stall_samples, _provider_stop), name="provider-stalls", daemon=True)
+    _provider_thread.start()
+
+
+@atexit.register
+def _stop_provider_stall_monitor():
+    _provider_stop.set()
+    if _provider_thread and _provider_thread is not threading.current_thread():
+        _provider_thread.join(timeout=4)
 
 
 def _parse_runtime(text: str) -> dict:
@@ -6023,6 +6453,7 @@ def _prune_runtime_cache(sessions: dict[str, dict]) -> None:
         for name, (_, generation, _) in list(_rt_cache.items()):
             if generations.get(name) != generation:
                 _rt_cache.pop(name, None)
+                _provider_captures.pop(name, None)
 
 
 def _agent_runtime(
@@ -6045,15 +6476,17 @@ def _agent_runtime(
            "pane_model": None}
     if _valid(session):
         try:
-            r = subprocess.run(
-                ["tmux", "capture-pane", "-p", "-J",
-                 "-t", session, "-S", "-45"],
-                capture_output=True, text=True, timeout=3,
-            )
+            r = _tmux_run(['capture-pane', '-p', '-J', '-t', session, '-S', '-45'], capture_output=True, text=True, timeout=3)
             if r.returncode == 0:
                 out = _parse_runtime(r.stdout)
+                with _rt_lock:
+                    _provider_captures[session] = (generation, now, provider_stalls.observe(r.stdout))
+            else:
+                with _rt_lock:
+                    _provider_captures[session] = (generation, now, {"state": "unknown"})
         except Exception:
-            pass
+            with _rt_lock:
+                _provider_captures[session] = (generation, now, {"state": "unknown"})
     with _rt_lock:
         previous = _rt_cache.get(session)
         if previous and previous[1] == generation:
@@ -6076,11 +6509,7 @@ def term_capture(session: str, lines: int) -> dict:
     lines = max(40, min(4000, lines))
     # capture-pane の -t はペイン指定。= 接頭辞は不可なのでセッション名を
     # そのまま渡す(存在は上で has-session -t =session で厳密確認済み)。
-    out = subprocess.run(
-        ["tmux", "capture-pane", "-e", "-p", "-J",
-         "-t", session, "-S", f"-{lines}"],
-        capture_output=True, text=True, timeout=6,
-    )
+    out = _tmux_run(['capture-pane', '-e', '-p', '-J', '-t', session, '-S', f'-{lines}'], capture_output=True, text=True, timeout=6)
     if out.returncode != 0:
         return {"ok": False, "error": "capture-pane 失敗"}
     return {"ok": True, "session": session, "content": out.stdout}
@@ -6117,7 +6546,15 @@ def ttyd_ensure(session: str) -> dict:
     if not os.path.exists(TTYD_BIN):
         return {"ok": False, "error": "ttyd が見つかりません"}
     with _TTYD_LOCK:
+        try:
+            attach_args = _legacy_terminal_argv(['tmux', 'attach', '-t', f'={session}'])
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+            return {'ok': False, 'error': str(exc)}
         rec = _TTYD.get(session)
+        if rec and _ttyd_alive(rec) and rec.get('attach_args') != attach_args:
+            _ttyd_kill(rec)
+            _TTYD.pop(session, None)
+            rec = None
         if rec and _ttyd_alive(rec):
             rec["last"] = time.time()
             return {"ok": True, "url": f"http://127.0.0.1:{rec['port']}/",
@@ -6130,11 +6567,11 @@ def ttyd_ensure(session: str) -> dict:
              "-m", "3", "-t", "fontSize=13",
              "-t", "titleFixed=" + session,
              "-t", "disableLeaveAlert=true",
-             "tmux", "attach", "-t", f"={session}"],
+             *attach_args],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        _TTYD[session] = {"proc": proc, "port": port, "last": time.time()}
+        _TTYD[session] = {"proc": proc, "port": port, "last": time.time(), "attach_args": attach_args}
     time.sleep(0.5)  # ttyd の listen 開始を待つ
     if proc.poll() is not None:
         return {"ok": False, "error": "ttyd 起動失敗"}
@@ -6167,7 +6604,130 @@ def _ttyd_cleanup() -> None:
         _ttyd_kill(rec)
 
 
-def do_jump(session: str, *, open_terminal: bool | None = None) -> dict:
+_TOOLS_UNSET = object()
+
+
+def do_jump(session: str, *, open_terminal: bool | None = None,
+            base=_TOOLS_UNSET, tools=_TOOLS_UNSET) -> dict:
+    """A tools request replaces a stopped managed child's selection."""
+    if not isinstance(session, str) or not re.fullmatch(r"[A-Za-z0-9_.\-]+", session):
+        return {"ok": False, "error": "invalid session name"}
+    requested = base is not _TOOLS_UNSET or tools is not _TOOLS_UNSET
+    if not requested and not os.path.lexists(os.path.join(RUNTIME_DIR, "child-agents", f"{session}.json")):
+        return _do_jump(session, open_terminal=open_terminal)
+    try:
+        module = _child_resume_module()
+        with module.tools_change_lock(pathlib.Path(RUNTIME_DIR), session):
+            if requested:
+                return _jump_with_tools(session, module, base=base, tools=tools,
+                                        open_terminal=open_terminal)
+            return _do_jump(session, open_terminal=open_terminal)
+    except (ValueError, OSError) as exc:
+        return {"ok": False, "error": str(exc), "resume_capability": "config_unrestorable"}
+
+
+def _jump_with_tools(session, module, *, base, tools, open_terminal):
+    program = _agent_program(session)
+    provider = "codex" if program in _CODEX_PROGRAMS else "claude" if program in {"claude", "claude-code"} else None
+    if provider is None:
+        return {"ok": False, "error": "Tools changes require a retained Claude or Codex CLI child"}
+    live = _child_session_live(session, module.boot_time())
+    if live is None:
+        return {"ok": False, "error": "Cannot confirm whether the child has stopped"}
+    if live:
+        found = lookup_agent(session)
+        if not found or found.get("category") != "finished":
+            return {"ok": False, "error": "Exit the child and confirm it has stopped before changing tools"}
+    selection = _child_tools_module()
+    if base is not _TOOLS_UNSET and base not in ("default", "mail-only"):
+        return {"ok": False, "error": "base must be default or mail-only"}
+    if tools is not _TOOLS_UNSET and not isinstance(tools, dict):
+        return {"ok": False, "error": "tools must be an object"}
+    runtime = pathlib.Path(RUNTIME_DIR)
+    if provider == "codex":
+        path = _codex_transcript_path(session)
+        sid, cwd = _codex_meta(path) if path else (None, None)
+        registration = _codex_registration(session)
+        if not path or not registration or not sid or not cwd:
+            return {"ok": False, "error": "The child's conversation and registration cannot be verified"}
+        provenance, error = _codex_resume_provenance(session, registration=registration, transcript_path=path)
+        if error or not provenance or provenance.get("launch_origin") != "child":
+            return {"ok": False, "error": "Tools changes require a retained child conversation"}
+        state = module.inspect_retained(runtime, session, agent_id=registration["agent_id"],
+                                        project_key=registration["project_key"], program=registration["program"])
+        record = runtime / "child-agents" / f"{session}.tools.json"
+        old = selection.read_codex_record(str(record)) or {
+            "base": "mail-only" if state["codex_mcp_profile"] == "orrery-only" else "default", "tools": {}}
+    else:
+        path = _transcript_path(session)
+        sid = os.path.basename(path)[:-6] if path else ""
+        cwd = _transcript_cwd(path) if path else ""
+        if not sid or not cwd or _claude_conversation_reason(session)[1]:
+            return {"ok": False, "error": "Tools changes require a retained child conversation"}
+        registration, _token, state = _claude_resume_material(session)
+        if state is None or "_legacy_sha256" in state:
+            return {"ok": False, "error": "Tools changes require a retained child conversation"}
+        policy = _claude_chrome_policy_module()
+        record = pathlib.Path(policy.session_path(str(runtime / "child-agents"), session, sid))
+        prior = policy.session_record(str(record.parent), session, sid)
+        old = {"base": prior["base"], "tools": prior["tools"]} if prior else {"base": "default", "tools": {}}
+        if prior and prior["claude_chrome"] and "browser" not in old["tools"]:
+            old["tools"] = {**old["tools"], "browser": {"device": prior["chrome_device"]}}
+    spec = selection.normalize(old["base"] if base is _TOOLS_UNSET else base,
+                               old["tools"] if tools is _TOOLS_UNSET else tools)
+    selection.check_provider(spec, provider)
+    if provider == "codex":
+        source = pathlib.Path(os.path.expanduser(os.environ.get("CODEX_HOME", "").strip() or "~/.codex"))
+        config_path = source / "config.toml"
+        config = module._toml().loads(config_path.read_text()) if config_path.exists() else {}
+        overlay = os.environ.get("AGENTSTACK_CODEX_CHILD_CONFIG_OVERLAY", "").strip()
+        if overlay:
+            try:
+                extra = module._toml().loads(pathlib.Path(overlay).read_text())
+                module._drop_protected_overlay_tables(extra)
+                module._deep_merge(config, extra)
+            except (ValueError, OSError):
+                pass  # Same optional overlay contract as build-home.
+        selection.codex_apply(config, spec)
+        candidate = {"version": selection.CODEX_RECORD_VERSION, **spec}
+        profile = "orrery-only" if spec["base"] == "mail-only" else "inherit"
+    else:
+        chrome = "browser" in spec["tools"]
+        selection.claude_plan(spec, cwd=cwd, chrome=chrome,
+                             claude_json=_env_path("AGENTSTACK_CLAUDE_JSON", "~/.claude.json"))
+        candidate = {"version": 4, "agent_name": session, "session_id": sid,
+                     "launch_id": secrets.token_hex(16), "standalone": False,
+                     "claude_chrome": chrome,
+                     "chrome_device": spec["tools"].get("browser", {}).get("device", ""), **spec}
+        profile = None
+    generation = module.begin_tools_change(runtime, session, state, record, candidate, profile)
+    try:
+        with module.owned_tools_change(generation):
+            _invalidate_resume_capability_cache(session)
+            result = _do_jump(session, open_terminal=open_terminal)
+        if result.get("ok") and result.get("action") != "resumed":
+            result = {"ok": False, "error": "The child became active before the tools-changing resume"}
+    except Exception:
+        # Only this generation may restore the previous selection/config.
+        module.finish_tools_change(runtime, session, generation, commit=False)
+        raise
+    if result.get("ok"):
+        try:
+            module.finish_tools_change(runtime, session, generation, commit=True)
+        except Exception:
+            # Launch has already been accepted. Do not undo a selection used
+            # by a running child or report that accepted launch as a failure.
+            result = {**result, "warning": "; ".join(filter(None, (
+                result.get("warning"), f"Tools change ({generation}) cleanup is pending; recover this generation before another resume")))}
+    else:
+        module.finish_tools_change(runtime, session, generation, commit=False)
+    _invalidate_resume_capability_cache(session)
+    if result.get("ok"):
+        result = {**result, "tools_changed": True, "base": spec["base"], "tools": spec["tools"]}
+    return result
+
+
+def _do_jump(session: str, *, open_terminal: bool | None = None) -> dict:
     if not re.fullmatch(r"[A-Za-z0-9_.\-]+", session or ""):
         return {"ok": False, "error": "invalid session name"}
     # Codex App lives outside tmux and its provider owns the safe activation
@@ -6220,10 +6780,7 @@ def do_jump(session: str, *, open_terminal: bool | None = None) -> dict:
             return _resume_unavailable(capability)
         if program.startswith("claude"):
             return do_resume(session, replace_husk=True, **preference)
-        subprocess.run(
-            ["tmux", "kill-session", "-t", f"={session}"],
-            capture_output=True,
-        )
+        _tmux_run(['kill-session', '-t', f'={session}'], capture_output=True)
         return do_resume(session, **preference)
 
     if open_terminal is False:
@@ -6349,10 +6906,7 @@ def do_kill(session: str, mode: str = "both") -> dict:
     # 2) tmux kill (husk shell があれば)
     if mode in ("both", "tmux"):
         if _has_session(session):
-            r = subprocess.run(
-                ["tmux", "kill-session", "-t", f"={session}"],
-                capture_output=True, text=True,
-            )
+            r = _tmux_run(['kill-session', '-t', f'={session}'], capture_output=True, text=True)
             actions.append("tmux-killed" if r.returncode == 0
                            else f"tmux-fail:{r.stderr.strip()}")
         else:
@@ -6650,7 +7204,9 @@ def spawn_names_payload() -> dict:
     statuses = _spawn_scientist_statuses(adjectives, scientists)
     raw_dirs = os.environ.get("AGENTSTACK_SPAWN_DIRS", "").split(":")
     # Keep `~` symbolic in the API; do_spawn expands it only at launch time.
-    dirs = [value for value in raw_dirs if value] or ["~"]
+    # Unset: the project folder first (the first chip is the default, and only
+    # there does the agent get the project's CLAUDE.md), then home.
+    dirs = [value for value in raw_dirs if value] or [d for d in (PROJECT_KEY, "~") if d]
     claude_catalog = _claude_catalog()
     claude_models = list(claude_catalog.models)
     claude_default = _claude_default_model(claude_models)
@@ -6742,7 +7298,11 @@ def _mcp_jsonrpc(method: str, params: dict, timeout: int = 15) -> dict:
     except ValueError as e:
         return {"ok": False, "error": f"invalid JSON-RPC response: {e}"}
     if isinstance(body, dict) and body.get("error"):
-        return {"ok": False, "error": str(body["error"])}
+        error = body["error"]
+        # Protocol dispatch/argument failures precede execution. Internal
+        # errors (-32603, server-defined codes) can follow a committed send.
+        rejected = isinstance(error, dict) and error.get("code") in (-32600, -32601, -32602)
+        return {"ok": False, "error": str(error), "rejected": rejected}
     if not isinstance(body, dict) or "result" not in body:
         return {"ok": False, "error": "JSON-RPC response has no result"}
     return {"ok": True, "result": body["result"]}
@@ -6774,6 +7334,27 @@ def _mcp_tool_parameters(tool: str) -> set[str] | None:
     return None
 
 
+def _mcp_send_rejected(method: str, text: str) -> bool:
+    """Recognize only Mail refusals whose source precedes message creation."""
+    if method != "send_message":
+        return False
+    text = text.removeprefix("Error calling tool 'send_message': ")
+    # boundary.py: ToolArgumentBoundary rejects before invoking the tool.
+    # app.py: send_message checks contact policy and sender_token before
+    # _deliver_message/_create_message. These fixed messages are contracted
+    # against real FastMCP responses in test_provider_stalls.py.
+    # ToolExecutionError.error_type is not published on this legacy wire;
+    # generic INVALID_ARGUMENT/ValueError, OS errors and isError alone say
+    # nothing about commit timing and must remain delivery_unknown.
+    return bool(
+        re.fullmatch(r"Tool 'send_message' does not accept \d+ of the supplied argument\(s\); check the published schema", text)
+        or re.match(r"Tool 'send_message' rejected its arguments: \d+ validation error\(s\)(?: |$)", text)
+        or text == "Recipient is not accepting messages."
+        or text.startswith("Contact approval required for recipients: ")
+        or re.fullmatch(r"Invalid argument value: sender_token does not match registered token for agent '[A-Za-z0-9]+'\. Check that all parameters have valid values\.", text)
+    )
+
+
 def _mcp_call(method: str, args: dict, timeout: int = 15) -> dict:
     """Call one ORRERY Mail tool, shaping arguments to its advertised schema."""
     allowed = _mcp_tool_parameters(method)
@@ -6799,7 +7380,8 @@ def _mcp_call(method: str, args: dict, timeout: int = 15) -> dict:
             for block in result.get("content") or []
             if isinstance(block, dict)
         ).strip()
-        return {"ok": False, "error": text or "ORRERY Mail tool failed"}
+        return {"ok": False, "error": text or "ORRERY Mail tool failed",
+                "rejected": _mcp_send_rejected(method, text)}
     # Newer MCP servers expose the decoded payload in structuredContent.
     try:
         data = result.get("structuredContent")
@@ -6810,7 +7392,8 @@ def _mcp_call(method: str, args: dict, timeout: int = 15) -> dict:
             except ValueError:
                 lowered = text.lower()
                 if "error calling tool" in lowered or "validation error" in lowered:
-                    return {"ok": False, "error": text.strip()}
+                    return {"ok": False, "error": text.strip(),
+                            "rejected": _mcp_send_rejected(method, text.strip())}
                 data = {"text": text}
     except (KeyError, IndexError, TypeError, ValueError) as e:
         return {"ok": False, "error": f"unexpected response shape: {e}"}
@@ -6860,6 +7443,65 @@ def _spawn_launch_record(name: str, result: dict) -> None:
             "state": state,
             "result": result,
         }
+
+
+_SPAWN_REASON_PREFIX = "[spawn_child] reason: "
+
+
+def _spawn_log_tail_and_reason(log_path, start_offset: int = 0) -> tuple[str, str]:
+    """The current launch interval's tail and first applicable cause line.
+
+    spawn_child.sh writes "[spawn_child] reason: ..." when it stops on
+    something only the user can resolve (Claude Code's first-run setup, its
+    Chrome question). That line becomes the launch error the cockpit shows;
+    without it the user saw only an exit status.
+    """
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(start_offset)
+            text = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return "", ""
+    reason = ""
+    # Explicit readiness failures outrank rejected candidates that the launcher
+    # may have successfully replaced. Within each class keep the first cause.
+    lines = text.splitlines()
+    for line in lines:
+        if line.startswith(_SPAWN_REASON_PREFIX):
+            reason = line[len(_SPAWN_REASON_PREFIX):].strip()
+            break
+    if not reason:
+        error = next((line.strip() for line in lines if line.startswith("Error:")), "")
+        reason = error
+        # A discarded candidate is relevant only when resolution exhausted
+        # every candidate. If a replacement CLI later fails, show that error.
+        if error.startswith("Error: no usable Codex CLI found"):
+            candidates = [line.strip() for line in lines
+                          if line.startswith("note: skipping ")]
+            if candidates:
+                budget = max(0, 500 - len("; " + error))
+                reason = "; ".join(candidates)
+                if len(reason) > budget:
+                    visible = []
+                    for index, candidate in enumerate(candidates):
+                        remaining = len(candidates) - index - 1
+                        suffix = f"; (+{remaining} more skipped candidates)" if remaining else ""
+                        joined = "; ".join([*visible, candidate])
+                        if len(joined + suffix) > budget:
+                            remaining += 1
+                            suffix = f"; (+{remaining} more skipped candidates)"
+                            if not visible:
+                                # Even one candidate may contain a very long path.
+                                remaining -= 1
+                                suffix = f"; (+{remaining} more skipped candidates)" if remaining else ""
+                                visible = [candidate[:max(0, budget - len(suffix) - 1)] + "…"]
+                            reason = "; ".join(visible) + suffix
+                            break
+                        visible.append(candidate)
+                    else:
+                        reason = "; ".join(visible)
+                reason = f"{reason}; {error}" if budget and len(reason) <= budget else error
+    return text[-1000:], reason[:500]
 
 
 def spawn_launch_status(name: str) -> dict:
@@ -6917,6 +7559,7 @@ class SpawnLaunchSpec:
     # Seconds a signalled launcher may spend exiting before SIGKILL.  None
     # selects the canonical grace for this kind of launcher.
     termination_grace: float | None = None
+    model_note: str = ""
 
     def __post_init__(self) -> None:
         grace = self.termination_grace
@@ -7152,8 +7795,8 @@ def _spawn_tools_args(payload: dict, provider: str, chrome: bool,
                       chrome_device: str) -> tuple[tuple[str, ...], str | None]:
     """Launcher arguments for the payload's base/tools, or an error message.
 
-    Omitted (or "default") base and no tools add nothing, so the launch stays
-    what it was before these fields existed."""
+    Omitted fields add nothing. Explicit default/empty selections suppress
+    installer defaults by passing --base default."""
     if "base" not in payload and "tools" not in payload:
         return (), None
     tools_module = _child_tools_module()
@@ -7183,6 +7826,9 @@ def _spawn_tools_args(payload: dict, provider: str, chrome: bool,
     approve_all = set(tools.get("approve_all", ()))
     for name in tools.get("mcp", ()):
         args += ["--tools", "mcp:" + name + (":all" if name in approve_all else "")]
+    if not args and provider in ("claude", "codex"):
+        # An explicit empty form selection must suppress installer defaults.
+        args = ["--base", "default"]
     return tuple(args), None
 
 
@@ -7265,13 +7911,16 @@ def do_spawn(payload: dict) -> dict:
     elif provider == "codex":
         try:
             launcher = codex_models.resolve_launcher()
-            model = codex_models.normalize_model(model, launcher=launcher)
-            effort = codex_models.resolve_effort(model, effort, codex_models.resolve_catalog(launcher=launcher))
+            catalog = codex_models.resolve_catalog(launcher=launcher)
+            model_note = catalog.note if not model or model.lower() == "sol" else ""
+            model = codex_models.normalize_model(model, catalog=catalog)
+            effort = codex_models.resolve_effort(model, effort, catalog)
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
         spec = SpawnLaunchSpec(
             provider="codex", program="codex-cli", model=model,
-            script=SPAWN_SCRIPT, effort=effort, provider_args=("--codex",) + tools_args,
+            script=SPAWN_SCRIPT, effort=effort, model_note=model_note,
+            provider_args=("--codex",) + tools_args,
             launcher_env=(("AGENTSTACK_CODEX_BIN", launcher.binary),) if launcher.binary else (),
             effort_arg=bool(effort),
         )
@@ -7353,8 +8002,7 @@ def _codex_self_update_on_screen(session: str) -> bool:
     left neither the old nor the new codex usable on the machine (#60).
     """
     try:
-        result = subprocess.run(["tmux", "capture-pane", "-t", f"={session}", "-p"],
-                                capture_output=True, text=True, timeout=5)
+        result = _tmux_run(['capture-pane', '-t', f'={session}', '-p'], capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         return False
     pane = getattr(result, "stdout", "")
@@ -7376,6 +8024,7 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
     program = spec.program
     model_str = spec.model
     effort = spec.effort
+    model_notice = {"model_note": spec.model_note} if spec.model_note else {}
 
     if standalone and not spec.standalone_supported:
         return {"ok": False,
@@ -7397,6 +8046,7 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
     if request["dry_run"]:
         return {
             "ok": True, "dry_run": True, "provider": provider,
+            **model_notice,
             "model": model_str, "effort": effort, "dir": work_dir,
             "standalone": standalone, "worktree": worktree,
             "argv": _spawn_argv(request, spec, requested_name or "<child-name>",
@@ -7464,6 +8114,7 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
         registration_status = "may remain" if registration_may_remain else "remains"
         result = {
             "ok": False,
+            **model_notice,
             "error": (
                 f"{error}; child registration '{child_name}' {registration_status} because "
                 "the dashboard server has no permission to delete it"
@@ -7633,9 +8284,7 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
             print(f"spawn {child_name}: Codex is updating itself; session left running (#60)", file=sys.stderr)
             return
         try:
-            subprocess.run(
-                ["tmux", "kill-session", "-t", f"={child_name}"],
-                capture_output=True, text=True)
+            _tmux_run(['kill-session', '-t', f'={child_name}'], capture_output=True, text=True)
         except OSError:
             pass
 
@@ -7686,6 +8335,10 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
     # the CLI env defaults would otherwise turn an unchecked box back on.
     env.pop("AGENTSTACK_CLAUDE_CHILD_CHROME", None)
     env.pop("AGENTSTACK_CLAUDE_CHILD_CHROME_DEVICE", None)
+    # The form/API selection is authoritative. The UI initializes its visible
+    # choices from installer defaults; the launcher must not append them again
+    # (or restore a choice the operator removed).
+    env.pop("AGENTSTACK_CHILD_DEFAULT_TOOLS", None)
     if spec.provider == "codex" and not env.get("AGENTSTACK_PYTHON", "").strip():
         # Direct development servers need the same interpreter as the API;
         # installed services already carry the installer's pinned interpreter.
@@ -7709,11 +8362,14 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
         os.makedirs(log_dir, exist_ok=True)
         log_path = os.path.join(log_dir, "spawn.log")
         log_fh = open(log_path, "ab", buffering=0)
+        log_start_offset = log_fh.tell()
         ts = datetime.now(timezone.utc).isoformat()
         log_fh.write(
             f"\n=== {ts} spawn child={child_name} parent={parent} "
             f"provider={provider} model={model_str} effort={effort or '-'} "
             f"standalone={standalone} worktree={worktree} ===\n".encode())
+        if spec.model_note:
+            log_fh.write(f"note: {spec.model_note}\n".encode())
         proc = subprocess.Popen(args, stdout=log_fh, stderr=log_fh, env=env,
                                 start_new_session=True)
 
@@ -7776,33 +8432,24 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
                 if returncode != 0:
                     kill_spawn_session()
                     remove_spawn_credentials()
-                    tail = ""
-                    try:
-                        with open(log_path, encoding="utf-8", errors="replace") as f:
-                            tail = f.read()[-1000:]
-                    except OSError:
-                        pass
+                    tail, reason = _spawn_log_tail_and_reason(log_path, log_start_offset)
+                    error = f"spawn launcher exited with status {returncode}"
                     return retained_registration_error(
-                        f"spawn launcher exited with status {returncode}",
+                        f"{reason} ({error})" if reason else error,
                         detail=tail)
 
-            probe = subprocess.run(
-                ["tmux", "has-session", "-t", f"={child_name}"],
-                capture_output=True, text=True)
+            probe = _tmux_run(['has-session', '-t', f'={child_name}'], capture_output=True, text=True)
             if probe.returncode:
                 kill_spawn_session()
                 remove_spawn_credentials()
-                tail = ""
-                try:
-                    with open(log_path, encoding="utf-8", errors="replace") as f:
-                        tail = f.read()[-1000:]
-                except OSError:
-                    pass
+                tail, reason = _spawn_log_tail_and_reason(log_path, log_start_offset)
+                error = "spawn launcher exited before a live tmux session was created"
                 return retained_registration_error(
-                    "spawn launcher exited before a live tmux session was created",
+                    f"{reason} ({error})" if reason else error,
                     detail=tail)
             return {
                 "ok": True,
+                **model_notice,
                 "child_name": child_name,
                 "requested_name": requested_name,
                 "name_substituted": name_substituted,
@@ -7822,6 +8469,7 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
             # rest of the UI. The thread owns the log handle from here.
             pending = {
                 "ok": True,
+                **model_notice,
                 "pending": True,
                 "child_name": child_name,
                 "requested_name": requested_name,
@@ -7876,10 +8524,7 @@ def _tmux_session_env(session: str, key: str) -> str:
     """Read one tmux session environment value without executing shell text."""
     if not _valid(session) or re.fullmatch(r"[A-Z0-9_]+", key or "") is None:
         return ""
-    result = subprocess.run(
-        ["tmux", "show-environment", "-t", f"={session}", key],
-        capture_output=True, text=True, timeout=3,
-    )
+    result = _tmux_run(['show-environment', '-t', f'={session}', key], capture_output=True, text=True, timeout=3)
     if result.returncode != 0:
         return ""
     line = (result.stdout or "").strip()
@@ -7891,10 +8536,7 @@ def _fresh_agent_process_pid(session: str, program: str | None) -> int | None:
     """Re-read tmux + ps immediately before a destructive provider signal."""
     if not _valid(session) or not _supports_agent_process_liveness(program):
         return None
-    pane = subprocess.run(
-        ["tmux", "display-message", "-t", session, "-p", "#{pane_pid}"],
-        capture_output=True, text=True, timeout=3,
-    )
+    pane = _tmux_run(['display-message', '-t', session, '-p', '#{pane_pid}'], capture_output=True, text=True, timeout=3)
     try:
         pane_pid = int((pane.stdout or "").strip()) if pane.returncode == 0 else 0
     except ValueError:
@@ -7924,10 +8566,7 @@ def _pane_agent_process(session: str, ps_output: str | None = None) -> str:
     instead of trusting the leader's name.
     """
     if ps_output is None:
-        pid_r = subprocess.run(
-            ["tmux", "display-message", "-t", session, "-p", "#{pane_pid}"],
-            capture_output=True, text=True,
-        )
+        pid_r = _tmux_run(['display-message', '-t', session, '-p', '#{pane_pid}'], capture_output=True, text=True)
         try:
             pane_pid = int(pid_r.stdout.strip())
         except ValueError:
@@ -8016,7 +8655,9 @@ def do_exit(session: str) -> dict:
                 "error": "Antigravity process could not be revalidated; refusing to signal",
             }
         try:
-            os.kill(provider_pid, signal.SIGINT)
+            _MODE_API['request_provider_exit'](send=None,
+                interrupt=lambda signum: os.kill(provider_pid, signum),
+                delegated_antigravity=True)
         except ProcessLookupError:
             return {
                 "ok": False,
@@ -8030,10 +8671,7 @@ def do_exit(session: str) -> dict:
     # pane で動いているプロセスを確認
     # Claude Code は Python プロセス → "Python" / シェルゾンビは "zsh"/"bash" 等
     _SHELL_PROCS = {"zsh", "bash", "sh", "fish", "csh", "tcsh", "dash"}
-    pane_cmd_r = subprocess.run(
-        ["tmux", "display-message", "-t", session, "-p", "#{pane_current_command}"],
-        capture_output=True, text=True,
-    )
+    pane_cmd_r = _tmux_run(['display-message', '-t', session, '-p', '#{pane_current_command}'], capture_output=True, text=True)
     pane_cmd = pane_cmd_r.stdout.strip().lower()
 
     # build_agents() resolves Codex liveness from the shared process snapshot
@@ -8049,30 +8687,18 @@ def do_exit(session: str) -> dict:
         if agent_proc:
             actions.append(f"wrapper-shell:{pane_cmd}>{agent_proc}")
 
-    if pane_cmd in _SHELL_PROCS and target["category"] == "finished" and not agent_proc:
-        r = subprocess.run(
-            ["tmux", "send-keys", "-t", session, "exit", "Enter"],
-            capture_output=True, text=True,
-        )
+    shell_exit = pane_cmd in _SHELL_PROCS and target["category"] == "finished" and not agent_proc
+    def send_exit(*keys):
+        r = _tmux_run(['send-keys', '-t', session, *keys], capture_output=True, text=True)
         if r.returncode != 0:
-            return {"ok": False, "error": f"tmux send-keys failed: {r.stderr.strip()}"}
-        actions.append("shell-exit-sent")
+            raise RuntimeError(f"tmux send-keys failed: {r.stderr.strip()}")
+    try:
+        actions.append(_MODE_API['request_provider_exit'](
+            send=send_exit, interrupt=None, shell_exit=shell_exit, pause=time.sleep))
+    except RuntimeError as exc:
+        return {"ok": False, "error": str(exc)}
+    if shell_exit:
         actions.append(f"zombie-pane:{pane_cmd}")
-    else:
-        r = subprocess.run(
-            ["tmux", "send-keys", "-t", session, "-l", "/exit"],
-            capture_output=True, text=True,
-        )
-        if r.returncode != 0:
-            return {"ok": False, "error": f"tmux send-keys failed: {r.stderr.strip()}"}
-        time.sleep(0.3)
-        r = subprocess.run(
-            ["tmux", "send-keys", "-t", session, "C-m"],
-            capture_output=True, text=True,
-        )
-        if r.returncode != 0:
-            return {"ok": False, "error": f"tmux send-keys failed: {r.stderr.strip()}"}
-        actions.append("exit-sent")
 
     return {"ok": True, "session": session, "actions": actions}
 
@@ -8229,20 +8855,7 @@ def mail_watcher_health() -> dict:
         except (json.JSONDecodeError, OSError):
             pass
 
-    try:
-        count = 0
-        for signal_dir in _signal_agent_dirs():
-            if not os.path.isdir(signal_dir):
-                continue
-            for agent_dir in os.scandir(signal_dir):
-                if not agent_dir.is_dir():
-                    continue
-                for f in os.scandir(agent_dir.path):
-                    if f.name.endswith(".signal"):
-                        count += 1
-        result["signal_count"] = count
-    except OSError:
-        pass
+    result.update(mail_signals.counts(_signal_agent_dirs(), RUNTIME_DIR, now))
 
     # 配送本体は mail-watcher に統合。GUI launchd domain が使えない環境でも
     # watcher 自身が持つ pidfile と command line を照合して実プロセスを判定する。
@@ -8264,9 +8877,10 @@ def mail_watcher_health() -> dict:
     result["daemon_running"] = _launchctl_job_running(NOTIFY_DAEMON_LABEL)
 
     age = result.get("last_success_age_s")
-    signals = result["signal_count"]
+    signals = result["actionable_signal_count"]
     watcher = result["watcher_running"]
-    # red:    watcher 不在 / signal 大量滞留 (>50, 通常は配送時に即 unlink される)
+    # red:    watcher 不在 / 生きている宛先・直近24時間の signal 大量滞留 (>50)
+    # session 不在が確認できた古い signal だけを分ける。測定失敗や headless は除外しない。
     # yellow: watcher 生存だが pending signal が捌けていない (滞留 + 直近配送なし
     #         = 配送が遅れている兆候)
     # green:  それ以外。watcher 生存かつ (backlog 無し or 直近配送あり)。トラフィック
@@ -8285,7 +8899,108 @@ def mail_watcher_health() -> dict:
 # --------------------------------------------------------------------------- #
 # HTTP
 # --------------------------------------------------------------------------- #
+def is_public_static(path):
+    return path == '/' or path in THEME_ASSETS
+
+
 class Handler(BaseHTTPRequestHandler):
+    def parse_request(self):
+        if not super().parse_request():
+            return False
+        if not GLOBAL_MODE:
+            return True
+        # One rule for every verb and route, including future local operations.
+        # Only exact installed static GET/HEAD resources are public.
+        path = urlparse(self.path).path
+        if self.command in {'GET','HEAD'} and is_public_static(path):
+            return True
+        try:
+            try:
+                from dashboard.http_operator import Admission
+            except ModuleNotFoundError:
+                from http_operator import Admission
+            home = os.environ.get('AGENTSTACK_HOME', '')
+            Admission(home, f'http://{BIND_HOST}:{self.server.server_port}').http(self.headers, self.client_address[0])
+            return True
+        except Exception as exc:
+            self._global_failure(exc)
+            return False
+
+    def _global_failure(self, exc):
+        reason=str(exc)
+        if not re.fullmatch(r'[A-Z][A-Z0-9_]{0,95}',reason):reason='GLOBAL_BACKEND_UNAVAILABLE'
+        status=getattr(exc,'status',None) or ({'QUERY_INVALID':400,'CURSOR_INVALID':400,
+            'UI_VIEWPOINT_REQUIRED':400,'NAME_INVALID':400,'CLIENT_NAME_INVALID':400,
+            'TARGET_UNAVAILABLE':404,'MESSAGE_UNAVAILABLE':404,
+            **dict.fromkeys(('NAME_CONFLICT','OWNER_REQUIRED','REGISTRATION_PENDING_CONFLICT',
+                'REGISTRATION_OWNER_CONFLICT','EXISTING_IDENTITY_REQUIRED','EXISTING_CLIENT_REQUIRED',
+                'CLIENT_SELECTION_REQUIRED','CLIENT_ROOT_IS_CHILD','REGISTRATION_OWNERSHIP_VERIFIED_RETRY_REQUIRED'),409)}.get(reason,503))
+        self._send(status,json.dumps({'ok':False,'reason':reason}).encode(),'application/json; charset=utf-8')
+
+    def _serve_portrait(self, nm, hi):
+        fp = _portrait_file(nm, hi)
+        if not fp:
+            if not re.fullmatch(r"[A-Za-z][A-Za-z ._-]{0,23}", nm or ""):
+                self._send(404, b"no portrait", "text/plain")
+                return
+            img = _portrait_fallback(nm, hi)
+            self._send(200, img, "image/svg+xml")
+            return
+        try:
+            with open(fp, "rb") as f:
+                img = f.read()
+        except OSError:
+            self._send(404, b"missing", "text/plain")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(img)))
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        self.wfile.write(img)
+
+    def _global_get(self, path):
+        try:
+            try:
+                from dashboard.global_backend import Backend
+            except ModuleNotFoundError:
+                from global_backend import Backend
+            if path == '/api/version':
+                payload = {'name':'orrery-telemetry','version':_resolve_version(),'api':API_GENERATION,
+                    'runtime_mode':'global','capabilities':{'operator_http_admission':1,'ui_read':1,
+                    'global_spawn':1,'instruction_migration':1,'global_dashboard_ui':1,
+                    'global_runtime_observation':1,'operator_session':1}}
+            elif path == '/api/runtime-observations':
+                query=parse_qs(urlparse(self.path).query,keep_blank_values=True)
+                ids=(query.get('agent_ids') or [''])[0].split(',')
+                if (set(query) != {'agent_ids'} or len(query['agent_ids']) != 1
+                        or not 1 <= len(ids) <= 200
+                        or any(re.fullmatch(r'[1-9][0-9]{0,18}', x) is None or int(x)>2**63-1 for x in ids)
+                        or len(set(ids)) != len(ids)):
+                    raise ValueError('QUERY_INVALID')
+                payload=Backend(GLOBAL_SERVER_CONFIG).observe(list(map(int,ids)),_parse_runtime)
+            elif path == '/api/quotas':
+                payload=QUOTA_SERVICE.read_all()
+            elif path == '/portrait':
+                query=parse_qs(urlparse(self.path).query,keep_blank_values=True)
+                if set(query)-{'name','hi'} or any(len(x)!=1 for x in query.values()):
+                    raise ValueError('QUERY_INVALID')
+                name=(query.get('name') or [''])[0]
+                self._serve_portrait(name,(query.get('hi') or [''])[0] in ('1','true'));return
+            elif path == '/api/fs/dirs':
+                query=parse_qs(urlparse(self.path).query,keep_blank_values=True)
+                if set(query)-{'path'} or len(query.get('path',[]))>1:
+                    raise ValueError('QUERY_INVALID')
+                payload={'ok':True,'runtime_mode':'global',**spawn_directory_suggestions((query.get('path') or [''])[0])}
+            elif path == '/api/deliverables':
+                payload={'ok':True,'runtime_mode':'global','configured':bool(os.environ.get('AGENTSTACK_DELIVERABLE_ROOTS','').strip()),'items':_deliverables_index()}
+            else:
+                backend = Backend(GLOBAL_SERVER_CONFIG)
+                payload = backend.get(path,parse_qs(urlparse(self.path).query,keep_blank_values=True))
+            self._send(200,json.dumps(payload,ensure_ascii=False).encode(),'application/json; charset=utf-8')
+        except Exception as exc:
+            self._global_failure(exc)
+
     def log_message(self, *a):  # サイレント
         pass
 
@@ -8295,7 +9010,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def _single_flight(self, key: tuple, compute) -> bytes | None:
         """A shared display body, or None after answering 503 busy."""
@@ -8312,14 +9028,22 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return None
 
+    def do_HEAD(self):
+        if GLOBAL_MODE and is_public_static(urlparse(self.path).path):
+            self.do_GET()
+        else:self.send_error(501,'Unsupported method')
+
     def do_GET(self):
         path = urlparse(self.path).path
+        if GLOBAL_MODE and not is_public_static(path):
+            self._global_get(path)
+            return
         if path == "/":
             try:
                 with open(INDEX_HTML, "rb") as f:
                     self._send(
                         200,
-                        _render_dashboard_index(f.read()),
+                        _global_dashboard_index(f.read()) if GLOBAL_MODE else _render_dashboard_index(f.read()),
                         "text/html; charset=utf-8",
                     )
             except FileNotFoundError:
@@ -8345,9 +9069,9 @@ class Handler(BaseHTTPRequestHandler):
             version = _resolve_version()
             # "api" is the compatibility generation for programs using this
             # API (ORRERY cockpit): raise it only when something they rely on
-            # is added or changes meaning, and say so in the CHANGELOG. It is
-            # managed this way from 2 on; every earlier release reported 1.
-            self._send(200, json.dumps({"name": "orrery-telemetry", "version": version, "api": 7}).encode(), "application/json; charset=utf-8")
+            # is added or changes meaning; record it in a changelog.d fragment.
+            # Managed this way from 2 on; every earlier release reported 1.
+            self._send(200, json.dumps({"name": "orrery-telemetry", "version": version, "api": API_GENERATION}).encode(), "application/json; charset=utf-8")
         elif path == "/api/spawn-names":
             try:
                 self._send(200, json.dumps(spawn_names_payload()).encode(), "application/json; charset=utf-8")
@@ -8370,16 +9094,13 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/agents":
             q = parse_qs(urlparse(self.path).query)
             history_days = _parse_history_days((q.get("days") or [""])[0])
-            body = self._single_flight(("agents", history_days), lambda: json.dumps(
-                {
-                    "ts": int(time.time()),
-                    "history_days": history_days,
-                    "agents": build_agents(history_days),
-                },
-                ensure_ascii=False,
-            ).encode())
-            if body is not None:
-                self._send(200, body, "application/json; charset=utf-8")
+            scope = (q.get("scope") or [""])[0]
+            # Every scope shares the one roster computation for this window;
+            # only the answer written from it differs.
+            answer = self._single_flight(("agents", history_days),
+                                         lambda: _AgentsAnswer(history_days))
+            if answer is not None:
+                self._send(200, answer.body(scope), "application/json; charset=utf-8")
         elif path == "/api/spawn-status":
             q = parse_qs(urlparse(self.path).query)
             name = (q.get("name") or [""])[0]
@@ -8544,26 +9265,7 @@ class Handler(BaseHTTPRequestHandler):
             q = parse_qs(urlparse(self.path).query)
             nm = (q.get("name") or [""])[0]
             hi = (q.get("hi") or ["0"])[0] in ("1", "true")
-            fp = _portrait_file(nm, hi)
-            if not fp:
-                if not re.fullmatch(r"[A-Za-z][A-Za-z ._-]{0,23}", nm or ""):
-                    self._send(404, b"no portrait", "text/plain")
-                    return
-                img = _portrait_fallback(nm, hi)
-                self._send(200, img, "image/svg+xml")
-                return
-            try:
-                with open(fp, "rb") as f:
-                    img = f.read()
-            except OSError:
-                self._send(404, b"missing", "text/plain")
-                return
-            self.send_response(200)
-            self.send_header("Content-Type", "image/png")
-            self.send_header("Content-Length", str(len(img)))
-            self.send_header("Cache-Control", "public, max-age=86400")
-            self.end_headers()
-            self.wfile.write(img)
+            self._serve_portrait(nm, hi)
         elif path == "/api/ptty":
             q = parse_qs(urlparse(self.path).query)
             sess = (q.get("session") or [""])[0]
@@ -8598,6 +9300,30 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
+        if GLOBAL_MODE:
+            try:
+                try:
+                    from dashboard.global_backend import Backend, BackendError
+                except ModuleNotFoundError:
+                    from global_backend import Backend, BackendError
+                if self.headers.get_content_type()!='application/json':raise BackendError('JSON_REQUIRED',415)
+                lengths=self.headers.get_all('Content-Length',[])
+                if len(lengths)!=1 or not lengths[0].isascii() or not lengths[0].isdigit():raise BackendError('QUERY_INVALID',400)
+                length=int(lengths[0])
+                if not 0<length<=65536:raise BackendError('PAYLOAD_TOO_LARGE',413)
+                try:payload=json.loads(self.rfile.read(length))
+                except (json.JSONDecodeError,UnicodeDecodeError) as exc:
+                    raise BackendError('QUERY_INVALID',400) from exc
+                def cwd(value):
+                    if not os.path.isabs(value) or not os.path.isdir(value):raise BackendError('SPAWN_DIRECTORY_INVALID',400)
+                    resolved=os.path.realpath(value)
+                    if not any(_is_within_root(resolved,root) for root in _spawn_roots()):raise BackendError('SPAWN_DIRECTORY_OUTSIDE_ROOTS',400)
+                    return resolved
+                result=Backend(GLOBAL_SERVER_CONFIG).post(path,payload,cwd,_open_terminal_tmux)
+                self._send(200 if result.get('ok') else 409,json.dumps(result,ensure_ascii=False).encode(),'application/json; charset=utf-8')
+            except Exception as exc:
+                self._global_failure(exc)
+            return
         if path not in ("/api/jump", "/api/kill", "/api/exit",
                         "/api/annotate", "/api/spawn", "/api/reactivate",
                         "/api/jserr"):
@@ -8659,12 +9385,15 @@ class Handler(BaseHTTPRequestHandler):
             return
         session = body.get("session", "")
         if path == "/api/jump":
-            if "open" in body and type(body["open"]) is not bool:
+            if body.get('runtime_mode') == 'global':
+                result = global_child_resume(body)
+            elif "open" in body and type(body["open"]) is not bool:
                 result = {"ok": False, "error": "open must be a boolean"}
-            elif "open" in body:
-                result = do_jump(session, open_terminal=body["open"])
             else:
-                result = do_jump(session)
+                options = {key: body[key] for key in ("base", "tools") if key in body}
+                if "open" in body:
+                    options["open_terminal"] = body["open"]
+                result = do_jump(session, **options)
         elif path == "/api/exit":
             result = do_exit(session)
         elif path == "/api/annotate":
@@ -8805,16 +9534,30 @@ def _child_session_live(name: str, boot: float | None) -> bool | None:
     A tmux session of that name, or a live-session lease written since this
     machine booted whose process is alive. A lease from before the boot is
     ignored: its PID may belong to an unrelated process now.
+
+    Absence is read from the session list, not from has-session: the tmux
+    consumer refuses a has-session on a missing target (TMUX_TARGET_UNAVAILABLE)
+    instead of returning tmux's "can't find session", which read as "cannot
+    tell" and left every child a reboot stopped unresumable.
     """
     try:
-        # Under the lease lock: keep it shorter than a lease writer waits (10 s).
-        done = subprocess.run(["tmux", "has-session", "-t", f"={name}"],
-                              capture_output=True, text=True, timeout=2)
-    except (OSError, subprocess.SubprocessError):
+        # Under the lease lock: both calls together stay shorter than a lease
+        # writer waits (10 s).
+        listed = _tmux_run(['list-sessions', '-F', '#{session_name}'],
+                           capture_output=True, text=True, timeout=2)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
         return None
-    if done.returncode == 0:
-        return True
-    reason = (done.stderr or "").lower()
+    if listed.returncode == 0:
+        if name not in (listed.stdout or "").splitlines():
+            return _child_resume_module().live_lease(pathlib.Path(RUNTIME_DIR), name, boot=boot)
+        # Listed: a session of that name exists, and only admission can say
+        # whether it is this child's. Any refusal stays "cannot tell".
+        try:
+            done = _tmux_run(['has-session', '-t', f'={name}'], capture_output=True, text=True, timeout=2)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return None
+        return True if done.returncode == 0 else None
+    reason = (listed.stderr or "").lower()
     # Only these mean "no such session". Any other failure, such as a server
     # socket this user cannot open ("error connecting … (permission denied)"),
     # says nothing about the session and must not be read as "gone".
@@ -8907,8 +9650,18 @@ def _log_js_error(body: dict) -> dict:
 
 
 def main():
+    if GLOBAL_MODE:
+        # Isolation-only global backend starts no legacy maintenance, providers,
+        # ttyd cleanup or child processes. Request failures never fall back.
+        srv = ThreadingHTTPServer((BIND_HOST, PORT), Handler)
+        print(f'agent-dashboard global backend on http://{BIND_HOST}:{PORT}/',flush=True)
+        try:srv.serve_forever()
+        except KeyboardInterrupt:pass
+        finally:srv.server_close()
+        return
     _start_supervisor_watchdog()
     _start_child_resume_maintenance()
+    _start_provider_stall_monitor()
 
     # 前回(SIGKILL 等で atexit 未実行)の野良 ttyd を掃除してから開始
     try:
@@ -8929,6 +9682,8 @@ def main():
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        _stop_provider_stall_monitor()
 
 
 if __name__ == "__main__":

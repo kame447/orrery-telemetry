@@ -74,6 +74,7 @@ WORKTREE_ROOT_SETTING="${AGENTSTACK_WORKTREE_ROOT:-}"
 CODEX_CHILD_APPROVAL_SETTING="${AGENTSTACK_CODEX_CHILD_APPROVAL:-}"
 CODEX_CHILD_CONFIG_OVERLAY_SETTING="${AGENTSTACK_CODEX_CHILD_CONFIG_OVERLAY:-}"
 CODEX_NETWORK_SETTING="${AGENTSTACK_CODEX_NETWORK:-}"
+CHILD_DEFAULT_TOOLS_SETTING="${AGENTSTACK_CHILD_DEFAULT_TOOLS:-}"
 CODEX_ADD_DIRS_SETTING="${AGENTSTACK_CODEX_ADD_DIRS:-}"
 CHILD_RESUME_RETENTION_DAYS_SETTING="${AGENTSTACK_CHILD_RESUME_RETENTION_DAYS:-}"
 # Where the Codex CLI lives. The dashboard runs under launchd / systemd with
@@ -172,7 +173,7 @@ Options:
                          just that setting.
                          AGENTSTACK_RESET_SETTINGS=1 does the same.
   --spawn-dirs PATHS     ':'-separated NEW AGENT launch-directory presets
-                         (absolute or ~; default: existing env.sh, else ~)
+                         (absolute or ~; default: existing env.sh, else the project key then ~)
   --spawn-roots PATHS    ':'-separated roots the directory typeahead may
                          browse (default: existing env.sh, else $HOME)
   --codex-approval MODE  Codex child --ask-for-approval: never, on-request,
@@ -182,6 +183,7 @@ Options:
                          Absolute path to a TOML fragment merged over every
                          macOS/Linux Codex child's config.toml (default:
                          existing env.sh, else disabled)
+  --child-default-tools SPEC  default child tools (same grammar as --tools; empty by default)
   --codex-network MODE   on or off: sandbox network access for Codex children
                          (default: existing env.sh, else on)
   --codex-bin PATH       Codex CLI executable used by the dashboard and child
@@ -309,6 +311,15 @@ while [[ $# -gt 0 ]]; do
     --codex-child-overlay)
       CODEX_CHILD_CONFIG_OVERLAY_SETTING="$2"
       OPTION_GIVEN="$OPTION_GIVEN AGENTSTACK_CODEX_CHILD_CONFIG_OVERLAY"
+      shift 2
+      ;;
+    --child-default-tools)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --child-default-tools requires a value (empty clears it)" >&2
+        exit 2
+      fi
+      CHILD_DEFAULT_TOOLS_SETTING="$2"
+      OPTION_GIVEN="$OPTION_GIVEN AGENTSTACK_CHILD_DEFAULT_TOOLS"
       shift 2
       ;;
     --codex-network)
@@ -460,6 +471,8 @@ if [[ ! -f "$PROJECT_CONTEXT_LIB" ]]; then
 fi
 # shellcheck disable=SC1090
 . "$PROJECT_CONTEXT_LIB"
+AGENTSTACK_LEGACY_PROJECT_KEY="$(agentstack_installed_env_value AGENTSTACK_PROJECT_KEY "$INSTALL_DIR/env.sh")"
+export AGENTSTACK_LEGACY_PROJECT_KEY
 PROJECT_KEY="$(agentstack_resolve_project_key "" "$INSTALL_DIR/env.sh" 0)"
 if [[ -z "$PROJECT_KEY" ]]; then
   echo "error: project key is required on first install; pass --project-key /absolute/path/to/project or set AGENTSTACK_PROJECT_KEY" >&2
@@ -516,6 +529,35 @@ if [[ -n "${AGENTSTACK_PROTECTED_ROOTS:-}" &&
       "$AGENTSTACK_PROTECTED_ROOTS" != "$LEGACY_PROTECTED_ROOTS" ]]; then
   printf 'warning: ambient AGENTSTACK_PROTECTED_ROOTS=%q differs from installed legacy value %q; ignoring ambient roots (never migrated)\n' \
     "$AGENTSTACK_PROTECTED_ROOTS" "$LEGACY_PROTECTED_ROOTS" >&2
+fi
+
+# --dashboard-only copies no hooks/ and never launches a Codex child
+# (spawn_child.sh): nothing on that path needs hooks/codex-bin.sh, so it must
+# not be required to exist there either. Everything that loads or calls it
+# is skipped for that tier, below (#243).
+if [[ "$TIER" != tier0 ]]; then
+# --- codex helper load (tests extract from here to the end marker) ---
+# The launcher, doctor and installer resolve and probe Codex through the same
+# functions (hooks/codex-bin.sh, #242); the installer keeps no copy of its
+# own. install.sh is never run from an install destination (it copies
+# $REPO_ROOT/hooks there, never the reverse), so the checkout's own copy is
+# the only one that can ever be current; a missing or incompatible helper is
+# a packaging error, not a reason to skip Codex detection silently.
+CODEX_HELPER="$REPO_ROOT/hooks/codex-bin.sh"
+if [[ ! -f "$CODEX_HELPER" ]]; then
+  echo "error: missing Codex launcher helper: $CODEX_HELPER" >&2
+  exit 2
+fi
+# shellcheck disable=SC1090
+. "$CODEX_HELPER"
+for CODEX_HELPER_FN in codex_bin_problem find_usable_codex_bin_in codex_launch_search_path codex_probe_budget_start codex_launch_context; do
+  if ! declare -F "$CODEX_HELPER_FN" >/dev/null; then
+    echo "error: Codex launcher helper is missing required function $CODEX_HELPER_FN: $CODEX_HELPER" >&2
+    exit 2
+  fi
+done
+unset CODEX_HELPER_FN
+# --- end codex helper load ---
 fi
 case "$RESET_SETTINGS" in
   0|"") RESET_SETTINGS=0 ;;
@@ -643,190 +685,82 @@ resolve_setting WORKTREE_ROOT_SETTING AGENTSTACK_WORKTREE_ROOT "$INSTALL_DIR/wor
 resolve_setting CODEX_CHILD_APPROVAL_SETTING AGENTSTACK_CODEX_CHILD_APPROVAL never
 resolve_setting CODEX_CHILD_CONFIG_OVERLAY_SETTING AGENTSTACK_CODEX_CHILD_CONFIG_OVERLAY
 resolve_setting CODEX_NETWORK_SETTING AGENTSTACK_CODEX_NETWORK on
+resolve_setting CHILD_DEFAULT_TOOLS_SETTING AGENTSTACK_CHILD_DEFAULT_TOOLS
 resolve_setting CODEX_ADD_DIRS_SETTING AGENTSTACK_CODEX_ADD_DIRS
 resolve_setting CHILD_RESUME_RETENTION_DAYS_SETTING AGENTSTACK_CHILD_RESUME_RETENTION_DAYS 30
 # --- codex launcher resolution (tests extract from here to the end marker) ---
-# Under WSL, PATH also carries the Windows PATH (/mnt/c/...). A `codex` found
-# there is the Windows npm shim: run by the Linux node it dies at once with
-# "Missing optional dependency @openai/codex-linux-x64", and every Codex child
-# spawned from the dashboard ends before its prompt arrives. A candidate is
-# therefore used only if it is not under a Windows drive mount (WSL only) and
-# answers `--version` within a short time.
-WSL_WINDOWS_MOUNT_ROOT=/mnt
-CODEX_VERSION_TIMEOUT_SECONDS=10
-
-running_under_wsl() {
-  [[ -r /proc/version ]] && grep -qi microsoft /proc/version 2>/dev/null
-}
-
-# Succeeds when `$1 --version` exits 0 within the timeout (portable: no
-# coreutils `timeout` on macOS).
-codex_version_answers() {
-  local bin="$1" out="${2:-/dev/null}" pid tick=0 limit=$((CODEX_VERSION_TIMEOUT_SECONDS * 10))
-  local err status=0
-  # Why it failed, for codex_version_failure: a probe that ran out of time and
-  # one that exited at once (a wrong node on PATH dies in a few hundredths of a
-  # second) need different fixes, and used to read the same.
-  CODEX_VERSION_STATUS=""
-  CODEX_VERSION_ERROR=""
-  CODEX_VERSION_ELAPSED=""
-  err="$(mktemp "${TMPDIR:-/tmp}/agentstack-codex-stderr.XXXXXX" 2>/dev/null || true)"
-  "$bin" --version </dev/null >"$out" 2>"${err:-/dev/null}" &
-  pid=$!
-  while kill -0 "$pid" 2>/dev/null; do
-    if [[ "$tick" -ge "$limit" ]]; then
-      codex_probe_stop "$pid"
-      CODEX_VERSION_STATUS=timeout
-      [[ -n "$err" ]] && rm -f "$err"
-      return 1
-    fi
-    sleep 0.1
-    tick=$((tick + 1))
-  done
-  wait "$pid" || status=$?
-  CODEX_VERSION_STATUS="$status"
-  CODEX_VERSION_ELAPSED="$((tick / 10)).$((tick % 10))"
-  if [[ -n "$err" ]]; then
-    # First non-blank line, bounded: it is shown inside a one-line warning.
-    CODEX_VERSION_ERROR="$(sed -n '/[^[:space:]]/{p;q;}' "$err" 2>/dev/null | cut -c1-200 || true)"
-    rm -f "$err"
-  fi
-  return "$status"
-}
-
-# One line saying why the last codex_version_answers failed.
-codex_version_failure() {
-  local bin="$1"
-  if [[ "$CODEX_VERSION_STATUS" == timeout ]]; then
-    echo "'$bin --version' did not finish within ${CODEX_VERSION_TIMEOUT_SECONDS}s and was stopped"
-  else
-    echo "'$bin --version' exited with status ${CODEX_VERSION_STATUS:-unknown} after ${CODEX_VERSION_ELAPSED:-0.0}s: ${CODEX_VERSION_ERROR:-(no error output)}"
-  fi
-}
-
-# Stop a probe that overran. Every wait here is a kill -0 poll with a
-# deadline (one second of grace, one second for the probe to go after KILL),
-# so waiting on `codex --version` and on the cleanup after it is bounded. The
-# system commands used on the way (pgrep, ps) are not bounded: if they
-# themselves stop responding, so does this function.
-#
-# The probe itself ($!) is this shell's own child, so it gets TERM and then
-# KILL without further checks. Its descendants (an npm wrapper's native codex)
-# are recorded first, while they are still attached to it, because a wrapper
-# that exits on TERM orphans them out of reach of `pgrep -P`. They get TERM
-# too; a descendant seen gone during the grace period is dropped, and KILL goes
-# only to one whose `ps -o lstart=` start time (one-second resolution) still
-# matches what was recorded. This is a best-effort identity check: a PID reused
-# within the same second is not told apart. A still-running descendant whose
-# start time cannot be read or no longer matches is left without KILL, with a
-# note on stderr; one that received KILL is not checked again. A probe still present after its second of reaping is left with a note.
-codex_probe_stop() {
-  local pid="$1" level="$1" descendants="" next p t start depth round
-  # PID lists are space-separated; a caller may have narrowed IFS (the PATH
-  # scan in find_usable_codex_bin splits on ":").
-  local IFS=$' \t\n'
-  if command -v pgrep >/dev/null 2>&1; then
-    for depth in 1 2 3 4; do
-      next=""
-      for p in $level; do
-        next="$next $(pgrep -P "$p" 2>/dev/null | tr '\n' ' ' || true)"
-      done
-      next="$(echo $next)"
-      [[ -n "$next" ]] || break
-      for p in $next; do
-        descendants="$descendants $p/$(codex_process_start "$p")"
-      done
-      level="$next"
-    done
-  fi
-  kill -TERM "$pid" 2>/dev/null || true
-  for t in $descendants; do
-    kill -TERM "${t%%/*}" 2>/dev/null || true
-  done
-  # One second of grace for everything to exit on TERM.
-  for round in 1 2 3 4 5 6 7 8 9 10; do
-    next=""
-    for t in $descendants; do
-      kill -0 "${t%%/*}" 2>/dev/null && next="$next $t"
-    done
-    descendants="$(echo $next)"
-    if [[ -z "$descendants" ]] && ! kill -0 "$pid" 2>/dev/null; then
-      break
-    fi
-    sleep 0.1
-  done
-  kill -KILL "$pid" 2>/dev/null || true
-  for t in $descendants; do
-    p="${t%%/*}"
-    start="${t#*/}"
-    if [[ -n "$start" && "$(codex_process_start "$p")" == "$start" ]]; then
-      kill -KILL "$p" 2>/dev/null || true
-    elif kill -0 "$p" 2>/dev/null; then
-      echo "note: left process $p from the codex --version probe (its identity could not be confirmed)" >&2
-    fi
-  done
-  # Reap the probe only once it is gone; never block on it.
-  for round in 1 2 3 4 5 6 7 8 9 10; do
-    kill -0 "$pid" 2>/dev/null || break
-    sleep 0.1
-  done
-  if kill -0 "$pid" 2>/dev/null; then
-    echo "note: the codex --version probe (pid $pid) did not exit after KILL; leaving it" >&2
-  else
-    wait "$pid" 2>/dev/null || true
-  fi
-}
-
-# The process start time as one word (empty when ps cannot tell), used to
-# recognise the same process again under the same PID.
-codex_process_start() {
-  ps -o lstart= -p "$1" 2>/dev/null | tr -d ' \n' || true
-}
-
-# Prints why a codex candidate cannot be used; prints nothing when it can.
-codex_bin_problem() {
-  local bin="$1"
-  if running_under_wsl && [[ "$bin" == "$WSL_WINDOWS_MOUNT_ROOT"/?/* ]]; then
-    echo "it is a Windows install under $WSL_WINDOWS_MOUNT_ROOT (install Codex inside WSL; the Windows npm shim cannot run here)"
-    return 0
-  fi
-  if [[ ! -x "$bin" ]]; then
-    echo "it is not executable"
-    return 0
-  fi
-  if ! codex_version_answers "$bin"; then
-    codex_version_failure "$bin"
-  fi
-}
-
-# First usable `codex` on PATH, then the per-user install locations that
-# hooks/spawn_child.sh also searches (a fresh WSL shell may not have
-# ~/.npm-global/bin on PATH yet).
+# Candidate search and probing (WSL Windows-shim rejection, the `--version`
+# timeout, the probe-kill cleanup) live in hooks/codex-bin.sh, loaded above,
+# so the installer judges a codex the same way the launcher and doctor do.
+# Only the per-user search locations differ by caller; codex_launch_search_path
+# already matches hooks/spawn_child.sh's own list (including nvm), so the
+# installer no longer keeps a separate, narrower one.
 find_usable_codex_bin() {
-  local search="$PATH:$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.nodebrew/current/bin:/opt/homebrew/bin:/usr/local/bin"
-  local dir candidate seen=":"
-  local IFS=:
-  for dir in $search; do
-    [[ -n "$dir" && "$seen" != *":$dir:"* ]] || continue
-    seen="$seen$dir:"
-    candidate="$dir/codex"
-    [[ -f "$candidate" || -L "$candidate" ]] || continue
-    if [[ -z "$(codex_bin_problem "$candidate")" ]]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-  return 0
+  find_usable_codex_bin_in "$(codex_launch_search_path)"
 }
 # --- end codex launcher resolution ---
 
+resolve_codex_install_setting() {
 resolve_setting CODEX_BIN_SETTING AGENTSTACK_CODEX_BIN "" found
-if [[ "$SETTING_SOURCE" != explicit ]]; then
+if [[ "$TIER" == tier0 ]]; then
+  # --dashboard-only: see the note above where the helper would otherwise load.
+  CODEX_CONTEXT_NOTE="not checked: --dashboard-only does not use Codex"
+else
+# A candidate must be probed the way a spawned child will actually run it —
+# its own login shell, with codex_launch_path's PATH (the resolved target's
+# own bin, so an npm shim finds the node it was installed with) — not under
+# this installer's own PATH. Judging it any other way can save a value here
+# that the launcher then rejects, or reject one (an nvm-style codex whose
+# node is not on this shell's PATH) that the launcher would have accepted
+# (#239, #243). codex_launch_context sets this up; doctor and the launcher
+# (spawn_child.sh) call the same function. There is no second, direct-PATH
+# way to probe a candidate here: a PATH with neither zsh nor bash means no
+# entry point can judge a candidate the way the child will actually run it,
+# so none of them do, rather than installer alone falling back to a
+# different (and looser) judgment that the launcher would then reject.
+#
+# codex_launch_context's own failure is not one of preflight's checks
+# (run_preflight, further down, only requires git and tmux) and is not fatal
+# here either: a person not using Codex must not have their install stopped
+# over it. Deferred to here, not right after loading the helper above: that
+# used to run before preflight at all, turning preflight's aggregated "N
+# problem(s)" report into a single unrelated-looking error for anyone
+# missing git or tmux too (#243).
+CODEX_CONTEXT_AVAILABLE=1
+if ! codex_launch_context; then
+  CODEX_CONTEXT_AVAILABLE=0
+fi
+if [[ "$SETTING_SOURCE" == explicit ]]; then
+  # An explicit --codex-bin / AGENTSTACK_CODEX_BIN is a direct request: it is
+  # rejected, not silently left unchecked, when it cannot be judged at all.
+  if [[ "$CODEX_CONTEXT_AVAILABLE" != 1 ]]; then
+    echo "error: --codex-bin / AGENTSTACK_CODEX_BIN cannot be used: no login shell (zsh or bash) found on PATH to probe it under; set AGENTSTACK_CHILD_SHELL" >&2
+    exit 2
+  fi
+  codex_probe_budget_start
+  if codex_explicit_reason="$(codex_bin_problem "$CODEX_BIN_SETTING")" && [[ -n "$codex_explicit_reason" ]]; then
+    echo "error: --codex-bin / AGENTSTACK_CODEX_BIN cannot be used: $CODEX_BIN_SETTING ($codex_explicit_reason)" >&2
+    exit 2
+  fi
+elif [[ "$CODEX_CONTEXT_AVAILABLE" != 1 ]]; then
+  # No candidate can be judged: do not search, do not save a new value, and
+  # do not touch a saved one either (it is not "stale" — it was never
+  # checked this run). codex bin: in the summary says so explicitly.
+  CODEX_CONTEXT_NOTE="not checked: no login shell (zsh or bash) found on PATH for the probe context; set AGENTSTACK_CHILD_SHELL"
+  echo "note: Codex launcher checks skipped: $CODEX_CONTEXT_NOTE" >&2
+else
+  # codex_probe_budget_start must run in this shell, not inside a $(...)
+  # subshell: a subshell's CODEX_PROBE_DEADLINE cannot be read back here,
+  # which would silently drop the budget check below. One budget, started
+  # once, covers the installed/stale check and the PATH scan together, so a
+  # path that appears in both is judged (and timed) only once (#243).
+  codex_probe_budget_start
   if [[ -n "$CODEX_BIN_SETTING" ]]; then
     # A stale path from an earlier install (Node upgraded, prefix moved, or a
     # Windows shim picked up under WSL) must not pin the dashboard to a binary
     # that cannot run. An explicit --codex-bin that cannot run is rejected
-    # below instead.
+    # above instead.
+    CODEX_JUDGED="$CODEX_JUDGED$CODEX_BIN_SETTING:"
     codex_stale_reason="$(codex_bin_problem "$CODEX_BIN_SETTING")"
     if [[ -n "$codex_stale_reason" ]]; then
       echo "note: installed AGENTSTACK_CODEX_BIN=$CODEX_BIN_SETTING is stale ($codex_stale_reason); resolving codex again" >&2
@@ -835,10 +769,19 @@ if [[ "$SETTING_SOURCE" != explicit ]]; then
   fi
   if [[ -z "$CODEX_BIN_SETTING" ]]; then
     CODEX_BIN_SETTING="$(find_usable_codex_bin)"
+    # A candidate that is never reached, or is reached only after the shared
+    # probe budget ran out, must not read the same as "nothing is installed":
+    # the next install may have found it if it had more time (a slow PATH, a
+    # loaded machine), where "nothing is installed" would not change.
+    if [[ -z "$CODEX_BIN_SETTING" && -n "$CODEX_PROBE_DEADLINE" ]] && (( SECONDS >= CODEX_PROBE_DEADLINE )); then
+      # Distinct from plain "not found" in the summary too (not just stderr):
+      # the next install may find it with more time, where "not found" would
+      # not change (#243).
+      CODEX_CONTEXT_NOTE="not checked: the ${CODEX_PROBE_BUDGET_SECONDS}s candidate-probe budget ran out before every candidate on PATH could be tried"
+      echo "note: Codex detection stopped after the ${CODEX_PROBE_BUDGET_SECONDS}s candidate-probe budget was spent, before every candidate on PATH could be tried; AGENTSTACK_CODEX_BIN is left unset. Pass --codex-bin /path/to/codex, or remove/fix the slow candidate on PATH and re-run install." >&2
+    fi
   fi
-elif codex_explicit_reason="$(codex_bin_problem "$CODEX_BIN_SETTING")" && [[ -n "$codex_explicit_reason" ]]; then
-  echo "error: --codex-bin / AGENTSTACK_CODEX_BIN cannot be used: $CODEX_BIN_SETTING ($codex_explicit_reason)" >&2
-  exit 2
+fi
 fi
 # A Node-installed `codex` is a wrapper that loads its platform package through
 # whichever `node` is first on PATH; under the service's own PATH that is a
@@ -851,6 +794,7 @@ if [[ -n "$CODEX_BIN_SETTING" ]]; then
     PATH_VALUE="$codex_bin_dir:$PATH_VALUE"
   fi
 fi
+}
 # Product defaults are written out explicitly so env.sh, the service definition
 # and install-state.json all say what a child actually gets.
 AUTO_OPEN_CHILD_SETTING="${AUTO_OPEN_CHILD_SETTING:-1}"
@@ -881,6 +825,7 @@ CLAUDE_SETTINGS="${AGENTSTACK_CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 # plain install writes the real ~/.claude.json (review of #146).
 CLAUDE_JSON="${AGENTSTACK_CLAUDE_JSON:-$HOME/.claude.json}"
 CLAUDE_SKILLS_DIR="$HOME/.claude/skills"
+CODEX_SKILLS_DIR="${CODEX_HOME:-$HOME/.codex}/skills"
 SAFE_MERGE_RESULT_FILE="$RUNTIME_DIR/settings-merge-result.json"
 MCP_MERGE_RESULT_FILE="$RUNTIME_DIR/claude-mcp-merge-result.json"
 MAIL_DB="${AGENTSTACK_MAIL_DB:-}"
@@ -1305,6 +1250,12 @@ preflight_python() {
   fi
   if ! select_python; then
     preflight_error "$PYTHON_SELECTION_ERROR"
+    return
+  fi
+  if [[ -n "$CHILD_DEFAULT_TOOLS_SETTING" ]] && ! "$PYTHON_BIN" \
+      "$REPO_ROOT/hooks/child_tools.py" parse --provider claude \
+      --tools "$CHILD_DEFAULT_TOOLS_SETTING" >/dev/null; then
+    preflight_error "--child-default-tools must use the --tools grammar"
   fi
 }
 
@@ -2092,6 +2043,10 @@ check_agent_mail_provisioning_dependencies() {
 }
 
 validate_repo_assets() {
+  local source
+  for source in "$RUNTIME_SCHEMA_SOURCE" "$RUNTIME_FIXTURE_SOURCE" "${RUNTIME_CLIENT_CONTRACT_SOURCES[@]}" "${RUNTIME_PUBLIC_ENTRY_SOURCES[@]}"; do
+    [[ -f "$source" ]] || die "missing runtime client contract: ${source#"$REPO_ROOT"/}; use a complete source checkout or archive"
+  done
   [[ -f "$REPO_ROOT/dashboard/server.py" ]] || die "missing dashboard/server.py"
   [[ -f "$REPO_ROOT/dashboard/index.html" ]] || die "missing dashboard/index.html"
   [[ -d "$REPO_ROOT/dashboard/assets" ]] || die "missing dashboard/assets"
@@ -2351,6 +2306,42 @@ copy_tree() {
 # together; a core reinstall overwriting only the hooks would pair an old
 # runtime with a new adapter (or the reverse). The core neither copies nor
 # removes these: an existing provider install keeps all of its files.
+RUNTIME_SCHEMA_SOURCE="$REPO_ROOT/packages/agentstack_mail/src/agentstack_mail/schema_contract.py"
+RUNTIME_FIXTURE_SOURCE="$REPO_ROOT/packages/agentstack_mail/fixtures/global-server-s2a.json"
+RUNTIME_CLIENT_CONTRACT_SOURCES=(
+  "$REPO_ROOT/bin/lib/instruction_blocks.py"
+  "$REPO_ROOT/bin/lib/instruction_contract.json"
+  "$REPO_ROOT/bin/lib/instruction_templates.json"
+  "$REPO_ROOT/scripts/codex_plugin_trust.py"
+  "$REPO_ROOT/scripts/codex-reservation-status.py"
+  "$REPO_ROOT/scripts/build-codex-app-marketplace.py"
+  "$REPO_ROOT/bin/lib/runtime_delivery.py"
+  "$REPO_ROOT/bin/lib/runtime_operator.py"
+  "$REPO_ROOT/bin/lib/runtime_observation.py"
+  "$REPO_ROOT/bin/lib/runtime_tmux.py"
+  "$REPO_ROOT/bin/lib/runtime_target.py"
+  "$REPO_ROOT/bin/lib/runtime_tmux_consumer.py"
+  "$REPO_ROOT/bin/lib/legacy_consumer.py"
+  "$REPO_ROOT/bin/lib/process_observation.py"
+  "$REPO_ROOT/bin/lib/legacy-tmux-consumer.sh"
+  "$REPO_ROOT/bin/lib/runtime_tmux_target_contract.json"
+  "$REPO_ROOT/dashboard/terminal_state.py"
+  "$REPO_ROOT/bin/lib/runtime_tmux_contract.json"
+  "$REPO_ROOT/packages/agentstack_mail/fixtures/global-runtime-observation.json"
+  "$REPO_ROOT/packages/agentstack_mail/fixtures/global-client-4c.json"
+  "$REPO_ROOT/bin/lib/global-client-loader.sh"
+  "$REPO_ROOT/packages/agentstack_mail/src/agentstack_mail/global_s2b_contract.py"
+  "$REPO_ROOT/packages/agentstack_mail/src/agentstack_mail/global_s2c_contract.py"
+  "$REPO_ROOT/packages/agentstack_mail/src/agentstack_mail/global_ui_contract.py"
+  "$REPO_ROOT/packages/agentstack_mail/fixtures/global-ui.json"
+  "$REPO_ROOT/packages/agentstack_mail/fixtures/global-server-s2b.json"
+  "$REPO_ROOT/packages/agentstack_mail/fixtures/global-server-s2c.json"
+  "$REPO_ROOT/packages/agentstack_mail/fixtures/global-client-4b.json"
+)
+RUNTIME_PUBLIC_ENTRY_SOURCES=(
+  "$REPO_ROOT/bin/agentstack-http-operator"
+  "$REPO_ROOT/bin/agentstack-ui-client"
+)
 OPTIONAL_PROVIDER_PAYLOAD=(
   "dashboard/provider_server.py"
   "dashboard/gemini_provider_runtime.py"
@@ -2465,8 +2456,20 @@ install_payload() {
     cp "$SCRIPT_DIR/lib/mail_update_notice.py" "$BIN_DIR/lib/mail_update_notice.py"
     cp "$REPO_ROOT/bin/lib/agentstack-launch.sh" "$BIN_DIR/lib/agentstack-launch.sh"
     cp "$REPO_ROOT/bin/lib/agentstack-register.sh" "$BIN_DIR/lib/agentstack-register.sh"
+    cp "$REPO_ROOT/bin/lib/runtime_client.py" "$BIN_DIR/lib/runtime_client.py"
+    cp "$RUNTIME_SCHEMA_SOURCE" "$BIN_DIR/lib/schema_contract.py"
+    cp "$RUNTIME_FIXTURE_SOURCE" "$BIN_DIR/lib/global-server-s2a.json"
+    local runtime_source
+    for runtime_source in "${RUNTIME_CLIENT_CONTRACT_SOURCES[@]}"; do
+      cp "$runtime_source" "$BIN_DIR/lib/$(basename "$runtime_source")"
+    done
+    for runtime_source in "${RUNTIME_PUBLIC_ENTRY_SOURCES[@]}"; do
+      cp "$runtime_source" "$BIN_DIR/$(basename "$runtime_source")"
+      chmod +x "$BIN_DIR/$(basename "$runtime_source")"
+    done
+    cp "$REPO_ROOT/bin/agentstack-runtime-client" "$BIN_DIR/agentstack-runtime-client"
     cp "$REPO_ROOT/bin/lib/agentstack-scientists.sh" "$BIN_DIR/lib/agentstack-scientists.sh"
-    cp "$REPO_ROOT/bin/lib/agentstack-managed-block.sh" "$BIN_DIR/lib/agentstack-managed-block.sh"
+    rm -f "$BIN_DIR/lib/agentstack-managed-block.sh"
     cp "$REPO_ROOT/bin/agent-start" "$BIN_DIR/agent-start"
     cp "$REPO_ROOT/bin/agent-start-codex" "$BIN_DIR/agent-start-codex"
     cp "$REPO_ROOT/bin/agentstack-reregister" "$BIN_DIR/agentstack-reregister"
@@ -2482,6 +2485,7 @@ install_payload() {
     cp "$REPO_ROOT/bin/agentstack-preregister-child" "$BIN_DIR/agentstack-preregister-child"
     cp "$REPO_ROOT/bin/agentstack-await-reply" "$BIN_DIR/agentstack-await-reply"
     cp "$REPO_ROOT/bin/agentstack-codex-bootstrap" "$BIN_DIR/agentstack-codex-bootstrap"
+    cp "$REPO_ROOT/bin/agentstack-resume" "$BIN_DIR/agentstack-resume"
     cp "$REPO_ROOT/bin/agentstack-purge-child-resume" "$BIN_DIR/agentstack-purge-child-resume"
     cp "$REPO_ROOT/bin/agentstack-codex-setup" "$BIN_DIR/agentstack-codex-setup"
     cp "$REPO_ROOT/bin/agentstack-claude-setup" "$BIN_DIR/agentstack-claude-setup"
@@ -2492,7 +2496,7 @@ install_payload() {
       "$BIN_DIR/agent-start" "$BIN_DIR/agent-start-codex" "$BIN_DIR/agentstack-reregister" "$BIN_DIR/agentstack-enroll" \
       "$BIN_DIR/agentstack-persistent" "$BIN_DIR/agentstack-persistent-deliver" \
       "$BIN_DIR/agentstack-preregister-child" "$BIN_DIR/agentstack-await-reply" \
-      "$BIN_DIR/agentstack-codex-bootstrap" "$BIN_DIR/agentstack-purge-child-resume" "$BIN_DIR/agentstack-codex-setup" "$BIN_DIR/agentstack-claude-setup" \
+      "$BIN_DIR/agentstack-codex-bootstrap" "$BIN_DIR/agentstack-resume" "$BIN_DIR/agentstack-purge-child-resume" "$BIN_DIR/agentstack-codex-setup" "$BIN_DIR/agentstack-claude-setup" \
       "$BIN_DIR/agentstack-mailctl"
   fi
 }
@@ -2515,18 +2519,20 @@ raise SystemExit(0 if target.resolve(strict=False) == expected.resolve(strict=Fa
 PY
 }
 
-install_claude_skill_links() {
+install_skill_links_for() {
+  local host="$1"
+  local skills_dir="$2"
   if [[ "$TIER" == "tier0" ]]; then
-    plan "skip Claude skill links for --dashboard-only"
+    plan "skip $host skill links for --dashboard-only"
     return
   fi
 
-  if [[ -e "$CLAUDE_SKILLS_DIR" && ! -d "$CLAUDE_SKILLS_DIR" ]]; then
-    warn "Claude skills path exists but is not a directory; leaving it untouched: $CLAUDE_SKILLS_DIR"
+  if [[ -e "$skills_dir" && ! -d "$skills_dir" ]]; then
+    warn "$host skills path exists but is not a directory; leaving it untouched: $skills_dir"
     return
   fi
-  plan "create Claude standard skills directory $CLAUDE_SKILLS_DIR"
-  run mkdir -p "$CLAUDE_SKILLS_DIR"
+  plan "create $host standard skills directory $skills_dir"
+  run mkdir -p "$skills_dir"
 
   local discovery_root="$SKILLS_DIR"
   if [[ "$DRY_RUN" == true ]]; then
@@ -2536,20 +2542,28 @@ install_claude_skill_links() {
   while IFS= read -r -d '' skill_file; do
     skill_name="$(basename "$(dirname "$skill_file")")"
     source_path="$SKILLS_DIR/$skill_name"
-    link_path="$CLAUDE_SKILLS_DIR/$skill_name"
+    link_path="$skills_dir/$skill_name"
 
     if [[ -e "$link_path" || -L "$link_path" ]]; then
       if [[ -L "$link_path" ]] && symlink_points_to "$link_path" "$source_path"; then
-        plan "reuse Claude skill link $link_path -> $source_path"
+        plan "reuse $host skill link $link_path -> $source_path"
       else
-        warn "Claude skill '$skill_name' already exists; leaving it untouched: $link_path"
+        warn "$host skill '$skill_name' already exists; leaving it untouched: $link_path"
       fi
       continue
     fi
 
-    plan "link Claude skill $link_path -> $source_path"
+    plan "link $host skill $link_path -> $source_path"
     run ln -s "$source_path" "$link_path"
   done < <(find "$discovery_root" -mindepth 2 -maxdepth 2 -name SKILL.md -type f -print0)
+}
+
+install_claude_skill_links() {
+  install_skill_links_for "Claude" "$CLAUDE_SKILLS_DIR"
+}
+
+install_codex_skill_links() {
+  install_skill_links_for "Codex" "$CODEX_SKILLS_DIR"
 }
 
 render_installed_templates() {
@@ -2600,6 +2614,7 @@ safe_merge_settings() {
     --hooks-dir "$HOOKS_DIR"
     --bin-dir "$BIN_DIR"
     --skills-dir "$SKILLS_DIR"
+    --claude-skills-dir "$CLAUDE_SKILLS_DIR"
     --backup-dir "$BACKUPS_DIR"
     --installed-entries "$RUNTIME_DIR/settings-installed-entries.json"
   )
@@ -2687,21 +2702,6 @@ safe_merge_claude_mcp() {
   fi
 }
 
-confirm_managed_setup() {
-  local label="$1"
-  if [[ "$ASSUME_YES" == "1" ]]; then
-    return 0
-  fi
-  if [[ ! -t 0 ]]; then
-    warn "non-interactive shell; skipping $label managed setup"
-    return 1
-  fi
-  printf 'Apply this ORRERY Telemetry %s managed setup? Type yes to continue: ' "$label" >&2
-  local reply
-  read -r reply
-  [[ "$reply" == "yes" ]]
-}
-
 run_managed_setup() {
   local label="$1" script_name="$2"
   local script_path setup_home
@@ -2719,36 +2719,23 @@ run_managed_setup() {
     return
   fi
 
-  if confirm_managed_setup "$label"; then
-    AGENTSTACK_HOME="$INSTALL_DIR" AGENTSTACK_PROJECT_KEY="$PROJECT_KEY" "$script_path"
-    if [[ "$ASSUME_YES" == "1" ]]; then
-      say "assume-yes: applied $label managed setup"
-    fi
+  # The engine owns the single consent prompt (including old shared sources).
+  if [[ "$ASSUME_YES" == "1" ]]; then
+    AGENTSTACK_HOME="$INSTALL_DIR" AGENTSTACK_PROJECT_KEY="$PROJECT_KEY" "$script_path" --assume-yes || [[ "$?" == 1 ]]
+    say "assume-yes: applied $label managed setup"
+  elif [[ -t 0 ]]; then
+    AGENTSTACK_HOME="$INSTALL_DIR" AGENTSTACK_PROJECT_KEY="$PROJECT_KEY" "$script_path" || [[ "$?" == 1 ]]
   else
+    warn "non-interactive shell; skipping $label managed setup"
     say "Skipped $label managed setup."
   fi
-}
-
-project_key_is_this_checkout() {
-  local resolved
-  resolved="$(cd "$PROJECT_KEY" 2>/dev/null && pwd -P)" || return 1
-  [[ "$resolved" == "$(cd "$REPO_ROOT" && pwd -P)" ]]
 }
 
 safe_managed_doc_setups() {
   if [[ "$TIER" != "tier1" ]]; then
     return
   fi
-  # An explicitly selected project can still be this checkout. Avoid placing
-  # the managed block into the stack's own tracked docs: the block belongs in
-  # the project where agents will work.
-  if project_key_is_this_checkout; then
-    say "skip managed CLAUDE.md / AGENTS.md blocks: --project-key is this checkout"
-    say "  The block belongs in the project you will run agents in. To add it:"
-    say "    $BIN_DIR/agentstack-claude-setup   (with AGENTSTACK_PROJECT_KEY set)"
-    say "    $BIN_DIR/agentstack-codex-setup"
-    return
-  fi
+  # User instructions also belong in the user HOME when working on this checkout.
   run_managed_setup "Codex AGENTS.md" "agentstack-codex-setup"
   run_managed_setup "Claude CLAUDE.md" "agentstack-claude-setup"
 }
@@ -2825,6 +2812,7 @@ values = {
     "AGENTSTACK_CODEX_CHILD_APPROVAL": "$CODEX_CHILD_APPROVAL_SETTING",
     "AGENTSTACK_CODEX_CHILD_CONFIG_OVERLAY": "$CODEX_CHILD_CONFIG_OVERLAY_SETTING",
     "AGENTSTACK_CODEX_NETWORK": "$CODEX_NETWORK_SETTING",
+    "AGENTSTACK_CHILD_DEFAULT_TOOLS": "$CHILD_DEFAULT_TOOLS_SETTING",
     "AGENTSTACK_CODEX_ADD_DIRS": "$CODEX_ADD_DIRS_SETTING",
     "AGENTSTACK_CHILD_RESUME_RETENTION_DAYS": "$CHILD_RESUME_RETENTION_DAYS_SETTING",
     "AGENTSTACK_CODEX_BIN": "$CODEX_BIN_SETTING",
@@ -2845,6 +2833,8 @@ values = {
     "AGENTSTACK_DASHBOARD_RESTART_DELAY": "$DASHBOARD_RESTART_DELAY",
     "AGENTSTACK_VAULT": "$VAULT_SETTING",
     "AGENTSTACK_PYTHON": "$PYTHON_BIN",
+    "AGENTSTACK_RUNTIME_MODE": "${AGENTSTACK_RUNTIME_MODE:-legacy}",
+    "AGENTSTACK_GLOBAL_SERVER_CONFIG": "${AGENTSTACK_GLOBAL_SERVER_CONFIG:-}",
     "AGENTSTACK_PATH": "$PATH_VALUE",
     # Which of the values above were chosen, not written-out defaults: only
     # these are inherited by the next install.
@@ -3077,7 +3067,7 @@ render_native_mail_runner() {
     "$NATIVE_MAIL_VENV/bin/agentstack-mail-service" \
     "$NATIVE_MAIL_VENV/bin/agentstack-mail" "$NATIVE_MAIL_ENV" \
     "$NATIVE_MAIL_STATE_ROOT" "$NATIVE_MAIL_SOURCE_ID" "$NATIVE_MAIL_VENV" \
-    "$MCP_URL" "$NATIVE_MAIL_ENROLL_BIN" "$NATIVE_MAIL_DEPLOYMENT" <<'PY'
+    "$MCP_URL" "$NATIVE_MAIL_ENROLL_BIN" "$NATIVE_MAIL_DEPLOYMENT" "$BIN_DIR/lib/runtime_client.py" "$PYTHON_BIN" "${AGENTSTACK_RUNTIME_MODE:-legacy}" <<'PY'
 import json
 import pathlib
 import shlex
@@ -3094,6 +3084,9 @@ import sys
     mcp_url,
     enroll_bin,
     deployment_file,
+    runtime_client,
+    python_bin,
+    runtime_mode,
 ) = sys.argv[1:]
 command = [
     service, "foreground",
@@ -3101,6 +3094,8 @@ command = [
     "--env-file", env_file,
     "--state-root", state_root,
 ]
+if runtime_mode == "global":
+    command = [python_bin, runtime_client, "service-exec", *command]
 payload = "\n".join([
     "#!/usr/bin/env bash",
     "set -u",
@@ -4232,6 +4227,8 @@ PATH=$PATH_VALUE
 AGENTSTACK_MAIL_HOME=$MAIL_HOME
 AGENTSTACK_SIGNALS_DIR=$SIGNALS_DIR
 AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR
+AGENTSTACK_RUNTIME_MODE=${AGENTSTACK_RUNTIME_MODE:-legacy}
+AGENTSTACK_GLOBAL_SERVER_CONFIG=${AGENTSTACK_GLOBAL_SERVER_CONFIG:-}
 ENVLIST
 } # end mail_watcher_environment
 
@@ -4310,6 +4307,40 @@ PY_UNIT
   mv "$AGENT_MAIL_WATCHER_PATH.tmp" "$AGENT_MAIL_WATCHER_PATH"
 } # end render_mail_watcher_unit
 
+# Before 2026-10-05 the watcher lock defaulted to /tmp (shared by every
+# account on the Mac). Updating leaves the new per-user default empty while a
+# dir nobody will ever look at again lingers at the old /tmp path. Clear it
+# only if it is this user's own: a still-running old watcher is terminated by
+# the service restart below and cleans up its own lock via its EXIT trap, and
+# a dir owned by someone else (a second account on the same Mac) is never
+# touched here.
+migrate_legacy_mail_watcher_lock() {
+  # Overridable only so tests can point this at an isolated tmp path instead
+  # of the real, machine-wide /tmp default; there is no reason to set this in
+  # a real install.
+  local legacy_dir="${AGENTSTACK_TEST_LEGACY_MAIL_WATCHER_LOCK_DIR:-/tmp/orrery-mail-watcher.lock}"
+  [[ -e "$legacy_dir" ]] || return 0
+  local owner_uid my_uid
+  # -c (GNU/BusyBox) before -f (BSD): GNU's -f means "filesystem status", and
+  # even when the %u directive itself is invalid it still prints the
+  # filesystem's default report to stdout before failing, which then runs
+  # into -c's output under `||` and corrupts the UID comparison (confirmed on
+  # WSL, GNU coreutils 9.4, ext4). -c fails on BSD with nothing on stdout
+  # (the error goes to stderr only), so it falls through to -f safely there.
+  owner_uid="$(stat -c '%u' "$legacy_dir" 2>/dev/null || stat -f '%u' "$legacy_dir" 2>/dev/null || true)"
+  my_uid="$(id -u)"
+  [[ -n "$owner_uid" && "$owner_uid" == "$my_uid" ]] || return 0
+  local pid=""
+  [[ -f "$legacy_dir/watcher.pid" ]] && pid="$(head -n1 "$legacy_dir/watcher.pid" 2>/dev/null | tr -d '[:space:]')"
+  if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+  plan "remove the leftover pre-2026-10-05 watcher lock $legacy_dir (owned by this user, no live process)"
+  [[ "$DRY_RUN" == true ]] && return 0
+  rm -rf "$legacy_dir"
+  say "removed the leftover pre-2026-10-05 watcher lock $legacy_dir"
+} # end migrate_legacy_mail_watcher_lock
+
 # A watcher left behind by agent-start (tmux session `mail-watcher`) holds the
 # single-instance lock; the managed unit would then exit as a duplicate on
 # every restart until that session dies. Retire it before registering.
@@ -4346,6 +4377,7 @@ enable_mail_watcher() {
   fi
 
   render_mail_watcher_unit "$kind"
+  migrate_legacy_mail_watcher_lock
 
   if [[ "$DRY_RUN" == true ]]; then
     if [[ "$kind" == "launchd" ]]; then
@@ -4431,6 +4463,8 @@ render_launchd_plist() {
       __LABEL_PREFIX__ "$LABEL_PREFIX"
       __INSTALL_DIR__ "$DASHBOARD_DIR"
       __PYTHON__ "$PYTHON_BIN"
+      __RUNTIME_MODE__ "${AGENTSTACK_RUNTIME_MODE:-legacy}"
+      __GLOBAL_SERVER_CONFIG__ "${AGENTSTACK_GLOBAL_SERVER_CONFIG:-}"
       __PORT__ "$PORT"
       __MAIL_DB__ "$MAIL_DB"
       __MAIL_ENV__ "$MAIL_ENV"
@@ -4450,6 +4484,7 @@ render_launchd_plist() {
       __WORKTREE_ROOT__ "$WORKTREE_ROOT_SETTING"
       __CODEX_CHILD_APPROVAL__ "$CODEX_CHILD_APPROVAL_SETTING"
       __CODEX_NETWORK__ "$CODEX_NETWORK_SETTING"
+      __CHILD_DEFAULT_TOOLS__ "$CHILD_DEFAULT_TOOLS_SETTING"
       __CODEX_ADD_DIRS__ "$CODEX_ADD_DIRS_SETTING"
       __CHILD_RESUME_RETENTION_DAYS__ "$CHILD_RESUME_RETENTION_DAYS_SETTING"
       __CODEX_BIN__ "$CODEX_BIN_SETTING"
@@ -4514,6 +4549,8 @@ import sys
 path = pathlib.Path(sys.argv[1])
 env = {
     "AGENTSTACK_PYTHON": "$PYTHON_BIN",
+    "AGENTSTACK_RUNTIME_MODE": "${AGENTSTACK_RUNTIME_MODE:-legacy}",
+    "AGENTSTACK_GLOBAL_SERVER_CONFIG": "${AGENTSTACK_GLOBAL_SERVER_CONFIG:-}",
     "AGENTSTACK_PORT": "$PORT",
     "AGENTSTACK_LABEL_PREFIX": "$LABEL_PREFIX",
     "AGENTSTACK_MAIL_DB": "$MAIL_DB",
@@ -4535,6 +4572,7 @@ env = {
     "AGENTSTACK_CODEX_CHILD_APPROVAL": "$CODEX_CHILD_APPROVAL_SETTING",
     "AGENTSTACK_CODEX_CHILD_CONFIG_OVERLAY": "$CODEX_CHILD_CONFIG_OVERLAY_SETTING",
     "AGENTSTACK_CODEX_NETWORK": "$CODEX_NETWORK_SETTING",
+    "AGENTSTACK_CHILD_DEFAULT_TOOLS": "$CHILD_DEFAULT_TOOLS_SETTING",
     "AGENTSTACK_CODEX_ADD_DIRS": "$CODEX_ADD_DIRS_SETTING",
     "AGENTSTACK_CHILD_RESUME_RETENTION_DAYS": "$CHILD_RESUME_RETENTION_DAYS_SETTING",
     "AGENTSTACK_CODEX_BIN": "$CODEX_BIN_SETTING",
@@ -4804,7 +4842,8 @@ write_manifest() {
     "$MAIL_AUTOSTART_LABEL" "${AGENT_MAIL_AUTOSTART_SERVICE_PATH:-}" \
     "${AGENT_MAIL_WATCHER_KIND:-}" "${AGENT_MAIL_WATCHER_PATH:-}" \
     "$MAIL_WATCHER_LABEL" "$NATIVE_MAIL_DEPLOYMENT_IDENTIFIED" \
-    "$NATIVE_MAIL_ENROLL_AVAILABLE" "$NATIVE_MAIL_AUTOSTART_MANAGED_BY_INSTALL" <<PY
+    "$NATIVE_MAIL_ENROLL_AVAILABLE" "$NATIVE_MAIL_AUTOSTART_MANAGED_BY_INSTALL" \
+    "$CLAUDE_SKILLS_DIR" "$CODEX_SKILLS_DIR" <<PY
 import json
 import os
 import pathlib
@@ -4828,7 +4867,9 @@ mail_deployment_identified = sys.argv[14] == "true"
 mail_enrollment_available = sys.argv[15] == "true"
 mail_autostart_managed = sys.argv[16] == "true"
 install_dir = pathlib.Path("$INSTALL_DIR")
-claude_skills_dir = pathlib.Path("$CLAUDE_SKILLS_DIR")
+# Skill discovery paths are data, not Python source. In particular CODEX_HOME
+# may contain quotes or literal backslashes that Python would otherwise parse.
+skill_dirs = tuple(pathlib.Path(raw) for raw in sys.argv[17:19])
 owned_files = []
 for rel in ("hooks", "skills", "dashboard", "bin", "codex", "claude", "integrations"):
     base = install_dir / rel
@@ -4872,17 +4913,18 @@ if mcp_merge_result_path.exists():
 skill_links = []
 skills_root = install_dir / "skills"
 if skills_root.is_dir():
-    for skill_file in sorted(skills_root.glob("*/SKILL.md")):
-        source = skill_file.parent
-        link = claude_skills_dir / source.name
-        if not link.is_symlink():
-            continue
-        raw_target = pathlib.Path(os.readlink(link))
-        target = raw_target if raw_target.is_absolute() else link.parent / raw_target
-        if target.resolve(strict=False) != source.resolve(strict=False):
-            continue
-        skill_links.append({"path": str(link), "target": str(source)})
-        owned_files.append(str(link))
+    for skill_dir in skill_dirs:
+        for skill_file in sorted(skills_root.glob("*/SKILL.md")):
+            source = skill_file.parent
+            link = skill_dir / source.name
+            if not link.is_symlink():
+                continue
+            raw_target = pathlib.Path(os.readlink(link))
+            target = raw_target if raw_target.is_absolute() else link.parent / raw_target
+            if target.resolve(strict=False) != source.resolve(strict=False):
+                continue
+            skill_links.append({"path": str(link), "target": str(source)})
+            owned_files.append(str(link))
 owned_files = sorted(dict.fromkeys(owned_files))
 owned_dir_paths = {
     install_dir / rel
@@ -4959,6 +5001,7 @@ manifest = {
         "AGENTSTACK_CODEX_CHILD_APPROVAL": "$CODEX_CHILD_APPROVAL_SETTING",
         "AGENTSTACK_CODEX_CHILD_CONFIG_OVERLAY": "$CODEX_CHILD_CONFIG_OVERLAY_SETTING",
         "AGENTSTACK_CODEX_NETWORK": "$CODEX_NETWORK_SETTING",
+        "AGENTSTACK_CHILD_DEFAULT_TOOLS": "$CHILD_DEFAULT_TOOLS_SETTING",
         "AGENTSTACK_CODEX_ADD_DIRS": "$CODEX_ADD_DIRS_SETTING",
         "AGENTSTACK_CHILD_RESUME_RETENTION_DAYS": "$CHILD_RESUME_RETENTION_DAYS_SETTING",
         "AGENTSTACK_CODEX_BIN": "$CODEX_BIN_SETTING",
@@ -5014,7 +5057,7 @@ manifest = {
     ],
     "notes": [
         "Tier1 user-settings merge is JSON-parser based, explicit-confirm only, and manifest recorded.",
-        "Claude skills use manifest-owned symlinks under ~/.claude/skills; existing conflicts are preserved.",
+        "Claude and Codex skills use manifest-owned symlinks; existing conflicts are preserved.",
         "Dashboard service logs persist under runtime with bounded rotation and crash restart diagnostics.",
         "Claude MCP user config uses an explicit-confirm, fixed-name structural merge.",
     ],
@@ -5027,6 +5070,8 @@ manifest["agent_mail"]["deployment_metadata"] = "$NATIVE_MAIL_DEPLOYMENT"
 manifest["agent_mail"]["enroll_bin"] = "$NATIVE_MAIL_ENROLL_BIN"
 manifest["agent_mail"]["deployment_identified"] = mail_deployment_identified
 manifest["agent_mail"]["enrollment_available"] = mail_enrollment_available
+instruction_root = pathlib.Path("$INSTALL_DIR") / "backups" / "instruction-migration"
+manifest["instruction_receipts"] = [str(p) for p in instruction_root.glob("*/*/receipt.json") if p.is_file() and not p.is_symlink()]
 manifest["agent_mail"]["autostart_managed_by_this_install"] = mail_autostart_managed
 mail_update = json.loads(os.environ.get("AGENTSTACK_INSTALL_MAIL_UPDATE") or "null")
 if mail_update:
@@ -5066,6 +5111,18 @@ protection_restart_guidance() {
 }
 
 main() {
+  validate_repo_assets
+  # Select once before installer probes or lifecycle actions. Live/global
+  # cutover is still a later operator procedure, never a legacy install.
+  . "$REPO_ROOT/bin/lib/global-client-loader.sh"
+  ags_client_bootstrap "$ENV_FILE" --literal --system "$@" || return $?
+  ags_client_select && _ags_install_rc=0 || _ags_install_rc=$?
+  if [[ "$_ags_install_rc" == 0 ]]; then
+    printf '%s\n' GLOBAL_INSTALL_REQUIRES_PR7 >&2
+    return 2
+  fi
+  [[ "$_ags_install_rc" == 125 ]] || return "$_ags_install_rc"
+  resolve_codex_install_setting
   say "ORRERY Telemetry core installer"
   say "tier: $TIER"
   say "install dir: $INSTALL_DIR"
@@ -5079,14 +5136,19 @@ main() {
   say "label prefix: $LABEL_PREFIX"
   say "terminal: $TERMINAL"
   say "ORRERY Mail MCP URL: $MCP_URL"
-  say "spawn dirs: ${SPAWN_DIRS_SETTING:-(default: ~)}"
+  say "spawn dirs: ${SPAWN_DIRS_SETTING:-(default: the project key, then ~)}"
   say "spawn roots: ${SPAWN_ROOTS_SETTING:-(default: \$HOME)}"
   say "worktree root: $WORKTREE_ROOT_SETTING"
   say "automatically open child terminals: $AUTO_OPEN_CHILD_SETTING (set AGENTSTACK_AUTO_OPEN_CHILD=0 on reinstall to disable auto-open while keeping Deck Open tmux)"
   say "codex child approval: $CODEX_CHILD_APPROVAL_SETTING"
   say "codex child config overlay: ${CODEX_CHILD_CONFIG_OVERLAY_SETTING:-(disabled)}"
   say "codex network: $CODEX_NETWORK_SETTING"
-  say "codex bin: ${CODEX_BIN_SETTING:-(not found on PATH; Codex spawns will fail until --codex-bin is set)}"
+  say "child default tools: ${CHILD_DEFAULT_TOOLS_SETTING:-none}"
+  if [[ -n "${CODEX_CONTEXT_NOTE:-}" ]]; then
+    say "codex bin: ($CODEX_CONTEXT_NOTE)"
+  else
+    say "codex bin: ${CODEX_BIN_SETTING:-(not found on PATH; Codex spawns will fail until --codex-bin is set)}"
+  fi
   say "codex add dirs: ${CODEX_ADD_DIRS_SETTING:-(none beyond project, spawn dirs/roots, install dir, worktrees, ~/.claude, ~/.codex)}"
   say "Claude/Codex child resume retention: $CHILD_RESUME_RETENTION_DAYS_SETTING day(s)"
   validate_assume_yes
@@ -5100,7 +5162,6 @@ main() {
     say "Phase 3a note: Tier2 project enable is a placeholder; no project settings are modified."
   fi
   check_dependencies
-  validate_repo_assets
   check_port
   # A legacy listener can answer health_check but report its database relative
   # to its own working directory. Honor the explicit retirement choice before
@@ -5121,6 +5182,7 @@ main() {
   migrate_legacy_dashboard_log
   install_payload
   install_claude_skill_links
+  install_codex_skill_links
   render_installed_templates
   ensure_native_agentstack_mail
   say "ORRERY Mail requested-name handling: honored (passthrough)"

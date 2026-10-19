@@ -8,13 +8,13 @@ ENV_FILE="${AGENTSTACK_ENV_FILE:-$HERE/../env.sh}"
 # absent EXTRAS into an empty process override before an installer update.
 EXTRA_PROTECTED_ROOTS_GIVEN="${AGENTSTACK_EXTRA_PROTECTED_ROOTS+x}"
 EXTRA_PROTECTED_ROOTS_LIVE="${AGENTSTACK_EXTRA_PROTECTED_ROOTS-}"
-if [[ -f "$ENV_FILE" ]]; then
-  PROTECTION_ENV_READER="$HERE/../hooks/installed-env.py"
-  [[ -f "$PROTECTION_ENV_READER" ]] || PROTECTION_ENV_READER="$HERE/installed-env.py"
-  python3 "$PROTECTION_ENV_READER" state AGENTSTACK_EXTRA_PROTECTED_ROOTS "$ENV_FILE" >/dev/null
-  python3 "$PROTECTION_ENV_READER" state AGENTSTACK_PROTECTED_ROOTS "$ENV_FILE" >/dev/null
-  # shellcheck disable=SC1090
-  . "$ENV_FILE"
+_ags_mode_loader="$HERE/../bin/lib/global-client-loader.sh"
+if [[ -f "$_ags_mode_loader" ]]; then
+  . "$_ags_mode_loader"
+  ags_client_bootstrap "$ENV_FILE" --system "$@" || exit $?
+else
+  printf '%s\n' GLOBAL_ENTRY_UNAVAILABLE >&2
+  exit 2
 fi
 
 if [[ "$EXTRA_PROTECTED_ROOTS_GIVEN" == x ]]; then
@@ -45,6 +45,7 @@ SPAWN_ROOTS_SETTING="${AGENTSTACK_SPAWN_ROOTS:-}"
 WORKTREE_ROOT_SETTING="${AGENTSTACK_WORKTREE_ROOT:-$HERE/../worktrees}"
 CODEX_CHILD_APPROVAL_SETTING="${AGENTSTACK_CODEX_CHILD_APPROVAL:-}"
 CODEX_NETWORK_SETTING="${AGENTSTACK_CODEX_NETWORK:-}"
+CHILD_DEFAULT_TOOLS_SETTING="${AGENTSTACK_CHILD_DEFAULT_TOOLS:-}"
 CODEX_ADD_DIRS_SETTING="${AGENTSTACK_CODEX_ADD_DIRS:-}"
 PORTRAITS_DIR_SETTING="${AGENTSTACK_PORTRAITS_DIR:-}"
 CUSTOM_PORTRAITS_SETTING="${AGENTSTACK_CUSTOM_PORTRAITS:-}"
@@ -82,6 +83,8 @@ render_plist() {
     -e "s|__LABEL_PREFIX__|$(sed_escape "$LABEL_PREFIX")|g" \
     -e "s|__INSTALL_DIR__|$(sed_escape "$HERE")|g" \
     -e "s|__PYTHON__|$(sed_escape "$PYTHON")|g" \
+    -e "s|__RUNTIME_MODE__|$(xml_sed_escape "${AGENTSTACK_RUNTIME_MODE:-legacy}")|g" \
+    -e "s|__GLOBAL_SERVER_CONFIG__|$(xml_sed_escape "${AGENTSTACK_GLOBAL_SERVER_CONFIG:-}")|g" \
     -e "s|__PORT__|$(sed_escape "$PORT")|g" \
     -e "s|__MAIL_DB__|$(sed_escape "$MAIL_DB")|g" \
     -e "s|__MAIL_ENV__|$(sed_escape "$MAIL_ENV")|g" \
@@ -96,10 +99,22 @@ render_plist() {
     -e "s|__DELIVERABLE_ROOTS__|$(sed_escape "$DELIVERABLE_ROOTS")|g" \
     -e "s|__LANG__|$(sed_escape "$LANG_SETTING")|g" \
     -e "s|__MURMUR__|$(sed_escape "$MURMUR_SETTING")|g" \
+    -e "s|__SPAWN_DIRS__|$(xml_sed_escape "$SPAWN_DIRS_SETTING")|g" \
+    -e "s|__SPAWN_ROOTS__|$(xml_sed_escape "$SPAWN_ROOTS_SETTING")|g" \
+    -e "s|__CODEX_CHILD_APPROVAL__|$(xml_sed_escape "$CODEX_CHILD_APPROVAL_SETTING")|g" \
+    -e "s|__CODEX_NETWORK__|$(xml_sed_escape "$CODEX_NETWORK_SETTING")|g" \
+    -e "s|__CODEX_ADD_DIRS__|$(xml_sed_escape "$CODEX_ADD_DIRS_SETTING")|g" \
+    -e "s|__CHILD_RESUME_RETENTION_DAYS__|$(xml_sed_escape "${AGENTSTACK_CHILD_RESUME_RETENTION_DAYS:-30}")|g" \
+    -e "s|__CODEX_BIN__|$(xml_sed_escape "${AGENTSTACK_CODEX_BIN:-}")|g" \
+    -e "s|__PORTRAITS_DIR__|$(xml_sed_escape "$PORTRAITS_DIR_SETTING")|g" \
+    -e "s|__CUSTOM_PORTRAITS__|$(xml_sed_escape "$CUSTOM_PORTRAITS_SETTING")|g" \
+    -e "s|__CODEX_MODELS__|$(xml_sed_escape "$CODEX_MODELS_SETTING")|g" \
     -e "s|__CLAUDE_MODELS__|$(xml_sed_escape "$CLAUDE_MODELS_SETTING")|g" \
+    -e "s|__CHILD_DEFAULT_TOOLS__|$(xml_sed_escape "$CHILD_DEFAULT_TOOLS_SETTING")|g" \
     -e "s|__WORKTREE_ROOT__|$(sed_escape "$WORKTREE_ROOT_SETTING")|g" \
     -e "s|__HOOKS_DIR__|$(sed_escape "$HOOKS_DIR")|g" \
     -e "s|__RUNTIME_DIR__|$(sed_escape "$RUNTIME_DIR")|g" \
+    -e "s|__PERSISTENT_PROFILES_DIR__|$(xml_sed_escape "${AGENTSTACK_PERSISTENT_PROFILES_DIR:-$HOME/.agentstack/profiles}")|g" \
     -e "s|__DASHBOARD_LOG__|$(sed_escape "$DASHBOARD_LOG")|g" \
     -e "s|__DASHBOARD_LOG_MAX_BYTES__|$(sed_escape "$DASHBOARD_LOG_MAX_BYTES")|g" \
     -e "s|__DASHBOARD_LOG_BACKUPS__|$(sed_escape "$DASHBOARD_LOG_BACKUPS")|g" \
@@ -161,6 +176,7 @@ export_background_env() {
   export AGENTSTACK_WORKTREE_ROOT="$WORKTREE_ROOT_SETTING"
   export AGENTSTACK_CODEX_CHILD_APPROVAL="$CODEX_CHILD_APPROVAL_SETTING"
   export AGENTSTACK_CODEX_NETWORK="$CODEX_NETWORK_SETTING"
+  export AGENTSTACK_CHILD_DEFAULT_TOOLS="$CHILD_DEFAULT_TOOLS_SETTING"
   export AGENTSTACK_CODEX_ADD_DIRS="$CODEX_ADD_DIRS_SETTING"
   export AGENTSTACK_PORTRAITS_DIR="$PORTRAITS_DIR_SETTING"
   export AGENTSTACK_CUSTOM_PORTRAITS="$CUSTOM_PORTRAITS_SETTING"
@@ -288,10 +304,13 @@ case "${1:-status}" in
     if background_running; then
       stop_background
       start_background
-    elif launchd_loaded; then
-      launchctl kickstart -k "$GUI/$LABEL"
-      echo "restarted in launchd mode"
+    elif [[ ! -f "$PLIST_DST" ]] && launchd_loaded; then
+      # Match stop_all's HOME ownership guard before rendering or unloading.
+      echo "refusing to restart launchd job without a plist owned by this HOME: $PLIST_DST" >&2
+      exit 1
     else
+      # Reinstall launchd jobs through the start path so selected mode/config
+      # reaches the loaded job, even when its label is already present.
       start_any
     fi
     ;;

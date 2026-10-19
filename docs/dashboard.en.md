@@ -25,6 +25,27 @@ NETWORK may omit nodes outside its selected time window. Absence from the curren
 
 ## DECK
 
+### Provider-stop notifications (legacy)
+
+The dashboard displays `MODEL CAPACITY` on DECK and `CAPACITY` on NETWORK when a running Codex CLI is waiting after `Selected model is at capacity. Please try a different model.` A background worker checks approximately every five seconds even with no browser open, confirms two distinct captures, and sends one ORRERY Mail notice to the child's verified `PARENT_AGENT`. The sender is the existing child identity; the message identifies itself as telemetry's automatic observation and includes the time in JST and the error line. It never resumes the child, changes models, or sends pane keystrokes.
+
+`AGENTSTACK_RUNTIME_DIR/provider-stalls.json` preserves each episode across dashboard restarts. Observed work rearms notification. A new stop can also be detected without observing work when the same pane proves an append of "previous stop → newly submitted input → new capacity error." A second distinct capture must confirm the same input/error boundary before one notice is sent. An unsubmitted composer, Mail delivery records alone, repainting the same error, or footer/width changes alone do not trigger another notice.
+
+Retry detection requires an unambiguous overlap with the previous stop's history. If history is pushed out between captures, repeated sequences make the boundary ambiguous, or quoted/complex input blocks cannot be identified, the current episode is retained without guessing. An old journal without history anchors also uses its first observation only as a baseline. These cases can miss retries. Several retries before confirmation coalesce into one notice after the latest boundary is confirmed. Only hashes and ordering of up to 64 normalized history blocks are stored, never their text.
+
+Parentless sessions get a marker alone. Unverified parents or owner credentials retain the marker. If a send times out with an uncertain acceptance, it is not retried: `delivery_unknown` / `MAIL UNCONFIRMED` remains visible. During transport failures this prioritizes avoiding duplicates over guaranteeing delivery.
+
+Only the confirmed Codex capacity message is supported, either bare or with remote compaction's `Error running remote compact task: ` prefix. Unknown prefixes and other compaction errors are excluded. Historical/quoted errors, busy or approval screens, and unknown provider errors do not trigger a notice. Codex App, headless, and **global mode are not supported yet**.
+
+Detection also handles Codex's own line wrapping of the fixed error text. A single newline is allowed only between its known words; blank lines and unrelated output are never joined.
+
+Detection also accepts Codex's single background-terminal count row, including its `/ps` and `/stop` hints, between the error and the composer. Only the exact singular/plural status row is allowed. Ordinary output, queued-input bodies, and `/ps` results are not skipped.
+
+The state file starts with the first capacity candidate and is saved only when state changes. Work observations for a child that has never been a candidate cause no writes. Once a child has been a candidate, observed work writes the small state file approximately every five seconds, including after rearming. Persisting the latest work capture's order prevents delayed capacity captures from causing another notice in a different process or after a restart. For ticks that do not update capture ordering, observation-time checkpoints are at most hourly.
+
+Capture ordering survives state transitions and work observations, so delayed older captures cannot confirm or clear newer transitions. Replaced generations expire after seven unobserved days; definitively absent sessions expire after thirty. An unavailable tmux inventory retains the record. Only recognized fixed Mail refusals that establish rejection before acceptance (argument validation, contact policy, sender authentication), or JSON-RPC request errors before execution, are `failed`. A tool error can also follow a database commit, so internal errors and unrecognized refusal messages remain `delivery_unknown`. Neither is automatically retried.
+
+
 DECK opens first. **One card represents one agent**, so you can inspect who is doing what and whether each agent is stopped waiting for input.
 
 In the following image, the top counter and card area both show three agents. The counter is the total; each card shows an individual state.
@@ -327,6 +348,8 @@ The normal install root is `~/.agentstack`; set `AGENTSTACK_WORKTREE_ROOT` when 
 
 `/?embed=1` or a same-origin iframe uses embed mode with a compact header. [ORRERY cockpit](https://github.com/gyroid-eth/orrery) embeds the dashboard in this mode from the `TELEMETRY` button in its header.
 
+Host checklists can follow successful interactions through same-origin parent notifications. See [Embedded interaction notifications](embedded-tour-events.md) for the envelope, success boundaries and receiver validation. Standalone pages send none.
+
 From the parent window:
 
 ```js
@@ -447,3 +470,61 @@ The public [agentstack-demo.pages.dev](https://agentstack-demo.pages.dev/) runs 
 - [API reference](api.en.md)
 - [Configuration](configuration.en.md)
 - [Troubleshooting](troubleshooting.en.md)
+
+<a id="global-mail-view"></a>
+## Mail in isolated global mode
+
+Legacy mode remains the default. The global dashboard requires an isolated global server and operator capability. Follow [unlock and Lock](global-delivery-client.en.md#operator-ui-access); never paste an agent owner token. The page checks its screen capability.
+
+Choose a numeric identity in `View as`, then open a NETWORK edge. Mail visible to that viewpoint appears in the existing right drawer. Replies link by `reply_to` message ID; indentation stays bounded even for long chains. Bodies are literal text, never executable HTML. Unavailable earlier Mail gets a short notice without exposing hidden IDs, bodies or recipients. `Load more visible mail` passes through the server’s keyset cursor.
+
+Save `?view=net&view_as_agent_id=ID&message_id=ID`. Old numeric `thread_id` links resolve a visible origin. Old labels retain separate source groups, never inferred replies or subject joins. Conflicting old/new IDs are refused.
+
+Old instructions produce a short English notice with `Details: English / 日本語`. Cleanup only copies a command; nothing is deleted automatically. Dismiss hides that exact finding for this page session. Settings still shows it; changes to path, block hash, version or state bring it back. Findings refresh every 60 seconds and on explicit inspection. Embedded pages defer the notice to their host. See [legacy block migration](instruction-migration.en.md#legacy-blocks). Session-start candidate observations do not prove what instructions the running session loaded.
+
+MAIL shows delivery `signal.status`, separately from server readiness. A red delivery state does not disable requests the server can accept. The roster does not infer process activity; unverified session activity is shown as unavailable.
+
+NEW AGENT uses fixed client slots. Existing names offer resume of the same identity without issuing credentials. Missing configuration or trust returns an explicit operator action. Recent work folders retain ten entries and consume the old scalar once. Work folders are not Mail scopes. The browser uses existing `AGENTSTACK_SPAWN_ROOTS`; deliverables use only explicit `AGENTSTACK_DELIVERABLE_ROOTS`. Unset deliverable roots yield an empty result, with no cwd/project fallback.
+
+Legacy screens and routes are retained. Cockpit’s global bridge and right-pane integration follow separately. A new dashboard with an old cockpit keeps the cockpit’s legacy display and does not infer global screen capabilities.
+
+Global network activity is shown as `ACTIVITY UNKNOWN`. A read projection for actual working/waiting, context, and parent/child state is required before PR7 switches the default.
+
+Registration recovery buttons follow status `next_operations`: replay/finalize/configure continue the same slot and intent; Resume is for an existing launch. Registration replay and abandon compare the displayed pending digest. Lock aborts in-flight fetches and invalidates delayed bodies and tab capability handoffs. A fresh tab accepts only its matching request within 500ms; after Lock it requires explicit Unlock. If browser storage is denied, `BROWSER_SESSION_STORAGE_UNAVAILABLE` indicates memory-only access and reload requires input again.
+
+Instruction checks select local contexts by identity, then verify only matching slots. The slot's `wrapper_root` is the sole installation provenance. Agents without a proven Claude/Codex provider slot show `PROVIDER_HOME_UNPROVEN` in Settings only, without repeated conversation notices. Copied cleanup commands explicitly carry the same HOME, provider HOME and installation environment used for detection; never remove a block by dropping those assignments.
+
+Lock also resets drawer participants, count and accessibility state. The configure-provider button is available only for instruction block setup. Codex trust approval and daemon execution configuration link to the English/Japanese CLI steps; an absent profile is reported as `PERSISTENT_EXECUTION_REQUIRED`.
+
+<a id="global-runtime-observation"></a>
+### Activity in the global network
+
+API 18 advertises `global_runtime_observation=1`. The network reads working / waiting, context use and parent/child colours from existing private client roots and owner verification through the management socket. Legacy rendering and default installation remain unchanged. Observation never registers agents, creates files or opens Mail SQLite directly.
+
+Readers take the existing operation mutex with a shared nonblocking lock. A busy writer, mismatched owner/generation/binding or uncertain PID/start/pane proof makes only that agent `ACTIVITY UNKNOWN`. The entire request has a five-second deadline. The volatile pane cache lasts at most 4.5 seconds and is invalidated by owner, binding or live-slot changes. Concurrent live sessions show `MULTIPLE SESSIONS`, without merging activity or context. Ended history does not hide a current session.
+
+Codex App snapshots and Desktop session metadata do not prove that the provider is currently alive. App activity and context remain **unknown / null**. Bridge, wake and snapshot writers are unchanged. Parent relationships use existing typed child-state and verified owners, never names or Mail traffic.
+
+Shared browser controllers own capability, Lock, Mail display and registration recovery. Lock invalidates outstanding requests and image object URLs. Extensions granted access to the page can read sessionStorage: use a trusted browser profile. Lock clears the page session, rather than revoking the server capability.
+
+Network and Deck show the same activity without a Mail viewpoint. Confirmed absence is NOT RUNNING; unavailable evidence is ACTIVITY UNKNOWN. Parent/child colours describe direct relationships, so a retired ancestor does not hide a grandchild’s direct parent.
+
+<a id="global-runtime-proof"></a>
+### Checking supported capabilities
+
+Prepare an isolated server/dashboard in a temporary HOME, then explicitly configure the existing [operator capability](global-delivery-client.en.md#operator-ui-access):
+
+```sh
+AGENTSTACK_HOME="$TEST_HOME/agentstack" \
+AGENTSTACK_GLOBAL_SERVER_CONFIG="$TEST_CONFIG" \
+ORRERY_DASHBOARD_URL="http://127.0.0.1:$TEST_PORT" \
+agentstack-http-operator probe --service telemetry
+```
+
+The capability is read internally and never placed in arguments, URLs or output. Inspect `binding`, `telemetry_api` and `capabilities`. With 6r alone, `cockpit_ready=false` and `cutover_ready=false` are expected. After cockpit integration, use `--service cockpit` with its existing `PORT` environment variable. No persisted cockpit port file or configuration key is added. PR7 activation is a separate gate; a successful probe does not activate global mode.
+
+Verification uses synthetic work / wait, context 0 / 42 / 100, standalone, parent/child, multiple sessions, a busy writer and App unknown. No real provider binary is required. Actual PID/start/tmux proof uses a dedicated test socket, never the live dashboard, Mail or tmux.
+
+Use `127.0.0.1` for the probe origin, matching the CLI default and these examples. `localhost` is a different Origin and is not interchangeable. The probe never uses environment HTTP proxies.
+
+If observation alone fails, that refresh falls back to `ACTIVITY UNKNOWN` for all agents; Unlock, Mail, and registration remain available. Authentication refusal (403) still locks the page. Each observation HTTP request enumerates the roster and client roots once and reuses them for IDs and parent checks. More than 200 IDs requires another enumeration per request. There is no persistent cache, and the 15-second refresh interval is unchanged.

@@ -34,6 +34,7 @@ def _anchors(doc: Path) -> set[str]:
         match = HEADING.match(line)
         if match:
             anchors.add(_slug(match.group(1)))
+        anchors.update(re.findall(r'<a\s+id=["\']([\w-]+)["\']\s*>', line))
     return anchors
 
 
@@ -62,3 +63,9 @@ def test_docs_anchor_references_resolve() -> None:
                 missing.append(f"{rel}: docs/{match.group(1)}#{match.group(2)}")
     assert checked > 0, "no docs anchor references found; the scanner is broken"
     assert not missing, "dead docs anchors:\n" + "\n".join(sorted(set(missing)))
+
+
+def test_explicit_html_anchors_resolve_but_fenced_examples_do_not(tmp_path):
+    doc=tmp_path/'guide.md'
+    doc.write_text('# Visible heading\n<a id="stable-link"></a>\n```html\n<a id="example-only"></a>\n```\n')
+    assert _anchors(doc)=={'visible-heading','stable-link'}

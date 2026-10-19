@@ -1,4 +1,17 @@
 #!/bin/bash
+
+# Decide explicit global context before loading any legacy environment/state.
+_ags_global_loader="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin/lib" && pwd)/global-client-loader.sh"
+. "$_ags_global_loader"
+_ags_legacy_consumer="$(dirname "$_ags_global_loader")/legacy-tmux-consumer.sh"
+if [[ -f "$_ags_legacy_consumer" ]]; then . "$_ags_legacy_consumer"; fi || exit 2
+if declare -F ags_client_entry >/dev/null; then
+  if ags_client_entry spawn-child "$@"; then exit 0; else _ags_global_rc=$?; fi
+  if [[ "$_ags_global_rc" != 125 ]]; then
+    exit "$_ags_global_rc"
+  fi
+
+fi
 # spawn_child.sh - launch a child agent (Claude / Codex) in a new tmux session
 #
 # Usage:
@@ -179,12 +192,13 @@ terminal_adapter() {
 
 _open_child_terminal() {
     local child_name="$1"
-    local adapter shell_child shell_cmd
+    local adapter shell_child shell_cmd shell_helper
     adapter="$(terminal_adapter)"
     [[ "$adapter" == "none" ]] && return 0
 
     printf -v shell_child '%q' "$child_name"
-    shell_cmd="env -u TMUX -u TMUX_PANE tmux attach -t $shell_child"
+    printf -v shell_helper '%q' "$(dirname "$_ags_global_loader")/runtime_tmux_consumer.py"
+    shell_cmd="env -u TMUX -u TMUX_PANE python3 $shell_helper attach-session -t $shell_child"
     # Spawning a child is a background event: the window is opened so the user
     # CAN watch it, not so it steals what they are doing. `open -g` keeps it
     # behind the current app. Set AGENTSTACK_FOCUS_CHILD=1 to bring it forward.
@@ -192,7 +206,7 @@ _open_child_terminal() {
     [[ "${AGENTSTACK_FOCUS_CHILD:-}" == "1" ]] && open_bg=()
     case "$adapter" in
         ghostty)
-            if env -u TMUX -u TMUX_PANE open ${open_bg[@]+"${open_bg[@]}"} -na Ghostty.app --args --title="$child_name" -e tmux attach -t "$child_name" 2>/dev/null; then
+            if env -u TMUX -u TMUX_PANE open ${open_bg[@]+"${open_bg[@]}"} -na Ghostty.app --args --title="$child_name" -e python3 "$(dirname "$_ags_global_loader")/runtime_tmux_consumer.py" attach-session -t "$child_name" 2>/dev/null; then
                 echo "[spawn_child] Opened terminal window (${child_name}, adapter: ghostty)" >&2
             fi
             ;;
@@ -268,6 +282,8 @@ CHILD_TOOLS_BASE=""
 CHILD_TOOLS_ARGS=()
 CHILD_TOOLS_SPEC=""
 CHILD_TOOLS_RESTRICTIVE=false
+CHILD_TOOLS_FROM_DEFAULTS=false
+CHILD_DEFAULT_TOOLS_NOTICE=""
 CLAUDE_CHILD_TOOL_FLAGS=""
 WORKTREE_BASE="${AGENTSTACK_WORKTREE_ROOT:-${AGENTSTACK_HOME_DIR:-$HOME/.agentstack}/worktrees}"
 if [[ "$WORKTREE_BASE" == "~" ]]; then
@@ -425,6 +441,18 @@ fi
 # Tools selection. Parsed here so that an invalid request stops before any
 # registration or tmux work; what can only be checked in the child's final
 # directory (servers, computer use) is checked again just before launch.
+if [[ -n "${AGENTSTACK_CHILD_DEFAULT_TOOLS:-}" ]]; then
+    # Resolve defaults only after the final directory is known. Explicit base
+    # or tools/profile bypass them entirely, including --base default and the
+    # legacy --codex-mcp reduction. Defaults must never widen that reduction.
+    if [[ -z "$CHILD_TOOLS_BASE" && ${#CHILD_TOOLS_ARGS[@]} -eq 0 \
+            && "$CODEX_MCP_PROFILE_CLI" != true ]]; then
+        CHILD_TOOLS_FROM_DEFAULTS=true
+    else
+        CHILD_DEFAULT_TOOLS_NOTICE="Default tools were not applied because an explicit base, tools or MCP profile takes precedence."
+        echo "[spawn_child] Notice: $CHILD_DEFAULT_TOOLS_NOTICE" >&2
+    fi
+fi
 if [[ -n "$CHILD_TOOLS_BASE" || ${#CHILD_TOOLS_ARGS[@]} -gt 0 ]]; then
     if [[ "$CHILD_TOOLS_BASE" == "mail-only" || ${#CHILD_TOOLS_ARGS[@]} -gt 0 ]]; then
         CHILD_TOOLS_RESTRICTIVE=true
@@ -950,25 +978,18 @@ warm_pool_has_model() {
     printf '%s\n' "$status" | grep -E "^[[:space:]]*${warm_type}[^[:alnum:]].*ready" | grep -qF "($model)"
 }
 
-# A warm provider cannot change its inherited cwd/protection after launch.
-# Opt in only when the pool advertises the exact `claim-workspace-v1` capability.
-# That command receives type, child, model, cwd, Mail namespace, repository,
-# worktree, computed roots, and explicit extras. It must atomically compare all
-# of them with the running provider's launch context before claiming, make no
-# changes on mismatch, and return "<child> <model> workspace-v1" on success.
-# Merely setting tmux session environment is not enough. Older pools cold-start;
-# their unknown-command behavior is never used to attempt a claim.
+# Claim a warm session started with exactly $3. The pool must implement
+# `claim-model <type> <child> <model>`: claim atomically only a session started
+# with that model, and print "<child> <model>". A pool without it (the older
+# `claim <type> <child>` cannot be told the model) fails here, and the caller
+# cold starts. A claim that reports another model is stopped: that session
+# would run a model other than the one registered.
 claim_warm_session() {
-    local warm_type="$1" child="$2" model="$3" out capabilities
-    capabilities="$(bash "$WARM_POOL" capabilities 2>/dev/null)" || return 1
-    printf '%s\n' "$capabilities" | grep -qxF 'claim-workspace-v1' || return 1
-    out="$(bash "$WARM_POOL" claim-workspace-v1 "$warm_type" "$child" "$model" \
-        "$AGENTSTACK_PROJECT_WORK_DIR" "$PROJECT_KEY" "$AGENTSTACK_PROJECT_REPOSITORY" \
-        "$AGENTSTACK_PROJECT_WORKTREE_ROOT" "$AGENTSTACK_PROTECTED_ROOTS" \
-        "$AGENTSTACK_EXTRA_PROTECTED_ROOTS" 2>/dev/null)" || return 1
+    local warm_type="$1" child="$2" model="$3" out
+    out="$(bash "$WARM_POOL" claim-model "$warm_type" "$child" "$model" 2>/dev/null)" || return 1
     out="$(printf '%s\n' "$out" | tail -n 1)"
-    [[ "$out" == "$child $model workspace-v1" ]] && return 0
-    echo "Error: the warm pool claimed a session for $child but reported '${out}' instead of '$child $model workspace-v1'; stopping it" >&2
+    [[ "$out" == "$child $model" ]] && return 0
+    echo "Error: the warm pool claimed a session for $child but reported '${out}' instead of '$child $model'; stopping it" >&2
     tmux kill-session -t "=$child" 2>/dev/null || true
     return 2
 }
@@ -1180,47 +1201,41 @@ cleanup_worktree() {
 # when present (macOS default, and where every operator so far has run this),
 # otherwise bash; AGENTSTACK_CHILD_SHELL overrides both. The launch snippets
 # above are written in the syntax subset both shells share.
-# shellcheck disable=SC1090
-[[ -f "$HOOKS_DIR/codex-bin.sh" ]] && . "$HOOKS_DIR/codex-bin.sh"
-resolve_child_shell() {
-    if declare -F codex_launch_shell >/dev/null; then
-        codex_launch_shell "$@"
-        return
-    fi
-    local shell="${AGENTSTACK_CHILD_SHELL:-}"
-    if [[ -n "$shell" && -x "$shell" ]]; then
-        printf '%s\n' "$shell"
-        return 0
-    fi
-    shell="$(command -v zsh 2>/dev/null || true)"
-    [[ -z "$shell" ]] && shell="$(command -v bash 2>/dev/null || true)"
-    if [[ -z "$shell" ]]; then
-        echo "Error: neither zsh nor bash found for the child session; set AGENTSTACK_CHILD_SHELL" >&2
+load_codex_launch_context() {
+    if [[ ! -f "$HOOKS_DIR/codex-bin.sh" ]]; then
+        echo "Error: required launcher helper is missing: $HOOKS_DIR/codex-bin.sh; re-run the installer" >&2
         return 1
     fi
-    printf '%s\n' "$shell"
+    # shellcheck disable=SC1090
+    . "$HOOKS_DIR/codex-bin.sh"
+    local helper
+    for helper in codex_launch_shell codex_launch_path codex_launch_path_setup codex_launch_runner codex_launch_search_path codex_find_bin codex_bin_problem; do
+        if ! declare -F "$helper" >/dev/null; then
+            echo "Error: launcher helper is incompatible ($helper missing); re-run the installer" >&2
+            return 1
+        fi
+    done
 }
-CHILD_SHELL="$(resolve_child_shell)" || exit 1
+load_codex_launch_context || exit 1
 
+# CHILD_SHELL, CODEX_CHILD_PATH_SETUP and CODEX_PROBE_RUNNER (read by name
+# below) are one definition shared with doctor and the installer
+# (codex_launch_context, hooks/codex-bin.sh, #243).
+#
 # How a Codex child's shell sets PATH before it runs codex: a login shell of
 # CHILD_SHELL (the user's profile may add nvm, nodebrew, ...) and ~/.local/bin in
 # front. Both Codex launch commands splice in this one string, and the codex
-# probes (--version, --help) run through run_like_codex_child, so a candidate is
+# probes (--version, --help) run through CODEX_PROBE_RUNNER, so a candidate is
 # judged under the PATH it will run with. Probing with the launcher's own PATH
 # rejected a codex whose `#!/usr/bin/env node` finds node only there (2026-09-29).
-CODEX_CHILD_PATH_SETUP='export PATH="$HOME/.local/bin:$PATH"'
+codex_launch_context || exit 1
+# tmux receives a shell command containing a single-quoted login script.
+# Escape the shared setup for that outer shell; probes use the raw script.
+CODEX_CHILD_PATH_SETUP_QUOTED="$(printf '%s' "$CODEX_CHILD_PATH_SETUP" | sed "s/'/'\\\\''/g")"
+
 # The probe's login shell also gets the guard variables the child's session
 # has (TMUX_ENV_ARGS below): a profile or exit hook that checks CLAUDECODE, or
 # the reserved-identity marker, must behave as it will for the child.
-run_like_codex_child() {
-    if declare -F codex_launch_runner >/dev/null; then
-        codex_launch_runner "$@"
-        return
-    fi
-    env CLAUDECODE=1 AGENTSTACK_RESERVED_IDENTITY=1 \
-        "$CHILD_SHELL" -lc "$CODEX_CHILD_PATH_SETUP"'; exec "$0" "$@"' "$@"
-}
-CODEX_PROBE_RUNNER=run_like_codex_child
 # The latest point, in seconds of this launcher's run, at which the Codex start
 # watch ends: the dashboard signals a launcher after 120s, and a poll plus the
 # final note need a few seconds after the deadline.
@@ -1232,21 +1247,13 @@ CODEX_WATCH_END_BY=105
 # on a host where `codex` worked from every shell (2026-09-08, nodebrew). The
 # installer now persists AGENTSTACK_CODEX_BIN; this is the fallback for
 # installs that predate it and for hosts where the setting is empty.
-# Codex candidate rules, and the env.sh reader (both define functions only).
-# shellcheck disable=SC1090
-[[ -f "$HOOKS_DIR/codex-bin.sh" ]] && . "$HOOKS_DIR/codex-bin.sh"
+# The env.sh reader defines functions only; binary rules are loaded above.
 # Workspace policy belongs to this launcher version, not an unrelated hooks
 # override (which may only customize cleanup or reminders).
 PROJECT_CONTEXT_HELPER="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/project-context.sh"
 [[ -f "$PROJECT_CONTEXT_HELPER" ]] || PROJECT_CONTEXT_HELPER="$HOOKS_DIR/project-context.sh"
 # shellcheck disable=SC1090
 [[ -f "$PROJECT_CONTEXT_HELPER" ]] && . "$PROJECT_CONTEXT_HELPER"
-# An older hooks dir without codex-bin.sh keeps the previous rules (executable,
-# first on the search path) instead of treating every candidate as usable.
-if ! declare -F codex_bin_problem >/dev/null; then
-    codex_bin_problem() { [[ -x "$1" ]] || echo "it is not executable"; }
-    find_usable_codex_bin_in() { PATH="$1" command -v codex 2>/dev/null || true; }
-fi
 
 # A delegated child keeps its parent's Mail namespace, but its workspace is
 # always the directory it will actually launch in. Runtime roots from a parent
@@ -1276,17 +1283,7 @@ append_child_workspace_environment() {
 }
 
 codex_search_path() {
-    if declare -F codex_launch_search_path >/dev/null; then
-        codex_launch_search_path "$@"
-        return
-    fi
-    local extra="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.nodebrew/current/bin:/opt/homebrew/bin:/usr/local/bin"
-    local nvm_dir="${NVM_DIR:-$HOME/.nvm}"
-    local candidate
-    for candidate in "$nvm_dir"/versions/node/*/bin; do
-        [[ -d "$candidate" ]] && extra="$extra:$candidate"
-    done
-    printf '%s\n' "$PATH:$extra"
+    codex_launch_search_path "$@"
 }
 
 # The codex a Codex child runs: AGENTSTACK_CODEX_BIN from the environment,
@@ -1302,35 +1299,7 @@ codex_search_path() {
 # path is probed at most once, and all probes share one time budget, so an
 # unresponsive saved codex cannot eat the dashboard's 120 seconds.
 find_codex_bin() {
-    if declare -F codex_find_bin >/dev/null; then
-        codex_find_bin "$@"
-        return
-    fi
-    if [[ -n "${CODEX_BIN_PRIMED:-}" ]]; then
-        printf '%s\n' "$CODEX_BIN_RESOLVED"
-        return 0
-    fi
-    local codex_bin source problem
-    declare -F codex_probe_budget_start >/dev/null && codex_probe_budget_start
-    for source in environment env.sh; do
-        if [[ "$source" == environment ]]; then
-            codex_bin="${AGENTSTACK_CODEX_BIN:-}"
-        elif declare -F agentstack_installed_env_value >/dev/null; then
-            codex_bin="$(agentstack_installed_env_value AGENTSTACK_CODEX_BIN)"
-        else
-            codex_bin=""
-        fi
-        [[ -n "$codex_bin" ]] || continue
-        [[ "${CODEX_JUDGED:-:}" != *":$codex_bin:"* ]] || continue
-        CODEX_JUDGED="${CODEX_JUDGED:-:}$codex_bin:"
-        problem="$(codex_bin_problem "$codex_bin")"
-        if [[ -z "$problem" ]]; then
-            printf '%s\n' "$codex_bin"
-            return 0
-        fi
-        echo "note: skipping AGENTSTACK_CODEX_BIN from $source ($codex_bin): $problem" >&2
-    done
-    find_usable_codex_bin_in "$(codex_search_path)"
+    codex_find_bin "$@"
 }
 
 prime_codex_bin() {
@@ -1541,17 +1510,11 @@ pane_normalize_nbsp() {
 }
 
 claude_pane_ready() {
-    local pane_text="$1" last_lines
+    local pane_text="$1" reader
     claude_trust_dialog_present "$pane_text" && return 1
-    last_lines="$(printf '%s' "$pane_text" | pane_normalize_nbsp | pane_nonblank_tail 8)"
-    printf '%s' "$last_lines" | grep -qE 'for shortcuts' && return 0
-    # Only an empty input row counts. A selected dialog row also starts with
-    # the cursor glyph ("❯ No, exit") and must not read as ready.
-    printf '%s' "$last_lines" | grep -qE '^[[:space:]]*❯[[:space:]]*$' && return 0
-    # Claude Code 2.1.282 shows a placeholder in the empty input row
-    # ('❯ Try "fix lint errors"') and no "for shortcuts" footer.
-    printf '%s' "$last_lines" | grep -qE '^[[:space:]]*❯[[:space:]]*Try "' && return 0
-    return 1
+    reader="$(dirname "$_ags_global_loader")/terminal_state.py"
+    if [[ ! -f "$reader" ]]; then reader="$(dirname "$_ags_global_loader")/../../dashboard/terminal_state.py"; fi
+    printf '%s' "$pane_text" | python3 "$reader" spawn-ready
 }
 
 # Classifies the bottom-most active choice on the screen, by structure rather
@@ -1708,6 +1671,65 @@ claude_user_prompt_present() {
         && printf '%s' "$text" | grep -qiF "use my browser"
 }
 
+# Claude Code's first-run setup appears in every new session until it has been
+# finished once. In 2.1.289 it runs: text style, login method, "Login
+# successful. Press Enter to continue", Security notes, then the folder trust
+# dialog and the normal prompt. It is gated on hasCompletedOnboarding
+# in ~/.claude.json, not on the theme already saved in settings.json (2.1.289,
+# 2026-10-04: a child stopped on it while the user's first `claude` was still
+# open on its setup screens). Picking a theme or a login method would decide
+# the user's settings, so the launcher never answers it. Two cues per screen.
+claude_onboarding_present() {
+    local text
+    text="$(printf '%s' "$1" | pane_normalize_nbsp)"
+    if printf '%s' "$text" | grep -qiF "Choose the text style" \
+        && printf '%s' "$text" | grep -qiF "/theme"; then
+        return 0
+    fi
+    if printf '%s' "$text" | grep -qiF "Select login method" \
+        && printf '%s' "$text" | grep -qiE "Claude account with subscription|Anthropic Console account"; then
+        return 0
+    fi
+    printf '%s' "$text" | grep -qiF "Press Enter to continue" \
+        && printf '%s' "$text" | grep -qiE "Security notes|Login successful"
+}
+
+# Another one-time question for the user, seen on a fresh Windows/WSL machine
+# with 2.1.289 (2026-10-04): "Try the new fullscreen renderer?" with "Yes" and
+# "Not now". Like the Chrome question its answer is the user's setting.
+claude_renderer_question_present() {
+    local text
+    text="$(printf '%s' "$1" | pane_normalize_nbsp)"
+    printf '%s' "$text" | grep -qiF "fullscreen renderer" \
+        && printf '%s' "$text" | grep -qiF "Not now"
+}
+
+# The child has already answered its launch prompt: the prompt's echo
+# ("❯ <first line up to the child's name>") with one of Claude's reply rows
+# ("⏺ ...", or "●" where the terminal draws that) below it. The prompt was delivered and acted on, so the launch has
+# succeeded; a question Claude shows after that (2026-10-04: the fullscreen
+# renderer offer, right after the child's first reply) is for the user to
+# answer in the child's pane, not a reason to remove a working child.
+claude_answered_launch_prompt() {
+    [[ -n "$CLAUDE_READY_PROMPT_ECHO" ]] || return 1
+    local line rest echoed=false
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        rest="${line#"${line%%[![:space:]]*}"}"
+        if [[ "$echoed" == false && "$rest" == "❯"* ]]; then
+            rest="${rest#❯}"
+            rest="${rest#"${rest%%[![:space:]]*}"}"
+            [[ "$rest" == "$CLAUDE_READY_PROMPT_ECHO"* ]] && echoed=true
+            continue
+        fi
+        [[ "$echoed" == true ]] || continue
+        # Claude draws its reply rows from the first column. The echo's own
+        # continuation rows are indented, so a bullet in the prompt text
+        # ("  ● do this") is never a reply.
+        [[ "$line" == "⏺"* || "$line" == "●"* ]] && return 0
+    done <<< "$(printf '%s' "$1" | pane_normalize_nbsp)"
+    return 1
+}
+
 # Diagnostics only: the last 40 non-blank lines, blank lines anywhere removed.
 # capture-pane pads to the window height and a dialog can sit above a run of
 # blank rows, so a plain tail may hold only blank lines. Readiness checks keep
@@ -1798,10 +1820,30 @@ wait_for_claude_ready() {
         # Keep the last screen actually seen: once the session is gone, the
         # capture fails and would leave an empty record.
         [[ -n "$pane_text" ]] && last_seen="$pane_text"
+        if claude_answered_launch_prompt "$pane_text"; then
+            if claude_user_prompt_present "$pane_text" || claude_renderer_question_present "$pane_text" \
+                || [[ "$(claude_choice_block_kind "$(claude_strip_prompt_echo "$pane_text")")" != none ]]; then
+                echo "[$log_prefix] Claude has answered its first prompt and is now showing a question for you; it is left unanswered in the child's pane: $(printf '%s' "$pane_text" | pane_normalize_nbsp | pane_nonblank_tail 1 | cut -c1-120)" >&2
+            fi
+            return 0
+        fi
         pane_text="$(claude_strip_prompt_echo "$pane_text")"
         if claude_user_prompt_present "$pane_text"; then
             claude_record_failure "$session_name" "Claude asked the user about Claude in Chrome; not answered by the launcher" "$last_seen"
             echo "[$log_prefix] Aborting: Claude Code is asking the user a one-time question about Claude in Chrome (\"Claude in Chrome extension detected\"). No key was sent: the answer may become the default for all later Claude sessions, so ORRERY leaves it to you. Open 'claude' once in a normal terminal and answer it yourself (or choose with /chrome), then launch the child again." >&2
+            spawn_reason "Claude Code is asking a one-time question about Claude in Chrome. Run 'claude' once in a terminal and answer it, then launch the child again."
+            return 1
+        fi
+        if claude_renderer_question_present "$pane_text"; then
+            claude_record_failure "$session_name" "Claude asked the user about the fullscreen renderer; not answered by the launcher" "$last_seen"
+            echo "[$log_prefix] Aborting: Claude Code is asking a one-time question (\"Try the new fullscreen renderer?\"). No key was sent: the answer is your setting, so ORRERY leaves it to you." >&2
+            spawn_reason "Claude Code is asking a one-time question (Try the new fullscreen renderer?). Run 'claude' once in a terminal and answer it, then launch the child again."
+            return 1
+        fi
+        if claude_onboarding_present "$pane_text"; then
+            claude_record_failure "$session_name" "Claude Code's first-run setup is not finished; not answered by the launcher" "$last_seen"
+            echo "[$log_prefix] Aborting: Claude Code is showing its first-run setup (text style, login or Security notes). No key was sent: the choices are your settings, so ORRERY leaves them to you." >&2
+            spawn_reason "Claude Code's first-run setup is not finished on this machine. Run 'claude' once in a terminal and go through text style, login, Security notes and trusting the folder until the normal input prompt appears, then /exit (if a 'claude' window is still on those screens, finish it there). Then launch the child again."
             return 1
         fi
         choice_kind="$(claude_choice_block_kind "$pane_text")"
@@ -1863,6 +1905,13 @@ spawn_note() {
     mkdir -p "$(dirname "$SPAWN_INCIDENT_LOG")" 2>/dev/null || true
     printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$message" \
         >> "$SPAWN_INCIDENT_LOG" 2>/dev/null || true
+}
+
+# One line, for a stop the user has to resolve themselves. The dashboard shows
+# the last such line as the launch error (the cockpit toast), instead of only
+# the launcher's exit status; everything else stays in the log tail.
+spawn_reason() {
+    spawn_note "reason: $1"
 }
 
 # Claude can accept a submit while startup is still settling but leave it as a
@@ -2193,8 +2242,14 @@ codex_watch_initial_task() {
     while (( waited < wait_max && SECONDS < deadline )); do
         sleep 3
         waited=$((waited + 3))
-        pane_text="$(tmux capture-pane -t "$session_name" -p 2>/dev/null || true)"
-        if ! codex_session_alive "$session_name"; then
+        # A successful admitted capture already proves this exact session is
+        # present. Reuse that read within this poll; a second has-session
+        # would repeat the same socket/PID/root proof without adding an effect.
+        local captured_alive=false
+        if pane_text="$(tmux capture-pane -t "$session_name" -p 2>/dev/null)"; then
+            captured_alive=true
+        fi
+        if [[ "$captured_alive" != true ]] && ! codex_session_alive "$session_name"; then
             echo "[$log_prefix] Codex session '$session_name' died after ${waited}s; last pane output:" >&2
             printf '%s\n' "$pane_text" | tail -15 >&2
             return 2
@@ -2681,6 +2736,12 @@ claude_watch_initial_task() {
     local child_name="$1" parent_name="$2" token_file="$3" prompt_text="$4"
     # Off only where nothing real is launched (the test suite sets it).
     [[ "${AGENTSTACK_CHILD_START_CHECK:-1}" == 0 ]] && return 0
+    # The watch tells the parent whether the child took up its task. A
+    # standalone child has no parent and is not asked to report, so a first
+    # turn that ends in text is its normal answer, not "declined" (2026-10-04:
+    # "declined; could not tell the parent by Mail: no parent to tell" for a
+    # standalone child that was working as asked).
+    [[ -n "$parent_name" ]] || return 0
     CHILD_START_TOKEN_FILE="$token_file" \
     CHILD_START_MCP_URL="$MCP_URL" \
     CHILD_START_PROJECT_KEY="$PROJECT_KEY" \
@@ -2743,13 +2804,16 @@ claude_chrome_prompt_block() {
 
 # Checks the tools selection against the child's final directory and the
 # user's Claude settings, and sets the extra claude flags (--no-chrome,
-# --allowed-tools/--disallowed-tools for read-only screen access). Fails when
+# --allowed-tools for Chrome and screen, --disallowed-tools for screen). Fails when
 # the selection cannot be honoured; the caller then stops before tmux.
 claude_tools_plan() {
     CLAUDE_CHILD_TOOL_FLAGS=""
-    [[ "$CHILD_TOOLS_RESTRICTIVE" == true ]] || return 0
-    local flags
-    flags="$(python3 "$HOOKS_DIR/child_tools.py" claude-plan --spec "$CHILD_TOOLS_SPEC" \
+    [[ "$CHILD_TOOLS_RESTRICTIVE" == true || "$CLAUDE_CHILD_CHROME" == true ]] || return 0
+    local flags spec
+    spec="$CHILD_TOOLS_SPEC"
+    # Legacy --claude-chrome requests have no parsed base/tools selection.
+    [[ -n "$spec" ]] || spec='{"base":"default","tools":{}}'
+    flags="$(python3 "$HOOKS_DIR/child_tools.py" claude-plan --spec "$spec" \
         --cwd "$WORK_DIR" \
         --chrome "$([[ "$CLAUDE_CHILD_CHROME" == true ]] && echo 1 || echo 0)" \
         --claude-json "${AGENTSTACK_CLAUDE_JSON:-$HOME/.claude.json}")" || return 1
@@ -2758,6 +2822,32 @@ claude_tools_plan() {
         return 1
     fi
     CLAUDE_CHILD_TOOL_FLAGS="$flags"
+}
+
+# Installer defaults are best effort. Explicit selections never enter this
+# resolver and keep their fail-closed checks. Keep the effective spec in the
+# existing launch/resume records, without reapplying defaults during resume.
+resolve_child_default_tools() {
+    [[ "$CHILD_TOOLS_FROM_DEFAULTS" == true ]] || return 0
+    local resolved tools_chrome tools_device
+    resolved="$(python3 "$HOOKS_DIR/child_tools.py" defaults \
+        --selection "$AGENTSTACK_CHILD_DEFAULT_TOOLS" \
+        --provider "$([[ "$USE_CODEX" == true ]] && echo codex || echo claude)" \
+        --cwd "$WORK_DIR" \
+        --chrome "$([[ "$CLAUDE_CHILD_CHROME" == true ]] && echo 1 || echo 0)" \
+        --chrome-device "$CLAUDE_CHILD_CHROME_DEVICE" \
+        --claude-json "${AGENTSTACK_CLAUDE_JSON:-$HOME/.claude.json}" \
+        --codex-config "${CODEX_HOME:-$HOME/.codex}/config.toml" \
+        --overlay "${AGENTSTACK_CODEX_CHILD_CONFIG_OVERLAY:-}")" || return 1
+    IFS='|' read -r CHILD_TOOLS_SPEC tools_chrome tools_device \
+        CHILD_TOOLS_RESTRICTIVE CHILD_DEFAULT_TOOLS_NOTICE <<< "$resolved"
+    if [[ "$USE_CODEX" != true ]]; then
+        CLAUDE_CHILD_CHROME="$([[ "$tools_chrome" == 1 ]] && echo true || echo false)"
+        CLAUDE_CHILD_CHROME_DEVICE="$tools_device"
+    fi
+    if [[ -n "$CHILD_DEFAULT_TOOLS_NOTICE" ]]; then
+        echo "[spawn_child] Warning: $CHILD_DEFAULT_TOOLS_NOTICE" >&2
+    fi
 }
 
 # On WSL, warn when a selected screen server would run in Windows session 0
@@ -2769,6 +2859,9 @@ warn_windows_screen_session() {
 
 # Appended to the child's first prompt when tools were selected.
 child_tools_prompt_block() {
+    if [[ -n "$CHILD_DEFAULT_TOOLS_NOTICE" ]]; then
+        printf '\n\n%s' "$CHILD_DEFAULT_TOOLS_NOTICE"
+    fi
     [[ "$CHILD_TOOLS_RESTRICTIVE" == true ]] || return 0
     local text
     text="$(python3 "$HOOKS_DIR/child_tools.py" prompt --spec "$CHILD_TOOLS_SPEC" \
@@ -2837,8 +2930,8 @@ build_codex_mail_task_prompt() {
 append_codex_mcp_profile_notice() {
     local prompt="$1"
     printf '%s' "$prompt"
+    child_tools_prompt_block || return 1
     if [[ "$CHILD_TOOLS_RESTRICTIVE" == true ]]; then
-        child_tools_prompt_block
         return
     fi
     if [[ "$CODEX_MCP_PROFILE" == "orrery-only" ]]; then
@@ -3087,6 +3180,8 @@ PY
         echo "[spawn_child/pre-reg] WORK_DIR overridden to worktree: $WORK_DIR" >&2
     fi
 
+    resolve_child_default_tools || exit 1
+
     if ! grep -qxF "$CHILD_NAME" "$MANAGED_FILE" 2>/dev/null; then
         mkdir -p "$(dirname "$MANAGED_FILE")"
         echo "$CHILD_NAME" >> "$MANAGED_FILE"
@@ -3181,7 +3276,7 @@ ${TASK}"
             -c "$WORK_DIR" \
             "${TMUX_ENV_ARGS[@]}" \
             "$CHILD_SHELL"' -lc '"'"'
-                '"$CODEX_CHILD_PATH_SETUP"';
+                '"$CODEX_CHILD_PATH_SETUP_QUOTED"';
                 cd "$AGENTSTACK_LAUNCH_WORK_DIR" || exit $?; _ags_workspace_context="$(AGENTSTACK_EXTRA_PROTECTED_ROOTS="$AGENTSTACK_LAUNCH_EXTRA_PROTECTED_ROOTS" /bin/bash "$AGENTSTACK_LAUNCH_CONTEXT_HELPER" workspace-context-exports "$PWD" "$AGENTSTACK_LAUNCH_PROJECT_KEY")" || exit $?; eval "$_ags_workspace_context"; unset _ags_workspace_context AGENTSTACK_LAUNCH_WORK_DIR AGENTSTACK_LAUNCH_PROJECT_KEY AGENTSTACK_LAUNCH_EXTRA_PROTECTED_ROOTS AGENTSTACK_LAUNCH_CONTEXT_HELPER;
                 # The child never sources a user-side bootstrap: identity comes
                 # from the reserved name and token file, and a failing script
@@ -3251,11 +3346,16 @@ ${TASK}"
         # 旧実装は部分一致（*opus* + *[1m]* skip）だったため、opus[1m] は skip できても
         # fable 等の非デフォルトモデルが warm-sonnet に握り潰されていた（RainyKepler 事例）。
         # exact-match に広げて [1m] 以外の降格も塞ぐ。
-        if [[ "$STANDALONE" == true ]]; then
+        if [[ "${AGENTSTACK_PROTECTION_CONTEXT:-}" == workspace-v1 ]]; then
+            # A running provider cannot adopt this launch's cwd/protection.
+            # Use the existing cold path instead of inventing a pool protocol.
+            WARM_TYPE="__skip_warm__"
+        elif [[ "$STANDALONE" == true ]]; then
             # A claimed warm session may retain a parent environment. Cold
             # start standalone children so PARENT_AGENT is guaranteed absent.
             WARM_TYPE="__skip_warm__"
-        elif [[ "$CLAUDE_CHILD_CHROME" == true || "$CHILD_TOOLS_RESTRICTIVE" == true ]]; then
+        elif [[ "$CLAUDE_CHILD_CHROME" == true || "$CHILD_TOOLS_RESTRICTIVE" == true \
+                || -n "$CHILD_DEFAULT_TOOLS_NOTICE" ]]; then
             # A warm session was started without --chrome or the tool flags,
             # and a claim cannot add a CLI flag to a running process. Cold
             # start instead.
@@ -3300,7 +3400,8 @@ ${TASK}"
 
         WARM_CLAIMED=false
         WARM_STATUS=$(bash "$WARM_POOL" status 2>/dev/null || true)
-        if [[ "$CLAUDE_CHILD_CHROME" != true && "$CHILD_TOOLS_RESTRICTIVE" != true && -f "$WARM_POOL" ]] \
+        if [[ "$CLAUDE_CHILD_CHROME" != true && "$CHILD_TOOLS_RESTRICTIVE" != true \
+                && -z "$CHILD_DEFAULT_TOOLS_NOTICE" && -f "$WARM_POOL" ]] \
             && warm_pool_has_model "$WARM_TYPE" "$CHILD_MODEL" "$WARM_STATUS"; then
             echo "[spawn_child/pre-reg] Claiming warm pool session ($WARM_TYPE, $CHILD_MODEL)..." >&2
             WARM_CLAIM_STATUS=0
@@ -3363,6 +3464,8 @@ ${TASK}"
             exit 1
         fi
         if [[ "$WARM_CLAIMED" == true ]]; then
+            WARM_IDENTITY="$(AGENT_NAME= TMUX_PANE="$(tmux display-message -t "=$CHILD_NAME" -p '#{pane_id}')" bash -c '. "$1"; printf "%s" "$RESOLVED_AGENT"' _ "$HOOKS_DIR/resolve-agent-name.sh")"
+            [[ "$WARM_IDENTITY" == "$CHILD_NAME" ]] || { echo "LAUNCH_IDENTITY_UNAVAILABLE: warm session identity mismatch" >&2; exit 1; }
             # A warm session is already running: the prompt can only be pasted.
             CLAUDE_LAUNCH_EPOCH="$(date +%s)"
             send_prompt_to_pane "$CHILD_NAME" "$CHILD_PROMPT" 0.3
@@ -3899,6 +4002,8 @@ if [[ "$USE_WORKTREE" == true ]]; then
     echo "[spawn_child] WORK_DIR overridden to worktree: $WORK_DIR" >&2
 fi
 
+resolve_child_default_tools || exit 1
+
 # --- 3. タスクメッセージを子エージェントに送信 ---
 SUBJECT="Task request: ${TASK:0:50}"
 RESOURCE_NOTE=""
@@ -4044,7 +4149,7 @@ if [[ "$USE_CODEX" == true ]]; then
         -c "$WORK_DIR" \
         "${TMUX_ENV_ARGS[@]}" \
         "$CHILD_SHELL"' -lc '"'"'
-                '"$CODEX_CHILD_PATH_SETUP"';
+                '"$CODEX_CHILD_PATH_SETUP_QUOTED"';
                 cd "$AGENTSTACK_LAUNCH_WORK_DIR" || exit $?; _ags_workspace_context="$(AGENTSTACK_EXTRA_PROTECTED_ROOTS="$AGENTSTACK_LAUNCH_EXTRA_PROTECTED_ROOTS" /bin/bash "$AGENTSTACK_LAUNCH_CONTEXT_HELPER" workspace-context-exports "$PWD" "$AGENTSTACK_LAUNCH_PROJECT_KEY")" || exit $?; eval "$_ags_workspace_context"; unset _ags_workspace_context AGENTSTACK_LAUNCH_WORK_DIR AGENTSTACK_LAUNCH_PROJECT_KEY AGENTSTACK_LAUNCH_EXTRA_PROTECTED_ROOTS AGENTSTACK_LAUNCH_CONTEXT_HELPER;
             # See the pre-registered path: no user-side bootstrap is sourced.
             # See the pre-registered path: the product owns the launch flags and

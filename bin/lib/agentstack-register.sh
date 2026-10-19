@@ -217,6 +217,16 @@ raise SystemExit(0 if has_project(root) else 1)
 ags_mcp_call() {
   [[ "${AGENTSTACK_MAIL_DISABLED:-0}" != "1" ]] || return 1
   local tool="$1"; shift
+  local runtime_client
+  runtime_client="$AGS_REGISTER_LIB_DIR/runtime_client.py"
+  if ags_global_context_selected; then
+    local runtime_mode
+    runtime_mode="$(python3 "$runtime_client" mode)" || return 1
+    if [[ "$runtime_mode" == "global" ]]; then
+      python3 "$runtime_client" call "$tool" "$@"
+      return $?
+    fi
+  fi
   local mcp_url="${AGENTSTACK_MCP_URL:-${MCP_URL:-http://127.0.0.1:18765/mcp}}"
   local args_json payload
   args_json="$(python3 - "$@" <<'PY'
@@ -595,6 +605,14 @@ PY
 }
 
 ags_apply_contact_policy() {
+  if ags_global_context_selected; then
+    local context_mode
+    context_mode="$(python3 "$AGS_REGISTER_LIB_DIR/runtime_client.py" mode)" || return 1
+    if [[ "$context_mode" == "global" ]]; then
+      python3 "$AGS_REGISTER_LIB_DIR/runtime_client.py" policy >/dev/null
+      return $?
+    fi
+  fi
   local project_key="$1" agent_name="$2" registration_token="${3:-}" policy
   [[ -n "$project_key" && -n "$agent_name" && -n "$registration_token" ]] || return 0
   if [[ ${AGENTSTACK_CONTACT_POLICY+x} ]]; then
@@ -653,6 +671,11 @@ ags_sanitize_agent_name() {
 }
 
 ags_agent_name_status_once() {
+  if ags_global_context_selected; then
+    local context_mode
+    context_mode="$(python3 "$AGS_REGISTER_LIB_DIR/runtime_client.py" mode)" || { printf 'unknown\n'; return 0; }
+    if [[ "$context_mode" == "global" ]]; then printf 'unknown\n'; return 0; fi
+  fi
   local project_key="$1" lookup_name="$2" response
   response="$(ags_mcp_call "whois" "project_key=$project_key" "agent_name=$lookup_name" 2>/dev/null || true)"
   if [[ -z "$response" ]]; then
@@ -727,6 +750,14 @@ ags_pick_scientist_name() {
 AGS_NAME_UNKNOWN_LIMIT="${AGENTSTACK_NAME_UNKNOWN_LIMIT:-3}"
 
 ags_pick_available_agent_name() {
+  if ags_global_context_selected; then
+    local context_mode
+    context_mode="$(python3 "$AGS_REGISTER_LIB_DIR/runtime_client.py" mode)" || return 1
+    if [[ "$context_mode" == "global" ]]; then
+      echo 'agentstack: GLOBAL_NAME_REQUIRES_ATOMIC_REGISTER' >&2
+      return 1
+    fi
+  fi
   local project_key="$1" _prefix="$2" preferred_name="${3:-}"
   local attempts="${AGENTSTACK_AGENT_NAME_ATTEMPTS:-75}"
   local adjective scientist candidate i name_status
@@ -801,6 +832,16 @@ ags_register_session() {
   AGS_AGENT_NAME_SUBSTITUTED=0
   ags_registration_diag_reset
 
+  if ags_global_context_selected; then
+    local context_mode context_row
+    context_mode="$(python3 "$AGS_REGISTER_LIB_DIR/runtime_client.py" mode)" || return 1
+    if [[ "$context_mode" == "global" ]]; then
+      context_row="$(python3 "$AGS_REGISTER_LIB_DIR/runtime_client.py" session "$program" "$model" "$requested_name")" || return 1
+      AGS_REGISTERED_AGENT_NAME="$(printf '%s' "$context_row" | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')"
+      AGS_REGISTERED_AGENT_ID="$(printf '%s' "$context_row" | python3 -c 'import json,sys; print(json.load(sys.stdin)["agent_id"])')"
+      return 0
+    fi
+  fi
   local task_description="Agent session in $work_dir"
   case "$program" in
     claude-code) task_description="Claude session in $work_dir" ;;
@@ -891,6 +932,14 @@ ags_register_session() {
 # eligible. Only the Mail call and its read-back live here: the caller decides
 # when (and whether) a retired identity may come back.
 ags_unretire_owned_identity() {
+  if ags_global_context_selected; then
+    local context_mode
+    context_mode="$(python3 "$AGS_REGISTER_LIB_DIR/runtime_client.py" mode)" || return 1
+    if [[ "$context_mode" == "global" ]]; then
+      python3 "$AGS_REGISTER_LIB_DIR/runtime_client.py" call unretire_agent >/dev/null
+      return $?
+    fi
+  fi
   local project_key="$1" agent_name="$2"
   [[ -n "$project_key" && -n "$agent_name" ]] || return 1
   ags_mcp_call_diagnosed "unretire_agent" "unretire_agent" \
@@ -925,7 +974,7 @@ ags_start_mail_watcher() {
   # (or any other) watcher holds the single-instance lock, a tmux copy would
   # only start, print "duplicate", and exit — so this is a fallback, not the
   # primary path.
-  local pidfile="${AGENTSTACK_MAIL_WATCHER_PIDFILE:-${AGENTSTACK_MAIL_WATCHER_LOCK_DIR:-/tmp/orrery-mail-watcher.lock}/watcher.pid}"
+  local pidfile="${AGENTSTACK_MAIL_WATCHER_PIDFILE:-${AGENTSTACK_MAIL_WATCHER_LOCK_DIR:-${AGENTSTACK_RUNTIME_DIR:-$HOME/.agentstack/runtime}/mail-watcher.lock}/watcher.pid}"
   if [[ -f "$pidfile" ]]; then
     local watcher_pid
     watcher_pid="$(head -n 1 "$pidfile" 2>/dev/null | tr -d '[:space:]')"
@@ -1006,3 +1055,27 @@ ags_warn_tcc_access() {
   } >&2
   return 0
 }
+
+ags_global_call_json() {
+  python3 "$AGS_REGISTER_LIB_DIR/runtime_client.py" call-json "$1"
+}
+
+# Explicit global child operations; 125 means the default legacy path continues.
+ags_global_context_selected() {
+  . "$AGS_REGISTER_LIB_DIR/global-client-loader.sh"
+  ags_client_select "$@" && return 0
+  [[ "$?" != 125 ]]
+}
+
+ags_global_entry() {
+  python3 "$AGS_REGISTER_LIB_DIR/runtime_client.py" entry "$@"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  if [[ "${1:-}" == call-json ]]; then
+    shift
+    ags_global_call_json "$@"
+  else
+    ags_global_entry "$@"
+  fi
+fi

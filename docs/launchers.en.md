@@ -4,6 +4,9 @@
 
 [Previous: Installation](install.en.md) · [Back to README](../README.en.md) · [Next: Delegation and child agents](delegation.en.md)
 
+
+To change tools in the same conversation, complete EXIT, confirm the child stopped, and use `"${AGENTSTACK_HOME:-$HOME/.agentstack}/bin/agentstack-resume" <NAME> --tools <spec>`. Do not preregister or create another child. See [procedure and limits](delegation.en.md#resume-a-stopped-child-with-different-tools).
+
 ## Launch commands
 
 ```bash
@@ -34,6 +37,16 @@ Every managed launch computes `AGENTSTACK_PROTECTED_ROOTS` from `AGENTSTACK_EXTR
 Inherited `GIT_DIR`, `GIT_WORK_TREE`, and `GIT_COMMON_DIR` do not choose the workspace and are removed from the launched process. Broken Git metadata stops the launch rather than selecting another directory. New tmux sessions receive the current workspace context instead of the server's stale roots; the server's global environment is not changed. `AGENTSTACK_VAULT`, Codex sandbox/approval, and OAuth behavior are unchanged.
 
 Install/update automatically migrates the installed legacy protection list once. Ambient shell/tmux `AGENTSTACK_PROTECTED_ROOTS` is never imported; a different nonempty legacy value warns even when extras exist. Before cutover, finish work or release reservations, then restart affected sessions together after updating because relative reservation names use the first matching root. See [automatic protection migration](configuration.en.md#reservation-protection-and-migration).
+
+## Codex and the Node.js PATH
+
+Codex children select and validate the CLI with the shared `hooks/codex-bin.sh` functions, running `codex --version` in the login-shell launch context. Doctor uses the same selection and validation. The search includes nvm bin directories. If executable `node` exists beside the resolved Codex symlink target, that directory is included in the execution PATH. nvm version directories take precedence; shared prefixes retain existing command order and are appended when absent. If the selected node already resolves there, PATH is unchanged. For npm symlinks without adjacent node at the target, the selected shim's bin directory is used when it contains node. Otherwise the login-shell PATH and `~/.local/bin` apply.
+
+The launcher requires its bundled `codex-bin.sh` and stops with reinstall guidance when it is missing or incompatible. Doctor prefers its adjacent helper and reports unavailable checks when it cannot use it.
+
+Dashboard `SPAWN FAILED` reads the current launch interval, showing explicit reasons or the first ordinary error before registration cleanup errors. Candidate rejection details are added only when all candidates fail. If node cannot be found, check Node.js for the selected CLI installation.
+
+Managed launches cold-start instead of reusing a custom warm pool, so the current workspace and protection settings reach a fresh process. The existing `claim-model` contract does not prove a running provider's working directory and is not called on this path. No new pool protocol is added.
 
 ## tmux session
 
@@ -86,7 +99,7 @@ The launcher registers an identity with ORRERY Mail before starting the CLI.
 4. Register with project key, program, model, and task metadata
 5. Compare the requested name with the returned canonical name. On a mismatch, a top-level launch reports it and renames the tmux session to the returned name; a reserved identity stops
 6. For Codex CLI, record this launch expectation with the numeric agent ID
-7. Update the managed agent list and clipboard
+7. Update the managed agent list
 
 If `AGENTSTACK_PROJECT_KEY` is unset or ORRERY Mail is unreachable, the CLI itself still starts with the preselected name. Mail, reservations, and project-scoped dashboard features are unavailable, however.
 
@@ -146,6 +159,8 @@ Before classifying absence or expiry, existing material is checked for UID, mode
 AGENTSTACK_PROJECT_KEY=/path/to/project \
   ~/.agentstack/bin/agentstack-reregister "$AGENT_NAME"
 ```
+
+In an explicit global context, exit 3 means `observed` without refreshing registration; pass program/model and rerun the helper.
 
 The helper reads the owner token from runtime state and restores the identity with the same name. Do not create a different name when same-name registration fails. A different name separates the inbox, thread, reservations, and audit history.
 
@@ -231,6 +246,16 @@ A Claude Code session that was open before installation does not discover the ne
 
 ORRERY Telemetry delegation must be entered with the leading slash as `/delegate ...`. `delegate ...` is an ordinary prompt, not an invocation of this skill. If Claude handles it with a built-in subagent / Agent tool, it may produce an artifact, but it does not create ORRERY Telemetry identity, reservations, a dedicated tmux session, or dashboard telemetry. Do not use the built-in Agent tool in place of `/delegate` when the objective is to create an ORRERY Telemetry-monitored child.
 
+Talking to the child has the same boundary. Claude Code 2.1.224 and later can message other local sessions with the built-in `SendMessage` / `ListAgents`, and an ORRERY child in tmux is one of them, so a message sent that way arrives but leaves no ORRERY Mail record and nothing on the dashboard. The `/delegate` skill description and the managed block both tell Claude to use `send_message`. If you want Claude Code to refuse the built-in route outright, add a deny rule yourself; the installer does not, because the same rule also removes messaging to built-in subagents and agent-team teammates:
+
+```json
+{
+  "permissions": {
+    "deny": ["SendMessage", "ListAgents"]
+  }
+}
+```
+
 | Item | Details |
 | --- | --- |
 | Trigger | A request to delegate to a child, launch a subagent, or perform parallel work |
@@ -242,15 +267,15 @@ The parent agent does not finish when it hands off the task. It remains responsi
 
 `--base mail-only` and `--tools browser[:<deviceId>]` / `screen[:read|:operate]` / `screen:<read|operate>:<server>` / `mcp:<server>[:all]` choose the tools a child gets. A child with a selection is not started when the selection cannot be applied ([Choosing the tools a child gets](delegation.en.md#choosing-the-tools-a-child-gets---base----tools)).
 
+A CLI launch that omits base/tools/MCP profile uses the installer's `AGENTSTACK_CHILD_DEFAULT_TOOLS` (empty by default), reporting and omitting only unavailable default items. Explicit `--base default` suppresses those defaults. Resume restores the recorded selection ([Installer defaults](delegation.en.md#installer-defaults)).
+
 Codex children default to MCP profile `inherit` for backward compatibility. `/delegate --codex-mcp orrery-only` keeps authenticated ORRERY Mail and the session-binding plugin while disabling other inherited MCP servers and plugins. Do not use it for tasks that require plugin skills or external app tools.
 
-Where the Claude aliases point lives in `dashboard/claude_models.py`; Codex model and effort policy lives in `dashboard/codex_models.py`. For Claude, an omitted model and `opus` / `sonnet` / `haiku` / `fable` resolve to the model the local Claude Code model catalog names as current for that family, falling back to the bundled table (currently `claude-opus-5-5` / `claude-sonnet-5-5` / `claude-haiku-4-5-20251001` / `claude-fable-5-1`); the launcher output and doctor say which was used. Versioned aliases such as `sonnet-5-5` (also `sonnet55`, `Sonnet 5.5`), `sonnet-5` and `opus-5-5` pin a generation and live in `spawn_child.sh`. for Codex, omission and explicit `sol` both mean `gpt-6.1-sol` when the selected CLI is 0.159.0 or later (fresh catalog evidence is used if its version is unknown), otherwise `gpt-6-sol`. GPT-6.1 Sol requires Codex CLI 0.159.0 or later; doctor reports fallback and update guidance. Use a formal ID such as `gpt-6-sol` to pin the prior generation. `claude-opus-5` / `opus-5` remain valid compatibility forms for explicitly requesting the prior generation. `luna` means `gpt-6-luna`, `terra` means `gpt-5.6-terra`, and `astra` means `gpt-6-astra`. Full IDs for older generations remain valid for compatibility. A custom warm pool must match both the current model and the full launch workspace context; older/model-only pools cold-start safely (see below). The child runs the `claude` path that `hooks/claude-child-bin.sh` finds in the child's login shell (with `~/.local/bin` first), and alias version checks use that same binary. The dashboard runs the same script at startup and before a launch with an omitted model, and the NEW AGENT default follows its answer. If the run before a launch fails (a timeout, for example), the launch stops with an error before registration instead of deciding on the previous answer; launches with an explicit model and dry runs do not run it. Opus 5.5 requires Claude Code 2.1.280 or later.
+Where the Claude aliases point lives in `dashboard/claude_models.py`; Codex model and effort policy lives in `dashboard/codex_models.py`. For Claude, an omitted model and `opus` / `sonnet` / `haiku` / `fable` resolve to the model the local Claude Code model catalog names as current for that family, falling back to the bundled table (currently `claude-opus-5-5` / `claude-sonnet-5-5` / `claude-haiku-4-5-20251001` / `claude-fable-5-1`); the launcher output and doctor say which was used. Versioned aliases such as `sonnet-5-5` (also `sonnet55`, `Sonnet 5.5`), `sonnet-5` and `opus-5-5` pin a generation and live in `spawn_child.sh`. `claude-opus-5` / `opus-5` remain valid compatibility forms for explicitly requesting the prior generation. `luna` means `gpt-6-luna`, `terra` means `gpt-5.6-terra`, and `astra` means `gpt-6-astra`. Full IDs for older generations remain valid for compatibility, but the warm pool is used only when the requested model is what the `opus` / `sonnet` aliases resolve to and the pool's status names that formal ID in parentheses (for example `opus ready (claude-opus-5-5)`). The claim is `warm_pool.sh claim-model <type> <child-name> <formal ID>`: the pool must atomically claim only a session started with that model and print `<child-name> <formal ID>`, so a pool that changed after the status check cannot hand over another model. A pool without `claim-model`, or one that refuses, gets a cold start; a claim that reports another model is stopped and the launch aborted. The child runs the `claude` path that `hooks/claude-child-bin.sh` finds in the child's login shell (with `~/.local/bin` first), and alias version checks use that same binary. The dashboard runs the same script at startup and before a launch with an omitted model, and the NEW AGENT default follows its answer. If the run before a launch fails (a timeout, for example), the launch stops with an error before registration instead of deciding on the previous answer; launches with an explicit model and dry runs do not run it. Opus 5.5 requires Claude Code 2.1.280 or later.
 
-### Warm-pool compatibility
+The Codex default uses the same resolution as `sol`. Omission and `sol` start from `gpt-6.1-sol` with the selected CLI 0.159.0+, or `gpt-6-sol` on older versions; unknown versions use fresh catalog evidence for the initial decision. If that ID is absent from the selected `CODEX_HOME/models_cache.json`, choose the next cached candidate in order: `gpt-6.1-sol` → `gpt-6-sol` → `gpt-6-luna` → `gpt-5.6-terra` → `gpt-5.6-luna`. Expired snapshots can lower the default, while candidate additions and effort metadata still require a cache fetched within 300 seconds. An older CLI never moves up to GPT-6.1 Sol. Without a usable cache or next candidate, the existing default remains. Explicit formal IDs are never substituted.
 
-No `warm_pool.sh` is bundled. A custom pool is eligible only for the current `opus` / `sonnet` alias model, with that exact formal ID in its ready status, and only when `capabilities` outputs an exact `claim-workspace-v1` line. The launcher then calls `claim-workspace-v1 TYPE CHILD MODEL WORK_DIR PROJECT_KEY REPOSITORY WORKTREE_ROOT PROTECTED_ROOTS EXTRA_PROTECTED_ROOTS`. The pool must atomically compare every supplied field with the already running provider's actual launch context, refuse a mismatch without mutation, and return exactly `CHILD MODEL workspace-v1` on success. Changing only tmux environment is insufficient. Missing capability or refusal falls back to a fresh cold launch; an incorrect success response stops the claimed session and aborts the launch. Browser/tool restrictions still require cold start. No fixed startup time is guaranteed.
-
-### Child startup sequence
+Both IDs and the reason are reported in launcher output, doctor, API `model_note`, and NEW AGENT. A stale snapshot also reports `fetched_at` and guidance to start `codex` once to refresh the list. Before registration, `/delegate` uses the shared `resolve` command for the CLI and model, relays its notice to the operator, and uses the returned formal ID for both registration and launch. Cache `identity` is not checked against the current login: a snapshot retained after switching accounts may differ from the new account's access, and neither candidates nor fallback prove authorization. See [Codex model catalog](configuration.en.md#codex-model-catalog).
 
 1. Determine risk and monitoring cadence from the target resources, exclusivity, failure points, and reversibility
 2. Create a child-owned token and canonical name with `agentstack-preregister-child`
@@ -285,6 +310,8 @@ The log is not a transcript. It focuses on Goal, Decisions, Work Performed, Veri
 ### Hooks and reservation enforcement
 
 Claude Code hard-blocks `Edit` / `Write` through the `check-file-reservation.sh` PreToolUse hook. Codex has no equivalent hook, so the managed `~/.codex/AGENTS.md` instructs reserve / renew / release discipline. The registry is shared, so Claude and Codex reservations are mutually visible.
+
+Writes through `Bash`, scripts, or other tools are not checked or automatically released by Claude's reservation hooks. Release the reserved files yourself immediately after writing: bound proxy `release_reservations`, raw/direct `release_file_reservations`.
 
 See [Hooks and operational helpers](hooks.en.md) for the trigger timing, caller, block conditions, and cleanup lifecycle of the repository's 11 hooks / helpers.
 

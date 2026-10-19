@@ -20,6 +20,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -72,6 +73,7 @@ def _worktree_base_assignment() -> str:
 def _run_bash(script: str, env: dict[str, str] | None = None,
               check: bool = False) -> subprocess.CompletedProcess[str]:
     run_env = os.environ.copy()
+    run_env["_ags_global_loader"] = str(_ROOT / "bin/lib/global-client-loader.sh")
     if env:
         run_env.update(env)
     result = subprocess.run(
@@ -676,6 +678,21 @@ def test_dead_child_fails_fast_instead_of_waiting_out_the_timeout():
     assert text.count("exited before starting its task") == 2
 
 
+def test_required_mcp_initialization_failure_is_a_failed_start():
+    # No native Codex or live tmux: replay a required-server startup failure.
+    script = (
+        'sleep() { :; }\n'
+        'tmux() { echo "Error: required MCP server chosen failed to initialize"; return 1; }\n'
+        'codex_session_alive() { return 1; }\n'
+        + _extract("codex_watch_initial_task")
+        + '\nSECONDS=0; codex_watch_initial_task Child task test /l id\n'
+    )
+    result = _run_bash(script)
+    assert result.returncode == 2
+    assert "died after 3s" in result.stderr
+    assert "required MCP server chosen failed to initialize" in result.stderr
+
+
 def test_trust_dialog_uses_carriage_return_and_has_a_hard_attempt_limit():
     helper = _extract("codex_accept_trust_dialog")
     # capture-pane shows the legacy dialog; send-keys is echoed.
@@ -1265,7 +1282,7 @@ def test_codex_polls_capture_the_visible_screen_only():
     assert 'capture-pane -t "$CHILD_NAME" -p -S -30' not in text
     # The shared Claude wait plus the shared Codex watch.
     assert 'pane_text=$(tmux capture-pane -t "$session_name" -p 2>/dev/null || true)' in _extract("wait_for_claude_ready")
-    assert 'pane_text="$(tmux capture-pane -t "$session_name" -p 2>/dev/null || true)"' in _extract("codex_watch_initial_task")
+    assert 'if pane_text="$(tmux capture-pane -t "$session_name" -p 2>/dev/null)"; then' in _extract("codex_watch_initial_task")
 
 
 def test_child_shell_never_sources_a_user_bootstrap():
@@ -1487,10 +1504,71 @@ def test_the_dashboard_never_kills_a_codex_updating_itself(monkeypatch):
 
     screens = {"updating": "Updating Codex via `npm install -g @openai/codex`...\n", "idle": "› Ask Codex\n"}
     for name, screen in screens.items():
-        monkeypatch.setattr(server.subprocess, "run",
+        monkeypatch.setattr(server, "_tmux_run",
                             lambda argv, s=screen, **_kw: server.subprocess.CompletedProcess(argv, 0, s, ""))
         assert server._codex_self_update_on_screen("Child") is (name == "updating")
     source = (_ROOT / "dashboard" / "server.py").read_text(encoding="utf-8")
     body = source[source.index("    def kill_spawn_session() -> None:"):]
     body = body[:body.index("\n\n")]
-    assert body.index("_codex_self_update_on_screen") < body.index('"kill-session"')
+    assert body.index("_codex_self_update_on_screen") < body.index("'kill-session'")
+
+
+@pytest.mark.parametrize("parent, started", [("", False), ("ParentAgent", True)])
+def test_the_first_turn_watch_runs_only_when_there_is_a_parent_to_tell(tmp_path, parent, started):
+    """A standalone child is not asked to report; watching its first turn only
+    produced "declined; could not tell the parent by Mail: no parent to tell"
+    for a child that was working as asked (2026-10-04)."""
+    mark = tmp_path / "watch-started"
+    fake_python = tmp_path / "python"
+    fake_python.write_text(f"#!/bin/sh\ntouch '{mark}'\n", encoding="utf-8")
+    fake_python.chmod(0o755)
+    script = _extract("claude_watch_initial_task") + "\n" + (
+        'claude_prompt_head() { printf "%s" "$1"; }\n'
+        f'claude_watch_initial_task Probe-Curie "{parent}" /nonexistent "task text"\n'
+        "wait\n"
+    )
+    result = _run_bash(script, {"AGENTSTACK_CHILD_START_CHECK": "1",
+                                "AGENTSTACK_PYTHON": str(fake_python), "HOOKS_DIR": str(tmp_path)})
+    assert result.returncode == 0, result.stderr
+    import time
+    deadline = time.monotonic() + 5
+    while started and not mark.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert mark.exists() is started
+
+
+@pytest.mark.parametrize("age", [0, 3600])
+def test_delegate_launcher_default_falls_back_and_prints_notice(tmp_path, age):
+    binary = tmp_path / "codex"
+    binary.write_text('#!/bin/sh\n[ "$1" = --version ] || exit 2\necho "codex-cli 0.160.1"\n')
+    binary.chmod(0o755)
+    fetched = (datetime.now(timezone.utc) - timedelta(seconds=age)).isoformat()
+    (tmp_path / "models_cache.json").write_text(json.dumps({
+        "fetched_at": fetched, "models": [{"slug": "gpt-6-luna"}],
+    }))
+    env = {"AGENTSTACK_CODEX_BIN": str(binary), "CODEX_HOME": str(tmp_path)}
+    for requested in ("", "sol"):
+        result = _model_call("normalize_codex_model", requested, extra_env=env)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "gpt-6-luna"
+        assert "from gpt-6.1-sol to gpt-6-luna" in result.stderr
+        if age:
+            assert fetched in result.stderr and "Start codex once" in result.stderr
+    explicit = _model_call("normalize_codex_model", "gpt-6.1-sol", extra_env=env)
+    assert explicit.stdout.strip() == "gpt-6.1-sol"
+    assert explicit.stderr == ""
+    # /delegate captures resolve's JSON before preregistration and later passes
+    # its formal ID to the launcher. The note must survive that capture.
+    resolve_env = {**os.environ, **env, "AGENTSTACK_CHILD_SHELL": "/bin/bash"}
+    for requested in ("", "sol", "gpt-6.1-sol"):
+        result = subprocess.run([sys.executable, str(_ROOT / "dashboard/codex_models.py"),
+                                 "resolve", requested], env=resolve_env,
+                                capture_output=True, text=True, timeout=20)
+        assert result.returncode == 0, result.stderr
+        policy = json.loads(result.stdout)
+        if requested.startswith("gpt-"):
+            assert policy["model"] == requested
+            assert "model_note" not in policy and result.stderr == ""
+        else:
+            assert policy["model"] == "gpt-6-luna"
+            assert policy["model_note"] in result.stderr

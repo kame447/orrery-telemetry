@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 
+from _installed_client_payload import copy_client_library
+
 ROOT = Path(__file__).resolve().parents[1]
 CHECK_HOOK = ROOT / "hooks" / "check-file-reservation.sh"
 RELEASE_HOOK = ROOT / "hooks" / "release-file-reservation.sh"
@@ -47,12 +49,15 @@ def _mcp_result(*, renewed: int | None = None, released: int | None = None) -> b
 class _Server:
     def __init__(self, responder: Callable[[int], tuple[int, bytes]] | None = None) -> None:
         self.requests: list[dict[str, Any]] = []
+        self.resource_requests: list[dict[str, Any]] = []
         self.responder = responder or (lambda _count: (200, _mcp_result(released=1)))
         parent = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self) -> None:  # noqa: N802
                 body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                request = json.loads(body)
+                assert request['method'] == 'tools/call'
                 parent.requests.append(
                     {
                         "headers": {
@@ -62,6 +67,13 @@ class _Server:
                     }
                 )
                 status, response = parent.responder(len(parent.requests))
+                document = json.loads(response)
+                structured = document.get('result', {}).get('structuredContent', {})
+                if 'renewed' in structured:
+                    args = request['params']['arguments']
+                    structured['conflict_check'] = {'version': 1, 'project_key': args['project_key'],
+                        'paths': args['paths'], 'conflicts': []}
+                    response = json.dumps(document).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(response)))
@@ -110,6 +122,7 @@ class ReleaseHookTests(unittest.TestCase):
         if install_worker:
             shutil.copy2(WORKER, hooks / WORKER.name)
         if install_resolver:
+            copy_client_library(root)
             shutil.copy2(RESOLVER, hooks / RESOLVER.name)
 
         env = os.environ.copy()
@@ -222,6 +235,34 @@ class ReleaseHookTests(unittest.TestCase):
         self.assertEqual(
             release["headers"]["accept"], "application/json, text/event-stream"
         )
+
+    def test_r1_symlink_entry_is_identical_before_and_after_delete(self) -> None:
+        def respond(count: int) -> tuple[int, bytes]:
+            return 200, _mcp_result(renewed=1) if count % 2 else _mcp_result(released=1)
+
+        with tempfile.TemporaryDirectory() as directory, _Server(respond) as server:
+            root = Path(directory)
+            env, project, _runtime = self.make_environment(root, server.url)
+            outside = root / "outside.md"
+            outside.write_text("old")
+            link = project / "link.md"
+            link.symlink_to(outside)
+            for operation in ("Delete", "MoveSource"):
+                with self.subTest(operation=operation):
+                    document = json.loads(self.payload(link))
+                    document["tool_name"] = operation
+                    payload = json.dumps(document)
+                    checked = self.run_hook(CHECK_HOOK, payload, env, project)
+                    link.unlink()
+                    released = self.run_hook(RELEASE_HOOK, payload, env, project)
+                    self.assertEqual(checked.returncode, 0, checked.stderr)
+                    self.assertEqual(released.returncode, 0, released.stderr)
+                    guard, release = server.requests[-2:]
+                    guard_args = guard["json"]["params"]["arguments"]
+                    release_args = release["json"]["params"]["arguments"]
+                    self.assertEqual(guard_args["paths"], release_args["paths"])
+                    self.assertEqual(guard_args["paths"][0], "link.md")
+                    link.symlink_to(outside)
 
     def test_failed_or_blocked_tool_never_releases(self) -> None:
         failures = (

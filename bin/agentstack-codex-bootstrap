@@ -31,14 +31,26 @@ _ags_legacy_roots_set="${AGENTSTACK_PROTECTED_ROOTS+x}"
 _ags_legacy_roots="${AGENTSTACK_PROTECTED_ROOTS:-}"
 _ags_extra_roots_set="${AGENTSTACK_EXTRA_PROTECTED_ROOTS+x}"
 _ags_extra_roots="${AGENTSTACK_EXTRA_PROTECTED_ROOTS:-}"
-if [ -z "${AGENTSTACK_PROJECT_KEY:-}" ] && [ -f "$SCRIPT_DIR/../env.sh" ]; then
-  # Protection assignments must be literal before the legacy env is sourced.
+# The continuation loader sources env.sh only without a selected project.
+# Validate protection data first; malformed values must never execute as shell.
+if [ -z "${AGENTSTACK_PROJECT_KEY:-${PROJECT_KEY:-}}" ] && [ -f "$SCRIPT_DIR/../env.sh" ]; then
   if ! /bin/bash "$_ags_context_helper" installed-env-value AGENTSTACK_PROTECTED_ROOTS "$SCRIPT_DIR/../env.sh" >/dev/null ||
      ! /bin/bash "$_ags_context_helper" installed-env-value AGENTSTACK_EXTRA_PROTECTED_ROOTS "$SCRIPT_DIR/../env.sh" >/dev/null; then
     echo "warning: invalid installed protection configuration; refusing to start." >&2
     return 1 2>/dev/null || exit 1
   fi
-  . "$SCRIPT_DIR/../env.sh"
+fi
+. "$SCRIPT_DIR/lib/global-client-loader.sh" || { return 2 2>/dev/null || exit 2; }
+ags_client_bootstrap "$SCRIPT_DIR/../env.sh" --continue "$@" || { return 2 2>/dev/null || exit 2; }
+ags_client_select "$@" && _ags_selected_rc=0 || _ags_selected_rc=$?
+[[ "$_ags_selected_rc" == 0 || "$_ags_selected_rc" == 125 ]] || { return "$_ags_selected_rc" 2>/dev/null || exit "$_ags_selected_rc"; }
+if [[ "$_ags_selected_rc" == 0 ]]; then
+  _ags_global_mode="$(python3 "$SCRIPT_DIR/lib/runtime_client.py" mode)" || { return 1 2>/dev/null || exit 1; }
+  if [[ "$_ags_global_mode" == "global" ]]; then
+    _ags_global_exports="$(python3 "$SCRIPT_DIR/lib/runtime_client.py" bootstrap codex)" || { return 1 2>/dev/null || exit 1; }
+    eval "$_ags_global_exports"
+    return 0 2>/dev/null || exit 0
+  fi
 fi
 if [ "$_ags_extra_roots_set" = x ]; then
   export AGENTSTACK_EXTRA_PROTECTED_ROOTS="$_ags_extra_roots"
@@ -199,7 +211,6 @@ finalize_agent_name() {
   fi
   if [[ "$TMUX_IDENTITY_MATCHED" == "1" ]]; then
     ags_record_managed_agent "$MANAGED_FILE" "${AGENT_NAME:-}"
-    command -v pbcopy >/dev/null 2>&1 && printf '%s' "${AGENT_NAME:-}" | pbcopy 2>/dev/null || true
   fi
   export AGENT_NAME="${AGENT_NAME:-}"
   [[ -n "${CHILD_REGISTRATION_TOKEN:-}" ]] && export CHILD_REGISTRATION_TOKEN
@@ -340,6 +351,10 @@ else
   echo "⚠️  agent registration failed; launching Codex with preselected AGENT_NAME=${AGENT_NAME:-}." >&2
 fi
 
+IDENTITY_POLICY="$HOOKS_DIR/session-identity-policy.sh"
+[[ -f "$IDENTITY_POLICY" ]] || IDENTITY_POLICY="$SCRIPT_DIR/../hooks/session-identity-policy.sh"
+. "$IDENTITY_POLICY"
+ags_require_launch_identity || { return 2 2>/dev/null || exit 2; }
 finalize_agent_name
 if [[ -z "$REGISTERED_AGENT_NAME" && "$REQUIRE_FRESH_BINDING" == "1" ]]; then
   echo "⚠️  reserved/resumed Codex identity could not be registered; refusing to start without a fresh history binding expectation." >&2

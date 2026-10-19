@@ -107,50 +107,52 @@ legacy_bearer_enabled() {
     esac
 }
 
+reservation_absolute_paths() {
+    # Explicit candidate helper only; no caller in the installed legacy hooks.
+    # All adapters use the packaged normalizer. Cwd is observed here, rather
+    # than inferred from PROJECT_KEY or PROTECTED_ROOTS. Missing package fails.
+    "${AGENTSTACK_PYTHON:-python3}" -m agentstack_mail.reservation_clients --cwd "$(pwd -P)" "$@"
+}
+
 # Populate SESSION_ID, FILE_PATH, MATCHED_ROOT, REL_PATH, and
 # RESERVATION_PROJECT_KEY from an Edit/Write hook document. Return 1 for the
 # intentional no-op cases (no file or a file outside all protected roots).
 reservation_resolve_tool_context() {
     local tool_document="$1"
-    SESSION_ID=$(printf '%s' "$tool_document" | python3 -c '
+    local context
+    context=$(printf '%s' "$tool_document" | "${AGENTSTACK_PYTHON:-python3}" -c '
 import json, sys
+from pathlib import Path
 try:
-    print(json.loads(sys.stdin.read()).get("session_id", ""))
-except Exception:
-    print("")
-' 2>/dev/null || echo "")
-    export AGENTSTACK_SESSION_ID="$SESSION_ID"
-    FILE_PATH=$(printf '%s' "$tool_document" | python3 -c '
-import json, sys
-try:
-    data = json.loads(sys.stdin.read())
+    data = json.load(sys.stdin)
+    session = data.get("session_id", "")
     tool_input = data.get("tool_input", {})
-    print(tool_input.get("file_path", tool_input.get("path", "")))
-except Exception:
-    print("")
-' 2>/dev/null || echo "")
-    [ -n "$FILE_PATH" ] || return 1
-
-    if [[ "$FILE_PATH" == /* ]]; then
-        :
-    elif [[ "$FILE_PATH" == "~/"* ]]; then
-        FILE_PATH="$HOME/${FILE_PATH:2}"
-    else
-        FILE_PATH="$(pwd)/$FILE_PATH"
-    fi
-
-    # New managed launches export physical roots. Resolve file aliases/.. into
-    # that same coordinate system (also for a not-yet-created Write target),
-    # while retaining the legacy lexical contract for already-running sessions.
-    if [[ "${AGENTSTACK_PROTECTION_CONTEXT:-}" == workspace-v1 ]]; then
-        FILE_PATH="$(python3 - "$FILE_PATH" <<'PYFILE'
-import os
-import sys
-print(os.path.realpath(sys.argv[1]))
-PYFILE
-)" || return 1
-    fi
-
+    file_path = tool_input.get("file_path", tool_input.get("path", ""))
+    if not isinstance(session, str) or not isinstance(file_path, str):
+        raise ValueError("session_id and file_path must be strings")
+    if any(c in session + file_path for c in ("\0", "\n", "\r")):
+        raise ValueError("unsupported control character in path or session")
+    if not file_path:
+        print("__AGENTSTACK_NO_TARGET__")
+        sys.exit(0)
+    candidate = Path.home() / file_path[2:] if file_path.startswith("~/") else Path(file_path)
+    if data.get("tool_name") in ("Delete", "MoveSource"):
+        candidate = candidate.parent.resolve() / candidate.name
+    else:
+        candidate = candidate.resolve()
+    print(session)
+    print(candidate)
+except (ValueError, TypeError, AttributeError, OSError, RuntimeError) as exc:
+    print("RESERVATION PATH INVALID: " + str(exc), file=sys.stderr)
+    sys.exit(2)
+') || {
+        echo "RESERVATION CONTEXT INVALID: cannot decode edit target" >&2
+        return 2
+    }
+    [ "$context" = "__AGENTSTACK_NO_TARGET__" ] && return 1
+    SESSION_ID="${context%%$'\n'*}"
+    FILE_PATH="${context#*$'\n'}"
+    export AGENTSTACK_SESSION_ID="$SESSION_ID"
     MATCHED_ROOT=""
     if [[ -n "$PROTECTED_ROOTS" ]]; then
         local remaining="$PROTECTED_ROOTS" root
@@ -165,6 +167,10 @@ PYFILE
             esac
             root="$(expand_path "$root")"
             [[ -z "$root" ]] && continue
+            root=$("${AGENTSTACK_PYTHON:-python3}" -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$root") || {
+                echo "RESERVATION PATH INVALID: cannot resolve protected root" >&2
+                return 2
+            }
             [[ "$root" != "/" ]] && root="${root%/}"
             case "$FILE_PATH" in
                 "$root"|"${root%/}/"*)
@@ -224,7 +230,7 @@ reservation_release_request() {
     fi
     QUERY_PROJECT_KEY="$project_key" QUERY_AGENT="$agent" \
         QUERY_PATHS_JSON="$paths_json" QUERY_TOKEN="$token" QUERY_URL="$MCP_URL" \
-        QUERY_FAILURE_LOG="$RUNTIME_DIR/release-failures.log" python3 - <<'PY'
+        QUERY_FAILURE_LOG="$RUNTIME_DIR/release-failures.log" "${AGENTSTACK_PYTHON:-python3}" - <<'PY'
 import datetime
 import json
 import os

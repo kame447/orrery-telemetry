@@ -1,5 +1,13 @@
 #!/bin/bash
 
+_ags_global_loader="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin/lib" && pwd)/global-client-loader.sh"
+. "$_ags_global_loader" || exit 2
+if declare -F ags_client_entry >/dev/null; then
+  if ags_client_entry session-start "$@"; then exit 0; else _ags_global_rc=$?; fi
+  [[ "$_ags_global_rc" == 125 ]] || exit "$_ags_global_rc"
+
+fi
+
 # Conversation-only resume must not touch ORRERY Mail or owner material.
 if [[ "${AGENTSTACK_MAIL_DISABLED:-0}" == "1" ]]; then
     exit 0
@@ -359,6 +367,12 @@ printf '%s src=%s resolved=%q AGENT_NAME=%q TMUX_PANE=%q TMUX=%s sess=%q\n' \
     "${CURRENT_SESSION:-}" \
     >> "$RUNTIME_DIR/session-start-resolve.log" 2>/dev/null
 
+INSTRUCTION_ENGINE="$HOOKS_DIR/../bin/lib/instruction_blocks.py"
+if [[ -f "$INSTRUCTION_ENGINE" ]] &&
+   command -v agentstack_instruction_admission >/dev/null 2>&1 &&
+   [[ "$(agentstack_instruction_admission)" != unrelated ]]; then
+    "${AGENTSTACK_PYTHON:-python3}" "$INSTRUCTION_ENGINE" --provider claude --session-notices 2>/dev/null || true
+fi
 write_live_session_lease "${RESOLVED_AGENT:-}"
 
 if mail_server_is_answering; then
@@ -398,7 +412,12 @@ if mail_server_is_answering; then
         fi
     else
         echo "ORRERY Mail server is running, but no existing identity was resolved."
-        echo "提供 tool schema を確認してください。bound proxy なら登録せずその schema に従い、confirmed raw/direct の新規未登録 session だけ ensure_project -> register_agent -> fetch_inbox を使ってください。"
+        if command -v agentstack_instruction_admission >/dev/null 2>&1 &&
+           [ "$(agentstack_instruction_admission)" = unrelated ]; then
+            agentstack_instruction_message identity-unavailable
+        else
+            agentstack_instruction_message identity-binding-unresolved
+        fi
     fi
 else
     echo "ORRERY Mail server is not running; skip registration until it is available."

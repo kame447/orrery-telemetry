@@ -48,6 +48,16 @@ PRODUCTION_LABELS = tuple(
 SAMPLE_SECONDS = 2.0
 
 
+@pytest.fixture(autouse=True)
+def _close_synthetic_tmux_endpoints():
+    """Fixture sockets do not accumulate across a full serial worker."""
+    yield
+    import sys
+    module = sys.modules.get('_fake_tmux_transport')
+    if module is not None:
+        module._cleanup()
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _no_inherited_agentstack_env():
     """Run the suite as CI does: with no AGENTSTACK_* in the environment.
@@ -79,6 +89,18 @@ def _no_inherited_agentstack_env():
 
 
 @pytest.fixture(autouse=True)
+def _checkout_dashboard_helpers(monkeypatch):
+    """Workers must load this checkout's helpers, never an installed old copy."""
+    from pathlib import Path
+    from dashboard import server
+    monkeypatch.setattr(server, "HOOKS_DIR", str(Path(__file__).resolve().parents[1] / "hooks"))
+    # A tmux consumer kept by an earlier test would carry that test's doubles.
+    server._reset_tmux_consumer_cache()
+    yield
+    server._reset_tmux_consumer_cache()
+
+
+@pytest.fixture(autouse=True)
 def _no_child_start_watcher(monkeypatch):
     """A Claude child launched by spawn_child.sh gets a background watcher that
     reports to its parent by Mail when the child does not start its task.
@@ -86,6 +108,28 @@ def _no_child_start_watcher(monkeypatch):
     Per test, so nothing reaches suites that check for inherited AGENTSTACK_*.
     """
     monkeypatch.setenv("AGENTSTACK_CHILD_START_CHECK", "0")
+
+
+@pytest.fixture
+def isolated_provider_stall_runtime(tmp_path, monkeypatch):
+    """Import-time dashboard constants must not retain launcher runtime paths."""
+    from dashboard import server
+    for key in list(os.environ):
+        if is_inherited_stack_variable(key):
+            monkeypatch.delenv(key)
+    home = tmp_path / "provider-home"
+    home.mkdir()
+    runtime = home / ".agentstack" / "runtime"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("AGENTSTACK_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("AGENTSTACK_MAIL_DB", str(home / "fixture.sqlite3"))
+    monkeypatch.setattr(server, "RUNTIME_DIR", str(runtime))
+    monkeypatch.setattr(server, "DB_PATH", str(home / "fixture.sqlite3"))
+    monkeypatch.setattr(server, "_provider_monitor", None)
+    monkeypatch.setattr(server, "_provider_thread", None)
+    monkeypatch.setattr(server, "_provider_stop", threading.Event())
+    yield runtime
+    server._stop_provider_stall_monitor()
 
 @pytest.fixture(autouse=True, scope="session")
 def _the_suite_leaves_real_user_instructions_alone():

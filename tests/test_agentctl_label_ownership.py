@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import pathlib
 import subprocess
+import sys
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -80,3 +81,49 @@ def test_stop_still_unloads_the_job_this_home_did_register(tmp_path):
 
     calls = _run_stop(tmp_path)
     assert [call for call in calls if call.startswith("bootout")], calls
+
+
+def test_restart_refuses_a_loaded_job_this_home_never_registered(tmp_path):
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    calls = tmp_path / "launchctl-calls.txt"
+    loaded = tmp_path / "foreign-job"
+    loaded.write_text("another HOME's job")
+    launchctl = fake_bin / "launchctl"
+    launchctl.write_text("""#!/bin/sh
+echo "$1" >> "$LAUNCHCTL_CALLS"
+case "$1" in
+  print) test -f "$LOADED_JOB"; exit $? ;;
+  bootout) rm -f "$LOADED_JOB" ;;
+  bootstrap) touch "$LOADED_JOB" ;;
+esac
+exit 0
+""")
+    launchctl.chmod(0o755)
+    uname = fake_bin / "uname"
+    uname.write_text("#!/bin/sh\necho Darwin\n")
+    uname.chmod(0o755)
+    home = tmp_path / "home"
+    home.mkdir()
+    label = "org.agentstack.test.restart-ownership"
+    plist = home / "Library/LaunchAgents" / (label + ".agentdashboard.plist")
+    env = {
+        "HOME": str(home),
+        "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+        "AGENTSTACK_ENV_FILE": str(tmp_path / "absent-env.sh"),
+        "AGENTSTACK_RUNTIME_DIR": str(home / "runtime"),
+        "AGENTSTACK_LABEL_PREFIX": label,
+        "AGENTSTACK_PYTHON": sys.executable,
+        "AGENTSTACK_PORT": "19878",
+        "LAUNCHCTL_CALLS": str(calls),
+        "LOADED_JOB": str(loaded),
+    }
+    result = subprocess.run(
+        ["/bin/bash", str(AGENTCTL), "restart"], env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode != 0
+    assert "refusing to restart launchd job without a plist owned by this HOME" in result.stderr
+    assert calls.read_text().splitlines() == ["print"]
+    assert loaded.read_text() == "another HOME's job"
+    assert not plist.exists()

@@ -13,9 +13,15 @@ say() { printf '%s\n' "$*"; }
 die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
 
 AGENTSTACK_HOME="${AGENTSTACK_HOME:-$HOME/.agentstack}"
-if [[ "${AGENTSTACK_MAILCTL_SKIP_ENV:-0}" != "1" && -f "$AGENTSTACK_HOME/env.sh" ]]; then
-  # shellcheck disable=SC1090
-  . "$AGENTSTACK_HOME/env.sh"
+_ags_mode_loader="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/global-client-loader.sh"
+if [[ -f "$_ags_mode_loader" ]]; then
+  . "$_ags_mode_loader"
+  if [[ "${AGENTSTACK_MAILCTL_SKIP_ENV:-0}" != 1 ]]; then
+    ags_client_bootstrap "$AGENTSTACK_HOME/env.sh" --system "$@" || exit $?
+  fi
+else
+  printf '%s\n' GLOBAL_ENTRY_UNAVAILABLE >&2
+  exit 2
 fi
 
 MAIL_SERVICE_ROOT="${AGENTSTACK_MAIL_DIR:-$AGENTSTACK_HOME/mail-service}"
@@ -285,6 +291,14 @@ PY
 }
 
 health_ok() {
+  if [[ -f "${_ags_mode_loader:-}" ]]; then
+    ags_client_select && _ags_health_rc=0 || _ags_health_rc=$?
+    if [[ "$_ags_health_rc" == 0 ]]; then
+      "$PYTHON_BIN" "$AGS_CLIENT_LOADER_DIR/runtime_client.py" service-health
+      return $?
+    fi
+    [[ "$_ags_health_rc" == 125 ]] || return "$_ags_health_rc"
+  fi
   "$PYTHON_BIN" - "$MCP_URL" "$MAIL_DB" <<'PY'
 import json
 import pathlib

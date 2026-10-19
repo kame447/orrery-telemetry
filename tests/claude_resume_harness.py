@@ -89,5 +89,9 @@ def run_resumed(launches, tmp_path, cli_body, env=None):
     environment.pop("TMUX", None)
     environment.pop("TMUX_PANE", None)
     environment.update(env or {})
+    from _fake_tmux_transport import add_transport_evidence
+    pane=environment.get('TMUX_PANE')
+    add_transport_evidence(bin_dir,environment,inherited=bool(environment.get('TMUX')))
+    if pane is not None:environment['TMUX_PANE']=pane
     return subprocess.run(["/bin/bash", "-c", launches[-1][-1]], cwd=tmp_path, env=environment,
                           capture_output=True, text=True, timeout=60)

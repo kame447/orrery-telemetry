@@ -459,6 +459,8 @@ def test_claude_display_defers_scan_then_reuses_mtime_keyed_result(
         "run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout=""),
     )
+    from _legacy_dashboard_transport import install_legacy_transport
+    install_legacy_transport(monkeypatch, tmp_path, server, lambda *a, **kw: SimpleNamespace(returncode=1, stdout="", stderr=""))
     server._TPATH_CACHE.clear()
     server._TPATH_OWNER.clear()
     server._RESUME_CAPABILITY_CACHE.clear()
@@ -558,6 +560,8 @@ def test_claude_failed_full_verification_is_cached_as_no_history(
         "run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout=""),
     )
+    from _legacy_dashboard_transport import install_legacy_transport
+    install_legacy_transport(monkeypatch, tmp_path, server, lambda *a, **kw: SimpleNamespace(returncode=1, stdout="", stderr=""))
     server._TPATH_CACHE.clear()
     server._TPATH_OWNER.clear()
     server._RESUME_CAPABILITY_CACHE.clear()

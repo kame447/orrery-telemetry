@@ -17,6 +17,7 @@ import math
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import stat
 import subprocess
@@ -127,9 +128,13 @@ def _parser() -> argparse.ArgumentParser:
     for operation, help_text in (
         ("inspect", "validate the profile and enrolled row without starting it"),
         ("run", "validate, take the instance lock, and exec the configured process"),
+        ("reconnect", "reconnect a global preparation profile without starting its proxy"),
     ):
         command = commands.add_parser(operation, help=help_text)
         command.add_argument("--profile", required=True, help="0600 persistent profile JSON path")
+    configure = commands.add_parser("configure", help="operator-only global execution settings from JSON stdin")
+    configure.add_argument("--profile", required=True)
+    configure.add_argument("--operator", required=True, action="store_true")
     return parser
 
 
@@ -1616,6 +1621,26 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = _parser().parse_args(argv)
     profile_path = _expand_path(args.profile)
     try:
+        api = runpy.run_path(str(Path(__file__).resolve().parent / 'lib/runtime_client.py'))
+        try:
+            if args.operation == 'configure':
+                profile=api['read_json'](profile_path)
+                if profile.get('kind') != api['PROFILE_KIND']:
+                    raise api['ClientError']('LEGACY_FILE_REQUIRES_IMPORT')
+                client=api['RuntimeClient'](Path(profile['client_config']))
+                if profile_path != client.profile_path:
+                    raise api['ClientError']('FIXED_LAYOUT_PATH_NOT_SUPPORTED')
+                value=json.loads(sys.stdin.read(1048577))
+                print(json.dumps(api['runtime_delivery'](client).configure_execution(value)))
+                return
+            global_result = api['profile_operation'](profile_path, args.operation)
+        except api['ClientError'] as exc:
+            raise PersistentError(str(exc)) from None
+        if global_result is not None:
+            print(json.dumps(global_result))
+            return
+        if args.operation == 'reconnect':
+            raise PersistentError('global-profile-required')
         if args.operation == "inspect":
             profile, inspected, _connection_path, _connection_value, _runtime_dir, _state_dir = (
                 _validated(profile_path)

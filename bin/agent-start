@@ -25,7 +25,14 @@ BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$BIN_DIR/lib/agentstack-launch.sh"
 # shellcheck source=lib/agentstack-register.sh
 . "$BIN_DIR/lib/agentstack-register.sh"
-ags_load_env
+AGS_RUNTIME_CLIENT="$BIN_DIR/lib/runtime_client.py"
+. "$BIN_DIR/lib/global-client-loader.sh" || exit 2
+ags_load_env "$@"
+ags_client_select "$@" && _ags_selected_rc=0 || _ags_selected_rc=$?
+[[ "$_ags_selected_rc" == 0 || "$_ags_selected_rc" == 125 ]] || exit "$_ags_selected_rc"
+if [[ "$_ags_selected_rc" == 0 ]]; then
+  exec python3 "$AGS_RUNTIME_CLIENT" launch claude "${1:-$PWD}"
+fi
 
 CLAUDE_BIN="${AGENTSTACK_CLAUDE_BIN:-claude}"
 CLAUDE_MODEL="${AGENTSTACK_CLAUDE_MODEL:-claude-code}"
@@ -78,10 +85,14 @@ else
   echo "warning: AGENTSTACK_PROJECT_KEY unset; launching Claude with preselected AGENT_NAME=${AGENT_NAME:-}" >&2
 fi
 
+IDENTITY_POLICY="$HOOKS_DIR/session-identity-policy.sh"
+[[ -f "$IDENTITY_POLICY" ]] || IDENTITY_POLICY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/hooks/session-identity-policy.sh"
+. "$IDENTITY_POLICY"
+ags_require_launch_identity || exit 2
+
 if [[ -n "${AGENT_NAME:-}" ]]; then
   SESSION="$AGENT_NAME"
   ags_record_managed_agent "$MANAGED_FILE" "$AGENT_NAME"
-  command -v pbcopy >/dev/null 2>&1 && printf '%s' "$AGENT_NAME" | pbcopy 2>/dev/null || true
 fi
 
 # Already inside a real tmux pane: register + run in place.

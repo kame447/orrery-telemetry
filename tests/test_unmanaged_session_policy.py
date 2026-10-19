@@ -120,7 +120,7 @@ def answering_endpoint():
 def test_an_unregistered_session_is_refused_while_the_service_answers(
     tmp_path: Path, answering_endpoint: str
 ) -> None:
-    """The default: registering is possible, so it is required."""
+    """The default edit guard still blocks; it directs bare sessions to a launcher."""
     result = _run(
         REGISTRATION_GUARD,
         _registration_payload("healthy-1"),
@@ -129,7 +129,8 @@ def test_an_unregistered_session_is_refused_while_the_service_answers(
     )
     assert result.returncode == 2, result.stdout + result.stderr
     assert "UNMANAGED SESSION BLOCKED" in result.stderr
-    assert "register_agent" in result.stderr
+    assert "agent-start" in result.stderr
+    assert "register_agent" not in result.stderr
 
 
 def test_an_endpoint_that_only_errors_is_still_a_reachable_service(
@@ -305,7 +306,7 @@ def test_a_tmux_session_without_registration_is_still_refused(tmp_path: Path, an
         AGENTSTACK_MCP_URL=answering_endpoint,
     )
     assert result.returncode == 2, result.stdout + result.stderr
-    assert "AGENT NOT REGISTERED" in result.stderr
+    assert "identity binding is unresolved" in result.stderr
 
 
 def test_a_registered_session_is_allowed(tmp_path: Path, answering_endpoint: str) -> None:
@@ -355,7 +356,7 @@ def test_block_policy_refuses_and_names_an_escape_from_outside(tmp_path: Path, a
     assert result.returncode == 2
     assert "UNMANAGED SESSION BLOCKED" in result.stderr
     assert "agent-start" in result.stderr
-    assert "settings.json" in result.stderr
+    assert "not participating in ORRERY" in result.stderr
 
 
 def test_block_policy_also_refuses_the_edit(tmp_path: Path, answering_endpoint: str) -> None:
@@ -2020,7 +2021,7 @@ def test_a_real_exact_session_is_still_an_identity_source(
     if guard == "registration":
         result = _run(REGISTRATION_GUARD, _registration_payload("tmux-real"), tmp_path, **env)
         assert result.returncode == 2, result.stdout + result.stderr
-        assert "AGENT NOT REGISTERED" in result.stderr
+        assert "identity binding is unresolved" in result.stderr
     else:
         project = tmp_path / "project"
         project.mkdir()
@@ -2035,3 +2036,41 @@ def test_a_real_exact_session_is_still_an_identity_source(
         )
         # It has an identity, so it is held to the reservation check.
         assert "UNMANAGED SESSION" not in result.stderr, result.stderr
+
+# User-scoped instructions must never turn guard refusals back into raw signup.
+@pytest.mark.parametrize('guard',[REGISTRATION_GUARD,RESERVATION_GUARD])
+@pytest.mark.parametrize('flag',[False,True])
+def test_instruction_catalog_preserves_block_and_never_requests_raw_signup(tmp_path,answering_endpoint,guard,flag):
+    import uuid
+    session='pr5-'+uuid.uuid4().hex
+    marker=Path('/tmp')/('.claude-agent-registered-'+session)
+    project=tmp_path/'project';project.mkdir()
+    target=project/'reserved.md';target.write_text('reserved by another owner')
+    if flag:marker.write_text('registered')
+    try:
+        payload=_registration_payload(session) if guard==REGISTRATION_GUARD else _edit_payload(session,target)
+        result=_run(guard,payload,tmp_path,AGENTSTACK_MCP_URL=answering_endpoint,
+                    AGENTSTACK_PROTECTED_ROOTS=str(project),AGENTSTACK_UNMANAGED_SESSION_POLICY='block')
+        # The registration flag already exempts the registration-only guard.
+        if flag and guard==REGISTRATION_GUARD:
+            assert result.returncode==0
+        else:
+            assert result.returncode==2,result.stdout+result.stderr
+            assert 'register_agent' not in result.stderr and 'ensure_project' not in result.stderr
+            if flag:
+                assert 'identity binding is unresolved' in result.stderr
+                assert 'not participating in ORRERY' not in result.stderr
+            else:assert 'not participating in ORRERY' in result.stderr
+        assert target.read_text()=='reserved by another owner'
+    finally:marker.unlink(missing_ok=True)
+
+
+def test_clear_keeps_tmux_identity_and_uses_same_identity_recovery_notice(tmp_path,answering_endpoint):
+    import uuid
+    bins=_fake_tmux_session(tmp_path,'ExistingIdentity')
+    result=_run(REGISTRATION_GUARD,_registration_payload('pr5-clear-'+uuid.uuid4().hex),tmp_path,
+                AGENTSTACK_MCP_URL=answering_endpoint,TMUX='/tmp/fixture,1,0',TMUX_PANE='%9',PATH=f"{bins}:{BASE_ENV['PATH']}")
+    assert result.returncode==2
+    assert 'identity binding is unresolved' in result.stderr
+    assert 'not participating in ORRERY' not in result.stderr and 'agent-start <workdir>' not in result.stderr
+    assert 'register_agent' not in result.stderr and 'ensure_project' not in result.stderr

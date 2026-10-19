@@ -26,6 +26,10 @@
     <string>__PATH__</string>
     <key>AGENTSTACK_PYTHON</key>
     <string>__PYTHON__</string>
+    <key>AGENTSTACK_RUNTIME_MODE</key>
+    <string>__RUNTIME_MODE__</string>
+    <key>AGENTSTACK_GLOBAL_SERVER_CONFIG</key>
+    <string>__GLOBAL_SERVER_CONFIG__</string>
     <key>AGENTSTACK_PORT</key>
     <string>__PORT__</string>
     <key>AGENTSTACK_LABEL_PREFIX</key>
@@ -64,6 +68,8 @@
     <string>__WORKTREE_ROOT__</string>
     <key>AGENTSTACK_CODEX_CHILD_APPROVAL</key>
     <string>__CODEX_CHILD_APPROVAL__</string>
+    <key>AGENTSTACK_CHILD_DEFAULT_TOOLS</key>
+    <string>__CHILD_DEFAULT_TOOLS__</string>
     <key>AGENTSTACK_CODEX_NETWORK</key>
     <string>__CODEX_NETWORK__</string>
     <key>AGENTSTACK_CODEX_ADD_DIRS</key>

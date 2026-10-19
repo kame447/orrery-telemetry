@@ -11,6 +11,8 @@ import sys
 
 import pytest
 
+from _installed_client_payload import copy_client_library
+
 ROOT = Path(__file__).resolve().parents[1]
 KEYS = (
     "AGENTSTACK_PROJECT_KEY", "PROJECT_KEY", "AGENTSTACK_PROJECT_WORK_DIR",
@@ -34,6 +36,7 @@ ags_mail_load_token() { :; }
 ags_mcp_call() { return 1; }
 ags_record_managed_agent() { :; }
 """)
+    copy_client_library(install)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     env = {"PATH": os.environ.get("PATH", os.defpath), "HOME": str(tmp_path),

@@ -6,6 +6,11 @@
 
 この文書は、はじめて ORRERY Telemetry（この repository）を入れる人向けです。3 コマンドで入れて、2 コマンドで確かめ、1 コマンドで最初の agent を起動します。以前 third-party の MCP Agent Mail を使っていた人向けの移行手順は、末尾の[付録](#付録-以前-mcp-agent-mail-を使っていた場合)にまとめました。
 
+
+installer は `bin/agentstack-resume` も配置します。停止した子の道具を変更する [resume の手順](delegation.md#停止した子の道具を変更して-resume-する)で使います。
+
+installer は完全な repository checkout または source archive から実行してください。`packages/agentstack_mail/src/agentstack_mail/schema_contract.py` と `packages/agentstack_mail/fixtures/global-server-s2a.json` は runtime client と一緒に配置する正本なので、dashboard-only でも必要です。不足時は配備前に `missing runtime client contract` と不足ファイルを表示して停止します。通常の clone・1 行 install・WSL の導入では repository 全体を取得します。
+
 ## 動作環境
 
 主対象は macOS です。launcher と hook は macOS 標準 Bash 3.2 でも動くよう実装されています。
@@ -54,7 +59,7 @@ installer は途中で 3 つの変更を preview し、それぞれ `yes` を求
 installer が置くもの:
 
 - `~/.agentstack/` に dashboard、launcher、hook、skill、同梱の ORRERY Mail、`env.sh`、`VERSION`、`install-state.json`
-- `~/.claude/skills/delegate` と `~/.claude/skills/log`（`~/.agentstack/skills/` への symlink）
+- `~/.claude/skills/{delegate,log}` と `${CODEX_HOME:-~/.codex}/skills/{delegate,log}`（`~/.agentstack/skills/` への symlink）
 - 常駐 service 2 つ: dashboard（port 8770）と ORRERY Mail（`http://127.0.0.1:18765/mcp`、state は `~/.agentstack/mail`）。それぞれ launchd（macOS）に登録し、できなければ supervised background mode で起動します
 
 `env.sh` は mode `0600` で、token は書き込みません。shell の dotfile は変更しません。
@@ -82,7 +87,7 @@ agent-start /path/to/your-project
 agent-start-codex /path/to/your-project
 ```
 
-`agent-start` は ORRERY Mail の identity と同名の tmux session を作ります。dashboard の jump、mail 通知、token 復旧はこの名前で結びつきます。起動した Claude Code では `/delegate` のように先頭の slash を付けて skill を呼びます。初回の child 起動は [Skills と file reservation](launchers.md#skills2件と-file-reservation) を参照してください。
+`agent-start` は ORRERY Mail の identity と同名の tmux session を作ります。dashboard の jump、mail 通知、token 復旧はこの名前で結びつきます。起動した Claude Code では `/delegate` のように先頭の slash を付けて skill を呼びます。Codex では `$delegate`（ログは `$log`）または `/skills` で選択します。初回の child 起動は [Skills と file reservation](launchers.md#skills2件と-file-reservation) を参照してください。
 
 ## Windows（WSL2）で入れる
 
@@ -123,7 +128,7 @@ Windows では WSL2 の Ubuntu の中に入れます。Ubuntu の中は Linux �
    npm install -g @openai/codex@latest
    ```
    ログインは `claude`（起動後に `/login`）と `codex login` です。表示された URL を Windows 側のブラウザで開いて認可します。
-   Windows 側にも Codex を入れている場合、Ubuntu の PATH には Windows の `codex`（`/mnt/c/...`）も見えますが、これは Ubuntu の中では動きません。installer はそれを候補から外し、Ubuntu の中に入れた `codex`（`--version` に答えるもの）を選びます。agent が `/delegate` で Codex の子を起動するときも同じ規則で選び、agent の shell に `AGENTSTACK_CODEX_BIN` が無ければ、installer が `~/.agentstack/env.sh` に保存した値を使います。以前の install で Windows の `codex` が保存されていても、再実行すると選び直します。`agentstack-doctor` が `warn: Codex launcher binary ... cannot start Codex` と出したら、Ubuntu の中に Codex を入れてから installer を再実行してください。 理由の部分は 2 通りです。`exited with status N after 0.0s: …` は `codex --version` がすぐにエラーで終わったことを示し、続く 1 行がそのエラーです（`Missing optional dependency …` なら、その shell の PATH にある node が Codex を入れた版と違います。login shell（`zsh -lc` など）から installer を実行するか、`--codex-bin` で指定します）。`did not finish within 10s and was stopped` は時間内に応答しなかったことを示します。
+   Windows 側にも Codex を入れている場合、Ubuntu の PATH には Windows の `codex`（`/mnt/c/...`）も見えますが、これは Ubuntu の中では動きません。installer はそれを候補から外し、Ubuntu の中に入れた `codex`（`--version` に答えるもの）を選びます。agent が `/delegate` で Codex の子を起動するときも同じ規則で選び、agent の shell に `AGENTSTACK_CODEX_BIN` が無ければ、installer が `~/.agentstack/env.sh` に保存した値を使います。以前の install で Windows の `codex` が保存されていても、再実行すると選び直します。`agentstack-doctor` が `warn: Codex launcher binary ... cannot start Codex` と出したら、Ubuntu の中に Codex を入れてから installer を再実行してください。 理由の部分は 2 通りです。`exited with status N after 0s: …` は `codex --version` がすぐにエラーで終わったことを示し、続く 1 行がそのエラーです（`Missing optional dependency …` なら、その shell の PATH にある node が Codex を入れた版と違います。login shell（`zsh -lc` など）から installer を実行するか、`--codex-bin` で指定します）。`did not finish within 10s and was stopped` は時間内に応答しなかったことを示します。
    以前から Ubuntu に Codex が入っている場合も、`npm install -g @openai/codex@latest` で最新にしてください。古い版では GPT-6 系のモデルで起動した子が API に拒否されます（WSL で 0.153.4 は拒否、0.158.0 は応答）。
    Codex の子を使うなら、installer の後で [history binding を入れて `/hooks` で一度承認](#codex-を使う場合-history-binding-を入れて-hooks-で一度承認する) してください。しないと、Codex の起動が最大で約90秒待たされることがあります。
 7. **agent を起動する**（Ubuntu の中）。上の「最初の agent を起動する」と同じコマンドを打ちます。dashboard の jump は Windows Terminal（`wt.exe`、Windows 11 なら標準搭載）の新しいタブを開いて tmux に attach します。Windows Terminal が無い場合は Microsoft Store から入れてください。
@@ -132,7 +137,7 @@ Windows では WSL2 の Ubuntu の中に入れます。Ubuntu の中は Linux �
 
 ## 非対話で入れる（`--assume-yes`）
 
-CI や script から入れる場合、既定のままだと 4 つの承認（Claude settings merge・`~/.claude.json` の MCP entry・Codex `AGENTS.md` block・Claude `CLAUDE.md` block）は警告付きでスキップされます。repository と preview 内容を確認した**ユーザー本人**が、承認を事前に与える場合だけ次を使えます。
+確認の条件と非対話時の扱いは [同意の契約](instruction-migration.md#consent) を参照してください。repository と preview 内容を確認した利用者本人が事前に承認した場合だけ次を使えます。
 
 ```bash
 ./scripts/install.sh --project-key /absolute/path/to/your-project --assume-yes
@@ -144,7 +149,7 @@ CI や script から入れる場合、既定のままだと 4 つの承認（Cla
 
 | 呼び出し | Tier | 内容 |
 | --- | --- | --- |
-| `./scripts/install.sh` | Tier 1 / default | 全 payload と Claude skill link。hooks・permissions と Codex / Claude managed block は preview 後、承認時だけ merge |
+| `./scripts/install.sh` | Tier 1 / default | 全 payload と Claude / Codex skill link。hooks・permissions と Codex / Claude managed block は preview 後、承認時だけ merge |
 | `./scripts/install.sh --dashboard-only` | Tier 0 | dashboard と helper のみ。hooks、skills、Codex / Claude template は導入しない |
 | `./scripts/install.sh --scoped` | Tier 2 placeholder | payload は導入するが、user settings / managed docs は変更しない |
 | `./scripts/install.sh --dry-run` | preview | 変更予定を表示し、file や service を変更しない |
@@ -162,6 +167,7 @@ CI や script から入れる場合、既定のままだと 4 つの承認（Cla
 --spawn-roots PATHS     directory typeahead が閲覧できる root（`:` 区切り）
 --codex-approval MODE   Codex child の `--ask-for-approval`（never | on-request | on-failure | untrusted、既定 never）
 --codex-network MODE    Codex child の sandbox network（on | off、既定 on）
+--child-default-tools SPEC  子の既定の道具（--tools と同じ文法、既定は空）
 --codex-add-dirs PATHS  Codex child に追加で書込を許す root（`:` 区切り）
 --retire-legacy-mail    付録参照（以前の MCP Agent Mail を退役させる）
 --mail auto|update|keep 稼働中の ORRERY Mail をどうするか（既定 keep。--update-mail / --keep-mail はその別名）
@@ -184,18 +190,24 @@ Tier 1 の merge は `scripts/lib/merge_settings.py` による JSON parser ベ�
 - managed block は marker 間だけを idempotent に更新
 - `install-state.json` を uninstall の削除範囲の正本にする
 
-permissions の `deny` は、**不可逆で復旧手段がない操作だけ**に限定します。破壊的でも復旧できる操作は allow にも deny にも入れず、実行時の人間による確認に委ねます。また、allow 済みの別 tool で同じ状態へ到達できる場合は、deny に追加しても安全上の意味がないため追加しません。現在 deny するのは `hard_delete_agent`、`hard_delete_project`、`purge_old_messages` の 3 つです。
+ORRERY Mail の tool に対する permissions の `deny` は、**不可逆で復旧手段がない操作だけ**に限定します。破壊的でも復旧できる操作は allow にも deny にも入れず、実行時の人間による確認に委ねます。また、allow 済みの別 tool で同じ状態へ到達できる場合は、deny に追加しても安全上の意味がないため追加しません。現在 deny する ORRERY Mail の tool は `hard_delete_agent`、`hard_delete_project`、`purge_old_messages` の 3 つです。これとは別に、下の skill directory への `Edit` を 1 つ deny します。
+
+installer が置いた skill（`~/.agentstack/skills` と、そこを指す `~/.claude/skills/<name>` の symlink）は `additionalDirectories` に入れ、作業 directory の外でも確認なしで読めるようにします。新しい環境の親 agent が `/delegate` の SKILL.md を読む時点で、作業 directory の外を読むかどうかの確認で止まらないためです。読み取りだけに絞るため、同じ場所への `Edit` は deny に入れます。この deny が止めるのは Claude Code の file tool（Edit・Write など）と、それと分かる Bash の書き込みです。sandbox なしで動く Python や Node を通した間接的な書き込みまでは止めません。利用者が自分で置いた同名の skill は対象にしません。
 
 単純な文字列置換ではなく構造を読んで merge するのは、再インストールと uninstall でユーザー設定を巻き込まないためです。
 
-`skillsDirectories` は Claude Code の setting ではなく、installer は新しい値を追加しません。skill payload の正本は `~/.agentstack/skills/<name>` のままにし、Claude Code が標準で読む `~/.claude/skills/<name>` へ絶対 symlink を作ります。
+`skillsDirectories` は Claude Code の setting ではなく、installer は新しい値を追加しません。skill payload の正本は `~/.agentstack/skills/<name>` のままにし、Claude Code が標準で読む `~/.claude/skills/<name>` および Codex の `${CODEX_HOME:-$HOME/.codex}/skills/<name>` へ絶対 symlink を作ります。
 
 ```text
 ~/.claude/skills/delegate -> ~/.agentstack/skills/delegate
 ~/.claude/skills/log      -> ~/.agentstack/skills/log
+~/.codex/skills/delegate  -> ~/.agentstack/skills/delegate
+~/.codex/skills/log       -> ~/.agentstack/skills/log
 ```
 
 同じ ORRERY Telemetry payload を指す symlink がすでにある場合は再利用し、manifest に所有登録します。この link は payload と一緒に無効になるため、uninstall では削除対象です。同名の file、directory、または別 target の symlink がある場合は warning を出して保持し、所有登録しません。uninstall は manifest の path と実際の symlink target を照合し、所有登録された、ORRERY Telemetry payload を指す symlink だけを削除します。利用者が file や directory に置き換えた path、または retarget した symlink は残します。
+
+上の Codex の例は `CODEX_HOME` が未設定の場合です。設定済みなら、その directory の `skills` に置きます。リンクの再利用・競合保持・manifest 記録・uninstall の規則は両方に適用します。Codex の managed block の呼び出し案内は、通常の `agentstack-codex-setup` の preview / 承認による更新で反映します。
 
 旧 installer が `skillsDirectories` に `~/.agentstack/skills` を追加していた環境では、Tier 1 の settings merge を承認した再インストール時にその旧 ORRERY Telemetry entry だけを削除します。同じ配列の他の user value と、それ以外の settings は保持します。
 
@@ -293,7 +305,7 @@ Tier 1 が preview / merge に使う helper は単独でも実行できます。
 ~/.agentstack/bin/agentstack-claude-setup
 ```
 
-block だけを外す場合はそれぞれ `--uninstall` を使います。Codex は `$CODEX_HOME/AGENTS.md`、Claude は `AGENTSTACK_CLAUDE_MD_SCOPE=project / global / both` で選んだ `CLAUDE.md` が対象です。marker 外の既存内容は保持します。
+Claude は利用者の `$CLAUDE_CONFIG_DIR/CLAUDE.md`、Codex は `$CODEX_HOME/AGENTS.md` へ設置します。`--uninstall` は記録した marker のみ撤去し、全文 backup を保持します。既存 block・中断・共有 repo・purge は[指示の移行](instruction-migration.md)を参照してください。
 
 ## ORRERY Mail service の扱い
 
@@ -477,3 +489,13 @@ installer は third-party 版への自動切替を行いません。必要なら
 - [設定](configuration.md)
 - [トラブルシューティング](troubleshooting.md)
 - [第三者コンポーネント](third-party.md)
+
+## 決定的daemonのlocal helper
+
+[専用bindingと通知](daemon-agents.md) は固定source releaseから実行するlocal entryで、一般installerの配備対象にはまだ加えていません。HTTP healthのMail UUID対応buildが必要です。通常のClaude/Codex profileにdaemonを偽装せず、live Mail更新・identity作成・配備は別のoperator承認を経てください。
+
+Codex の専用 installer の再利用単位・hook 承認の引渡し・隔離試験は [Codex plugin 導入処理の再利用](codex-plugin-lifecycle.md) を参照してください。本体 install への接続は別の変更です。
+
+隔離 global client の準備は [global child client](global-child-client.md) を参照してください。既定の旧運用は維持します。
+
+明示的な隔離起動・配送と operator の復旧は [global delivery client](global-delivery-client.md) を参照してください。既定は旧 mode のままです。

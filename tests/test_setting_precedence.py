@@ -160,7 +160,17 @@ def _previous_install(
 
 def _dry_run(home: pathlib.Path, *args: str, **extra: str) -> subprocess.CompletedProcess[str]:
     env = _scrubbed_env(home, **extra)
-    env["PATH"] = f"{_fake_bin(pathlib.Path(tempfile.mkdtemp(dir=home.parent)))}:{env['PATH']}"
+    fake = _fake_bin(pathlib.Path(tempfile.mkdtemp(dir=home.parent)))
+    env["PATH"] = f"{fake}:{env['PATH']}"
+    # Setting/plan tests must not contact a developer's live default-port Mail.
+    (fake / "sitecustomize.py").write_text(
+        "import errno, socket\n"
+        "def blocked(*args, **kwargs): raise ConnectionRefusedError(errno.ECONNREFUSED, 'isolated installer fixture')\n"
+        "socket.socket.connect = blocked\n"
+        "socket.socket.connect_ex = lambda *args: errno.ECONNREFUSED\n"
+        "socket.create_connection = blocked\n"
+    )
+    env["PYTHONPATH"] = f"{fake}:{env.get('PYTHONPATH', '')}"
     return subprocess.run(
         ["bash", str(INSTALLER), "--dashboard-only", "--dry-run", *args],
         cwd=ROOT,
@@ -770,7 +780,7 @@ def test_the_installed_layout_finds_the_shared_order(tmp_path):
 def test_every_launcher_loads_env_sh_only_through_ags_load_env():
     for name in ("agent-start", "agent-start-codex", "agent-start-gemini"):
         text = (ROOT / "bin" / name).read_text(encoding="utf-8")
-        assert "\nags_load_env\n" in text, name
+        assert '\nags_load_env "$@"\n' in text, name
         assert "env.sh\"" not in text and "/env.sh" not in text, name
 
 

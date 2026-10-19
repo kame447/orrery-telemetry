@@ -30,7 +30,7 @@ ags_load_env() {
   # shellcheck source=../../hooks/project-context.sh
   . "$ctx"
   AGS_PROJECT_CONTEXT_HELPER="$ctx"
-  agentstack_load_top_level_env "$envf"
+  agentstack_load_top_level_env "$envf" "$@"
 }
 
 ags_resolve_tmux() {

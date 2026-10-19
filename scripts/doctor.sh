@@ -294,6 +294,39 @@ else
     "$INSTALL_DIR/backups" "$INSTALL_DIR/runtime/claude-mcp-merge-result.json" >&2
 fi
 
+# Claude Code shows its first-run setup (text style, login) in every new
+# session until it has been finished once, which ~/.claude.json records as
+# hasCompletedOnboarding. A child launched before that stops on the setup
+# screen, so say so here. Only whether the flag is set is printed; the launcher
+# never answers the setup and nothing here writes it.
+if command -v claude >/dev/null 2>&1; then
+  CLAUDE_ONBOARDING_STATE="$("$PYTHON_BIN" - "$CLAUDE_JSON" <<'PY' 2>/dev/null || true
+import json
+import pathlib
+import sys
+
+try:
+    config = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+except FileNotFoundError:
+    print("not-done")
+except (OSError, ValueError):
+    print("unreadable")
+else:
+    print("done" if isinstance(config, dict) and config.get("hasCompletedOnboarding") is True else "not-done")
+PY
+)"
+  case "$CLAUDE_ONBOARDING_STATE" in
+    done) echo "ok: Claude Code first-run setup finished" ;;
+    not-done)
+      echo "warn: Claude Code's first-run setup is not finished ($CLAUDE_JSON has no hasCompletedOnboarding)" >&2
+      echo "      Children launched now stop on its setup screens. Run 'claude' once in a terminal and go" >&2
+      echo "      through text style, login, Security notes and trusting the folder until the normal" >&2
+      echo "      input prompt appears; answer any other one-time question it asks, then /exit." >&2
+      ;;
+    *) echo "warn: could not read $CLAUDE_JSON to check Claude Code's first-run setup" >&2 ;;
+  esac
+fi
+
 if [[ -f "$INSTALL_DIR/dashboard/server.py" && \
       -f "$INSTALL_DIR/dashboard/service_runner.py" ]]; then
   echo "ok: dashboard installed"
@@ -343,6 +376,59 @@ raise SystemExit(0 if healthy else 1)
 PY
 }
 
+# Fetches /api/mail-watcher-health from the already-serving dashboard and
+# warns using the exact same watcher_running / status fields the cockpit
+# shows, so doctor cannot report "ok" while the cockpit shows the watcher red.
+report_mail_watcher_health() {
+  local python_bin="$1"
+  local port="$2"
+  local record
+  record="$("$python_bin" - "$port" <<'PY' 2>/dev/null || true
+import json
+import sys
+import urllib.request
+
+try:
+    port = int(sys.argv[1])
+    with urllib.request.urlopen(
+        f"http://127.0.0.1:{port}/api/mail-watcher-health", timeout=2
+    ) as response:
+        health = json.load(response)
+except Exception:
+    health = {}
+running = bool(health.get("watcher_running"))
+hstatus = health.get("status") or "unknown"
+age = health.get("last_success_age_s")
+print("|".join((
+    "1" if running else "0",
+    str(hstatus),
+    "" if age is None else str(age),
+    str(health.get("signal_count", 0)),
+    str(health.get("actionable_signal_count", health.get("signal_count", 0))),
+    str(health.get("orphan_signal_count", 0)),
+)))
+PY
+)"
+  local running hstatus age signals actionable orphans
+  IFS='|' read -r running hstatus age signals actionable orphans <<< "$record"
+  # Judge by status, not just watcher_running: the same /api/mail-watcher-health
+  # can report watcher_running=true with status=red (>50 pending signals) or
+  # status=yellow (signals pending with no recent delivery) when the watcher
+  # process is alive but not actually draining mail. Checking watcher_running
+  # alone left doctor reporting "ok" in exactly the case the cockpit shows red.
+  if [[ "${orphans:-0}" != "0" ]]; then
+    echo "warn: ${orphans} old Mail signals have no session (total=${signals}, actionable=${actionable}); notification files retained, Mail inbox unchanged" >&2
+    printf '      preview with the installed env: source %q; %q %q; add --prune to remove only old signals whose sessions are still absent\n' "$INSTALL_DIR/env.sh" "$python_bin" "$INSTALL_DIR/dashboard/mail_signals.py" >&2
+  fi
+  if [[ "$hstatus" == "green" ]]; then
+    echo "ok: mail watcher healthy (status: green, watcher_running=${running:-0})"
+  else
+    echo "warn: mail watcher health is ${hstatus:-unknown} (dashboard /api/mail-watcher-health: watcher_running=${running:-0}${age:+, last success ${age}s ago}, signals=${signals:-0}, actionable=${actionable:-0}, orphan=${orphans:-0})" >&2
+    echo "      mail delivered to an agent waiting for input may not wake it; see docs/troubleshooting*.md (mail watcher)" >&2
+    status=1
+  fi
+}
+
 report_dashboard_service() {
   local python_bin="${AGENTSTACK_PYTHON:-python3}"
   local port="${AGENTSTACK_PORT:-8770}"
@@ -354,6 +440,14 @@ report_dashboard_service() {
   else
     echo "warn: dashboard endpoint is not serving an ORRERY Telemetry API at http://127.0.0.1:$port/api/version"
     status=1
+  fi
+
+  # Reuse the dashboard's own /api/mail-watcher-health judgment (same code the
+  # cockpit reads) instead of re-deriving it here: all items can be "ok" while
+  # the watcher is actually down, which is exactly what went unreported in the
+  # 2026-10-05 two-user-on-one-Mac lock collision.
+  if [[ "$endpoint_serving" -eq 1 ]]; then
+    report_mail_watcher_health "$python_bin" "$port"
   fi
   record="$("$python_bin" - "$MANIFEST" <<'PY' 2>/dev/null || true
 import json
@@ -461,170 +555,41 @@ check_managed_block() {
   env "$@" AGENTSTACK_HOME="$INSTALL_DIR" "$script" --check || true
 }
 
-# Keep binary resolution aligned with hooks/spawn_child.sh:find_codex_bin.
+# Use the launcher's library and login-shell execution context, including nvm.
+CODEX_LAUNCHER_CONTEXT_READY=0
+CODEX_HELPER="$SCRIPT_DIR/../hooks/codex-bin.sh"
+[[ -f "$CODEX_HELPER" ]] || CODEX_HELPER="$INSTALL_DIR/hooks/codex-bin.sh"
+if [[ -f "$CODEX_HELPER" ]]; then
+  . "$CODEX_HELPER"
+fi
+if declare -F codex_launch_path >/dev/null && \
+   declare -F codex_bin_problem >/dev/null && \
+   declare -F codex_launch_path_setup >/dev/null && \
+   declare -F codex_launch_shell >/dev/null && \
+   declare -F codex_launch_runner >/dev/null && \
+   declare -F codex_find_bin >/dev/null && \
+   declare -F codex_launch_context >/dev/null && \
+   codex_launch_context; then
+  CODEX_LAUNCHER_CONTEXT_READY=1
+else
+  echo "warn: Codex launcher checks unavailable: hooks/codex-bin.sh is missing or incompatible"
+fi
+
 codex_launcher_search_path() {
-  local extra="$HOME/.local/bin:$HOME/.npm-global/bin:$HOME/.nodebrew/current/bin:/opt/homebrew/bin:/usr/local/bin"
-  local nvm_dir="${NVM_DIR:-$HOME/.nvm}"
-  local candidate
-  for candidate in "$nvm_dir"/versions/node/*/bin; do
-    [[ -d "$candidate" ]] && extra="$extra:$candidate"
-  done
-  printf '%s\n' "$PATH:$extra"
+  codex_launch_search_path
 }
 
 resolve_launcher_codex_bin() {
-  local codex_bin="${AGENTSTACK_CODEX_BIN:-}"
-  if [[ -n "$codex_bin" && ! -x "$codex_bin" ]]; then
-    codex_bin=""
-  fi
-  if [[ -z "$codex_bin" ]]; then
-    codex_bin="$(PATH="$(codex_launcher_search_path)" command -v codex 2>/dev/null || true)"
-  fi
-  printf '%s\n' "$codex_bin"
+  [[ "${CODEX_LAUNCHER_CONTEXT_READY:-0}" == 1 ]] || return 0
+  codex_find_bin
 }
 
-# Same rules as scripts/install.sh "codex launcher resolution": under WSL a
-# codex under /mnt/<drive>/ is the Windows npm shim and cannot run, and any
-# candidate must answer `--version` within a short time.
-WSL_WINDOWS_MOUNT_ROOT=/mnt
-CODEX_VERSION_TIMEOUT_SECONDS=10
-
-running_under_wsl() {
-  [[ -r /proc/version ]] && grep -qi microsoft /proc/version 2>/dev/null
-}
-
-codex_version_answers() {
-  local bin="$1" out="${2:-/dev/null}" pid tick=0 limit=$((CODEX_VERSION_TIMEOUT_SECONDS * 10))
-  local err status=0
-  # Why it failed, for codex_version_failure: a probe that ran out of time and
-  # one that exited at once (a wrong node on PATH dies in a few hundredths of a
-  # second) need different fixes, and used to read the same.
-  CODEX_VERSION_STATUS=""
-  CODEX_VERSION_ERROR=""
-  CODEX_VERSION_ELAPSED=""
-  err="$(mktemp "${TMPDIR:-/tmp}/agentstack-codex-stderr.XXXXXX" 2>/dev/null || true)"
-  "$bin" --version </dev/null >"$out" 2>"${err:-/dev/null}" &
-  pid=$!
-  while kill -0 "$pid" 2>/dev/null; do
-    if [[ "$tick" -ge "$limit" ]]; then
-      codex_probe_stop "$pid"
-      CODEX_VERSION_STATUS=timeout
-      [[ -n "$err" ]] && rm -f "$err"
-      return 1
-    fi
-    sleep 0.1
-    tick=$((tick + 1))
-  done
-  wait "$pid" || status=$?
-  CODEX_VERSION_STATUS="$status"
-  CODEX_VERSION_ELAPSED="$((tick / 10)).$((tick % 10))"
-  if [[ -n "$err" ]]; then
-    # First non-blank line, bounded: it is shown inside a one-line warning.
-    CODEX_VERSION_ERROR="$(sed -n '/[^[:space:]]/{p;q;}' "$err" 2>/dev/null | cut -c1-200 || true)"
-    rm -f "$err"
-  fi
-  return "$status"
-}
-
-# One line saying why the last codex_version_answers failed.
-codex_version_failure() {
-  local bin="$1"
-  if [[ "$CODEX_VERSION_STATUS" == timeout ]]; then
-    echo "'$bin --version' did not finish within ${CODEX_VERSION_TIMEOUT_SECONDS}s and was stopped"
-  else
-    echo "'$bin --version' exited with status ${CODEX_VERSION_STATUS:-unknown} after ${CODEX_VERSION_ELAPSED:-0.0}s: ${CODEX_VERSION_ERROR:-(no error output)}"
-  fi
-}
-
-# Stop a probe that overran. Every wait here is a kill -0 poll with a
-# deadline (one second of grace, one second for the probe to go after KILL),
-# so waiting on `codex --version` and on the cleanup after it is bounded. The
-# system commands used on the way (pgrep, ps) are not bounded: if they
-# themselves stop responding, so does this function.
-#
-# The probe itself ($!) is this shell's own child, so it gets TERM and then
-# KILL without further checks. Its descendants (an npm wrapper's native codex)
-# are recorded first, while they are still attached to it, because a wrapper
-# that exits on TERM orphans them out of reach of `pgrep -P`. They get TERM
-# too; a descendant seen gone during the grace period is dropped, and KILL goes
-# only to one whose `ps -o lstart=` start time (one-second resolution) still
-# matches what was recorded. This is a best-effort identity check: a PID reused
-# within the same second is not told apart. A still-running descendant whose
-# start time cannot be read or no longer matches is left without KILL, with a
-# note on stderr; one that received KILL is not checked again. A probe still present after its second of reaping is left with a note.
-codex_probe_stop() {
-  local pid="$1" level="$1" descendants="" next p t start depth round
-  # PID lists are space-separated; a caller may have narrowed IFS (the PATH
-  # scan in find_usable_codex_bin splits on ":").
-  local IFS=$' \t\n'
-  if command -v pgrep >/dev/null 2>&1; then
-    for depth in 1 2 3 4; do
-      next=""
-      for p in $level; do
-        next="$next $(pgrep -P "$p" 2>/dev/null | tr '\n' ' ' || true)"
-      done
-      next="$(echo $next)"
-      [[ -n "$next" ]] || break
-      for p in $next; do
-        descendants="$descendants $p/$(codex_process_start "$p")"
-      done
-      level="$next"
-    done
-  fi
-  kill -TERM "$pid" 2>/dev/null || true
-  for t in $descendants; do
-    kill -TERM "${t%%/*}" 2>/dev/null || true
-  done
-  # One second of grace for everything to exit on TERM.
-  for round in 1 2 3 4 5 6 7 8 9 10; do
-    next=""
-    for t in $descendants; do
-      kill -0 "${t%%/*}" 2>/dev/null && next="$next $t"
-    done
-    descendants="$(echo $next)"
-    if [[ -z "$descendants" ]] && ! kill -0 "$pid" 2>/dev/null; then
-      break
-    fi
-    sleep 0.1
-  done
-  kill -KILL "$pid" 2>/dev/null || true
-  for t in $descendants; do
-    p="${t%%/*}"
-    start="${t#*/}"
-    if [[ -n "$start" && "$(codex_process_start "$p")" == "$start" ]]; then
-      kill -KILL "$p" 2>/dev/null || true
-    elif kill -0 "$p" 2>/dev/null; then
-      echo "note: left process $p from the codex --version probe (its identity could not be confirmed)" >&2
-    fi
-  done
-  # Reap the probe only once it is gone; never block on it.
-  for round in 1 2 3 4 5 6 7 8 9 10; do
-    kill -0 "$pid" 2>/dev/null || break
-    sleep 0.1
-  done
-  if kill -0 "$pid" 2>/dev/null; then
-    echo "note: the codex --version probe (pid $pid) did not exit after KILL; leaving it" >&2
-  else
-    wait "$pid" 2>/dev/null || true
-  fi
-}
-
-# The process start time as one word (empty when ps cannot tell), used to
-# recognise the same process again under the same PID.
-codex_process_start() {
-  ps -o lstart= -p "$1" 2>/dev/null | tr -d ' \n' || true
-}
-
-# Prints why the launcher's codex cannot run; nothing when it can.
 codex_launcher_problem() {
-  local bin="$1"
-  if running_under_wsl && [[ "$bin" == "$WSL_WINDOWS_MOUNT_ROOT"/?/* ]]; then
-    echo "it is the Windows install under $WSL_WINDOWS_MOUNT_ROOT, which cannot run inside WSL"
+  if [[ "${CODEX_LAUNCHER_CONTEXT_READY:-0}" != 1 ]]; then
+    echo "launcher checks unavailable: hooks/codex-bin.sh is missing"
     return 0
   fi
-  if ! codex_version_answers "$bin" "${CODEX_VERSION_OUTPUT:-/dev/null}"; then
-    codex_version_failure "$bin"
-  fi
+  codex_bin_problem "$1"
 }
 
 # GPT-6.1 Sol requires Codex CLI 0.159.0 or later.
@@ -674,7 +639,7 @@ report_codex_history_binding_prereqs() {
 
   # Query only the public registry. A failed/changed response is unknown, not
   # evidence that the plugin is absent. Bound the CLI so doctor cannot hang.
-  plugin_result="$("$PYTHON_BIN" - "$codex_bin" "$codex_home" <<'PYPLUGIN' 2>/dev/null || true
+  plugin_result="$("$PYTHON_BIN" - "$codex_bin" "$codex_home" "$CHILD_SHELL" "$CODEX_CHILD_PATH_SETUP" <<'PYPLUGIN' 2>/dev/null || true
 import json
 import os
 import subprocess
@@ -682,8 +647,10 @@ import sys
 
 try:
     result = subprocess.run(
-        [sys.argv[1], "plugin", "list", "--json"],
-        env=dict(os.environ, CODEX_HOME=sys.argv[2]),
+        [sys.argv[3], "-lc", sys.argv[4] + '; exec "$0" "$@"',
+         sys.argv[1], "plugin", "list", "--json"],
+        env=dict(os.environ, CODEX_HOME=sys.argv[2], AGENTSTACK_CODEX_BIN=sys.argv[1],
+                 CLAUDECODE="1", AGENTSTACK_RESERVED_IDENTITY="1"),
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
@@ -723,14 +690,26 @@ PYPLUGIN
     enabled)
       echo "ok: Codex history binding plugin installed and enabled ($plugin_id)"
       echo "note: Codex lifecycle hook approval is unknown; open /hooks in Codex to review/approve the AgentStack hooks, then start a new Codex process before expecting BOUND history."
+      local reservation_diagnostic="${SCRIPT_DIR:-}/codex-reservation-status.py"
+      [[ -f "$reservation_diagnostic" ]] || reservation_diagnostic="${INSTALL_DIR:-${AGENTSTACK_HOME:-$HOME/.agentstack}}/bin/lib/codex-reservation-status.py"
+      if [[ -f "$reservation_diagnostic" ]]; then
+        "$PYTHON_BIN" "$reservation_diagnostic" \
+          --codex-binary "$codex_bin" --codex-home "$codex_home" \
+          --cwd "${AGENTSTACK_PROJECT_KEY:-$PWD}" --plugin-id "$plugin_id"
+      else
+        echo "warn: Codex apply_patch reservation guard status is unknown; refresh core/plugin and review /hooks before relying on guarded edits."
+      fi
       ;;
     disabled)
+      echo "warn: Codex apply_patch reservation guard is disabled; edits may be unguarded. Enable the plugin and review /hooks."
       echo "note: Codex history binding plugin installed but disabled ($plugin_id); Codex CLI history requires enabling it and reviewing its hooks in /hooks before a new process. Claude-only use is unaffected."
       ;;
     absent)
+      echo "warn: Codex apply_patch reservation guard is not installed; edits may be unguarded. Install the optional plugin and review /hooks."
       echo "note: Codex history binding plugin is not installed in $codex_home; Codex CLI history requires this optional plugin; see docs/codex-app.md for setup and /hooks approval. Claude-only use is unaffected."
       ;;
     *)
+      echo "warn: Codex apply_patch reservation guard status is unknown; inspect the plugin and /hooks before relying on guarded edits."
       echo "note: Codex history binding plugin status is unknown for $codex_bin with CODEX_HOME=$codex_home; inspect 'codex plugin list --json' and /hooks if you use Codex history."
       ;;
   esac
@@ -760,10 +739,9 @@ report_claude_model_aliases "$INSTALL_DIR/dashboard/claude_models.py"
 
 PROJECT_KEY="${AGENTSTACK_PROJECT_KEY:-}"
 WORKTREE_ROOT="${AGENTSTACK_WORKTREE_ROOT:-$INSTALL_DIR/worktrees}"
-CLAUDE_HOME="${CLAUDE_HOME:-$HOME/.claude}"
-CLAUDE_SCOPE="${AGENTSTACK_CLAUDE_MD_SCOPE:-project}"
+CLAUDE_SCOPE="${AGENTSTACK_CLAUDE_MD_SCOPE:-global}"
 check_managed_block "Claude CLAUDE.md" agentstack-claude-setup \
-  AGENTSTACK_CLAUDE_MD_SCOPE="$CLAUDE_SCOPE" CLAUDE_HOME="$CLAUDE_HOME" \
+  AGENTSTACK_CLAUDE_MD_SCOPE="$CLAUDE_SCOPE" \
   AGENTSTACK_PROJECT_KEY="$PROJECT_KEY"
 
 report_orphan_worktrees() {
@@ -1031,6 +1009,24 @@ PYEOF
   echo '<!-- What you did, what you expected, what you saw. Paste any error text. -->'
   echo
   echo "--- copy to here ---"
+fi
+
+# Local global-operation warnings remain available when Mail is offline.
+_ags_doctor_loader="$INSTALL_DIR/bin/lib/global-client-loader.sh"
+if [[ -f "$_ags_doctor_loader" ]]; then
+  . "$_ags_doctor_loader"
+  ags_client_select && _ags_doctor_rc=0 || _ags_doctor_rc=$?
+  if [[ "$_ags_doctor_rc" == 0 ]]; then
+    _ags_doctor_local="$(python3 "$INSTALL_DIR/bin/lib/runtime_client.py" doctor-local)" && _ags_doctor_local_rc=0 || _ags_doctor_local_rc=$?
+    if [[ "$_ags_doctor_local_rc" == 0 ]]; then
+      python3 -c 'import json,sys
+for item in json.loads(sys.argv[1]):
+ target = {key:item[key] for key in ("launch_id","message_id") if key in item}
+ print("WARN global operation: " + item["reason"] + "; target=" + json.dumps(target) + "; inspect with " + item["operation"] + ", then " + item["next"] + ". See docs/global-delivery-client.md")' "$_ags_doctor_local"
+    else
+      echo 'WARN global operation: local state could not be inspected'
+    fi
+  fi
 fi
 
 exit "$status"

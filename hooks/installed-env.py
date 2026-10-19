@@ -80,6 +80,15 @@ def read_assignment(path: pathlib.Path, name: str) -> tuple[str, str]:
         return "absent", ""
     except (OSError, UnicodeError) as error:
         raise InvalidAssignment(f"cannot read installed settings: {error}") from error
+    # Legacy files can contain unrelated shell logic. Quoted/escaped setting
+    # names still count as protection declarations and must fail strict parsing.
+    try:
+        words = shlex.split(raw, comments=True, posix=True)
+    except ValueError as error:
+        raise InvalidAssignment("invalid shell quoting") from error
+    protection_name = re.compile(r"\bAGENTSTACK_(?:EXTRA_)?PROTECTED_ROOTS\b")
+    if not any(protection_name.search(word) for word in words):
+        return "absent", ""
     # env.sh is generated data, not a shell program. Track logical records so
     # an apparent export inside another setting's multiline quote is never
     # mistaken for a protection assignment. Other generated multiline values
@@ -131,6 +140,9 @@ def main() -> int:
         print(state)
     elif mode == "present":
         print("0" if state == "absent" else "1")
+    elif mode == "--shell":
+        if state != "absent":
+            print("export " + name + "=" + shlex.quote(value), end="")
     elif mode == "value":
         print(value, end="")
     else:

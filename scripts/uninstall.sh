@@ -61,6 +61,10 @@ if [[ ! -x "$MCP_MERGE_TOOL" && -f "$SCRIPT_DIR/lib/merge_claude_mcp.py" ]]; the
   MCP_MERGE_TOOL="$SCRIPT_DIR/lib/merge_claude_mcp.py"
 fi
 
+# env.sh is removed below, so read the work folder first.
+# The line is only for the closing note: a missing or odd env.sh must not stop the uninstall.
+PROJECT_FOLDER="$({ sed -n 's/^export AGENTSTACK_PROJECT_KEY=//p' "$INSTALL_DIR/env.sh" 2>/dev/null | head -n 1 | tr -d "'\"" ; } || true)"
+
 python3 - "$MANIFEST" "$DRY_RUN" "$PURGE_DATA" "$MERGE_TOOL" \
   "$MCP_MERGE_TOOL" <<'PY'
 import json
@@ -168,6 +172,19 @@ def remove_claude_mcp():
         argv.append("--dry-run")
     subprocess.run(argv, check=True)
 
+# Before removing services/files, validate and remove only recorded marker spans.
+# Older installs without receipts retain the old manual-cleanup notice.
+instruction_refs = data.get("instruction_receipts", [])
+# A crash after receipt completion but before install-state publication must
+# not hide pending work from purge. The fixed ledger remains the sole record.
+ledger_root = pathlib.Path(data.get("install_dir", "")) / "backups/instruction-migration"
+instruction_refs = sorted(set(instruction_refs) | {str(p) for p in ledger_root.glob("*/*/receipt.json")})
+instruction_engine = pathlib.Path(data.get("install_dir", "")) / "bin/lib/instruction_blocks.py"
+if instruction_refs:
+    import runpy
+    engine = runpy.run_path(str(instruction_engine))
+    engine["uninstall_recorded"](data["install_dir"], instruction_refs, dry_run=dry_run, purge=purge_data)
+
 for svc in data.get("services", []):
     kind = svc.get("kind")
     if kind == "launchd":
@@ -259,6 +276,11 @@ for path in owned_files:
             raise RuntimeError(f"manifest owned_files entry is a directory: {path}")
 
 if purge_data:
+    instruction_backups = pathlib.Path(data.get("install_dir", "")) / "backups/instruction-migration"
+    if instruction_refs:
+        say("purge private full-file instruction backups", instruction_backups)
+        if not dry_run and instruction_backups.exists():
+            shutil.rmtree(instruction_backups)
     for raw in data.get("purge_paths", []):
         path = safe_path(raw)
         say("purge exact path", path)
@@ -282,3 +304,12 @@ for raw in sorted(data.get("owned_dirs", []), key=lambda p: len(str(p)), reverse
         except OSError:
             print(f"kept non-empty directory: {path}", file=sys.stderr)
 PY
+
+echo
+if [[ "$DRY_RUN" == true ]]; then echo "Left in place (dry run; nothing was removed above):"; else echo "Left in place:"; fi
+echo "  source folders  ~/orrery-telemetry, and the folder you cloned this from if elsewhere (remove: rm -rf ~/orrery-telemetry)"
+if [[ -n "$PROJECT_FOLDER" ]]; then
+  echo "  work folder     $PROJECT_FOLDER   (yours; unrecorded or edited instruction blocks remain for manual review)"
+fi
+echo "  ORRERY cockpit  ~/orrery   (stop it first, then: rm -rf ~/orrery)"
+echo "  uv              ~/.local/bin/uv, if the installer added it"

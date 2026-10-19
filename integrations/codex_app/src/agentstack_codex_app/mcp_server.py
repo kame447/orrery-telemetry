@@ -148,6 +148,28 @@ class AgentStackProxy:
         self._binding: dict[str, Any] | None = None
         self._owner_token: str | None = None
 
+    def candidate_reservations(
+        self,
+        session_id: str,
+        *,
+        cwd: Path,
+        dispatch: Callable[[str, Mapping[str, Any]], Any],
+        agent_id: str | None = None,
+    ) -> Any:
+        """Explicit PR2 adapter, never selected by tools/call or environment.
+
+        Import stays lazy: the default stdlib proxy does not acquire a Mail
+        package dependency. The later cutover must supply its candidate backend
+        and Bridge-observed cwd, rather than guessing from the project key.
+        """
+        from agentstack_mail.reservation_clients import Binding, ReservationClient
+
+        def resolve() -> Binding:
+            binding, token = self._resolve(session_id, agent_id)
+            return Binding(binding["agent_name"], token)
+
+        return ReservationClient(resolve, dispatch, cwd=cwd)
+
     def bootstrap(
         self, session_id: str, agent_id: str | None = None
     ) -> dict[str, Any]:
@@ -945,6 +967,15 @@ TOOL_DEFINITIONS = [
 def serve() -> None:
     """Start the allowlisted MCP proxy over stdio."""
 
+    if __package__ in {None, ''}:
+        from agentstack_codex_app.global_runtime import selected_client
+    else:
+        from .global_runtime import selected_client
+    selected = selected_client()
+    if selected is not None:
+        api, client = selected
+        api['runtime_delivery'](client).proxy()
+        return
     config = ProxyConfig.from_env()
     identities = IdentityStore(config.runtime_dir / "identity")
     snapshots = SnapshotStore(config.runtime_dir / "snapshot.json")

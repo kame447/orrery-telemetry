@@ -13,6 +13,7 @@ def test_plugin_hooks_wire_every_p1_telemetry_event():
     payload = json.loads(HOOKS.read_text(encoding="utf-8"))
     hooks = payload["hooks"]
     assert set(hooks) == {
+        "PreToolUse",
         "SessionStart",
         "SubagentStart",
         "UserPromptSubmit",
@@ -26,9 +27,14 @@ def test_plugin_hooks_wire_every_p1_telemetry_event():
         assert handler["type"] == "command"
         assert handler["async"] is False
         # SessionStart gives the recorder time to bind; interactive hooks keep the 1-second budget.
-        expected_timeout = 5 if event == "SessionStart" else 1
+        expected_timeout = 30 if event == "PreToolUse" else 5 if event == "SessionStart" else 1
         assert handler["timeoutSec"] == expected_timeout
-        assert handler["command"] == '"$PLUGIN_ROOT/scripts/run-hook.sh"'
+        if event == "PreToolUse":
+            assert groups[0]["matcher"] == "^apply_patch$"
+            assert handler["command"] == '"$PLUGIN_ROOT/scripts/run-reservation-guard.sh"'
+            assert handler["timeout"] == 30
+        else:
+            assert handler["command"] == '"$PLUGIN_ROOT/scripts/run-hook.sh"'
 
 
 def test_plugin_hooks_do_not_wire_cold_wake():

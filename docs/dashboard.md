@@ -29,6 +29,26 @@ NETWORK は選択中の time window 外にある node を表示しないこと�
 
 ## DECK
 
+### Provider 停止の自動通知（legacy）
+
+稼働中の Codex CLI が `Selected model is at capacity. Please try a different model.` で入力待ちになったら、DECK に `MODEL CAPACITY`、NETWORK に `CAPACITY` を表示します。dashboard server はブラウザが閉じていても約5秒ごとに確認し、別の pane capture で2回確認した停止を親の `PARENT_AGENT` へ ORRERY Mail で通知します。差出人は停止した子の既存 identity、本文冒頭は「telemetry の自動検知」で、JST の検知時刻とエラー行を載せます。自動再開・モデル変更・pane へのキー送信はしません。
+
+同じ停止の通知は1回だけです。`AGENTSTACK_RUNTIME_DIR/provider-stalls.json` に状態を保存し、dashboard 再起動後も重複を防ぎます。作業再開を観測した後の次の停止は再び通知します。作業を観測できなくても、同じ pane の前の停止に続いて「提出済みの新しい入力→新しい容量エラー」が追記されたと特定できれば、新しい停止の候補にします。同じ入力とエラーの境界を別の capture でもう1回確認してから1回通知します。入力途中の composer・Mail の配送記録だけ・同じエラーの再描画・footer や幅の変更だけでは再通知しません。
+
+再試行の特定には、直前の停止と一意に重なる履歴が必要です。capture 間に履歴が押し出された場合、同じ並びが繰り返されて境界が曖昧な場合、引用や複雑な入力ブロックを識別できない場合は、推測せず今の停止を維持します。旧状態ファイルに履歴の境界が無い場合も、最初の観測は基準を保存するだけです。これらでは再試行を見逃すことがあります。2回確認する前に続けて再試行された場合は、最新の境界を確認した時点で1回にまとめます。履歴本文は保存せず、正規化した最大64ブロックの hash と順序を保存します。
+
+親無しは印だけ、親や子の credential を検証できない場合も印を残します。Mail の timeout など受理有無が不明な場合は、重複を避けるため再送せず `delivery_unknown` / `MAIL UNCONFIRMED` を表示します。障害時に「重複なし」と「必ず届く」を両方保証するものではありません。
+
+初版は上記 Codex capacity 文言と、remote compact がその前に `Error running remote compact task: ` を付けた形式だけが対象です。未知の前置きや compact 中の他のエラーへは広げません。過去ログに残ったエラー、作業中・承認待ち、未知の provider エラーは判定しません。tmux を使わない Codex App / headless と **global mode は未対応・後続**です。
+
+Codex 自身が固定エラー文を折り返す場合も検知します。固定文言の単語間だけで改行を1つ許し、空行や無関係な行は連結しません。
+
+エラーと入力欄の間に Codex の background terminal 件数と `/ps`・`/stop` の案内行がある場合も検知します。許すのは実際の単数・複数の固定表示1行だけで、通常の出力・queued input の本文・`/ps` の実行結果は読み飛ばしません。
+
+状態ファイルは capacity 候補を初めて観測したときから作り、変化がある場合だけ保存します。一度も候補になっていない子の work 観測では書き込みません。一度候補になった子は、作業中も約5秒ごとに小さな状態ファイルを書きます。解除後も最新の work capture の順序を永続化し、別 process や再起動後に遅れた capacity が届いて再通知するのを防ぐためです。capture の順序を更新しない巡回では、観測時刻だけの更新は最大1時間に1回です。
+
+状態遷移や work 観測に使った capture の順序を保持し、それ以前の遅れた capture は停止確認・解除に使いません。終了した世代の行は、新しい世代への置換なら7日、不在を tmux で確認できる場合は30日の未観測で削除します。tmux が観測不能なら保持します。Mail の入力検証・contact policy・送信者認証について、受理前だと特定できる固定の拒否文を認識した場合と、JSON-RPC の実行前の要求エラーだけを `failed` にします。DB 保存後の処理でも tool error が返るため、内部エラーや未知の拒否文は `delivery_unknown` に残します。どちらも自動再送しません。
+
 最初は DECK を開きます。**1エージェントが1枚のカード**として並ぶため、誰が何をしているか、入力待ちで止まっていないかを個別に読めます。
 
 次の画像では、上部のカウンタが3体、カードも3枚です。カウンタは全体の数、カードは各エージェントの状態を示します。
@@ -350,6 +370,8 @@ branch: exp/<child-name>
 
 `/?embed=1` または same-origin iframe では compact header の embed mode になります。[ORRERY cockpit](https://github.com/gyroid-eth/orrery) は、header の `TELEMETRY` からこの mode で dashboard を埋め込みます。
 
+操作に追従する host の checklist 向けに、成功した操作だけを same-origin parent へ通知します。通知の型・成功条件・受信側の検証は [Embedded interaction notifications](embedded-tour-events.md) にあります。単独表示では通知しません。
+
 parent window から:
 
 ```js
@@ -472,3 +494,61 @@ embed の初期化完了時と reload 後には、dashboard が `agentstack-them
 - [API reference](api.md)
 - [設定](configuration.md)
 - [トラブルシューティング](troubleshooting.md)
+
+<a id="global-mail-view"></a>
+## 隔離 global mode の Mail 表示
+
+既定は旧 mode のままです。隔離 global server と operator capability を準備した場合だけ、global dashboard が開きます。[解除と Lock](global-delivery-client.md#operator-ui-access)の手順を使い、agent の owner token は貼り付けないでください。画面は対応する capability を確認します。
+
+`View as` で数値 identity を選び、NETWORK の edge を開くと、その視点で見える Mail を同じ右欄で読めます。返信は `reply_to` の message ID で結びます。長い返信も字下げを増やし続けず、返信先のリンクから辿れます。本文は literal text として表示し、埋め込まれた HTML を実行しません。見えない前の Mail は短い案内だけにし、不可視の ID・本文・宛先を補いません。`Load more visible mail` は server の keyset cursor をそのまま使います。
+
+保存する URL は `?view=net&view_as_agent_id=ID&message_id=ID` です。旧 numeric `thread_id` は可視の origin へ変換し、旧 label は source ごとの群を保ちます。件名から返信を推測しません。新旧 ID の矛盾は拒否します。
+
+古い指示があれば Mail 欄に短い英語の案内と `Details: English / 日本語` を出します。片付けは command のコピーまでで、自動削除しません。Dismiss はこの page session の同じ finding を隠すだけです。Settings からいつでも確認でき、path・block hash・版・状態が変われば再表示します。60秒ごとと明示確認時に更新します。埋込表示では host 側の案内にまとめます。詳細は[既存 block の移行](instruction-migration.md#legacy-blocks)へ。起動時の候補の観測は、実際に読み込まれた指示の証明ではありません。
+
+MAIL の `signal.status` は配送の健康です。server readiness と別の値なので、配送が red でも server が受け付けられる要求は使えます。登録一覧から process の活動を推測せず、確認できない session 状態は unavailable と表示します。
+
+NEW AGENT は固定 client slot を使います。同じ名前は既存 identity の resume を案内し、資格情報を再発行しません。設定・trust が不足したら表示された operator 操作へ戻ります。最近の folder は10件、古い scalar は1回だけ移して削除します。folder は作業場所であり Mail の scope ではありません。folder browser は既存の `AGENTSTACK_SPAWN_ROOTS`、成果物は明示 `AGENTSTACK_DELIVERABLE_ROOTS` だけです。成果物未設定なら空と案内し、cwd・project へ fallback しません。
+
+旧 mode の画面と経路は維持します。cockpit の global bridge と右 pane への結線は後続です。新 dashboard と旧 cockpit の組合せでは旧 cockpit の表示を使い、global の画面 capability を推測して有効にしません。
+
+global network の稼働状態は `ACTIVITY UNKNOWN` と表示します。実際の working/waiting・ctx・親子を表示する read 投影は PR7 の切替前に必須です。
+
+登録の回復ボタンは status の `next_operations` に従い、再送・finalize・configure を同じ slot と intent で続けます。Resume は既存 launch の操作です。登録再送と abandon は表示した pending の digest を照合します。Lock は進行中の fetch を中止し、遅い body と tab の capability 引継ぎを失効させます。新 tab は自分の request と一致する500ms以内の返信だけを採用し、Lock 後は明示 Unlock が必要です。storage 拒否時は `BROWSER_SESSION_STORAGE_UNAVAILABLE` を表示して page memory だけで動作し、reload 後は再入力します。
+
+指示の確認は local context の identity で slot を選び、一致した slot だけを server と照合します。配置元は slot の `wrapper_root` が唯一の正本です。Claude/Codex の provider slot を証明できない agent の `PROVIDER_HOME_UNPROVEN` は Settings だけで表示し、会話に毎回案内を重ねません。コピーする cleanup command は検出に使った HOME・provider HOME・install の env を明示します。この指定を外して旧 block を消さないでください。
+
+Lock は drawer の見出し・件数と accessibility 状態も初期化します。configure-provider ボタンは指示 block の配置が必要な場合だけです。Codex trust の承認と daemon の実行設定は日英の CLI 手順へ案内し、profile 不在は `PERSISTENT_EXECUTION_REQUIRED` と表示します。
+
+<a id="global-runtime-observation"></a>
+### global network の稼働状態
+
+API 18 の `global_runtime_observation=1` は、既存の私有 client root と管理 socket の本人照合から、network の working / waiting・context 使用率・親子の色を読み取ります。旧 mode の表示と既定の導入は変わりません。観測のための登録・ファイル作成・Mail DB の直接読取は行いません。
+
+各 root の既存 operation mutex を共有・非待機で取得します。writer が使用中、本人・世代・binding が不一致、PID/start/pane の証明が不明なら、その agent だけ `ACTIVITY UNKNOWN` です。応答全体の期限は5秒。pane の揮発 cache は最大4.5秒で、本人・binding・live slot の変更で失効します。複数 session が同時に生きている場合は `MULTIPLE SESSIONS` とし、activity と context を合成しません。終了済みの履歴は現在の session を隠しません。
+
+Codex App の snapshot と Desktop session meta は現在の provider の生存証明ではありません。App の activity / context は **unknown / null** のままです。bridge・wake・snapshot の記録方式は変えません。親子は既存の typed child-state を本人照合し、名前や Mail の往復から推測しません。
+
+共有 browser controller は capability・Lock・Mail の表示・登録回復を1か所で扱います。Lock は進行中の要求と画像 URL を失効させます。sessionStorage はそのページに権限を持つ拡張機能から読めるため、信頼できる browser profile を使ってください。Lock はその page session の解除であり、server の capability の撤去ではありません。
+
+Mail の視点を選ばなくても network と deck に同じ稼働状態を表示します。不在を確認できたものは NOT RUNNING、確認できないものは ACTIVITY UNKNOWN です。親子は直接の関係を表示し、退役した祖先だけを理由に孫の関係を消しません。
+
+<a id="global-runtime-proof"></a>
+### 対応能力の確認
+
+一時 HOME の隔離 server/dashboard を準備し、既存の [operator capability](global-delivery-client.md#operator-ui-access) を明示的に設定した後で実行します。
+
+```sh
+AGENTSTACK_HOME="$TEST_HOME/agentstack" \
+AGENTSTACK_GLOBAL_SERVER_CONFIG="$TEST_CONFIG" \
+ORRERY_DASHBOARD_URL="http://127.0.0.1:$TEST_PORT" \
+agentstack-http-operator probe --service telemetry
+```
+
+capability は内部で読み、引数・URL・結果に出しません。結果の `binding`・`telemetry_api`・`capabilities` を確認します。6r だけでは `cockpit_ready=false`、`cutover_ready=false` が正常です。cockpit の実装後は同じ command に `--service cockpit` と既存の `PORT` 環境変数を使います。cockpit の port の永続 file / 設定 key は追加しません。PR7 の切替は別の関門です。この probe の成功だけでは切り替えません。
+
+確認には合成の work / wait、context 0 / 42 / 100、standalone、親子、複数 session、writer 使用中、App unknown を用います。実 provider の binary は不要です。PID/start/tmux の実機証明は専用の試験 socket で行い、live の dashboard・Mail・tmux は使いません。
+
+probe の origin は CLI の既定・docs とも `127.0.0.1` を使います。`localhost` は別 Origin なので代用しません。環境の HTTP proxy は使用しません。
+
+観測だけの失敗では、その回の稼働状態をすべて `ACTIVITY UNKNOWN` に戻し、Unlock・Mail・新規登録は利用できます。認証拒否（403）は従来どおり Lock します。1回の観測 HTTP 要求では roster と client root の列挙を各1回だけ行い、対象 ID と親の照合で共有します。200 ID を超える場合は要求ごとに再列挙します。永続 cache は作らず、15秒の更新間隔は変えません。

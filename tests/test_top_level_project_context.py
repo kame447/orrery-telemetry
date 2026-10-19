@@ -12,6 +12,8 @@ import tempfile
 import time
 import unittest
 
+from _installed_client_payload import copy_client_library
+
 ROOT = Path(__file__).resolve().parents[1]
 PROVIDERS = ("claude", "codex", "gemini")
 LAUNCHERS = {"claude": "agent-start", "codex": "agent-start-codex", "gemini": "agent-start-gemini"}
@@ -137,6 +139,7 @@ subprocess.run(["/bin/bash", "-c", args[-1]], cwd=cwd, env=env, check=True, time
             shutil.copy2(ROOT / "bin" / name, self.bin / name)
         shutil.copy2(ROOT / "hooks/project-context.sh", self.install / "hooks/project-context.sh")
         shutil.copy2(ROOT / "hooks/installed-env.py", self.install / "hooks/installed-env.py")
+        copy_client_library(self.install)
         # Only external command discovery is replaced; argument/context helpers are real.
         (self.bin / "lib/agentstack-launch.sh").write_text(
             '. ' + shlex.quote(str(ROOT / "bin/lib/agentstack-launch.sh")) + '\n'

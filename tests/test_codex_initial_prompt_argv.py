@@ -192,6 +192,8 @@ def _watch(tmp_path, screens: list[str], statuses: list[str] | None = None, aliv
         '  printf "%s\\n" "$*" >> "$DIR/calls"\n'
         '  case "$1" in\n'
         "    capture-pane)\n"
+        + ('' if alive else '      return 1  # a dead session cannot yield an admitted screen\n')
+        +
         '      local idx; idx="$(cat "$DIR/idx")"\n'
         '      if [[ -f "$DIR/advance" ]] && (( idx + 1 < SCREENS )); then idx=$((idx + 1)); printf %s "$idx" > "$DIR/idx"; fi\n'
         '      rm -f "$DIR/advance"; cat "$DIR/screen$idx" ;;\n'

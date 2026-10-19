@@ -133,19 +133,50 @@ def test_the_lease_commands_answer_for_the_hooks(tmp_path):
     assert run("prune-leases") == 0 and (holder / str(os.getpid())).exists()
 
 
-@pytest.mark.parametrize("returncode,stderr,expected", [
-    (0, "", True),
-    (1, "can't find session: X", False),
-    (1, "no server running on /tmp/tmux-501/default", False),
-    (1, "something unexpected", None),
-    (1, "error connecting to /tmp/tmux-501/default (No such file or directory)", False),
-    (1, "error connecting to /tmp/tmux-501/default (Permission denied)", None),
+@pytest.mark.parametrize("listed,has_session,expected", [
+    ((0, f"Other\n{NAME}\n", ""), 0, True),
+    ((0, f"{NAME}\n", ""), 1, None),  # listed but admission refuses: cannot tell
+    ((0, "Other\n", ""), None, False),
+    ((0, "", ""), None, False),
+    ((1, "", "no server running on /tmp/tmux-501/default"), None, False),
+    ((1, "", "something unexpected"), None, None),
+    ((1, "", "error connecting to /tmp/tmux-501/default (No such file or directory)"), None, False),
+    ((1, "", "error connecting to /tmp/tmux-501/default (Permission denied)"), None, None),
 ])
-def test_the_dashboard_tells_a_live_child_from_a_gone_one(monkeypatch, tmp_path, returncode, stderr, expected):
+def test_the_dashboard_tells_a_live_child_from_a_gone_one(monkeypatch, tmp_path, listed, has_session, expected):
     monkeypatch.setattr(server, "RUNTIME_DIR", str(tmp_path))
     monkeypatch.setattr(server, "HOOKS_DIR", os.path.dirname(child_resume.__file__))
-    monkeypatch.setattr(server.subprocess, "run",
-                        lambda *a, **k: subprocess.CompletedProcess(a[0], returncode, "", stderr))
+    asked = []
+
+    def run(args, **kwargs):
+        asked.append(args[0])
+        if args[0] == "list-sessions":
+            return subprocess.CompletedProcess(args, *listed)
+        assert has_session is not None, "has-session is asked only for a listed name"
+        return subprocess.CompletedProcess(args, has_session, "", "")
+
+    monkeypatch.setattr(server, "_tmux_run", run)
+    assert server._child_session_live(NAME, _boot()) is expected
+    assert asked[0] == "list-sessions"
+
+
+@pytest.mark.parametrize("listed,expected", [({"$1": "Other"}, False), ({"$1": NAME}, True), ({}, False)])
+def test_the_real_tmux_consumer_reads_a_missing_session_as_gone(monkeypatch, tmp_path, listed, expected):
+    # 2026-10-16: through the real consumer, has-session on a missing target is
+    # refused (TMUX_TARGET_UNAVAILABLE), not answered with "can't find session".
+    # The probe read that as "cannot tell", so no child a reboot stopped was
+    # ever recovered. Only the transport's OS evidence is synthetic here.
+    from _legacy_dashboard_transport import install_legacy_transport
+    monkeypatch.setattr(server, "RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setattr(server, "HOOKS_DIR", os.path.dirname(child_resume.__file__))
+
+    def invoke(argv, **kwargs):
+        # Admission already resolved the name to its session id ($N).
+        if argv[1] == "has-session" and argv[argv.index("-t") + 1] in listed:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        raise AssertionError(f"unexpected tmux call: {argv}")
+
+    install_legacy_transport(monkeypatch, tmp_path, server, invoke, sessions=listed)
     assert server._child_session_live(NAME, _boot()) is expected
 
 
@@ -291,3 +322,27 @@ def test_only_children_left_running_or_mid_resume_are_asked_about(resume, tmp_pa
     child_resume.recover_after_reboot(runtime, is_live=lambda name: asked.append(name) or True,
                                       retention_days=30, boot=_boot())
     assert asked == [NAME, ]
+
+
+@pytest.mark.parametrize('reason',['GLOBAL_TARGET_OWNERSHIP_UNKNOWN','LEGACY_TARGET_IS_GLOBAL'])
+def test_actual_dashboard_unknown_admission_keeps_reboot_liveness_unknown(monkeypatch,tmp_path,reason):
+    monkeypatch.setattr(server,'RUNTIME_DIR',str(tmp_path))
+    def unknown(*args,**kwargs):raise RuntimeError(reason)
+    monkeypatch.setattr(server,'_tmux_run',unknown)
+    assert server._child_session_live(NAME,_boot()) is None
+
+
+@pytest.mark.parametrize("listed,expected", [({"$1": "Other"}, False), ({"$1": NAME}, True), ({}, False)])
+def test_the_resume_button_reads_a_missing_session_as_gone(monkeypatch, tmp_path, listed, expected):
+    # 2026-10-16: RESUME on any gone agent failed with "the dashboard's answer
+    # was lost": do_jump's _has_session let the consumer's refusal of a missing
+    # target escape as an exception instead of answering False.
+    from _legacy_dashboard_transport import install_legacy_transport
+
+    def invoke(argv, **kwargs):
+        if argv[1] == "has-session" and argv[argv.index("-t") + 1] in listed:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        raise AssertionError(f"unexpected tmux call: {argv}")
+
+    install_legacy_transport(monkeypatch, tmp_path, server, invoke, sessions=listed)
+    assert server._has_session(NAME) is expected

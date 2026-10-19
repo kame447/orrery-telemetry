@@ -11,6 +11,8 @@ import sys
 
 import pytest
 
+from _installed_client_payload import copy_client_library
+
 from test_persistent_agents import (
     _fixture,
     _init_linked_worktree,
@@ -83,6 +85,7 @@ class Launch:
         self.install = Path(self.env["AGENTSTACK_HOME"])
         (self.install / "bin").mkdir()
         (self.install / "hooks").mkdir()
+        copy_client_library(self.install)
         self.launcher = self.install / "bin" / "agentstack-persistent"
         self.helper = self.install / "hooks" / "project-context.sh"
         shutil.copy2(ROOT / "bin" / "agentstack-persistent", self.launcher)

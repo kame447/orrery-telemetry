@@ -8,13 +8,16 @@
 
 [`hooks/settings.template.json`](../hooks/settings.template.json) defines event-to-command mappings, and [`hooks/README.md`](../hooks/README.md) defines the safety policy for settings merges. This document is the user reference explaining when each component actually runs and what it guarantees.
 
+
+`agentstack-resume` changes a stopped child through `/api/jump`; `child_resume.py` owns the change generation and generated-setting rollback. See [tool changes](delegation.en.md#resume-a-stopped-child-with-different-tools).
+
 ## Claude Code event hooks (8)
 
 After the installer merges `settings.template.json` into `~/.claude/settings.json`, the following events run automatically.
 
 | Event / matcher | Executable | Trigger timing | Primary behavior |
 | --- | --- | --- | --- |
-| `SessionStart` | [`set-ghostty-title.sh`](../hooks/set-ghostty-title.sh) | Immediately after startup / resume / `/clear` / compact | Apply a known identity to pane metadata, the tmux session, the terminal-title clipboard, and the managed agent list |
+| `SessionStart` | [`set-ghostty-title.sh`](../hooks/set-ghostty-title.sh) | Immediately after startup / resume / `/clear` / compact | Apply a known identity to pane metadata, the tmux session, and the managed agent list |
 | `SessionStart` | [`session-start-reminder.sh`](../hooks/session-start-reminder.sh) | Same as above, after the title helper | Check ORRERY Mail health and the existing identity, then output route-aware guidance for embedded tasks, bound proxies, and raw/direct connections into session context |
 | `PreToolUse` / `Edit|Write` | [`check-file-reservation.sh`](../hooks/check-file-reservation.sh) | Immediately before Claude Code edits a file | Check an existing exact-path reservation inside a protected root with renew-only semantics. Retry zero results once, then block with exit 2 if the result remains zero |
 | `PreToolUse` / `Edit|Write|Bash` | [`check-agent-registered.sh`](../hooks/check-agent-registered.sh) | Immediately before an edit, write, or shell command | Check a session flag to confirm that the current Claude session has called `register_agent`. Block an unregistered session with exit 2 |
@@ -31,7 +34,7 @@ The installer distributes the endpoint and transport credential selector in the 
 
 - **Trigger:** `SessionStart`. It is also called in the background after `mark-agent-registered.sh` obtains the current session's own canonical name.
 - **Behavior:** Uses `AGENT_NAME` or an argument and writes identity metadata for each `TMUX_PANE` to the runtime directory. tmux rename is allowed only for `pending-*` sessions, so an established parent session is not overwritten with a child name.
-- **On collision:** Does not kill a same-name tmux session; it refuses the rename and fails closed. Supported terminals use the clipboard for title handoff. If the name cannot be resolved, it does nothing.
+- **On collision:** Does not kill a same-name tmux session; it refuses the rename and fails closed. If the name cannot be resolved, it does nothing.
 
 ### `session-start-reminder.sh`
 
@@ -44,7 +47,7 @@ The installer distributes the endpoint and transport credential selector in the 
 - **Trigger:** Immediately before `Edit` / `Write`. For managed launches, enforcement applies to the computed `AGENTSTACK_PROTECTED_ROOTS`: deliberate `AGENTSTACK_EXTRA_PROTECTED_ROOTS` in configured order, then the actual launch workspace. The first matching root determines the relative reservation name. Managed hooks compare canonical file/root paths; legacy/direct sessions keep their existing root and path-resolution behavior, including the project-root fallback when no roots are set. A path-shaped namespace is not an extra protected root for a new managed launch. See [protection migration](configuration.en.md#reservation-protection-and-migration) before restarting older sessions.
 - **Project key:** Resolved in the order `AGENTSTACK_PROJECT_KEY` → `PROJECT_KEY` → `AGENTSTACK_PROJECT_KEY` in `${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh` → cwd from hook input. The installed `env.sh` is not sourced as shell code; only the relevant `export AGENTSTACK_PROJECT_KEY=...` is read literally. The registration guard, session reminder, child cleanup, and `agentstack-await-reply` share this resolver, so an editor session that bypasses the launcher still refers to the same project selected at installation.
 - **Identity:** Prefers `AGENT_NAME`. Otherwise it explicitly obtains the target pane's tmux session through `TMUX_PANE` and uses pane metadata only to confirm a match. If metadata and session differ, either is a placeholder, or resolution fails, it blocks with exit 2 before sending HTTP. It never uses an untargeted ambient tmux session. A client outside tmux can resolve identity from hook input `session_id` if it called `register_agent` and was recorded under `<runtime>/session_index/` (precedence: env → tmux → session index). A `session_id` containing anything outside `[a-zA-Z0-9_-]` is not used, and symlinked index entries are not read. Sessions with no identity source follow the “unmanaged session” rules below.
-- **Behavior:** Checks existing reservations by both relative and absolute path using renew-only semantics. It neither reads the owner's `registration_token` nor sends it in tool arguments. A legacy HTTP bearer is a separate transport credential and is not sent to a native endpoint whose generated selector is `disabled`. A zero result is retried once to account for asynchronous commits; the guard never auto-acquires a reservation.
+- **Behavior:** Checks existing reservations by both relative and absolute path using renew-only semantics, then reads active foreign exclusive reservations and refuses overlaps with their holders in the reason. It neither reads the owner's `registration_token` nor sends it in tool arguments. A legacy HTTP bearer is a separate transport credential and is not sent to a native endpoint whose generated selector is `disabled`. A zero result is retried once to account for asynchronous commits; the guard never auto-acquires a reservation.
 - **Decision:** An existing reservation exits 0. Definitive zero, HTTP rejection, JSON-RPC error, MCP `isError=true` or a non-boolean value, schema violation, malformed response, or retry failure after zero exits 2. `isError` is accepted as success only when omitted or boolean `false`. After establishing exact identity and protected scope, an operational fail-open exists only when the **first query** finds the transport unreachable. A missing path or a path outside the protected roots is outside enforcement and exits 0.
 - **Deployment order:** Do not partially apply the strict-identity version to existing sessions. At cutover C5, restart/rebind every client through `agent-start`, verify exact identity, synchronize the repository version into the live installation, and pass tests in both the reservation-present and reservation-absent directions.
 
@@ -59,6 +62,7 @@ The installer distributes the endpoint and transport credential selector in the 
 
 - **Same coordinate system:** [`reservation-common.sh`](../hooks/reservation-common.sh) is sourced by `check-file-reservation.sh` and the release hooks. It resolves the endpoint, legacy bearer selector, identity, project key, protected root, and relative/absolute paths with the same rules. HTTP requests always include `Accept: application/json, text/event-stream`.
 - **Grace / debounce:** `release-file-reservation.sh` waits for `AGENTSTACK_RELEASE_GRACE_SECONDS` (90 seconds by default; legacy `FILE_RESERVATION_RELEASE_GRACE_SECONDS` is also accepted) before [`release-file-reservation-worker.py`](../hooks/release-file-reservation-worker.py) releases the reservation. State is under `$AGENTSTACK_RUNTIME_DIR/file_release_debounce/`; the next edit updates the token, and a new-reservation hook removes the state file so the older worker becomes a no-op.
+- **Writes through Bash or scripts:** Claude's reservation hooks cover only `Edit` / `Write`; use those tools for reserved files. Writes through `Bash`, scripts, or other tools are neither checked nor automatically released by these hooks. Release the reserved files yourself immediately after writing: bound proxy `release_reservations`, raw/direct `release_file_reservations`.
 - **Missing components and failures:** If the worker was not distributed, the hook falls back to an immediate synchronous release. Release failures such as HTTP 406, connection failure, or JSON-RPC / MCP error append one line to `$AGENTSTACK_RUNTIME_DIR/release-failures.log`. The hook itself does not make completion of an edit or session count as a failure.
 - **SessionEnd boundary:** `release-all-reservations.sh` releases only reservations. It does not retire the agent, avoiding irreversible identity changes after a crash / resume.
 
@@ -144,6 +148,8 @@ This source-only helper returns `RESOLVED_AGENT` and the resolution source to it
 
 By default, a target declaration through `--resources` is required, and conflicts are checked before a child starts. It supports Claude / Codex, model selection, a preregistered identity, a child-owned token file, a per-child MCP proxy, and an optional worktree. It waits until the tmux REPL is ready or has exited early, then injects the canonical task. Argument / server / worktree failures exit 1, missing resource declarations exit 2, and reservation conflicts exit 21. It is normally used through [/delegate](launchers.en.md#delegate) or the dashboard rather than called directly.
 
+`AGENTSTACK_CHILD_DEFAULT_TOOLS` applies only to CLI launches without `--base` / `--tools` / `--codex-mcp`. The final directory and provider determine which default items are usable; omissions appear in spawn output and first instructions. Explicit selections and resume retain their fail-closed path. See [defaults](delegation.en.md#installer-defaults).
+
 ### `cleanup-child-agent.sh`
 
 This helper is chained after the child's Claude / Codex command and runs only when the REPL returns. It releases all reservations and retires the identity with the child's owner token. Remote release / retirement and managed-list updates remain best-effort and run before local child state is handled.
@@ -162,13 +168,25 @@ Dangerous-command pattern checking is enabled only with `AGENTSTACK_MONITOR_DANG
 
 ### `watch_agent_mail_signals.sh`
 
-It uses event watching when `fswatch` is available and two-second polling otherwise. It does not delete signal files, which are server-owned dirty bits; runtime delivery state and a short lease suppress duplicate injection of the same `(agent, message)`. A periodic scan every 30 seconds recovers missed events.
+It uses event watching when `fswatch` is available and two-second polling otherwise. Runtime delivery state and a short lease suppress duplicate injection of the same `(agent, message)`. On success the watcher deletes per-message signals; `fetch_inbox` clears legacy signals. Failures such as `session_not_found` retain signals for retry. A periodic scan (30 seconds on macOS, two seconds on Linux) recovers missed events. See [troubleshooting](troubleshooting.en.md#mail-watcher-is-yellow--red) for health classification and optional cleanup of old signals with absent recipients.
 
 The delivery target is only the tmux session whose name exactly matches the agent. After sending notification text literally, it submits with a separate `C-m` call, avoiding bare shells and unrelated sessions. tmux calls run in timeout-controlled workers so a server stall cannot stop the entire watcher.
 
 ## Differences for Codex
 
-The official Codex CLI `SessionStart` hook is used for the history receipt above, but it is not equivalent to Claude Code's registration `PostToolUse` or reservation `PreToolUse` guards, and `mark-agent-registered.sh` does not run. `agent-start-codex` completes identity registration, tmux rename, and launch expectation during bootstrap; a reserved child/resume or reregistration stops when the response name does not match. Direct spawn instead reports a warning and adopts the response name, while raw MCP registration is not detected automatically. The managed `~/.codex/AGENTS.md` instructs reservation reserve / renew / release behavior. The mail watcher and ORRERY Mail registry are shared by Claude and Codex, so notifications and reservation conflicts are mutually visible.
+The optional ORRERY Codex CLI plugin includes a `PreToolUse` / `^apply_patch$` reservation guard. Its adapter extracts every Add / Update / Delete path and both endpoints of a Move from the patch in `tool_input.command`, resolves them against the payload's absolute cwd, and passes them to [`check-file-reservation.sh`](../hooks/check-file-reservation.sh). Header and filename extraction follows the state rules of Codex 0.159.2: leading filename spaces are preserved, indented Add/Delete headers are recognized, and Update context lines remain context. Environment-selection patch headers are refused. Delete and Move sources check the directory entry (resolving its parent), while writes check the physical target. Global mode refuses deletion of a final symlink because its server currently normalizes that entry to the target.
+
+Only path extraction is Codex-specific: identity, protected roots, renew-only ownership checks, the single definitive-zero retry, and unmanaged/outage policy use the Claude implementation. In legacy mode the shared guard uses the same `renew_file_reservations` response to verify ownership and overlapping ACTIVE foreign exclusive leases, naming their holders. Mail renews and checks conflicts in one transaction; `conflict_check` includes the version, project, checked paths, and conflicts.
+
+Pattern semantics live only in Mail's `_patterns_overlap`. The hook has no copy of that matcher. Real Mail HTTP tests cover directory patterns, double stars, slash normalization, character classes, and Unicode. Rejections from a reachable Mail server, malformed results, and scope mismatches fail closed. Renew does not follow redirects; body-read failures after the first HTTP response also refuse. Unreachable Mail before a response follows the existing `AGENTSTACK_MAIL_OUTAGE_POLICY`, with or without an identity: `warn-open` allows with a visible warning, while `block` refuses. A retry failure after definitive zero still refuses. Unmanaged policy and existing global-mode policy stay unchanged. Shared context parsing uses the configured `AGENTSTACK_PYTHON` and never treats a startup or parse failure as permission. Global mode uses its existing common client and server coverage/exclusivity rules.
+
+**Deployment order:** update Mail before deploying these hooks. A new hook with old Mail refuses a missing `conflict_check` and asks for a Mail update. An old hook (before #269) with new Mail ignores the additive field and behaves as before. Resources remain unpublished; no reservation listing is exposed for the hook.
+
+Codex treats exit 2 and stderr as a refusal before editing, so one unreserved target blocks the entire patch. The adapter bounds all path checks to 25 seconds and refuses on failure. Shell writes remain outside this reservation guard in both CLIs. Codex reservation release remains an explicit model action; this change adds no automatic release.
+
+Protection requires the plugin to be installed and enabled, and **a human to review and approve the current hooks in `/hooks`, followed by a new Codex process**. After a core update, use [plugin-only refresh](codex-app.en.md) and review the updated hooks. Startup and updates do not approve hooks automatically. `agentstack-doctor` warns when the guard is missing, disabled, unreviewed, or unknown; it reports current trusted/enabled protection only after a read-only `hooks/list` observation. Older plugins without the guard report missing. When warned, confirm reservations explicitly before editing and do not assume `apply_patch` is guarded.
+
+The official `SessionStart` hook still records history receipts. It is separate from Claude's registration `PostToolUse`; `mark-agent-registered.sh` does not run. `agent-start-codex` completes identity registration, tmux rename, and launch expectation during bootstrap; reserved child/resume and reregistration stop on a response-name mismatch. Direct spawn warns and adopts the response name, while raw MCP registration is not detected automatically. The managed `~/.codex/AGENTS.md` reserve / renew / release instructions remain necessary. Mail watcher and the registry are shared by both CLIs.
 
 Codex Desktop uses a further, separate plugin hook / Bridge lifecycle. See [Codex App integration](codex-app.en.md) for details.
 
@@ -179,3 +197,15 @@ Codex Desktop uses a further, separate plugin hook / Bridge lifecycle. See [Code
 - [Codex App integration](codex-app.en.md)
 - [Configuration](configuration.en.md)
 - [Troubleshooting](troubleshooting.en.md)
+
+## Local entry for deterministic daemons
+
+The operator-only CLI in [daemon-agents.en.md](daemon-agents.en.md) reuses the bound proxy and canonical await-reply primitive. Ordinary lifecycle hooks and child registration are unchanged; live deployment requires separate approval.
+
+The [absolute reservation candidate](absolute-reservations.en.md) supplies explicit guard/release adapters and a shared normalizer. Existing hooks remain in legacy mode and do not automatically call the candidate helper. Applying reservations to all folders of participating sessions and connecting the real binding resolver belongs to the later cutover PR.
+
+For explicit isolated launch, delivery and operator recovery, see [global delivery client](global-delivery-client.en.md). Legacy remains the default.
+
+SessionStart reports only legacy-block counts. Bare sessions do not register with Mail; editing guards keep their policy. [Details](instruction-migration.en.md#legacy-blocks).
+
+For new isolated-global launches, SessionEnd does not prove provider exit. The wait runner saves the actual outcome and completes the single report intent before cleanup. Existing standalone hooks retain their behavior. See [dedicated launch and termination recovery](global-delivery-client.en.md#dedicated-launch-and-termination-recovery).

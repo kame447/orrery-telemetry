@@ -207,6 +207,16 @@ Codex REPL では `Enter` keysym が submit にならない場合があるため
 
 ## Mail watcher が yellow / red
 
+24時間以上古く、宛先の tmux session が無い signal は `orphan_signal_count` に分け、health の滞留判定から除外します。watcher は `session_not_found` の signal を再試行用に残すため、退役した宛先の古い通知が残るのは配送障害とは限りません。生きている宛先・新しい signal・headless runtime は除外せず、tmux の確認に失敗した場合も全数を判定に残します。doctor は古い残留数と片付け方を warn に出しますが、health が green ならこの warn だけで exit 1 にはしません。
+
+必要なら、インストールの環境を読み込んで候補を確認します。`--prune` を付けると、削除直前にも session が無いことを確認し、signals 配下の24時間以上古い通常ファイルだけを削除します。Mail の DB・inbox・notify-state は触りません。symlink は辿らず、tmux の測定に失敗した場合は削除しません。session を再開する予定の宛先は、先に再開してください。
+
+```sh
+source ~/.agentstack/env.sh
+"${AGENTSTACK_PYTHON:-python3}" ~/.agentstack/dashboard/mail_signals.py
+"${AGENTSTACK_PYTHON:-python3}" ~/.agentstack/dashboard/mail_signals.py --prune
+```
+
 ```bash
 curl -s http://127.0.0.1:8770/api/mail-watcher-health
 ```
@@ -229,11 +239,13 @@ tail ~/.agentstack/runtime/mail-watcher.log
 **mail は inbox に届くのに tmux に通知が入らず、log に `Stale watcher lock detected; taking ownership` と `mkdir: ... File exists` が数秒おきに並ぶ**なら、watcher が lock の取り直しに失敗して service manager に再起動され続けています。前の watcher が EXIT trap を通らずに死ぬ（SIGKILL、host のクラッシュ、process を差し替える deploy）と lock dir に heartbeat が残り、2026-09-12 より前の watcher はそれを片付けられませんでした。`launchctl print` の `runs` が数千になっているのが目印です。復旧は lock dir を消すだけです（keepalive が次の起動で取り直します）:
 
 ```bash
-rm -rf /tmp/orrery-mail-watcher.lock   # AGENTSTACK_MAIL_WATCHER_LOCK_DIR を変えていればそのパス
+rm -rf ~/.agentstack/runtime/mail-watcher.lock   # AGENTSTACK_MAIL_WATCHER_LOCK_DIR を変えていればそのパス
 tail -3 ~/.agentstack/runtime/mail-watcher.log
 ```
 
 repo を更新して `bash scripts/install.sh` を再実行すれば、以後の takeover は残り物があっても通ります。
+
+**1 台の Mac に複数の利用者がいて、`log` に `Permission denied` と `Stale watcher lock detected` が交互に数秒おきに並び、watcher が一度も動かない**なら、lock dir を他人の watcher と共有しています（2026-10-05 以前は既定が `/tmp/orrery-mail-watcher.lock` で全利用者共通だったため、1 台の Mac の 2 人目の利用者が先にいる利用者の lock を取れず無限リトライしていました）。既定は利用者ごと（`$AGENTSTACK_RUNTIME_DIR/mail-watcher.lock`）になっており、repo を更新して `bash scripts/install.sh` を再実行すれば解決します。`AGENTSTACK_MAIL_WATCHER_LOCK_DIR`・`_PIDFILE`・`_HEARTBEAT` を手で他人の path（`/tmp` 配下の共有 path など）に向けている場合、watcher は**何も書かず、別の場所へ切り替えもせず**に止まり、log に「この path は別の利用者の物。override を外すか自分の path に」と一度だけ出します。設定を外す（または自分だけが書ける場所に変える）と動きます。2026-10-05 より前の既定に自分の古い watcher がまだ生きている場合も、二重配送を避けるため新しい watcher は起動せず、止める案内を出します（その pid が watcher の process でなければ、stale として扱います）。`agentstack-doctor` も、watcher が動いていない・status が red / yellow・heartbeat が古い場合に warn します。
 
 ## Dashboard spawn がすぐ消える
 
@@ -337,6 +349,8 @@ AGENTSTACK_PROJECT_KEY=/absolute/project/path \
 ```
 
 を実行します。
+
+明示 global context の exit 3 は `observed`（登録は未更新）です。program/model を指定して helper を再実行してください。
 
 失敗時の stderr は、秘密を含まない定型診断です。たとえば
 `stage=ensure_project reason=transport-failed curl_exit=7` は通信前半、
@@ -542,3 +556,15 @@ manifest がない状態で推測削除は行いません。settings や mail da
 - [Codex App 統合](codex-app.md)
 - [Dashboard](dashboard.md)
 - [設定](configuration.md)
+
+## nvm の Codex で node が見つからない
+
+dashboard の最小 PATH に nvm がなくても、検出した Codex と同じ bin（または symlink の解決先）に node があれば、確認と起動の両方で同じ PATH を使います。doctor の `Codex launcher binary` も同じ環境で `--version` に答えるかを確かめます。node がどちらにもなく login shell の PATH にもなければ、理由付きで候補を拒否します。
+
+WSL の検査は、対象の checkout で次を実行します。
+
+```bash
+bash scripts/check-codex-nvm-wsl.sh /absolute/path/to/codex python3
+```
+
+Python 3.11 以上が必要です。追加 package は不要です。既にある CLI と Node.js だけを使い、一時 HOME / CODEX_HOME、最小 PATH で `--version` を確認します。model、login、thread、子の登録や tmux session は起動しません。通常の実 HOME に対する設定変更はありません。

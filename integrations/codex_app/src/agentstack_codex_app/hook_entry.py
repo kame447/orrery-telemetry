@@ -363,6 +363,43 @@ def main() -> int:
         payload = json.loads(raw)
         if not isinstance(payload, dict):
             return 0
+        if __package__ in {None, ''}:
+            sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+            from agentstack_codex_app.global_runtime import selected_client
+        else:
+            from .global_runtime import selected_client
+        selected = selected_client()
+        if selected is not None:
+            api, client = selected
+            if is_codex_desktop_payload(payload) and not os.environ.get('AGENTSTACK_LAUNCH_ID'):
+                event=normalize_event(payload)
+                directory=api['runtime_delivery'](client).directory(client.runtime_dir/'codex-app')
+                response=handle_payload(event,socket_path=directory/'bridge.sock',spool_path=directory/'hook-events.jsonl')
+                if response is not None and response.get('ok'):
+                    target=api['runtime_delivery'](client).external_client(event['session_id'],event['agent_id'])
+                    delivery=api['runtime_delivery'](target)
+                    notices=response.get('notifications',[])
+                    context=('Call bootstrap with '+json.dumps({'session_id':event['session_id'],'agent_id':event['agent_id']})+' before coordination tools.') if event['hook_event_name'] in ('SessionStart','SubagentStart') else ''
+                    if notices:context+='\n'+'\n'.join(n['notification'] for n in notices)
+                    sys.stdout.write(json.dumps({'hookSpecificOutput':{'hookEventName':event['hook_event_name'],'additionalContext':context}})+'\n');sys.stdout.flush()
+                    for notice in notices:delivery.callback(notice['message_id'],notice['attempt_id'],confirmed=True)
+                return 0
+            delivery = api['runtime_delivery'](client)
+            event = payload.get('hook_event_name')
+            if event == 'SessionStart':
+                result = delivery.session_start(payload)
+            elif event == 'SessionEnd':
+                result = client.end_session(payload)
+            else:
+                result = {'ok': True}
+            notices = delivery.hook_notifications('codex-hook') if event in ('SessionStart','PostToolUse') else []
+            if notices:
+                result['hookSpecificOutput'] = {'hookEventName':event, 'additionalContext':'\n'.join(n['notification'] for n in notices)}
+            sys.stdout.write(json.dumps(result)+'\n')
+            sys.stdout.flush()
+            for notice in notices:
+                delivery.callback(notice['message_id'], notice['attempt_id'], confirmed=True)
+            return 0
         if not is_codex_desktop_payload(payload):
             return 0
         event = normalize_event(payload)
@@ -375,7 +412,7 @@ def main() -> int:
         if output is not None:
             sys.stdout.write(json.dumps(output, separators=(",", ":")) + "\n")
             sys.stdout.flush()
-    except (HookEventError, OSError, json.JSONDecodeError):
+    except (HookEventError, OSError, json.JSONDecodeError, RuntimeError):
         # Lifecycle telemetry must never prevent the user's Codex turn.
         return 0
     return 0

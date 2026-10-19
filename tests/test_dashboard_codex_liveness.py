@@ -142,6 +142,8 @@ def _exit(monkeypatch, process_tree):
         raise AssertionError(f"unexpected command: {argv}")
 
     monkeypatch.setattr(server.subprocess, "run", fake_run)
+    from _legacy_dashboard_transport import install_legacy_transport
+    install_legacy_transport(monkeypatch, None, server, fake_run)
     return server.do_exit("MintBoltzmann"), sent
 
 

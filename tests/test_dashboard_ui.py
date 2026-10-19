@@ -11,9 +11,9 @@ INDEX = ROOT / "dashboard" / "index.html"
 
 
 def _live_bubble_cases() -> dict:
-    html = INDEX.read_text(encoding="utf-8")
+    html = (ROOT / "dashboard/network_node.js").read_text(encoding="utf-8")
     match = re.search(
-        r"(function renderLiveStateBubble\(grp,actState\)\{.*?\n\})\n\nfunction buildEls",
+        r"(function renderLiveStateBubble\(grp,actState\)\{.*?\n\})\n\nfunction render",
         html,
         re.DOTALL,
     )
@@ -90,7 +90,8 @@ def test_live_state_bubbles_follow_dense_and_replay_visibility_contracts():
     html = INDEX.read_text(encoding="utf-8")
     assert "#net.dense .askbub,#net.dense .qbub{display:none}" in html
     assert "body.replay-on .node .askbub,\n  body.replay-on .node .qbub{display:none}" in html
-    assert "renderLiveStateBubble(grp,g.actState);" in html
+    assert "window.OrreryNetworkNode.render(name,g," in html
+    assert "renderLiveStateBubble(grp,g.actState);" in (ROOT / "dashboard/network_node.js").read_text()
     assert "el.className='ask-replay-glyph';" in html
 
 

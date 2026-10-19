@@ -14,6 +14,8 @@ import sys
 
 import pytest
 
+from _installed_client_payload import copy_client_library
+
 from dashboard import server
 from test_claude_resume_mail import resume, child, NAME  # noqa: F401
 
@@ -136,6 +138,7 @@ def test_bootstrap_recomputes_roots_even_when_mail_is_down(tmp_path, provider, c
     (install / "bin" / "lib" / "agentstack-register.sh").write_text(
         "ags_pick_adjective_scientist_name() { printf FixtureCurie; }\n"
         "ags_mail_load_token() { :; }\nags_mcp_call() { return 1; }\n")
+    copy_client_library(install)
     env["AGENTSTACK_PROJECT_KEY"] = "shared"
     env["AGENTSTACK_EXTRA_PROTECTED_ROOTS"] = ""
     if custom_hooks:

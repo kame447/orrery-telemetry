@@ -24,8 +24,11 @@ Reads the PostToolUse hook payload (JSON) on stdin. Never raises — a failure
 here must not disturb registration.
 """
 import json
+from pathlib import Path
+import runpy
 import os
 import sys
+import subprocess
 import time
 
 
@@ -120,6 +123,25 @@ def main():
         d = json.loads(sys.stdin.read())
     except Exception:
         return EXIT_NOT_APPLICABLE
+
+    helper = Path(__file__).resolve().parents[1] / 'bin/lib/runtime_client.py'
+    selection = subprocess.run(['/bin/bash', str(helper.with_name('global-client-loader.sh')), 'select', *sys.argv[1:]])
+    if selection.returncode not in (0, 125):
+        return EXIT_CALLER_UNRESOLVED
+    if selection.returncode == 0:
+        if os.environ.get('AGENTSTACK_MAIL_DISABLED') == '1':
+            return EXIT_NOT_APPLICABLE
+        try:
+            api = runpy.run_path(str(helper))
+            client = api['configured']()
+            with client.fence():
+                pass
+            if client.mode == 'global':
+                client.record_session(d)
+                client.record_live(d)
+                return EXIT_BOUND
+        except Exception:
+            return EXIT_CALLER_UNRESOLVED
 
     session_id = d.get("session_id") or ""
     transcript_path = d.get("transcript_path") or ""

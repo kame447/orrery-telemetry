@@ -24,7 +24,7 @@ def test_runtime_keeps_attributes_but_not_live_state_across_failed_scrape(
     ])
     ticks = iter((0.0, 10.0, 20.0))
     monkeypatch.setattr(server.time, "monotonic", lambda: next(ticks))
-    monkeypatch.setattr(server.subprocess, "run", lambda *args, **kwargs: next(captures))
+    monkeypatch.setattr(server, "_tmux_run", lambda *args, **kwargs: next(captures))
     server._rt_cache.clear()
 
     first = server._agent_runtime(

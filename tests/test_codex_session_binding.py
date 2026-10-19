@@ -20,6 +20,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from service_teardown import TEST_LABEL_PREFIX  # noqa: E402
+from _installed_client_payload import copy_client_library  # noqa: E402
 
 from dashboard import server
 
@@ -426,13 +427,14 @@ def _codex_entrypoint_layout(tmp_path: Path, layout: str) -> dict[str, Path]:
         root = ROOT
     else:
         root = tmp_path / "installed-agentstack"
+        copy_client_library(root)
         for relative in (
             "bin/agentstack-preregister-child",
-            "bin/lib/agentstack-register.sh",
-            "bin/lib/agentstack-scientists.sh",
             "hooks/spawn_child.sh",
             "hooks/project-context.sh",
             "hooks/installed-env.py",
+
+            "hooks/codex-bin.sh",
             "dashboard/codex_models.py",
             "hooks/child_resume.py",
             "hooks/prepare-codex-session-binding.py",
@@ -473,7 +475,11 @@ def _fake_codex_launch_env(
         "printf '\\035\\n'; } >> \"$FAKE_TMUX_LOG\"\n"
         "case \"${1:-}\" in\n"
         "  new-session) : > \"$FAKE_TMUX_ALIVE\" ;;\n"
-        "  capture-pane) printf '\\ngpt-5.6-terra medium · ~/workspace\\n' ;;\n"
+        # This binding fixture launches a running child. An idle model header
+        # alone makes the launcher exhaust its initial-task watch; fake sleep
+        # removes the delays but still leaves 30 polls near the outer timeout.
+        "  capture-pane) printf '\\ngpt-5.6-terra medium · ~/workspace\\n"
+        "Working (1s • esc to interrupt)\\n' ;;\n"
         "  has-session) [[ -f \"$FAKE_TMUX_ALIVE\" ]] ;;\n"
         "  kill-session) rm -f \"$FAKE_TMUX_ALIVE\" ;;\n"
         "  display-message) printf 'ParentAgent\\n' ;;\n"
@@ -554,6 +560,8 @@ def _fake_codex_launch_env(
             "FAKE_TMUX_ALIVE": str(tmux_alive),
         }
     )
+    from _fake_tmux_transport import add_transport_evidence
+    add_transport_evidence(fake_bin, env)
     return env, workdir
 
 
@@ -1055,6 +1063,8 @@ def test_no_arg_codex_spawn_rejects_untrusted_canonical_state_before_cli(
             empty_hooks = tmp_path / "hooks-without-prepare"
             empty_hooks.mkdir()
             shutil.copy2(ROOT / "hooks" / "child_resume.py", empty_hooks)
+            shutil.copy2(ROOT / "hooks" / "codex-bin.sh", empty_hooks)
+            copy_client_library(tmp_path)
             env["AGENTSTACK_HOOKS_DIR"] = str(empty_hooks)
     env["AGENTSTACK_CODEX_LAUNCH_BINDING"] = "/parent/launch.json"
     env["AGENTSTACK_CODEX_LAUNCH_ID"] = "parent-launch"
@@ -1908,6 +1918,8 @@ def test_deck_new_agent_handoff_reaches_recorder_and_reader(
     # This handoff/recorder test isolates launch policy, which has real-process
     # integration coverage in test_spawn_child_codex_bin.py.
     monkeypatch.setattr(server.codex_models, "resolve_launcher", lambda: server.codex_models.LauncherPolicy())
+    from _legacy_dashboard_transport import install_legacy_transport
+    install_legacy_transport(monkeypatch, tmp_path, server, lambda *a, **kw: subprocess.CompletedProcess([], 0, "", ""))
     with monkeypatch.context() as process_patch:
         process_patch.setattr(
             server.subprocess, "Popen", lambda args, **_kwargs: launched.append(args)

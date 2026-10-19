@@ -20,7 +20,14 @@ AGS_PROG="agent-start-gemini"
 BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/agentstack-launch.sh
 . "$BIN_DIR/lib/agentstack-launch.sh"
-ags_load_env
+AGS_RUNTIME_CLIENT="$BIN_DIR/lib/runtime_client.py"
+. "$BIN_DIR/lib/global-client-loader.sh" || exit 2
+ags_load_env "$@"
+ags_client_select "$@" && _ags_selected_rc=0 || _ags_selected_rc=$?
+[[ "$_ags_selected_rc" == 0 || "$_ags_selected_rc" == 125 ]] || exit "$_ags_selected_rc"
+if [[ "$_ags_selected_rc" == 0 ]]; then
+  exec python3 "$AGS_RUNTIME_CLIENT" launch gemini "${1:-$PWD}"
+fi
 
 GEMINI_BIN="${AGENTSTACK_GEMINI_BIN:-agy}"
 GEMINI_MODEL="${AGENTSTACK_GEMINI_MODEL:-gemini-3.8-flash-high}"
@@ -93,6 +100,9 @@ unset AGENT_NAME PARENT_AGENT CHILD_REGISTRATION_TOKEN AGENTSTACK_RESERVED_IDENT
 $(printf '%q' "$TMUX_BIN") new-session -s $(printf '%q' "$SESSION") -c $(printf '%q' "$DIR") \
   $TMUX_PROJECT_OPTIONS \
   -e AGENT_NAME= -e PARENT_AGENT= -e CHILD_REGISTRATION_TOKEN= -e AGENTSTACK_RESERVED_IDENTITY= \
+  -e $(printf '%q' "AGENTSTACK_RUNTIME_MODE=$AGENTSTACK_RUNTIME_MODE") \
+  -e $(printf '%q' "AGENTSTACK_GLOBAL_SERVER_CONFIG=${AGENTSTACK_GLOBAL_SERVER_CONFIG:-}") \
+  -e $(printf '%q' "AGENTSTACK_CLIENT_CONFIG=${AGENTSTACK_CLIENT_CONFIG:-}") \
   -e $(printf '%q' "AGENTSTACK_GEMINI_MODEL=$GEMINI_MODEL") \
   "$TMUX_RESTORE_WORKSPACE_COMMAND unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR; $TMUX_CLEAR_GIT_COMMAND || exit 1; source $(printf '%q' "$BOOTSTRAP") $(printf '%q' "$DIR") && $GEMINI_CMD; exec \"\$SHELL\" -l"
 rm -f -- "\$0"

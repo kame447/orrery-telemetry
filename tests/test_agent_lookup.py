@@ -101,6 +101,8 @@ def test_exit_kill_and_jump_never_build_the_whole_history(world, monkeypatch):
     monkeypatch.setattr(server, "_has_session", lambda name: name in world)
     monkeypatch.setattr(server, "_tmux", lambda *_a, **_k: "")
     monkeypatch.setattr(server.subprocess, "run", lambda *_a, **_k: server.subprocess.CompletedProcess([], 0, "", ""))
+    from _legacy_dashboard_transport import install_legacy_transport
+    install_legacy_transport(monkeypatch, None, server, lambda *a, **kw: server.subprocess.CompletedProcess([], 0, "", ""))
     monkeypatch.setattr(server.time, "sleep", lambda _s: None)
     # Refusals and acceptances both come from the lookup, never an enumeration error.
     assert "running" in server.do_kill("LiveClaude")["error"]

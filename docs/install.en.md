@@ -6,6 +6,11 @@
 
 This document is for people installing ORRERY Telemetry (this repository) for the first time. It takes three commands to install, two to verify, and one to start the first agent. Migration instructions for previous users of the third-party MCP Agent Mail are collected in the [appendix](#appendix-for-previous-mcp-agent-mail-users) at the end.
 
+
+The installer also installs `bin/agentstack-resume`, used by the [stopped-child tool change procedure](delegation.en.md#resume-a-stopped-child-with-different-tools).
+
+Run the installer from a complete repository checkout or source archive. `packages/agentstack_mail/src/agentstack_mail/schema_contract.py` and `packages/agentstack_mail/fixtures/global-server-s2a.json` are canonical inputs installed beside the runtime client, including dashboard-only installs. Missing inputs stop installation before deployment with `missing runtime client contract` and the missing file. Normal clones, the one-line installer and WSL installation obtain the whole repository.
+
 ## Supported environment
 
 macOS is the primary target. The launchers and hooks are implemented to work with the system Bash 3.2 on macOS.
@@ -50,7 +55,7 @@ All existing content is preserved, and a backup from before each merge is stored
 The installer places:
 
 - the dashboard, launchers, hooks, skills, bundled ORRERY Mail, `env.sh`, `VERSION`, and `install-state.json` under `~/.agentstack/`
-- `~/.claude/skills/delegate` and `~/.claude/skills/log`, as symlinks into `~/.agentstack/skills/`
+- `~/.claude/skills/{delegate,log}` and `${CODEX_HOME:-~/.codex}/skills/{delegate,log}`, as symlinks into `~/.agentstack/skills/`
 - two resident services: the dashboard on port 8770 and ORRERY Mail at `http://127.0.0.1:18765/mcp`, with state under `~/.agentstack/mail`. Each is registered with launchd on macOS or started in supervised-background mode when registration is unavailable
 
 `env.sh` uses mode `0600` and contains no token. Shell dotfiles are not changed.
@@ -78,7 +83,7 @@ agent-start /path/to/your-project
 agent-start-codex /path/to/your-project
 ```
 
-`agent-start` creates a tmux session with the same name as the ORRERY Mail identity. Dashboard jumps, mail notifications, and token recovery are joined by this name. In the launched Claude Code session, invoke skills with a leading slash, as in `/delegate`. See [Skills and file reservations](launchers.en.md#skills-2-and-file-reservations) for the first child launch.
+`agent-start` creates a tmux session with the same name as the ORRERY Mail identity. Dashboard jumps, mail notifications, and token recovery are joined by this name. In the launched Claude Code session, invoke skills with a leading slash, as in `/delegate`. In Codex, invoke `$delegate` (or `$log` for logs), or select the skill with `/skills`. See [Skills and file reservations](launchers.en.md#skills-2-and-file-reservations) for the first child launch.
 
 ## Installing on Windows (WSL2)
 
@@ -119,7 +124,7 @@ On Windows, install inside a WSL2 Ubuntu. Inside Ubuntu it is Linux, so the step
    npm install -g @openai/codex@latest
    ```
    Log in with `claude` (then `/login`) and `codex login`. Open the URL each prints in a Windows browser to authorize.
-   If Codex is also installed on the Windows side, Ubuntu's PATH shows that Windows `codex` (`/mnt/c/...`) too, and it cannot run inside Ubuntu. The installer skips it and chooses the `codex` installed inside Ubuntu (one that answers `--version`); an agent starting a Codex child with `/delegate` follows the same rules and, when its shell has no `AGENTSTACK_CODEX_BIN`, uses the value the installer saved in `~/.agentstack/env.sh`; re-running it also replaces a Windows `codex` saved by an earlier install. If `agentstack-doctor` prints `warn: Codex launcher binary ... cannot start Codex`, install Codex inside Ubuntu and re-run the installer. The reason comes in two forms. `exited with status N after 0.0s: …` means `codex --version` ended at once with an error, and the line that follows is that error (with `Missing optional dependency …`, the node on that shell's PATH is not the one Codex was installed with: run the installer from a login shell such as `zsh -lc`, or pass `--codex-bin`). `did not finish within 10s and was stopped` means it did not answer in time.
+   If Codex is also installed on the Windows side, Ubuntu's PATH shows that Windows `codex` (`/mnt/c/...`) too, and it cannot run inside Ubuntu. The installer skips it and chooses the `codex` installed inside Ubuntu (one that answers `--version`); an agent starting a Codex child with `/delegate` follows the same rules and, when its shell has no `AGENTSTACK_CODEX_BIN`, uses the value the installer saved in `~/.agentstack/env.sh`; re-running it also replaces a Windows `codex` saved by an earlier install. If `agentstack-doctor` prints `warn: Codex launcher binary ... cannot start Codex`, install Codex inside Ubuntu and re-run the installer. The reason comes in two forms. `exited with status N after 0s: …` means `codex --version` ended at once with an error, and the line that follows is that error (with `Missing optional dependency …`, the node on that shell's PATH is not the one Codex was installed with: run the installer from a login shell such as `zsh -lc`, or pass `--codex-bin`). `did not finish within 10s and was stopped` means it did not answer in time.
    If Codex was already installed in Ubuntu, update it too with `npm install -g @openai/codex@latest`: with an old release, a child started on a GPT-6 model is rejected by the API (on WSL, 0.153.4 was rejected and 0.158.0 answered).
    If you will use Codex children, after the installer [install the history binding and approve it once in `/hooks`](#using-codex-install-the-history-binding-and-approve-it-once-in-hooks). Without it, starting a Codex child can wait up to about 90 seconds.
 7. **Start an agent** (inside Ubuntu). Use the same commands as in "Starting the first agent" above. The dashboard's jump opens a new Windows Terminal (`wt.exe`, preinstalled on Windows 11) tab attached to the tmux session. If Windows Terminal is missing, install it from the Microsoft Store.
@@ -128,7 +133,7 @@ On Windows, install inside a WSL2 Ubuntu. Inside Ubuntu it is Linux, so the step
 
 ## Non-interactive installation (`--assume-yes`)
 
-When installing from CI or a script, the four approvals (Claude settings merge, the `~/.claude.json` MCP entry, the Codex `AGENTS.md` block, and the Claude `CLAUDE.md` block) are skipped with warnings by default. The following option may be used only when the **user personally** reviewed the repository and preview and has granted approval in advance.
+See the [consent contract](instruction-migration.en.md#consent) for confirmation conditions and non-interactive behavior. Use the following option only after the user personally reviewed the repository and preview and granted approval in advance.
 
 ```bash
 ./scripts/install.sh --project-key /absolute/path/to/your-project --assume-yes
@@ -140,7 +145,7 @@ When installing from CI or a script, the four approvals (Claude settings merge, 
 
 | Invocation | Tier | Behavior |
 | --- | --- | --- |
-| `./scripts/install.sh` | Tier 1 / default | Install all payloads and Claude skill links. Merge hooks, permissions, and Codex / Claude managed blocks only when approved after preview |
+| `./scripts/install.sh` | Tier 1 / default | Install all payloads and Claude / Codex skill links. Merge hooks, permissions, and Codex / Claude managed blocks only when approved after preview |
 | `./scripts/install.sh --dashboard-only` | Tier 0 | Dashboard and helpers only. Do not install hooks, skills, or Codex / Claude templates |
 | `./scripts/install.sh --scoped` | Tier 2 placeholder | Install payloads but do not change user settings / managed documents |
 | `./scripts/install.sh --dry-run` | preview | Display planned changes without changing files or services |
@@ -158,6 +163,7 @@ When installing from CI or a script, the four approvals (Claude settings merge, 
 --spawn-roots PATHS     roots the directory typeahead may browse (`:`-separated)
 --codex-approval MODE   Codex child `--ask-for-approval` (never | on-request | on-failure | untrusted; default never)
 --codex-network MODE    Codex child sandbox network (on | off; default on)
+--child-default-tools SPEC  Default child tools (--tools grammar; empty by default)
 --codex-add-dirs PATHS  extra writable roots for Codex children (`:`-separated)
 --retire-legacy-mail    see the appendix (retire a previous MCP Agent Mail)
 --mail auto|update|keep what to do with a running ORRERY Mail (default keep; --update-mail / --keep-mail are aliases)
@@ -180,18 +186,24 @@ The Tier 1 merge uses the JSON parser in `scripts/lib/merge_settings.py`.
 - Idempotently update only content between managed-block markers
 - Treat `install-state.json` as canonical for uninstall scope
 
-Permission `deny` entries are limited to **irreversible operations with no recovery mechanism**. Even destructive operations are left out of both allow and deny when they are recoverable, leaving them to runtime human approval. An operation is also not added to deny when the same state can be reached through another allowed tool, because doing so would provide no safety. The current three denied operations are `hard_delete_agent`, `hard_delete_project`, and `purge_old_messages`.
+Permission `deny` entries for ORRERY Mail tools are limited to **irreversible operations with no recovery mechanism**. Even destructive operations are left out of both allow and deny when they are recoverable, leaving them to runtime human approval. An operation is also not added to deny when the same state can be reached through another allowed tool, because doing so would provide no safety. The current three denied ORRERY Mail tools are `hard_delete_agent`, `hard_delete_project`, and `purge_old_messages`. Separately, one `Edit` on the skills directory below is denied.
+
+The skills the installer places (`~/.agentstack/skills` and the `~/.claude/skills/<name>` symlinks that point into it) go into `additionalDirectories`, so an agent can read them without being asked even though they are outside its working directory. Without this, a parent agent in a fresh environment stops at Claude Code's question about reading outside the working directory the moment it reads the `/delegate` SKILL.md. To keep this to reading, `Edit` on the same location is added to deny. That deny stops Claude Code's file tools (Edit, Write and the like) and Bash writes it can recognise; it does not stop an indirect write through Python or Node running without a sandbox. A skill of the same name that the user placed themselves is not included.
 
 The installer parses and merges structure rather than performing simple string replacement so that reinstall and uninstall do not sweep up user settings.
 
-`skillsDirectories` is not a Claude Code setting, and the installer does not add a new value. Canonical skill payloads remain in `~/.agentstack/skills/<name>`, with absolute symlinks from Claude Code's standard path at `~/.claude/skills/<name>`.
+`skillsDirectories` is not a Claude Code setting, and the installer does not add a new value. Canonical skill payloads remain in `~/.agentstack/skills/<name>`, with absolute symlinks from Claude Code's standard path at `~/.claude/skills/<name>` and Codex's `${CODEX_HOME:-$HOME/.codex}/skills/<name>`.
 
 ```text
 ~/.claude/skills/delegate -> ~/.agentstack/skills/delegate
 ~/.claude/skills/log      -> ~/.agentstack/skills/log
+~/.codex/skills/delegate  -> ~/.agentstack/skills/delegate
+~/.codex/skills/log       -> ~/.agentstack/skills/log
 ```
 
 An existing symlink to the same ORRERY Telemetry payload is reused and recorded as owned in the manifest. Because the link becomes invalid with the payload, it is removed on uninstall. An existing same-name file, directory, or symlink to another target is preserved with a warning and is not recorded as owned. Uninstall compares the manifest path with the actual symlink target and removes only an owned symlink that points to the ORRERY Telemetry payload. A path replaced by the user with a file or directory, or a retargeted symlink, remains.
+
+The Codex examples above assume `CODEX_HOME` is unset. When set, links go into its `skills` directory. Reuse, conflict preservation, manifest recording, and uninstall rules apply to both hosts. In Codex, invoke `$delegate` or `$log`, or select them with `/skills`. The invocation hint in the managed block is applied through the usual `agentstack-codex-setup` preview and approval flow.
 
 On systems where an old installer added `~/.agentstack/skills` to `skillsDirectories`, a reinstall with the Tier 1 settings merge approved removes only that old ORRERY Telemetry entry. Other user values in the same array and all other settings are preserved.
 
@@ -288,7 +300,7 @@ The helpers used by Tier 1 to preview / merge can also run independently.
 ~/.agentstack/bin/agentstack-claude-setup --check
 ```
 
-Use `--uninstall` on each helper to remove only its block. Codex targets `$CODEX_HOME/AGENTS.md`; Claude targets the `CLAUDE.md` selected by `AGENTSTACK_CLAUDE_MD_SCOPE=project / global / both`. Existing content outside the markers is preserved.
+Claude uses the user `$CLAUDE_CONFIG_DIR/CLAUDE.md`; Codex uses `$CODEX_HOME/AGENTS.md`. `--uninstall` removes only recorded markers and retains full-file backups. See [instruction migration](instruction-migration.en.md) for legacy blocks, interrupted work, shared repositories and purge.
 
 ## ORRERY Mail service handling
 
@@ -472,3 +484,9 @@ The installer does not automatically switch back to the third-party version. If 
 - [Configuration](configuration.en.md)
 - [Troubleshooting](troubleshooting.en.md)
 - [Third-party components](third-party.md)
+
+## Local deterministic daemon helper
+
+[Dedicated bindings and notifications](daemon-agents.en.md) use a fixed local source release, not a newly installed general launcher. They require a Mail build advertising its UUID in HTTP health. Do not impersonate a Claude/Codex profile; live Mail updates, identity creation and deployment require separate operator approval.
+
+For explicit isolated launch, delivery and operator recovery, see [global delivery client](global-delivery-client.en.md). Legacy remains the default.

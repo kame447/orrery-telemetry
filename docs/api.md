@@ -48,7 +48,7 @@ response body は、画像と HTML を除き JSON です。dashboard 自体に l
 | GET | `/api/mail-watcher-health` | なし | watcher / signal health |
 | GET | `/portrait` | `name`, `hi` | PNG または fallback SVG |
 | GET | `/assets/<file>` | `.svg` / `.png` の basename | static asset |
-| POST | `/api/jump` | `{session}` | open / focus / resume action |
+| POST | `/api/jump` | `{session, open?, base?, tools?}` | open / focus / resume action |
 | POST | `/api/exit` | `{session}` | graceful exit action |
 | POST | `/api/kill` | `{session, mode}` | kill / retire action |
 | POST | `/api/annotate` | `{name, role, emoji, group}` | saved annotation |
@@ -61,13 +61,32 @@ curl -s http://127.0.0.1:8770/api/version
 ```
 
 ```json
-{"name":"orrery-telemetry","version":"2026.09.16.1","api":7}
+{"name":"orrery-telemetry","version":"2026.09.16.1","api":19}
 ```
 
 version の解決順は [インストール](install.md#version)を参照してください。
 
 - `version`: いつの配布物か（日付。[CHANGELOG](../CHANGELOG.md)）。互換性の約束ではありません
-- `api`: この API を使う側（[ORRERY cockpit](https://github.com/gyroid-eth/orrery) など）との**互換の世代**です。利用者が頼る endpoint や field を**足す・意味を変える**ときだけ 1 つ上げ、CHANGELOG に書きます。release のたびには上げません。利用者は、必要な機能があるかを `version` の日付ではなく `api` で判定してください（cockpit は、`api` が必要な世代に足りないと起動時に警告します）。この運用は `api` 2 からで、それより前の版はどれも、中身にかかわらず 1 を返します
+- `api`: この API を使う側（[ORRERY cockpit](https://github.com/gyroid-eth/orrery) など）との**互換の世代**です。利用者が頼る endpoint や field を**足す・意味を変える**ときだけ 1 つ上げ、[changelog の断片](../changelog.d/)に書きます（release 時に CHANGELOG へ集約。[貢献・release 手順](../CONTRIBUTING.md#changelog-fragments-and-releases)）。release のたびには上げません。利用者は、必要な機能があるかを `version` の日付ではなく `api` で判定してください（cockpit は、`api` が必要な世代に足りないと起動時に警告します）。この運用は `api` 2 からで、それより前の版はどれも、中身にかかわらず 1 を返します
+
+### 隔離 global backend（API 17）
+
+明示 global mode では static 以外の全 route に operator capability の admission を適用します。`/api/version` も認証が必要です。`capabilities` の `operator_http_admission`・`ui_read`・`global_spawn`・`instruction_migration`・`global_dashboard_ui` は1です。画面を API 番号だけで有効にせず、対応する capability を確認してください。[設定・権限・中断復旧](global-delivery-client.md#operator-ui-access)を参照してください。旧 mode の payload と入場条件は維持します。
+
+API 17 は global dashboard の返信表示と次の認可済み読取 route を追加します。既定は旧 mode、activation は false のままです。
+
+| Route | 投影 |
+| --- | --- |
+| `GET /api/instruction-migration?agent_id=ID&session_id=SESSION` | session は任意。その identity の固定 provider HOME から共通 finding を返します。所有を証明できない・曖昧な場合は `disk_state:unknown` とし、dashboard の利用者 HOME で代用しません。 |
+| `GET /api/fs/dirs?path=PATH` | 既存の spawn-root の directory guard。Mail identity や作業 folder の変更から独立しています。 |
+| `GET /api/deliverables` | `configured` と agent 名を key にした `items`。明示した `AGENTSTACK_DELIVERABLE_ROOTS` だけを使い、未設定なら空です。 |
+
+指示の `data` は共通の [status schema](../bin/lib/instruction_contract.json) の provider・target_path・findings・checked_at・disk_state・session_state・evidence_kind・reason です。finding は既存の1定義を参照します。起動時の候補 hash は実際に読み込まれた指示の証明ではなく、cwd の変更も再読込ではありません。3 route とも Mail 読取と同じ operator admission を通ります。
+
+
+### 同梱 Mail の識別子（API 12）
+
+API 12の配布物では、同梱 ORRERY Mail の MCP `health_check` が `server_instance_id` を返します。これは管理 socket の inspect と同じ永続 UUID で、秘密や認証の代わりにはなりません。常駐 daemon は両方の transport の UUID と確認済みの connection pin を照合し、field の無い旧 build や不一致では停止します。既存の `status` / `environment` / `http_host` / `http_port` は維持します。これは dashboard の新しい HTTP route ではありません。[専用 binding と通知](daemon-agents.md)を参照してください。
 
 ## GET `/api/spawn-names`
 
@@ -113,6 +132,7 @@ curl -s http://127.0.0.1:8770/api/spawn-names
       "default_model":"gpt-6.1-sol",
       "model_source":"bundled",
       "model_error":"",
+      "model_note":"",
       "efforts":["low","medium","high","xhigh","max","ultra"],
       "effort_default":"xhigh"
     }
@@ -124,7 +144,7 @@ scientist rail の `status` は、その scientist と134語の adjective の組
 
 adjective は ORRERY Mail の正典 `SIMPLE_ADJECTIVES` Round 3 と逐語同期し、launcher・catalog・suggestion API が同じ source を使います。独自追加は strict deployment の name validation と乖離するため禁止です。
 
-Codex は同梱候補に期限内のCLIローカルcacheの候補を追加します。`AGENTSTACK_CODEX_MODELS` 明示時はその許可リストだけを使い、不正設定は `model_error` に返します。`model_source` は `bundled` / `local_cache` / `override` です。既定モデルは、起動対象 CLI が 0.159.0 以上なら `gpt-6.1-sol`、古い版なら `gpt-6-sol` です。版不明なら新鮮な catalog で判定します。候補順では決まりません。GPT-6.1 Sol には Codex CLI 0.159.0 以上が必要で、doctor は fallback と更新方法を note に出します。以前の世代を使う場合は `gpt-6-sol` のように正式 ID を指定してください。providerの `model_efforts` と `model_effort_defaults` はモデルIDをkeyとする辞書で、UIはこちらを優先します。空のeffort一覧はCLI既定を使うため、effortを省略してください。詳細は [設定](configuration.md#codex-model-catalog) を参照してください。
+Codex は同梱候補に取得から300秒以内のCLIローカルcacheの候補を追加します。`AGENTSTACK_CODEX_MODELS` 明示時はその許可リストだけを使い、不正設定は `model_error` に返します。`model_source` は `bundled` / `local_cache` / `override` です。モデル省略と `sol` の既定候補は、起動対象 CLI が 0.159.0 以上なら `gpt-6.1-sol`、古い版なら `gpt-6-sol`、版不明なら新鮮な catalog で初期判定します。その ID が選択された `CODEX_HOME` の cache に無ければ、`gpt-6.1-sol` → `gpt-6-sol` → `gpt-6-luna` → `gpt-5.6-terra` → `gpt-5.6-luna` の順で次の掲載候補へ下げます。既定を下げる判断には期限切れの cache も使いますが、古い CLI を GPT-6.1 Sol へ上げることはありません。使える cache や次の候補が無ければ従来の既定を維持します。正式 ID の明示要求は置き換えません。provider の `model_note` は優先する既定から変更が無ければ空文字列で、変更があれば変更前後と理由を伝え、期限切れの場合は取得日時と `codex` 起動による更新案内も含みます。cache の `identity` は現在のログインと照合しておらず、fallback は利用権限の証明ではありません。provider の `model_efforts` と `model_effort_defaults` はモデルIDをkeyとする辞書で、UIはこちらを優先します。空のeffort一覧はCLI既定を使うため、effortを省略してください。詳細は [設定](configuration.md#codex-model-catalog) を参照してください。
 
 ## GET `/api/name-status`
 
@@ -187,6 +207,10 @@ curl -s 'http://127.0.0.1:8770/api/fs/dirs?path=/Users/me/code'
 を返します。hidden directory と root 外へ出る symlink は除外し、名前順に最大 500 件を返します（page 側が入力中の prefix で絞るので、一覧全体が要ります）。501 件以上なら `truncated: true` です。
 
 ## GET `/api/agents`
+
+API 世代19では legacy の稼働中 Codex CLI row と `/api/graph` node に nullable な `provider_stall` を追加します。停止中は `{kind: "model_capacity", since: <UTC epoch秒>, error: <エラー1行>, notification_status: <状態>}`。通知状態は `sent`、`no_parent`、`parent_unverified`、`delivery_unknown`、`failed` です。停止しても `act_state` の既存の意味は変えません。provider での停止は独立した field です。
+
+dashboard の常駐 worker が現在の capacity エラーを別の capture で2回確認し、検証済みの子 identity から `PARENT_AGENT` へ1回だけ通知します。GET に送信の副作用はありません。作業再開、または同じ pane で「前の停止→提出済みの新入力→新しい容量エラー」の追記を特定して2回確認した場合に、次の停止を通知します。履歴の境界が曖昧なら元の停止を維持します。送達不明なら再送せず `delivery_unknown` を保持します。global は未対応・後続です。詳しくは [provider 停止](dashboard.md#provider-停止の自動通知legacy) を参照してください。
 
 query はありません。DECK が数秒ごとに取得します。
 
@@ -395,15 +419,20 @@ response は少なくとも次の診断を返します。
 
 ```json
 {
-  "status":"ok",
+  "status":"green",
   "watcher_running":true,
   "signal_count":0,
+  "actionable_signal_count":0,
+  "orphan_signal_count":0,
+  "signal_sessions_known":true,
   "last_success_age_s":4,
-  "recent_results":{"delivered":3}
+  "recent_results":{"success":3}
 }
 ```
 
 watcher process、signal backlog、直近成功時刻、直近10分の配送結果を header indicator が使います。
+
+API 11 から、`signal_count` は残っている全 signal（legacy を含む）の数、`actionable_signal_count` は health 判定に使う数、`orphan_signal_count` は24時間以上古く、tmux session の不在を確認できた数です。headless runtime manifest がある宛先と新しい signal は常に判定に残します。tmux の測定失敗時は `signal_sessions_known: false` とし、除外しません。watcher 不在か actionable が50件を超えると `red`、actionable が残り直近成功が120秒以上前（または成功なし）なら `yellow`、それ以外は `green` です。
 
 ## GET `/portrait`
 
@@ -422,6 +451,8 @@ overlay、高解像度 bundle、64px bundle の順で PNG を探します。安�
 
 ## POST `/api/jump`
 
+API13: `/api/jump` は明示 `runtime_mode=global`・`client_config`・`client_name`・`prepare_only=true`・`open=false` で固定 root の再開準備を受け取ります。返り値の runtime_ready は false、旧 session 入力は不変です。
+
 request:
 
 ```json
@@ -437,6 +468,8 @@ Claude は保存済み owner credential で同じ project・数値 ID・name・p
 Claude の起動準備が失敗した場合、元の husk を残し、元が retired だった Mail を再 retire します。元から active の identity は retire しません。復元にも失敗した場合は `rollback_errors` を返し、成功したようには報告しません。CLI は tmux と窓の準備が成功するまで待機します。
 
 旧3項目形式の Claude child は、private token と既存の正式 owner 登録が検証できれば `ready` になります。表示 GET は読み取りだけです。実際の認証・同じ identity の新形式への移行は明示 resume 時に行い、認証失敗では起動しません（[移行条件・保持期限・失敗時の復元](launchers.md)）。
+
+API 9 は任意の `base` / `tools` を受け付けます。`tools` は全置換、`{}` は追加の道具の解除です。base 省略は既存 base、base だけの指定は既存 tools を維持し、両方省略した呼び出しは従来の動作です。動作中・状態不明・retained state が無い子・standalone・conversation-only・Codex App は道具変更を拒否します。まず `/api/exit` を終え、`gone` / `finished` を確認します。変更は子ごとに直列化し、既存の認証と native resume を使い、起動失敗時に当該世代の旧記録・生成設定へ戻します。成功は tmux／terminal の起動受理であり、shell 内の bootstrap／認証の完了は待ちません。後発失敗でも新しい選択は保持し、次の resume に使います。子からの受信確認が必要です。成功応答に `tools_changed: true`, `base`, `tools` を追加します。installer の既定は追加しません。[手順と制限](delegation.md#停止した子の道具を変更して-resume-する)。
 
 ## POST `/api/exit`
 
@@ -541,8 +574,10 @@ request:
 | `worktree_base` | no | base revision。既定 `HEAD` |
 | `claude_chrome` | Claude only | boolean。`true` で child に `--chrome` を付ける。省略・`false` は inherit（利用者の Claude 設定に従う）。launcher の env 既定は使わない。[Claude in Chrome](delegation.md#claude-child-とブラウザ操作claude-in-chrome) |
 | `claude_chrome_device` | Claude only | 使うブラウザの deviceId（`[A-Za-z0-9._:-]{1,128}`）。指定すると `claude_chrome: true` と同じ。`claude_chrome: false` との併用は拒否 |
-| `base` | Claude / Codex | `"default"`（省略と同じ。従来の起動）または `"mail-only"`（ORRERY Mail と `tools` で選んだものだけ）。api 7 から |
-| `tools` | Claude / Codex | object。`browser`（`true` または `{"device": "<deviceId>"}`。Claude only）、`screen`（`"read"` / `"operate"` または `{"access": ..., "server": "<name>"}`。server を省くと Mac の computer use で Claude only）、`mcp`（server 名の配列。tool は承認しない）、`approve_all`（`mcp` のうち全 tool を承認する server。表に無い版は拒否）。`claude_chrome_device` と deviceId が食い違えば拒否。api 7 から。[子に渡す道具を選ぶ](delegation.md#子に渡す道具を選ぶ--base----tools) |
+| `base` | Claude / Codex | `"default"`（明示すると installer の道具の既定を適用しない）または `"mail-only"`（ORRERY Mail と `tools` で選んだものだけ）。api 7 から |
+| `tools` | Claude / Codex | object。`browser`（`true` は Claude/Codex、`{"device": "<deviceId>"}` の deviceId は Claude only）、`screen`（`"read"` / `"operate"` または `{"access": ..., "server": "<name>"}`。server を省くと Mac の computer use で Claude only）、`mcp`（server 名の配列。tool は承認しない）、`approve_all`（`mcp` のうち全 tool を承認する server。表に無い版は拒否）。`claude_chrome_device` と deviceId が食い違えば拒否。api 7 から。[子に渡す道具を選ぶ](delegation.md#子に渡す道具を選ぶ--base----tools) |
+
+API 8 では、`tools: {}` または `base: "default"` を明示すると `--base default` を渡します。dashboard/API はフォームの選択を正とし、installer の `AGENTSTACK_CHILD_DEFAULT_TOOLS` を launcher の env から外して、選択から外した道具を追加しません。明示した道具が使えなければ起動を止めます。CLI で base/tools/MCP profile を省略したときだけ、使えない既定の項目を通知して外す経路を使います。
 
 `base` か `tools` で選択した child は、選択どおりにできなければ（Mail の proxy が無い、server を写せない、computer use が有効な project での `mail-only` など）起動しません。形の誤りはここで 400、child の起動ディレクトリで決まる誤りは launcher の失敗として返ります。Gemini など他の provider では、`mail-only` と `tools` を拒否します。
 
@@ -566,6 +601,8 @@ request:
 ```
 
 `argv` は実起動と同じ builder で組み立てます。`name` を省略した場合の `<child-name>` は実起動で選ぶ名前の仮置きです。指定名は検証してそのまま表示しますが、登録時にサーバーが正規化する場合があります。`<child-token-file>` と Gemini の `launcher_env` にある `<gemini-task-file>` は、実起動でだけ作るファイルの仮置きです。`launcher_env` は provider 固有の上書き値で、継承する環境全体は含みません。プレビューでは identity 登録・予約・Mail・tmux・agent process 起動を行わず、token・task・annotation・log・worktree のファイルも作りません。parent の認証情報も不要です。検証では read-only の Git 確認と、実際の CLI/model の組を解決するため既存の時間制限付き Codex `--version` probe を実行する場合があります。`async: true` を併用してもプレビューだけを返します。名前や resources は予約しないため、実起動までに使用状況が変わる場合があります。
+
+Codex のモデル省略または `sol` で既定を変更した場合、preview・同期結果・非同期の pending と最終結果に `model_note` を含みます。変更前後の ID と理由を伝え、期限切れの cache の場合は取得日時と更新方法も示します。正式 ID を指定した要求にはこの置換通知を付けません。
 
 成功:
 
@@ -625,3 +662,13 @@ curl -s 'http://127.0.0.1:8770/api/spawn-status?name=WindyFermi'
 - [Dashboard](dashboard.md)
 - [設定](configuration.md)
 - [トラブルシューティング](troubleshooting.md)
+
+登録 pending の画面からの同 intent 再送は `POST /api/global/spawn` に status の `registration_sha256` を `expected_digest` として添えます（API 17）。同じ operation mutex の下で照合し、不一致は `REGISTRATION_PENDING_CONFLICT`、pending が既に無ければ `TARGET_UNAVAILABLE`。登録の認証・名前・program/model の既存照合は維持します。
+
+### global runtime 読取（API 18）
+
+`GET /api/runtime-observations?agent_ids=1,2` は既存の HTTP operator admission に通った要求だけを受け付けます。ID は正の63bit整数、重複なし、1〜200件。入力が不正なら `QUERY_INVALID` です。公開 Mail tool の追加はありません。応答 schema は `global-runtime-observation.json` の1定義です。
+
+`items` は各 ID の `liveness`、nullable な `act_state` / `ctx_used`、`session_count`、`parent_agent_id` / `parent_state`、`activity_freshness` / `reason` を返します。token・pane capture・私有 path は返しません。未知を waiting や context 0 に置き換えません。[観測と能力の確認](dashboard.md#global-runtime-observation)を参照してください。
+
+`global_runtime_observation=1` と `operator_session=1` を広告します。global の `/api/quotas` と `/portrait` も同じ admission を通り、既存の読取処理を使用します。画像は共有 session の `apiBlob` で取得して object URL とし、Lock で revoke します。

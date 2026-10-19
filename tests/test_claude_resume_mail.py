@@ -333,6 +333,8 @@ def tmux_resume(resume, monkeypatch):
             raise AssertionError(argv)
         return SimpleNamespace(returncode=status, stdout=stdout, stderr='fixture failed' if status else '')
     monkeypatch.setattr(server.subprocess, 'run', run)
+    from _legacy_dashboard_transport import install_legacy_transport
+    install_legacy_transport(monkeypatch, runtime.parent, server, run, sessions=sessions)
     def open_window(argv, **kw):
         state['windows'].append(argv)
         assert not state['started'] and state['active']
@@ -420,8 +422,7 @@ def test_real_isolated_tmux_preserves_husk_until_the_cli_gate_commits(monkeypatc
     bindir.mkdir()
     wrapper = bindir / 'tmux'
     socket_dir = Path(tempfile.mkdtemp(prefix='resume139-tmux-'))
-    socket_name = 'fixture'
-    wrapper.write_text('#!/bin/sh\nexec ' + tmux_binary + ' -L ' + socket_name + ' -f /dev/null "$@"\n')
+    wrapper.write_text('#!/bin/sh\nexec ' + tmux_binary + ' -f /dev/null "$@"\n')
     wrapper.chmod(0o700)
     monkeypatch.setenv('TMUX_TMPDIR', str(socket_dir))
     monkeypatch.setenv('PATH', str(bindir) + ':' + os.environ['PATH'])
@@ -431,7 +432,8 @@ def test_real_isolated_tmux_preserves_husk_until_the_cli_gate_commits(monkeypatc
     cli = tmp_path / 'fixture-cli'
     cli.write_text('#!/bin/sh\nprintf started > ' + str(marker) + '\nsleep 30\n')
     cli.chmod(0o700)
-    monkeypatch.setattr(server, '_open_terminal_tmux', lambda *a, **k: {'ok': succeeds, 'adapter': 'fixture'})
+    windows = []
+    monkeypatch.setattr(server, '_open_terminal_tmux', lambda *a, **k: windows.append(a) or {'ok': succeeds, 'adapter': 'fixture'})
     try:
         old = subprocess.run([str(wrapper), 'new-session', '-d', '-P', '-F', '#{session_id}', '-s', NAME,
                               '/bin/sh', '-c', 'sleep 30'], capture_output=True, text=True, check=True).stdout.strip()
@@ -441,6 +443,7 @@ def test_real_isolated_tmux_preserves_husk_until_the_cli_gate_commits(monkeypatc
         # Detached startup cannot fail at the window boundary.
         expected_success = not opens or succeeds
         assert answer['ok'] is expected_success, answer
+        assert len(windows) == int(opens)
         sessions = subprocess.run([str(wrapper), 'list-sessions', '-F', '#{session_id}:#{session_name}'],
                                   capture_output=True, text=True, check=True).stdout.splitlines()
         if expected_success:
@@ -468,3 +471,53 @@ def test_pending_preregistration_cannot_be_resumed_concurrently(resume):
         child_resume.begin_resume(runtime, NAME, agent_id=73, project_key=registration['project_key'], program='claude-code')
     child_resume.finish_registration(runtime, NAME, generation='a' * 32, rollback=True)
     assert child_resume.inspect_retained(runtime, NAME, agent_id=73, project_key=registration['project_key'], program='claude-code')
+
+
+@pytest.mark.parametrize("failure", ["register_agent", "unretire_agent", "tmux", "late-cli"])
+def test_tools_change_real_resume_auth_and_launch_boundary(resume, monkeypatch, failure):
+    from hooks import claude_chrome_policy
+    runtime, registration, launches, calls = resume
+    child(runtime, registration)
+    monkeypatch.setattr(server, "_child_session_live", lambda *a: False)
+    monkeypatch.setattr(server, "_has_session", lambda *a: False)
+    monkeypatch.setattr(server, "_resume_capability", lambda *a, **k: "ready")
+    monkeypatch.setattr(server, "_claude_conversation_reason", lambda *a: ({}, None))
+    directory = runtime / "child-agents"
+    record = Path(claude_chrome_policy.session_path(str(directory), NAME, SID))
+    claude_chrome_policy._write(str(record), {"version": 4, "agent_name": NAME,
+        "session_id": SID, "launch_id": "prior-launch-id", "standalone": False,
+        "claude_chrome": False, "chrome_device": "", "base": "default", "tools": {}})
+    old = record.read_bytes()
+    original = server._mcp_call
+    if failure in {"register_agent", "unretire_agent"}:
+        def failing_call(name, args):
+            if name == failure:
+                calls.append((name, args))
+                return {"ok": False, "error": TOKEN}
+            return original(name, args)
+        monkeypatch.setattr(server, "_mcp_call", failing_call)
+    elif failure == "tmux":
+        monkeypatch.setattr(server, "_launch_claude_resume_tmux",
+            lambda *a, **k: {"ok": False, "error": "fixture startup failure"})
+    else:
+        # Execute the fixture provider only after launch was accepted. A later CLI exit cannot turn the HTTP acceptance into a
+        # failed transaction or undo its selection.
+        Path(server.ABS_CLAUDE).write_text("#!/bin/bash\nexit 42\n")
+    result = server.do_jump(NAME, base="mail-only", tools={}, open_terminal=False)
+    assert result["ok"] is (failure == "late-cli"), result
+    assert TOKEN not in json.dumps(result)
+    assert not child_resume._tools_journal(directory / f"{NAME}.json").exists()
+    if failure in {"register_agent", "unretire_agent"}:
+        assert failure in [method for method, _ in calls]
+    if failure != "late-cli":
+        assert record.read_bytes() == old
+        retained = child_resume.inspect_retained(runtime, NAME, agent_id=73,
+            project_key=registration["project_key"], program="claude-code")
+        assert "resume_in_progress_at" not in retained
+    else:
+        assert json.loads(record.read_text())["base"] == "mail-only"
+        # Run the provider command directly, since cleanup requires a test
+        # Mail transport and is already covered by real-Mail fixtures above.
+        done = subprocess.run([server.ABS_CLAUDE, "--resume", SID], check=False)
+        assert done.returncode == 42
+        assert json.loads(record.read_text())["base"] == "mail-only"

@@ -13,6 +13,8 @@ import pytest
 
 import dashboard.server as server
 
+pytestmark = pytest.mark.usefixtures("isolated_provider_stall_runtime")
+
 
 @pytest.mark.parametrize("cleanup_status", ["missing", 0, 1])
 def test_main_serves_dashboard_with_optional_pkill(monkeypatch, cleanup_status):
@@ -28,6 +30,7 @@ def test_main_serves_dashboard_with_optional_pkill(monkeypatch, cleanup_status):
     # Its first pass reads the real runtime and runs tmux per child; a thread
     # left running from here called later tests' subprocess stubs.
     monkeypatch.setattr(server, "_start_child_resume_maintenance", lambda: None)
+    monkeypatch.setattr(server, "_start_provider_stall_monitor", lambda: None)
     monkeypatch.setattr(server, "BIND_HOST", "127.0.0.1")
     monkeypatch.setattr(server, "PORT", 0)
 

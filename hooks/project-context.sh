@@ -40,7 +40,7 @@ agentstack_installed_env_value() {
             return $?
             ;;
     esac
-    agentstack_literal_installed_env_value "$name" "$env_file" "$reader"
+    agentstack_literal_installed_env_value "$name" "$env_file" "$reader" "${3:-}"
 }
 
 # Historical non-executing lookup for direct hooks and ordinary settings.
@@ -56,7 +56,7 @@ agentstack_literal_installed_env_value() {
     esac
     [ -f "$env_file" ] || return 0
     command -v "$reader" >/dev/null 2>&1 || reader=python3
-    "$reader" - "$env_file" "$name" <<'PY' 2>/dev/null || true
+    "$reader" - "$env_file" "$name" "${4:-}" <<'PY' 2>/dev/null || { [[ "${4:-}" != --shell ]]; }
 import pathlib
 import re
 import shlex
@@ -64,10 +64,14 @@ import sys
 
 path = pathlib.Path(sys.argv[1])
 name = sys.argv[2]
+shell = sys.argv[3] == '--shell'
+def invalid():
+    if shell: print('false', end='')
+    raise SystemExit(0)
 try:
     raw = path.read_text(encoding="utf-8")
 except (OSError, UnicodeError):
-    raise SystemExit(0)
+    invalid()
 
 pattern = re.compile(r"^\s*export\s+" + re.escape(name) + r"=(.*)$")
 for line in raw.splitlines():
@@ -77,8 +81,12 @@ for line in raw.splitlines():
     try:
         values = shlex.split(match.group(1), comments=True, posix=True)
     except ValueError:
-        raise SystemExit(0)
-    if len(values) == 1:
+        invalid()
+    if shell:
+        if not values and not match.group(1).strip(): values = ['']
+        if len(values) != 1: invalid()
+        print('export ' + name + '=' + shlex.quote(values[0]), end='')
+    elif len(values) == 1:
         print(values[0], end="")
     raise SystemExit(0)
 PY
@@ -95,6 +103,8 @@ PY
 # load env.sh with agentstack_load_installed_env, which keeps an explicit value
 # instead of letting env.sh overwrite it (issues #33 and #137).
 AGENTSTACK_INHERITED_SETTINGS="
+AGENTSTACK_RUNTIME_MODE
+AGENTSTACK_GLOBAL_SERVER_CONFIG
 AGENTSTACK_PROJECT_KEY
 AGENTSTACK_PROTECTED_ROOTS
 AGENTSTACK_EXTRA_PROTECTED_ROOTS
@@ -124,6 +134,7 @@ AGENTSTACK_WORKTREE_ROOT
 AGENTSTACK_CODEX_CHILD_APPROVAL
 AGENTSTACK_CODEX_CHILD_CONFIG_OVERLAY
 AGENTSTACK_CODEX_NETWORK
+AGENTSTACK_CHILD_DEFAULT_TOOLS
 AGENTSTACK_CODEX_ADD_DIRS
 AGENTSTACK_CHILD_RESUME_RETENTION_DAYS
 AGENTSTACK_CODEX_BIN
@@ -165,7 +176,7 @@ agentstack_resolve_setting() {
 agentstack_load_installed_env() {
     local env_file="${1:-${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh}"
     local name value count=0 i=0 live_project_key="" live_protected_roots=""
-    local names=() values=()
+    local names=() values=() env_status=0
     [ -f "$env_file" ] || return 0
     for name in $AGENTSTACK_INHERITED_SETTINGS; do
         value="${!name:-}"
@@ -178,7 +189,7 @@ agentstack_load_installed_env() {
     live_project_key="${AGENTSTACK_PROJECT_KEY:-${PROJECT_KEY:-}}"
     live_protected_roots="${AGENTSTACK_PROTECTED_ROOTS:-}"
     # shellcheck disable=SC1090
-    . "$env_file"
+    . "$env_file" || env_status=$?
     while [ "$i" -lt "$count" ]; do
         name="${names[$i]}"
         value="${!name:-}"
@@ -197,7 +208,7 @@ agentstack_load_installed_env() {
             "$live_project_key" "$live_project_key" "$env_file")"
         export AGENTSTACK_PROTECTED_ROOTS="$value"
     fi
-    return 0
+    return "$env_status"
 }
 
 # Explicit extras are configuration; PROTECTED_ROOTS is a runtime result.
@@ -230,6 +241,10 @@ agentstack_warn_legacy_protected_roots() {
        [ "$inherited" = "$roots" ]; then
         return 0
     fi
+    # Explicit extras with no incoming legacy roots need no diagnostic lookup.
+    if [ -z "$inherited" ] && [ "${AGENTSTACK_EXTRA_PROTECTED_ROOTS+x}" = x ]; then
+        return 0
+    fi
     installed="$(agentstack_installed_env_value AGENTSTACK_PROTECTED_ROOTS "$env_file")" || return 1
     if [ -n "$inherited" ] && [ "$inherited" != "$installed" ]; then
         legacy="$inherited"
@@ -260,7 +275,12 @@ agentstack_load_top_level_env() {
     fi
     # Reject ambiguous legacy root declarations before the generic source.
     agentstack_installed_env_value AGENTSTACK_PROTECTED_ROOTS "$env_file" >/dev/null || return 1
-    agentstack_load_installed_env "$env_file" || return 1
+    if command -v ags_client_bootstrap >/dev/null 2>&1; then
+        shift
+        ags_client_bootstrap "$env_file" "$@" || return 1
+    else
+        agentstack_load_installed_env "$env_file" || return 1
+    fi
     # The legacy generic loader remains available to direct hooks/installers.
     # Managed launches use only EXTRAS as config, and retain incoming ROOTS
     # solely for the warning before replacing it with the resolved workspace.

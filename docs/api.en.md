@@ -48,7 +48,7 @@ with HTTP 400. A media-type mismatch is HTTP 415, a cross-origin POST is HTTP 40
 | GET | `/api/mail-watcher-health` | none | watcher / signal health |
 | GET | `/portrait` | `name`, `hi` | PNG or fallback SVG |
 | GET | `/assets/<file>` | `.svg` / `.png` basename | static asset |
-| POST | `/api/jump` | `{session}` | open / focus / resume action |
+| POST | `/api/jump` | `{session, open?, base?, tools?}` | open / focus / resume action |
 | POST | `/api/exit` | `{session}` | graceful exit action |
 | POST | `/api/kill` | `{session, mode}` | kill / retire action |
 | POST | `/api/annotate` | `{name, role, emoji, group}` | saved annotation |
@@ -61,13 +61,32 @@ curl -s http://127.0.0.1:8770/api/version
 ```
 
 ```json
-{"name":"orrery-telemetry","version":"2026.09.16.1","api":7}
+{"name":"orrery-telemetry","version":"2026.09.16.1","api":19}
 ```
 
 See [Installation](install.en.md#version) for version resolution order.
 
 - `version`: when the release was made (a date; see the [CHANGELOG](../CHANGELOG.md)). It is not a compatibility promise
-- `api`: the **compatibility generation** for the programs that use this API ([ORRERY cockpit](https://github.com/gyroid-eth/orrery) and others). It goes up by one only when an endpoint or field those programs rely on is **added or changes meaning**, and the CHANGELOG says so; it does not go up with every release. A program should decide whether a feature it needs is there from `api`, not from the date in `version` (the cockpit warns at startup when `api` is lower than it needs). This scheme starts at `api` 2; every earlier release reports 1, whatever it can do
+- `api`: the **compatibility generation** for the programs that use this API ([ORRERY cockpit](https://github.com/gyroid-eth/orrery) and others). It goes up by one only when an endpoint or field those programs rely on is **added or changes meaning**, and a [changelog fragment](../changelog.d/) records it (collected into the CHANGELOG at release; see [Contributing](../CONTRIBUTING.md#changelog-fragments-and-releases)); it does not go up with every release. A program should decide whether a feature it needs is there from `api`, not from the date in `version` (the cockpit warns at startup when `api` is lower than it needs). This scheme starts at `api` 2; every earlier release reports 1, whatever it can do
+
+### Isolated global backend (API 17)
+
+Explicit global mode applies operator capability admission to every non-static route, including `/api/version`. `capabilities.operator_http_admission`, `ui_read`, `global_spawn`, `instruction_migration` and `global_dashboard_ui` are 1. Gate the screen on its capability, never the API number alone. See [configuration, authority and interrupted recovery](global-delivery-client.en.md#operator-ui-access). Legacy payloads and admission remain unchanged.
+
+API 17 adds the global dashboard reply view and these admitted, read-only routes. Legacy mode remains the default; activation is false.
+
+| Route | Projection |
+| --- | --- |
+| `GET /api/instruction-migration?agent_id=ID&session_id=SESSION` | Optional session selector; canonical instruction findings from that identity’s fixed provider HOME. Unknown or ambiguous ownership returns `disk_state:unknown`, never the dashboard operator’s HOME. |
+| `GET /api/fs/dirs?path=PATH` | Existing spawn-root directory guard, independent of Mail identity and work-folder changes. |
+| `GET /api/deliverables` | `configured` and `items` keyed by agent name; only explicit `AGENTSTACK_DELIVERABLE_ROOTS`. Unset means an empty result. |
+
+Instruction `data` follows the shared [status schema](../bin/lib/instruction_contract.json): provider, target_path, findings, checked_at, disk_state, session_state, evidence_kind and reason. Findings are the existing canonical finding definition. Session-start candidate hashes do not prove effective instruction loading; a cwd change is not a reload. All three routes use the same operator admission as Mail reads.
+
+
+### Bundled Mail identity (API 12)
+
+In API 12 distributions, bundled ORRERY Mail's MCP `health_check` returns `server_instance_id`, the same persistent UUID as management-socket inspect. It is neither a secret nor authentication. Daemons compare both transports with the operator-pinned connection UUID, refusing older builds without the field or mismatches. Existing `status`, `environment`, `http_host`, and `http_port` fields remain. This adds no dashboard HTTP route. See [daemon bindings and notifications](daemon-agents.en.md).
 
 ## GET `/api/spawn-names`
 
@@ -113,6 +132,7 @@ curl -s http://127.0.0.1:8770/api/spawn-names
       "default_model":"gpt-6.1-sol",
       "model_source":"bundled",
       "model_error":"",
+      "model_note":"",
       "efforts":["low","medium","high","xhigh","max","ultra"],
       "effort_default":"xhigh"
     }
@@ -124,7 +144,7 @@ The scientist rail's `status` indicates whether at least one pairing of that sci
 
 The adjectives are synchronized word-for-word with ORRERY Mail's canonical `SIMPLE_ADJECTIVES` Round 3 list, and the launcher, catalog, and suggestion API use the same source. Custom additions are prohibited because they diverge from name validation in strict deployments.
 
-Codex augments bundled candidates with fresh local CLI cache entries. Explicit `AGENTSTACK_CODEX_MODELS` restricts candidates to that allowlist; invalid configuration appears in `model_error`. `model_source` is `bundled`, `local_cache`, or `override`. The default is `gpt-6.1-sol` when the selected CLI is 0.159.0 or later (fresh catalog evidence is used if its version is unknown); otherwise it is `gpt-6-sol`. Candidate order never chooses the default. Codex CLI 0.159.0 or later is required for GPT-6.1 Sol; doctor reports fallback and update guidance. Use a formal ID such as `gpt-6-sol` to pin the previous generation. Provider dictionaries `model_efforts` and `model_effort_defaults`, keyed by model ID, take precedence in the UI. An empty effort list means omit effort and use the CLI default. See [configuration](configuration.en.md#codex-model-catalog).
+Codex augments bundled candidates with local CLI cache entries fetched within 300 seconds. Explicit `AGENTSTACK_CODEX_MODELS` restricts candidates to that allowlist; invalid configuration appears in `model_error`. `model_source` is `bundled`, `local_cache`, or `override`. For omission and `sol`, the initial default is `gpt-6.1-sol` with selected CLI 0.159.0+, otherwise `gpt-6-sol`; unknown versions use fresh catalog evidence. If that ID is absent from the selected `CODEX_HOME` cache, choose the next cached candidate in order: `gpt-6.1-sol` → `gpt-6-sol` → `gpt-6-luna` → `gpt-5.6-terra` → `gpt-5.6-luna`. Expired snapshots can lower the default too, but an older CLI never moves up to GPT-6.1 Sol. Without a usable cache or next candidate, the existing default remains. Explicit formal IDs are never substituted. Provider `model_note` is empty when the preferred default is unchanged, otherwise it reports both IDs and the reason; a stale snapshot also supplies its timestamp and guidance to start `codex` to refresh it. Cache `identity` is not checked against the current login, and fallback does not prove account authorization. Provider dictionaries `model_efforts` and `model_effort_defaults`, keyed by model ID, take precedence in the UI. An empty effort list means omit effort and use the CLI default. See [configuration](configuration.en.md#codex-model-catalog).
 
 ## GET `/api/name-status`
 
@@ -187,6 +207,8 @@ When `path` is omitted, the first `AGENTSTACK_SPAWN_ROOTS` entry is used. For a 
 Hidden directories and symlinks that leave the root are excluded. Up to 500 entries are returned in name order because the page filters the complete list by the typed prefix. With 501 or more entries, `truncated` is `true`.
 
 ## GET `/api/agents`
+
+API generation 19 adds nullable `provider_stall` to live legacy Codex CLI agent rows and graph nodes: `{kind: "model_capacity", since: <UTC epoch seconds>, error: <one error line>, notification_status: <status>}`. Status is `sent`, `no_parent`, `parent_unverified`, `delivery_unknown`, or `failed`. It does not change `act_state`. The dashboard observes two distinct current capacity-error captures and sends one notice from the existing child identity to its verified parent. Observed work rearms it; a proven append of "previous stop → newly submitted input → new capacity error" in the same pane also produces a new notice after two captures confirm that boundary. Ambiguous history retains the current episode. GET requests never send messages. An uncertain delivery is not retried. Global mode is not supported yet; see [provider stops](dashboard.en.md#provider-stop-notifications-legacy).
 
 There is no query. DECK fetches it every few seconds.
 
@@ -395,15 +417,20 @@ The response includes at least these diagnostics:
 
 ```json
 {
-  "status":"ok",
+  "status":"green",
   "watcher_running":true,
   "signal_count":0,
+  "actionable_signal_count":0,
+  "orphan_signal_count":0,
+  "signal_sessions_known":true,
   "last_success_age_s":4,
-  "recent_results":{"delivered":3}
+  "recent_results":{"success":3}
 }
 ```
 
 The header indicator uses the watcher process, signal backlog, most recent success time, and delivery results from the last ten minutes.
+
+API 11 keeps `signal_count` as the total, including legacy signals, and adds `actionable_signal_count`, `orphan_signal_count` and `signal_sessions_known`. Only signals at least 24 hours old with a confirmed absent tmux recipient and no persistent headless runtime manifest are orphans. Measurement failures keep all signals actionable. A stopped watcher or more than 50 actionable signals is `red`; a pending actionable signal with no success in the last 120 seconds is `yellow`; otherwise health is `green`.
 
 ## GET `/portrait`
 
@@ -422,6 +449,8 @@ Only basenames immediately under `dashboard/assets` are served. Allowed extensio
 
 ## POST `/api/jump`
 
+API13: `/api/jump` accepts explicit `runtime_mode=global`, `client_config`, `client_name`, `prepare_only=true`, `open=false` for fixed-root resume preparation. `runtime_ready` remains false; legacy session input is unchanged.
+
 Request:
 
 ```json
@@ -437,6 +466,8 @@ Claude verifies its saved owner credential against the original project, numeric
 If Claude startup preparation fails, the original husk is preserved and Mail is re-retired only if it was originally retired. An originally active identity is not retired. Failures of the restoration itself are reported in `rollback_errors`; they are not reported as successful recovery. The CLI waits until tmux and window preparation succeed.
 
 A known three-field legacy Claude child can be `ready` when its private token and existing owned registration pass local validation. Roster GET remains read-only; owner authentication and migration of the same identity happen only on explicit resume. Authentication failure refuses startup ([migration, retention, and rollback](launchers.en.md)).
+
+API 9 accepts optional `base` / `tools`. `tools` replaces the whole selection; `{}` removes extra tools. Omitted base keeps the recorded base; base alone keeps prior tools. Omitting both preserves existing behavior. Changes refuse running/unknown children, missing retained state, standalone, conversation-only and Codex App. Complete `/api/exit` and confirm `gone` / `finished` first. Changes are serialized per child, using existing authentication and native resume; startup failure restores that generation's previous record/generated settings. Success means tmux/the terminal accepted the launch, without waiting for shell bootstrap/authentication. Later failures keep the new selection for the next resume. Confirm receipt of the child’s report. Success adds `tools_changed: true`, `base` and `tools`. Installer defaults are not appended. See [procedure and limits](delegation.en.md#resume-a-stopped-child-with-different-tools).
 
 ## POST `/api/exit`
 
@@ -541,8 +572,10 @@ Request:
 | `worktree_base` | no | Base revision; default `HEAD` |
 | `claude_chrome` | Claude only | Boolean. `true` adds `--chrome` to the child. Omitted or `false` means inherit (the user's Claude settings decide). The launcher's env defaults are not used. See [Claude in Chrome](delegation.en.md#claude-children-and-browser-control-claude-in-chrome) |
 | `claude_chrome_device` | Claude only | deviceId of the browser to use (`[A-Za-z0-9._:-]{1,128}`). Implies `claude_chrome: true`; combining it with `claude_chrome: false` is rejected |
-| `base` | Claude / Codex | `"default"` (same as omitted: the launch as before) or `"mail-only"` (ORRERY Mail and only what `tools` selects). Since api 7 |
-| `tools` | Claude / Codex | Object: `browser` (`true` or `{"device": "<deviceId>"}`, Claude only), `screen` (`"read"` / `"operate"` or `{"access": ..., "server": "<name>"}`; without a server it is the macOS computer use, Claude only), `mcp` (array of server names; no tool is approved), `approve_all` (servers in `mcp` whose every tool is approved; rejected for a version not in the table). Rejected when its deviceId differs from `claude_chrome_device`. Since api 7. See [Choosing the tools a child gets](delegation.en.md#choosing-the-tools-a-child-gets---base----tools) |
+| `base` | Claude / Codex | `"default"` (explicitly suppresses installer tool defaults) or `"mail-only"` (ORRERY Mail and only what `tools` selects). Since api 7 |
+| `tools` | Claude / Codex | Object: `browser` (`true` for Claude/Codex, `{"device": "<deviceId>"}` with a Claude-only deviceId), `screen` (`"read"` / `"operate"` or `{"access": ..., "server": "<name>"}`; without a server it is the macOS computer use, Claude only), `mcp` (array of server names; no tool is approved), `approve_all` (servers in `mcp` whose every tool is approved; rejected for a version not in the table). Rejected when its deviceId differs from `claude_chrome_device`. Since api 7. See [Choosing the tools a child gets](delegation.en.md#choosing-the-tools-a-child-gets---base----tools) |
+
+In API 8, explicit `tools: {}` or `base: "default"` passes `--base default`. Dashboard/API launches honor the form selection and remove installer `AGENTSTACK_CHILD_DEFAULT_TOOLS` from the launcher environment, so removed choices are not appended again. Unavailable explicit tools stop the launch. Only CLI launches omitting base/tools/MCP profile use the path that omits unavailable defaults with a notice.
 
 A child with a `base` or `tools` selection is not started when the selection cannot be applied (no Mail proxy, a server that cannot be copied, `mail-only` in a project where the computer use is enabled, ...). Malformed selections return 400 here; errors that depend on the child's directory are returned as a launcher failure. Other providers such as Gemini reject `mail-only` and `tools`.
 
@@ -566,6 +599,8 @@ Adding `"dry_run": true` validates the request and resolves provider, model, eff
 ```
 
 `argv` uses the same builder as an actual launch. `<child-name>` represents the name that a real launch would select when `name` is omitted; a supplied name is checked and shown directly. The server may normalize it during registration. `<child-token-file>` and, for Gemini, `<gemini-task-file>` in `launcher_env` stand for files created only by a real launch. `launcher_env` contains provider-specific overrides, not the inherited environment. The preview registers no identity, takes no reservation, sends no Mail, starts no tmux session or agent process, and creates no token, task, annotation, log or worktree files. Parent credentials are not required for a preview. Validation can run read-only Git checks and the existing bounded Codex `--version` probe to resolve the actual CLI/model policy. `async: true` still returns only this preview. Names and resources are not reserved, so their availability can change before a real launch.
+
+When an omitted Codex model or `sol` changes the default, preview, synchronous, asynchronous pending and final results include `model_note`. It reports both IDs and the reason, plus the timestamp and refresh guidance for a stale snapshot. Explicit formal-ID requests do not receive a substitution notice.
 
 Success:
 
@@ -625,3 +660,13 @@ curl -s 'http://127.0.0.1:8770/api/spawn-status?name=WindyFermi'
 - [Dashboard](dashboard.en.md)
 - [Configuration](configuration.en.md)
 - [Troubleshooting](troubleshooting.en.md)
+
+Explicit same-intent replay from registration status sends `registration_sha256` as optional `expected_digest` to `POST /api/global/spawn` (API 17). The existing operation mutex protects comparison and replay. A mismatch returns `REGISTRATION_PENDING_CONFLICT`; an absent pending returns `TARGET_UNAVAILABLE`. Existing credential/name/program/model checks remain in force.
+
+### Global runtime reads (API 18)
+
+`GET /api/runtime-observations?agent_ids=1,2` requires the existing HTTP operator admission. IDs are unique positive 63-bit integers, with 1–200 per request. Invalid input returns `QUERY_INVALID`. No public Mail tools are added. `global-runtime-observation.json` contains the single response schema.
+
+Each item returns `liveness`, nullable `act_state` / `ctx_used`, `session_count`, `parent_agent_id` / `parent_state`, and `activity_freshness` / `reason`. Tokens, pane captures and private paths are excluded. Unknown is never replaced with waiting or context zero. See [observation and capability checks](dashboard.en.md#global-runtime-observation).
+
+Capabilities include `global_runtime_observation=1` and `operator_session=1`. Global `/api/quotas` and `/portrait` use the same admission and existing read helpers. Images use shared-session `apiBlob` object URLs, revoked on Lock.

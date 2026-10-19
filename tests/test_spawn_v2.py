@@ -219,9 +219,26 @@ def test_spawn_name_status_fails_closed_when_db_missing(monkeypatch):
 
 def test_spawn_names_keeps_home_preset_symbolic(monkeypatch):
     monkeypatch.delenv("AGENTSTACK_SPAWN_DIRS", raising=False)
+    monkeypatch.setattr(server, "PROJECT_KEY", "")
     monkeypatch.setattr(server.subprocess, "run", lambda *a, **k: type("R", (), {"stdout": "Curie\\n"})())
     monkeypatch.setattr(server, "_spawn_name_status", lambda _: "available")
     assert server.spawn_names_payload()["dirs"] == ["~"]
+
+
+def test_spawn_names_defaults_to_the_project_folder_first(monkeypatch):
+    monkeypatch.delenv("AGENTSTACK_SPAWN_DIRS", raising=False)
+    monkeypatch.setattr(server, "PROJECT_KEY", "/work/proj")
+    monkeypatch.setattr(server.subprocess, "run", lambda *a, **k: type("R", (), {"stdout": "Curie\\n"})())
+    monkeypatch.setattr(server, "_spawn_name_status", lambda _: "available")
+    assert server.spawn_names_payload()["dirs"] == ["/work/proj", "~"]
+
+
+def test_spawn_names_keeps_an_explicit_spawn_dirs_unchanged(monkeypatch):
+    monkeypatch.setenv("AGENTSTACK_SPAWN_DIRS", "/a:/b")
+    monkeypatch.setattr(server, "PROJECT_KEY", "/work/proj")
+    monkeypatch.setattr(server.subprocess, "run", lambda *a, **k: type("R", (), {"stdout": "Curie\\n"})())
+    monkeypatch.setattr(server, "_spawn_name_status", lambda _: "available")
+    assert server.spawn_names_payload()["dirs"] == ["/a", "/b"]
 
 
 def test_spawn_names_advertises_codex_provider(monkeypatch):
@@ -232,6 +249,7 @@ def test_spawn_names_advertises_codex_provider(monkeypatch):
         "id": "codex", "label": "Codex", "program": "codex-cli",
         "models": ["gpt-test-a", "gpt-test-b"], "default_model": "gpt-6.1-sol",
         "model_source": "override", "model_error": "", "overflow_models": [],
+        "model_note": "",
         "model_efforts": {"gpt-test-a": [], "gpt-test-b": []},
         "model_effort_defaults": {"gpt-test-a": "", "gpt-test-b": ""},
         "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"], "effort_default": "xhigh",
@@ -408,12 +426,29 @@ def test_mcp_call_shapes_credentials_to_the_live_server_schema(monkeypatch):
     }
 
 
-@pytest.mark.parametrize("model", ["gpt-5.6-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-pro"])
-def test_codex_spawn_passes_model_effort_and_readback_name(monkeypatch, tmp_path, model):
+@pytest.mark.parametrize("model", ["gpt-5.6-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-pro", "", "sol"])
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_codex_spawn_passes_model_effort_and_readback_name(monkeypatch, tmp_path, model, asynchronous):
     launcher = tmp_path / "spawn_child.sh"
     launcher.write_text("#!/bin/bash\n")
     launcher.chmod(0o755)
     calls, launched, environments = [], [], []
+    records = []
+    settled = threading.Event()
+    resolved = model if model and model != "sol" else "gpt-6-luna"
+    if resolved != model:
+        cache_home = tmp_path / "codex"
+        cache_home.mkdir()
+        monkeypatch.setenv("CODEX_HOME", str(cache_home))
+        (cache_home / "models_cache.json").write_text(json.dumps({
+            "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "models": [{"slug": "gpt-6-luna"}],
+        }))
+    def record(name, result):
+        records.append(result)
+        if not result.get("pending"):
+            settled.set()
+    monkeypatch.setattr(server, "_spawn_launch_record", record)
     monkeypatch.delenv("AGENTSTACK_PYTHON", raising=False)
 
     def mcp(method, args, timeout=15):
@@ -439,9 +474,20 @@ def test_codex_spawn_passes_model_effort_and_readback_name(monkeypatch, tmp_path
     monkeypatch.setattr(server.time, "sleep", lambda _: None)
     monkeypatch.setattr(server.subprocess, "Popen", lambda args, **kwargs: (environments.append(kwargs["env"]), launched.append(args))[-1])
     monkeypatch.setattr(server.subprocess, "run", lambda *a, **k: type("R", (), {"returncode": 0})())
-    result = server.do_spawn({"parent": "Parent", "name": "Sunny-Curie", "task": "work", "dir": str(tmp_path), "provider": "codex", "model": model, "effort": "high"})
+    result = server.do_spawn({"parent": "Parent", "name": "Sunny-Curie", "task": "work", "dir": str(tmp_path), "provider": "codex", "model": model, "effort": "high", "async": asynchronous})
 
     assert result["ok"] is True
+    assert result["model"] == resolved
+    if asynchronous:
+        assert settled.wait(2), "mock launcher did not settle"
+        assert records[-1]["model"] == resolved
+    if resolved != model:
+        assert "from gpt-6.1-sol to gpt-6-luna" in result["model_note"]
+        assert result["model_note"] in (tmp_path / "logs/spawn.log").read_text()
+        if asynchronous:
+            assert records[0]["model_note"] == records[-1]["model_note"] == result["model_note"]
+    else:
+        assert "model_note" not in result
     assert environments[0]["AGENTSTACK_PYTHON"] == server.sys.executable
     assert result["requested_name"] == "Sunny-Curie"
     assert result["child_name"] == "SunnyCurie"
@@ -462,7 +508,7 @@ def test_codex_spawn_passes_model_effort_and_readback_name(monkeypatch, tmp_path
         "project_key": "/project",
         "program": "codex-cli",
     }
-    assert launched[0][1:] == ["--pre-registered", "SunnyCurie", "--child-token-file", launched[0][4], "--codex", "--model", model, "--effort", "high", "work", str(tmp_path)]
+    assert launched[0][1:] == ["--pre-registered", "SunnyCurie", "--child-token-file", launched[0][4], "--codex", "--model", resolved, "--effort", "high", "work", str(tmp_path)]
 
 
 def test_auto_spawn_registers_an_explicit_hyphenated_name(monkeypatch, tmp_path):
@@ -813,6 +859,40 @@ def test_process_group_launcher_cleanup_outlives_the_canonical_5s_grace(monkeypa
     assert not (runtime / "agent_token_QuietCurie").exists()
     assert list((runtime / "spawn-tokens").iterdir()) == []
     assert _group_gone(int((tmp_path / "mark.pid").read_text()))
+
+
+_REASON_LAUNCHER = """#!/bin/bash
+echo $$ > "$TEST_MARK.pid"
+echo "[spawn_child] Claude Code's first-run setup is not finished; not answered by the launcher (QuietCurie). Last screen:" >&2
+echo "[spawn_child] reason: Run 'claude' once in a terminal and finish its setup." >&2
+echo "[spawn_child] WARNING: session QuietCurie ended before prompt injection was verified" >&2
+exit 1
+"""
+
+
+def test_a_launcher_reason_line_becomes_the_error_the_cockpit_shows(monkeypatch, tmp_path):
+    launcher, runtime = _prepare_real_spawn(monkeypatch, tmp_path, script=_REASON_LAUNCHER)
+    monkeypatch.setattr(server, "_SPAWN_READINESS_TIMEOUT_SECONDS", 20)
+    spec = _cleanup_spec(launcher, tmp_path, cleanup_seconds=0)
+    result = server.spawn_with_launch_spec(
+        {"standalone": True, "name": "QuietCurie", "task": "work", "dir": str(tmp_path)}, spec)
+    assert result["ok"] is False
+    assert result["error"].startswith(
+        "Run 'claude' once in a terminal and finish its setup. "
+        "(spawn launcher exited with status 1); child registration 'QuietCurie'")
+    assert "ended before prompt injection was verified" in result["detail"]
+
+
+def test_without_a_reason_line_the_error_is_the_exit_status_as_before(monkeypatch, tmp_path):
+    script = _REASON_LAUNCHER.replace(
+        'echo "[spawn_child] reason: Run \'claude\' once in a terminal and finish its setup." >&2\n', "")
+    assert "reason:" not in script
+    launcher, runtime = _prepare_real_spawn(monkeypatch, tmp_path, script=script)
+    monkeypatch.setattr(server, "_SPAWN_READINESS_TIMEOUT_SECONDS", 20)
+    spec = _cleanup_spec(launcher, tmp_path, cleanup_seconds=0)
+    result = server.spawn_with_launch_spec(
+        {"standalone": True, "name": "QuietCurie", "task": "work", "dir": str(tmp_path)}, spec)
+    assert result["error"].startswith("spawn launcher exited with status 1; child registration")
 
 
 def test_cleanup_killed_past_its_grace_is_reported_and_keeps_owner_credential(monkeypatch, tmp_path):
@@ -1469,3 +1549,132 @@ def test_hooks_without_the_script_count_as_unknown_on_both_sides(monkeypatch, tm
     monkeypatch.setattr(server, "spawn_with_launch_spec", lambda payload, spec: {"model": spec.model})
     assert server.do_spawn({"parent": "Parent", "task": "work"}) == {"model": "claude-opus-5-5"}
     assert claude_models._bound_child_path == ""
+
+
+def test_nvm_node_failure_precedes_registration_cleanup_in_spawn_error(monkeypatch, tmp_path):
+    script = '''#!/bin/bash
+echo $$ > "$TEST_MARK.pid"
+echo "note: skipping codex /synthetic/nvm/bin/codex: '/synthetic/nvm/bin/codex --version' exited with status 127: env: node: No such file or directory" >&2
+echo "Error: no usable Codex CLI found" >&2
+exit 1
+'''
+    launcher, runtime = _prepare_real_spawn(monkeypatch, tmp_path, script=script)
+    monkeypatch.setattr(server, "_SPAWN_READINESS_TIMEOUT_SECONDS", 20)
+    result = server.spawn_with_launch_spec(
+        {"standalone": True, "name": "QuietCurie", "task": "work", "dir": str(tmp_path)},
+        _cleanup_spec(launcher, tmp_path, cleanup_seconds=0))
+    assert not result["ok"]
+    assert result["error"].startswith("note: skipping codex /synthetic/nvm/bin/codex:")
+    assert result["error"].index("node: No such file") < result["error"].index("child registration")
+    assert "no permission to delete" in result["error"]
+
+
+def test_first_launcher_reason_is_retained_before_later_cleanup_reason(tmp_path):
+    log = tmp_path / "spawn.log"
+    log.write_text("[spawn_child] reason: original failure\n[spawn_child] reason: cleanup failure\n")
+    _, reason = server._spawn_log_tail_and_reason(log)
+    assert reason == "original failure"
+
+
+def test_readiness_reason_outranks_an_earlier_rejected_candidate(tmp_path):
+    log = tmp_path / "spawn.log"
+    log.write_text("note: skipping codex /synthetic/obsolete: rejected\n"
+                   "[spawn_child] reason: selected CLI needs setup\n")
+    assert server._spawn_log_tail_and_reason(log)[1] == "selected CLI needs setup"
+
+
+def test_replaced_codex_candidate_does_not_hide_the_actual_launch_error(tmp_path):
+    log = tmp_path / "spawn.log"
+    log.write_text("note: skipping codex /synthetic/obsolete: missing node\n"
+                   "Error: could not prepare the Codex MCP profile\n"
+                   "Error: cleanup failed\n")
+    assert server._spawn_log_tail_and_reason(log)[1] == (
+        "Error: could not prepare the Codex MCP profile")
+
+
+def test_all_codex_candidates_failed_keeps_node_detail_before_cleanup(tmp_path):
+    log = tmp_path / "spawn.log"
+    log.write_text("note: skipping codex /synthetic/obsolete: missing node\n"
+                   "Error: no usable Codex CLI found\n"
+                   "Error: cleanup failed\n")
+    assert server._spawn_log_tail_and_reason(log)[1] == (
+        "note: skipping codex /synthetic/obsolete: missing node; "
+        "Error: no usable Codex CLI found")
+
+
+def test_discarded_codex_note_alone_is_not_a_launch_failure_reason(tmp_path):
+    log = tmp_path / "spawn.log"
+    log.write_text("note: skipping codex /synthetic/obsolete: missing node\n")
+    assert server._spawn_log_tail_and_reason(log)[1] == ""
+
+
+@pytest.mark.parametrize("returncode", [0, 1])
+@pytest.mark.parametrize("old_line", [
+    "[spawn_child] reason: obsolete setup failure\n",
+    "note: skipping codex /synthetic/windows: obsolete Windows install\n",
+])
+def test_spawn_failure_reads_only_the_current_append_interval(monkeypatch, tmp_path, returncode, old_line):
+    script = ('#!/bin/bash\necho $$ > "$TEST_MARK.pid"\n'
+              'echo "Error: current launch failure" >&2\n'
+              f"exit {returncode}\n")
+    launcher, _ = _prepare_real_spawn(monkeypatch, tmp_path, script=script)
+    log = tmp_path / "logs/spawn.log"
+    log.parent.mkdir()
+    log.write_text("過去の起動\n" + old_line)
+    result = server.spawn_with_launch_spec(
+        {"standalone": True, "name": "QuietCurie", "task": "work", "dir": str(tmp_path)},
+        _cleanup_spec(launcher, tmp_path, cleanup_seconds=0))
+    assert not result["ok"]
+    assert result["error"].startswith("Error: current launch failure")
+    assert "obsolete" not in result["error"] + result["detail"]
+    assert "過去の起動" not in result["detail"]
+    assert old_line in log.read_text()  # The shared historical log is retained.
+
+
+def test_all_failed_candidates_keep_windows_and_node_notes_in_order(tmp_path):
+    log = tmp_path / "spawn.log"
+    notes = ["note: skipping codex /mnt/c/npm/codex: Windows shim",
+             "note: skipping codex /synthetic/nvm/bin/codex: env: node: No such file or directory"]
+    log.write_text("\n".join([*notes, "Error: no usable Codex CLI found"]))
+    assert server._spawn_log_tail_and_reason(log)[1] == "; ".join(
+        [*notes, "Error: no usable Codex CLI found"])
+
+
+def test_all_failed_candidates_report_omitted_count_within_limit(tmp_path):
+    log = tmp_path / "spawn.log"
+    notes = [f"note: skipping codex /synthetic/{index}: " + "x" * 130 for index in range(8)]
+    log.write_text("\n".join([*notes, "Error: no usable Codex CLI found"]))
+    reason = server._spawn_log_tail_and_reason(log)[1]
+    assert reason == ("; ".join(notes[:2]) + "; (+6 more skipped candidates); "
+                      "Error: no usable Codex CLI found")
+    assert len(reason) <= 500
+
+
+def test_a_single_oversized_candidate_still_leaves_room_for_omitted_count(tmp_path):
+    log = tmp_path / "spawn.log"
+    log.write_text("note: skipping codex /" + "x" * 600 +
+                   "\nnote: skipping codex /second: missing node\nError: no usable Codex CLI found")
+    reason = server._spawn_log_tail_and_reason(log)[1]
+    assert reason.startswith("note: skipping codex /")
+    assert reason.endswith("…; (+1 more skipped candidates); Error: no usable Codex CLI found")
+    assert len(reason) == 500
+
+
+def test_single_oversized_candidate_keeps_final_resolution_error(tmp_path):
+    log = tmp_path / "spawn.log"
+    log.write_text("note: skipping codex /" + "x" * 600 +
+                   "\nError: no usable Codex CLI found")
+    reason = server._spawn_log_tail_and_reason(log)[1]
+    assert reason.startswith("note: skipping codex /")
+    assert reason.endswith("…; Error: no usable Codex CLI found")
+    assert "more skipped" not in reason
+    assert len(reason) == 500
+
+
+def test_long_error_remains_whole_when_candidate_count_exceeds_budget(tmp_path):
+    log = tmp_path / "spawn.log"
+    error = "Error: no usable Codex CLI found " + "E" * 438
+    assert len(error) == 471
+    log.write_text("note: skipping codex /first: " + "x" * 600 +
+                   "\nnote: skipping codex /second: missing node\n" + error)
+    assert server._spawn_log_tail_and_reason(log)[1] == error

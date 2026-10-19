@@ -6,13 +6,170 @@
 
 **この記録は 2026.09.16 から始めます。** それ以前は `VERSION` が `0.9.0` のまま更新されておらず、版から中身を知ることができませんでした。過去 6 週間分を遡って記載することはせず、ここを新しい基点とします。以前の版を使っていた場合も、上書き更新の手順は変わりません。
 
+未リリースの変更は [changelog.d/](changelog.d/) の断片を参照してください。追加・リリースの手順は [CONTRIBUTING.md](CONTRIBUTING.md#changelog-fragments-and-releases) にまとめています。
+
 ---
 
-## Unreleased
+## 2026.10.06
 
-### 起動先の保護を毎回計算し、既存の追加 root を自動移行します
+### Codex の既定モデルを、そのアカウントで使えるものに下げます
 
-managed 起動は順序付き `AGENTSTACK_EXTRA_PROTECTED_ROOTS` と実際の物理 workspace を保護し、古い runtime root を再利用しません。namespace の選択と installed project key は変えません。install/update は process extras → installed extras → installed 旧 root の literal 値・順序を一度だけ → 空、の順で選び、空も保存します。ambient shell/tmux の旧 root は取り込まず、不正・曖昧な旧設定は上書き前に停止します。移行元・値・保存先は `--dry-run` でも表示します。`--reset-settings` は extras を保持します。旧 field は direct/unmanaged hook 互換用に残し、異なる非空の ambient 旧値は extras があっても警告します。相対予約名は最初に一致する root から決まるため、cutover 前に作業完了・予約解放、更新後に影響する session をまとめて再起動してください。custom warm pool は `claim-workspace-v1` で稼働 provider の context の完全一致を不可分に検証できる場合だけ再利用し、旧版 pool は cold start します。
+モデルを省略した Codex の子と NEW AGENT の既定は `gpt-6.1-sol` でした。無料の ChatGPT の plan など、このモデルを使えないアカウントでは、起動の直後に 400 で止まっていました。選択された `CODEX_HOME` の CLI ローカル cache にその ID が無ければ、`gpt-6.1-sol` → `gpt-6-sol` → `gpt-6-luna` → `gpt-5.6-terra` → `gpt-5.6-luna` の順で、掲載されている次の候補へ下げます。既定を下げる判断には期限切れの cache も使い、変更があれば provider の `model_note` に変更前後と理由を返します（API 10）。
+
+正式 ID の明示要求は置き換えません。cache の `identity` は現在のログインと照合しておらず、fallback は利用権限の証明ではありません。2026-10-06、無料の ChatGPT の Codex（`gpt-6-luna` medium）で、Full tour のしりとりが最後まで通ることを確かめました。詳しくは [設定](docs/configuration.md#codex-model-catalog) を参照してください。
+
+### Codex でも `$delegate` と `$log` を使えます
+
+installer は `delegate` と `log` の skill を、`~/.claude/skills` に加えて Codex の skills（`$CODEX_HOME/skills`、既定は `~/.codex/skills`）にもリンクし、manifest に記録します。Codex の入力欄では `/` から始まる語が Codex 自身のコマンドとして扱われ、skill が無いと `/delegate` は `Unrecognized command` になっていました。Codex では `$delegate` / `$log` と書きます。`~/.codex/AGENTS.md` の managed block もこの書き方に合わせました。
+
+同じ名前の skill がすでにあれば上書きせず、installer が warn を出します。uninstall は ORRERY が作ったリンクだけを取り除きます。
+
+### Codex の子が、選んだ MCP の起動を待つようにしました
+
+ブラウザなどの MCP server が起動中のまま最初の道具一覧から省略され、子が道具を持たずに作業を始める場合がありました。`--tools` と installer の既定で選んだ browser・computer use・`mcp:<name>` の server は、子の生成設定だけで `required = true` とし、起動待ちを最低60秒にします。既存の長い timeout は保ち、初期化に失敗すれば Codex の起動・resume を止めます。
+
+選択しない継承 server と ORRERY Mail の待機設定は変えず、利用者の設定も変更しません。installer の既定で設定を解決できない項目は従来どおり外しますが、採用された server の実行時の初期化失敗は停止として扱います。Chrome 側の接続許可は別で、人が答える必要があります。Codex 0.159.2 の途中の道具追加が呼び出しに反映されない制限は、この変更では解決しません。
+
+### Claude の browser 子の tool を、起動ごとに承認します
+
+Claude in Chrome を付けた子は、既知の22 tool を1本の `--allowed-tools` にまとめ、Claude Code 側で承認します。`javascript_tool`・`computer`・`file_upload`・`upload_image`・`form_input` も含みます。`--tools browser`、installer の browser 既定、旧 `claude_chrome` 指定とその resume に適用し、利用者の設定は変えません。新しい名前の tool は自動承認しません。
+
+Claude in Chrome 自身の操作確認は別です。タブを開く等の操作では **人が Chrome 側の Allow を押す**必要があり、headless の子はその確認で止まります。拡張の接続・アクセス許可も人の操作のままです。2026-10-06、WSL2 の Ubuntu、Claude Code 2.1.290 でも、22 tool の承認後にこの確認で停止することを実測しました。
+
+### Codex の子に chrome-devtools の browser を渡せるようにしました
+
+Codex の `--tools browser` は、利用者の設定にある chrome-devtools MCP server を選び、既知の全30 tool を公開して個別に承認します。Codex と既知固定版の Claude の `screen:operate:<server>` でも、chrome-devtools の同じ30 tool を承認します。任意 JavaScript 実行、ホストへのファイル保存、ローカルファイルの upload を含む許可です。未知の新しい tool は公開・承認しません。
+
+読み取りに絞る `screen:read:<server>` は8 tool を公開し、保存引数を持つ tool や任意 JavaScript・upload は含めません。Claude の chrome-devtools 選択は既知固定版が必要です。browser と別の computer use server は、それぞれの承認範囲で併用できます。詳しくは [delegation](docs/delegation.md#子に渡す道具を選ぶ--base----tools) を参照してください。
+
+### 子に渡す道具の既定を installer で選べるようにしました
+
+`--child-default-tools` / `AGENTSTACK_CHILD_DEFAULT_TOOLS` は `--tools` と同じ文法で、既定は空です。明示の `--base` / `--tools` / `--codex-mcp` が優先します。使えない既定の項目だけを外し、起動の出力と子の最初の指示に残します。子の記録には実際の選択を保存し、resume 時に現在の既定を追加しません。
+
+API 8 では `/api/spawn` の `tools: {}` または `base: "default"` がこの既定を抑止します。CLI で base・tools・MCP profile を省略した新規起動に既定を適用します。dashboard/API ではフォームの選択を正とし、installer の env を黙って追加しません。
+
+### 停止した子の道具を変更して同じ会話を再開できます
+
+API 9 の `/api/jump` に `base` / `tools` を追加し、`agentstack-resume` と `/delegate --resume` の手順を用意しました。作業の区切りで EXIT した子を、同じ名前・会話・作業ディレクトリで再開します。`tools` は全置換、`{}` は追加の道具の解除、base 省略は現在の base を維持します。両方省略した resume と UI は従来のままです。動作中・状態不明・道具の記録が無い子などは変更を拒否します。
+
+変更は子ごとに直列化し、端末が起動を受け付ける前の失敗には、その変更の道具記録と生成設定を戻します。API の成功は端末の起動受理を意味し、その後の認証や MCP 呼び出しの成功を保証しません。起動受理後の失敗には新しい選択が残るため、再開した子から同じ会話と実際の道具の呼び出しを報告してもらってください。
+
+Claude Code 2.1.289 では、同じ会話の native resume で新しい chrome-devtools MCP を呼び出せることを実測しました。**Codex 0.159.2 は、途中で追加した道具が呼び出しに反映されない既知の制限が未解決です。** この版の API 世代は、2026.10.05 の 7 から、既定の道具で 8、道具変更 resume で 9、Codex の既定モデルの `model_note` で 10 に上がります。
+
+### ブラウザと computer use の届き方、人が行う許可をまとめました
+
+日英 [delegation](docs/delegation.md#ブラウザと-computer-use-何が届くか人がやること) に Claude / Codex × Mac / Windows（WSL2）の8通りと、子・NEW AGENT・resume ごとの届き方をまとめ、README から案内します。「画面全体」「画面操作」の表記は computer use に揃え、WSL 側の道具は Windows-MCP と明記しました。指定名の `screen` は変わりません。
+
+Chrome の接続許可は接続のたびに人が答え、Mac の computer use のアプリ単位の許可も人が出します。Claude の組み込み computer use は Mac 全体で同時に1セッションだけです。ロックは computer use を一度使ったセッションが終わるまで外れず、その間に起動した子は `Computer use is in use by another Claude session` で止まります。Windows-MCP は RDP などの対話セッションで動かす必要があります。英語 README 冒頭の agent の数を限定する表現も直しました。
+
+### Gemini の dry-run テストの不安定な判定を直しました
+
+試験用の Git repository に自動 maintenance の lock が生成されると、dry-run の副作用と誤判定していました。試験用 repository の自動 maintenance と gc を止め、Git のメタデータも含めた副作用の確認を保ちます。製品の Gemini の起動や dry-run の動作は変わりません。
+
+## 2026.10.05
+
+### 新しい環境で、ワークショップのしりとりが「作業フォルダの外を読むか」の確認で止まっていました
+
+しりとりの prompt は、親に installer が置いた `/delegate` skill（`~/.agentstack/skills/delegate/SKILL.md`）を読ませます。この path は作業フォルダの外なので、Claude Code が初回に「外を読んでよいか」を確認し、答えるまで親が止まっていました（Full tour の録画で約 10 分止まった）。
+
+installer は、ORRERY が置いた skill の場所だけを `permissions.additionalDirectories` に足します。対象は `~/.agentstack/skills` と、そこを指す `~/.claude/skills/<name>` の symlink だけで、利用者が置いた同名の skill は入れません。同じ場所への `Edit` は deny にして、読み取りだけに絞っています。uninstall では、manifest にある分だけを外します。
+
+- この deny が止めるのは file の道具（Edit・Write など）と、それと分かる Bash の書き込みです。sandbox なしの Python や Node を通した間接的な書き込みまでは覆いません（[docs/install.md](docs/install.md)）。
+- 既知の制限: 再 install の後に uninstall すると、installer が足した設定が残ります（allow・deny・hooks と同じ既存の構造。gyroid-eth/orrery-telemetry#205 で直します）。
+
+### NEW AGENT の既定の作業フォルダを、project folder にしました
+
+1 行の install（fresh install）は `AGENTSTACK_SPAWN_DIRS` を空で書き、dashboard は空のとき NEW AGENT の候補を `~` だけにしていました。そのため NEW AGENT で起動した agent が home で動き、project folder の `CLAUDE.md`（ORRERY の指示）を読まず、`/delegate` を使わないので親子の線も出ませんでした（2 人目の Mac 利用者の試走で見つかった）。
+
+- `AGENTSTACK_SPAWN_DIRS` が空なら、候補は project folder、`~` の順になります。明示した `--spawn-dirs` は変わりません。
+
+### README の入口を作り直しました
+
+冒頭に 1 行の install を置き、入るもの・置き場所の表、作業フォルダの変え方（Obsidian の vault を project key にする）、完全に消す手順を足しました。Telemetry 単独の install と、cockpit との関係、両方を入れる 1 行の順に並べ、cockpit と Telemetry の関係図を入れました。
+
+### 開いたままの詳細パネルのボタンが、agent の状態に合わせて変わるようにしました
+
+詳細パネルの OPEN IN COCKPIT／RESUME IN COCKPIT と Exit のボタンは、パネルを開いた時点の状態のまま変わりませんでした。パネルを開いたまま子を Resume すると、ボタンは RESUME IN COCKPIT のまま残り、cockpit の Full tour の「Return to your agent」の輪が、パネルの Close に付いていました。ボタンは、Deck の一覧か Network の graph のどちらかを受け取るたびに、新しい方の状態で描き直します（送信中の Exit はそのまま）。どちらにも agent が無くなったときは、ボタンを押せない「NO LONGER LISTED」にします。また、Full tour の「Return」の段は Close を指さなくなりました。running の agent の OPEN IN COCKPIT が無いときは輪を出さず、tour の欄の文で案内します。
+
+### mail watcher の lock を利用者ごとにし、doctor が watcher の停止を検出するようにしました
+
+1 台の Mac に 2 人目の利用者が fresh install すると、既定の lock dir（`/tmp/orrery-mail-watcher.lock`）が全利用者で共通だったため、先にいる利用者の watcher が持つ lock を 2 人目が取れず、`mkdir: ... Permission denied` → 「Stale watcher lock detected; taking ownership」を 5 秒おきに繰り返して一度も動きませんでした。入力待ちの agent に Mail が届いても起こされず、`agentstack-doctor` は全項目 ok のまま watcher の停止を報告しませんでした（dashboard の `/api/mail-watcher-health` は `watcher_running: false`・status red を返していました）。
+
+- watcher の lock の既定を利用者ごと（`$AGENTSTACK_RUNTIME_DIR/mail-watcher.lock`）にしました。既定が利用者ごとになったので、他人の lock に当たるのは `AGENTSTACK_MAIL_WATCHER_LOCK_DIR`・`_PIDFILE`・`_HEARTBEAT` を明示で他人の物に向けたときだけです
+- 所有者が自分でない path（lock dir・pidfile・heartbeat の親 dir とそれぞれの既存 file、symlink ならその参照先も）には、何も書かず（別の場所への切り替えもせず）、そのことを一度だけ log に出して止まります。黙って別の場所へ切り替えると、同じ override を見ている dashboard や agent-start が元の（他人の）path を読み続け、watcher は動いているのに「止まっている」と誤って報告するため
+- 2026-10-05 より前の既定（`/tmp/orrery-mail-watcher.lock`）に自分の watcher がまだ生きていれば（pid の process が自分の UID で command line が `watch_agent_mail_signals.sh` のときだけ。pid が再利用された無関係の process は stale 扱い）、新しい path では起動せず、旧 watcher を止める案内を出して止まります（二重配送の防止）。update 時、同じ旧既定に自分の物で使われていない lock が残っていれば片付けます。どちらも他人の物には触れません
+- 所有者 UID の取得は GNU（Linux/WSL）と BSD（macOS）の両方で UID だけを安全に取れる順に直しました（GNU の `stat -f` は「ファイルシステム情報」を意味し、未知の directive でも stdout を汚してから失敗するため、所有者比較が常に不一致になるおそれがありました）
+- `agentstack-doctor` が、dashboard の `/api/mail-watcher-health` と同じ判定で watcher の停止・status の red/yellow・heartbeat の停滞を warn するようになりました（`watcher_running` だけでは、signal が溜まっていたり直近の配送が無かったりする red/yellow な watcher を ok と報告していました）
+
+### EXIT を確定した直後、隣のカードを誤って EXIT しないようにしました
+
+EXIT した agent のカードが LIVE から消えたり finished の区画へ移ったりすると、後ろのカードが詰まり、直前に押した位置へ次のカードの EXIT が来ます。そこをもう一度押すと、別の agent の EXIT を構えてしまいました（Full tour の録画で、子を EXIT した直後に親の EXIT がカーソルの下に来た）。EXIT を確定してから 2 秒間、またその後 30 秒の間にそのカードが動いたり区画が変わったり消えたりしたときはその時点から 2 秒間、EXIT を押しても受け付けません。その間は EXIT ボタンを薄く表示し、カーソルも「押せない」形にして、効かない理由が見えるようにしました。
+
+### cockpit の Full tour の後半で、Telemetry の中の押すボタンを示せるようにしました
+
+cockpit の tour は、次に押す control をシアンの脈打つ輪と HERE の札で示します。Full tour の後半の 7 段（EXIT、Network の edge、Select、Replay、Resume、Network の Settings、Open in cockpit）は、cockpit に埋め込んだ Telemetry の中のボタンを押す段です。cockpit はその中に手を出せないので、これまでは Telemetry の画面全体を指すだけでした。
+
+Telemetry は、cockpit から段の名前（`orrery-tour-cue`）を受け取り、自分の画面の該当するボタンに同じ輪と札を描くようになりました（`dashboard/tour_cue.js`）。
+
+- 段ごとに候補を順に試し、画面に出ていて覆われていない最初のものを指します。ボタンがまだ出ていなければ、そこへ行く手前の操作（Deck／Network の切り替え、card）を指します。
+- 受け取るのは埋め込みのときだけで、送り主が親の cockpit・同じ origin の場合に限ります。cockpit の tour の欄がかぶる範囲を受け取れば、札はそこを避けます。
+- 指すのは「その種類のボタン」です。どの agent のボタンかまでは分かりません。EXIT なら画面で最初に見つかった EXIT を指すので、段の文が言う「しりとりの子」のものとは限りません。
+
+cockpit 側から段の名前を送る変更は、gyroid-eth/orrery に入っています。
+
+### Full tour の録画で見つかった、Telemetry の中の輪と札の置き場所を直しました
+
+- **Network の edge の段**は、cockpit がしりとりの親と子の名前（`pair`）を送ったときだけ、その 2 人の edge を指します。名前が来ない、またはその edge が画面にないときは、edge は指さずに Deck／Network の切り替えを指します。これまでは画面で最初に見つかった edge を指したので、関係ない 2 人の edge に輪が付くことがありました。
+- **HERE の札**は、ほかのボタンや入力欄に重なる側を避けます。どの側も空いていなければ、輪だけを出します。
+- **通知（toast）**は、選択の操作バー（selection bar）が出ている間はその上に出ます。Replay の件数の通知が、操作バーの RESUME を隠していました。
+- tour の段が進んでいる間は、右側に開いている edge の drawer・agent の詳細・Settings の範囲を cockpit に知らせます（`orrery-tour-cover`）。cockpit の tour の欄は、それに重なる間は自動で畳まれます（cockpit 側は gyroid-eth/orrery に入っています）。
+
+## 2026.10.04
+
+### agent の詳細パネルを開いている間、Help map を押せませんでした
+
+詳細パネルの背景は header より上に重なるため、header の「Help map」は見えていても押せませんでした。help map には、パネルを開いているときにパネルの 3 か所（History と Output、Exit・Open・Close、Role）を注記する機能がありますが、その入口が塞がれていました。
+
+パネルの操作の列に「HELP MAP」を置きました。header の Help map と同じ map を開き、パネルの注記が出ます。閉じると、開いたボタンに focus が戻ります。
+
+### Deck で EXIT した後も、カードが LIVE に数秒残り、もう一度押すと 400 になっていました
+
+EXIT が届いた後も、tmux の session が終わるまでの数秒間、カードは「↩ EXIT」に戻ったまま LIVE に残っていました。もう一度押すと `/api/exit` に再び届き、すでに終わりかけの agent に対して 400 が返っていました。
+
+EXIT が届いたカードは「exiting…」の表示にし、押せないようにしました。この表示は再描画しても続きます。agent が LIVE から外れた時点で状態を外し、30 秒経っても残っている場合は、その旨を知らせて EXIT を押せる状態に戻します。終わった agent への EXIT が 400 になった場合は、サーバーの文面をそのまま出すのではなく「<名前> has already exited」と知らせます。
+
+### 詳細パネルの Exit と、選択の一括 EXIT で、Full tour の「Exit」の段が進みませんでした
+
+cockpit に埋め込んだ Telemetry の Full tour は、EXIT が届いた知らせで「Exit」の段を完了にします。この知らせを出していたのは Deck のカードの EXIT だけで、詳細パネルの「↩ Exit」と、選択した agent の一括 EXIT からは出ていませんでした。
+
+EXIT が届いた時の知らせを 1 つの関数にまとめ、3 つの経路すべてから呼びます。知らせを出す条件は 3 つとも同じで、次のすべてを満たすときです。
+
+- 応答が成功している（`ok`）
+- 実際に送られた（`exit-sent`）か、終わった agent が shell に残っていて `exit` を打ち込んだ（`shell-exit-sent`）
+
+### Claude Code の初回設定が終わっていないと、子が理由を告げずに消えていました
+
+初回設定（text style・ログイン・Security notes・フォルダの信頼）を途中で閉じると、`~/.claude.json` に `hasCompletedOnboarding` が付きません。そのまま NEW AGENT で子を起動すると、子は最初の text style の画面で止まっていました。launcher はこの画面を選択画面と見分けられず 60 秒待ってから子を片付け、cockpit には「closed」としか出ませんでした。
+
+- launcher は初回設定の画面（text style・login method・Login successful・Security notes）を見分け、キーを送らずにすぐ止めます。答えは利用者の設定なので、ORRERY は代わりに答えません。
+- 止めた理由は `[spawn_child] reason:` の 1 行で出します。dashboard はそれを spawn の error の先頭に入れるので、cockpit の失敗の知らせに「端末で `claude` を一度起動し、入力欄が出るまで進めてから /exit」と表示されます。Claude in Chrome の一度きりの質問も同じ扱いです。
+- doctor は `hasCompletedOnboarding` が無いと warn します（値そのものは表示しません）。
+
+あわせて直したこと:
+
+- 子が最初の prompt に返答した後に一度きりの質問（「Try the new fullscreen renderer?」）が出ると、10 秒後に「unrecognised choice screen」として、動いていた子を片付けていました。prompt の echo の下に Claude の返答（`⏺`、WSL では `●`）があれば起動は成功として扱い、質問は子の pane で利用者が答えるものとして残します。返答の前にこの質問が出た場合は、キーを送らずに止め、理由を返します。
+- 親のいない（standalone の）子についても最初の turn を見張り、普通に返事をしただけで「declined; could not tell the parent by Mail: no parent to tell」と記録していました。知らせる相手がいないので、standalone では見張りません。
+
+### 「子を作って話して」と頼むと、Claude Code の組み込み Agent と SendMessage で済ませていました
+
+managed block が context に無いセッションでは（block は `--project-key` の dir の CLAUDE.md に入るため、それ以外の dir で起動した場合）、「Start one child agent and play shiritori with it over 3 turns」に対して 3 回とも組み込みの Agent が子を作り、SendMessage でしりとりを最後まで進めていました。ORRERY Mail には何も残らず、dashboard にも出ません。Claude Code 2.1.224 以降の組み込み `SendMessage` / `ListAgents` は、tmux の ORRERY child にも直接届きます。そのため、`/delegate` で作った子と話すときにも、同じ回避の経路がありました。`/delegate` skill の description の先頭に、子を作るのも子と話すのも組み込みの道具ではなく `/delegate` と `send_message` で、と書きました。block の禁止文にも `SendMessage`・`ListAgents`・agent teams を足しました。skill の description は block の外でも context に入ることが多く、その場合は道具を選ぶ手掛かりになります。ただし skill の一覧が予算を超えると description は削られるので、どのセッションでも入るとは限りません。入っているかは `/context` や `/doctor` で確かめられます。確実に通すには、明示の `/delegate` を使います。修正後は同じ条件で、3 回とも `/delegate` から始めました（stub の Mail を使った少数回の比較で、全セッションでの保証ではありません）。tmux の子への送信も 3 回とも `send_message` でした。組み込みの経路を設定で断る deny rule は、組み込み subagent への送信も消すので既定では入れず、[docs/launchers.md](docs/launchers.md) に opt-in として書きました。
+
+### Telemetry にも help map を付け、README と docs の索引を画面のガイド中心に作り直しました
+
+- Telemetry の header に「HELP MAP」を置きました。cockpit の help map と同じ見た目（金の角括弧と引き出し線）で、Deck・Network・詳細パネルの主な操作に注記します。置き場所が足りない狭い窓では凡例にします。
+- README（日英）を、何ができるか → 1 行の install → 画面のガイド → 退出した agent を再開する、の順に作り直しました。冒頭に Mail が流れる NETWORK の GIF、「退出した agent を再開する」に RESUME の GIF を置きました。
+- docs の索引（日英）を目的別に作り、全文書を載せました。索引の漏れと存在しないリンクは検査で止まります。
+- 詳細パネルの「HELP MAP」の案内を README と索引に足しました。
 
 ## 2026.10.03.1
 

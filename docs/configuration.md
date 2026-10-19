@@ -12,6 +12,8 @@
 
 です。file mode は `0600` です。service の environment は install 時に launchd plist / systemd unit へ書き込まれるため、変更後は `./scripts/install.sh` を再実行するか service definition も更新してください。
 
+macOS の dashboard は `~/.agentstack/dashboard/agentctl.sh restart` でも、起動時に選ばれた mode/config を `start` と同じ処理で plist に描画して job を再設置します。設定に変化が無くても再設置します。supervised-background の再起動手順は従来どおりです。
+
 ## Dashboard / `server.py`
 
 `server.py` が直接参照する `AGENTSTACK_*` は次のとおりです。
@@ -117,7 +119,7 @@ export AGENTSTACK_DELIVERABLE_ROOTS="$HOME/project-a/logs:$HOME/shared logs"
 | `AGENTSTACK_PATH` | Homebrew と system path | service に渡す `PATH` |
 | `AGENTSTACK_MCP_URL` | `http://127.0.0.1:18765/mcp` | launcher / hook / dashboard / Bridge の MCP endpoint |
 | `AGENTSTACK_CLAUDE_SETTINGS` | `~/.claude/settings.json` | merge 対象 settings |
-| `AGENTSTACK_CLAUDE_MD_SCOPE` | `project` | `agentstack-claude-setup` が managed block を書く先。`project / global / both` |
+| `AGENTSTACK_CLAUDE_MD_SCOPE` | `global` | 利用者単位のみ。明示 project/both は拒否。[移行](instruction-migration.md) |
 
 健康な ORRERY Mail listener が既にある場合、installer は server を更新・再起動せず、稼働中の immutable render に記録された deployment metadata を採用します。metadata 導入前の managed render は、render ID と candidate directory の決定論的対応が一意な場合だけ採用します。生成する `env.sh` の `AGENTSTACK_MAIL_ENV` と `AGENTSTACK_MAIL_ENROLL_BIN` は同じ deployment を指します。既知の legacy render に enrollment CLI が無い場合は Mail と既設 autostart を維持し、enrollment だけ unavailable として保存します。
 
@@ -218,6 +220,7 @@ namespace を使います。この分離は namespace の選択を変えず、in
 | `AGENTSTACK_CODEX_CHILD_APPROVAL` | `never` | Codex child の `--ask-for-approval`。installer の `--codex-approval` で永続化 |
 | `AGENTSTACK_CODEX_CHILD_CONFIG_OVERLAY` | 未設定 | macOS/Linux の全 Codex child の `config.toml` に重ねる TOML fragment の絶対 path。installer の `--codex-child-overlay <path>` で永続化 |
 | `AGENTSTACK_CODEX_NETWORK` | `on` | Codex child の sandbox network（`-c sandbox_workspace_write.network_access=true`）。`--codex-network off` で切る |
+| `AGENTSTACK_CHILD_DEFAULT_TOOLS` | 空 | installer で選ぶ子の道具。`--tools` と同じ文法。明示の base/tools/MCP profile が優先し、不適用の既定項目は通知して外す |
 | `AGENTSTACK_CODEX_ADD_DIRS` | 未設定 | Codex child に追加で書込を許す root（`:` 区切り）。`--codex-add-dirs` で永続化 |
 | `AGENTSTACK_WORKTREE_ROOT` | `$AGENTSTACK_HOME/worktrees` | 新規 isolated worktree の永続 root。installer 実行時の環境変数で上書き・永続化 |
 | `AGENTSTACK_CLAUDE_CHILD_CHROME` | 未設定 | `1` で `spawn_child.sh` が起動する Claude child に `--chrome` を付ける（Claude in Chrome）。未設定・`0` は inherit（起動コマンドを変えない）。CLI の `--claude-chrome` が優先。Codex child では無視。[詳細](delegation.md#claude-child-とブラウザ操作claude-in-chrome) |
@@ -269,7 +272,8 @@ export AGENTSTACK_OBSIDIAN_APP="/Applications/Obsidian.app/Contents/MacOS/Obsidi
 | `AGENTSTACK_MCP_PROXY` | `$AGENTSTACK_HOME/integrations/codex_app/plugin/scripts/run-mcp.sh` | spawned child ごとの認証済み stdio proxy runner |
 | `AGENTSTACK_PREREGISTER_CHILD` | `$AGENTSTACK_HOME/bin/agentstack-preregister-child` | `/delegate` が child-owned token を生成する helper |
 | `AGENTSTACK_MAIL_WATCHER_SESSION` | `mail-watcher` | launcher が起動・再利用する watcher の tmux session 名 |
-| `AGENTSTACK_MAIL_WATCHER_PIDFILE` | `/tmp/orrery-mail-watcher.lock/watcher.pid` | dashboard が非 launchd watcher の実プロセスを照合する pidfile |
+| `AGENTSTACK_MAIL_WATCHER_LOCK_DIR` | `$AGENTSTACK_RUNTIME_DIR/mail-watcher.lock`（利用者ごと） | watcher の単一起動 lock dir。`_PIDFILE`・`_HEARTBEAT` を含め、他人が所有する path（file・symlink の参照先も）を指す設定のときは、何も書かずに止まって直し方を log に出す |
+| `AGENTSTACK_MAIL_WATCHER_PIDFILE` | lock dir の `watcher.pid` | dashboard が非 launchd watcher の実プロセスを照合する pidfile |
 | `AGENTSTACK_MAIL_WATCHER_HEARTBEAT` | pidfile と同じ directory の `heartbeat` | process command を取得できない環境で使う watcher heartbeat |
 | `AGENTSTACK_MAIL_NOTIFY_MIN_IMPORTANCE` | `low`（＝全通） | 通知として**割り込ませる**下限。`low` \| `normal` \| `high` \| `urgent` |
 | `AGENTSTACK_MAIL_WATCHER_SCAN_INTERVAL` | Linux `2`、macOS `30` | watcher が signal を見直す回復 scan の間隔（秒、1 以上の整数）。同じ message の再試行間隔（30秒）とは別 |
@@ -325,7 +329,7 @@ installer に渡して `env.sh`・service 定義・`install-state.json` に永�
 優先順位は「command-line > 環境変数 > install 先の既存 `env.sh`」で、再インストール時に何も指定しなければ前回の値を引き継ぎます。
 存在しない directory は warning だけ出して受け付けます（後で clone する checkout を先に登録できます）。相対パスは error で停止します。
 
-- `SPAWN_DIRS` は「最初に見せる quick-select chip」。`GET /api/spawn-names` が `:` で分割した値を順番に返します。未設定時は `["~"]` です。`~` は API では symbolic のまま保持し、実際の spawn 時に展開します
+- `SPAWN_DIRS` は「最初に見せる quick-select chip」。`GET /api/spawn-names` が `:` で分割した値を順番に返します。未設定時は project key、続けて `~` の順（`[project key, "~"]`）で、先頭の project folder が既定です。`~` は API では symbolic のまま保持し、実際の spawn 時に展開します
 - `SPAWN_ROOTS` は「typeahead で閲覧できる範囲」。`GET /api/fs/dirs` はこの root 内の child directory だけを返します。未設定時は `$HOME` が唯一の root です。server は `realpath` で境界を検証し、`..`、root 外、hidden directory、root 外への symlink を拒否します
 
 `SPAWN_ROOTS` は `SPAWN_DIRS` から自動導出しません。chip が root 外を指す構成では exact path として入力できますが、その配下の suggestion は表示されません。多くの場合は既定の `$HOME` が chip を含むので、`SPAWN_DIRS` だけ指定すれば足ります。
@@ -365,13 +369,15 @@ AGENTSTACK_CODEX_MODELS="gpt-6.1-sol,gpt-6-luna" ./scripts/install.sh
 
 明示設定は cache より優先される許可リストです。空要素・前後空白・重複は除去します。不正な ID を含む場合は Codex タブに設定エラーを表示して起動を止め、別 provider や同梱候補へ黙って切り替えません。設定の永続化は既存の installer 経路を使います。shell の `export` は稼働中 service に届きません。
 
-**無指定と `sol` は、起動対象 CLI が 0.159.0 以上なら `gpt-6.1-sol` を使い、古い版なら `gpt-6-sol` に戻ります。** GPT-6.1 Sol には Codex CLI 0.159.0 以上が必要です。版が不明なら新鮮な catalog に 6.1 があるかを判定し、無い場合（欠損・期限切れ・hidden・破損・非対応形式・信頼できない symlink を含む）は同じ fallback を使います。doctor が fallback と更新コマンドを note で示します。cache や許可リストの順序では既定は変わりません。以前の既定を使う場合は `gpt-6-sol` のように正式 ID を指定してください。許可リストからこの既定を除いた場合、UI はモデルの明示選択を要求し、API のモデル省略は拒否されます。明示的な短縮名は `sol` → 同じ判定で決まる既定、`luna` → `gpt-6-luna`、`astra` → `gpt-6-astra`、`terra` → `gpt-5.6-terra` です。世代を固定したいときは正式 ID を指定してください。`gpt-6` / `gpt-5.6` を含む `gpt-*` の正式形式は別名として読み替えません。
+**モデル省略と `sol` は、起動対象 CLI が 0.159.0 以上なら `gpt-6.1-sol` を優先し、それ未満なら `gpt-6-sol` から選びます。版不明なら新鮮な catalog を初期判定に使います。** その既定候補が選択された `CODEX_HOME` の cache に無ければ、`gpt-6.1-sol` → `gpt-6-sol` → `gpt-6-luna` → `gpt-5.6-terra` → `gpt-5.6-luna` の順で、cache にある次の候補へ下げます。CLI 0.159.0 未満では GPT-6.1 Sol へ上げません。この順は製品の選好で、cache や許可リストの並び順には依存しません。既定を下げる判断には期限切れの cache も使います。古い一覧によって低いモデルを選んでも起動を続けられることを、利用できない上位モデルで最初の要求から停止することより優先するためです。候補の追加と effort 情報は引き続き取得から300秒以内に限ります。cache が無い・壊れている・読めない・未来日時の場合や、次の候補が無い場合は、CLI の版で決める従来の既定を維持します。
 
-cache は `fetched_at` の日時と `models[].slug`、`visibility`、`supported_reasoning_levels[].effort`、`default_reasoning_level` の観測済み形式だけを使います。Codex CLI 0.154.0 の実装に合わせ、取得から300秒以内の一覧を利用します。通常ファイル、または launcher が child の `CODEX_HOME` に作る正規の `models_cache.json` symlink だけを対象にし、2 MiB・256モデル・ID長128文字まで読み、hidden モデルは追加しません。欠損・破損・非対応形式・空・期限切れでは同梱候補へ戻ります。CLI の版が 0.159.0 以上なら GPT-6.1 Sol も残し、版不明なら除きます。異なるeffortを持つ同一IDの重複もfallback対象です。
+既定を変更した場合は、spawn の出力とログ、API の `model_note`、NEW AGENT のモデル欄に、変更前後の ID と理由を表示します。期限切れの cache を使った場合は `fetched_at` と、`codex` を一度起動して一覧を更新する案内も出します。doctor の note にも同じ判定を使います。正式 ID（例: `gpt-6.1-sol`、`gpt-6-sol`）を明示した要求は cache に無くても置き換えません。許可リストから解決された既定を除いた場合、UI はモデルの明示選択を要求し、API のモデル省略は拒否されます。明示的な短縮名は `sol` → 同じ判定で決まる既定、`luna` → `gpt-6-luna`、`astra` → `gpt-6-astra`、`terra` → `gpt-5.6-terra` です。世代を固定したいときは正式 ID を指定してください。`gpt-6` / `gpt-5.6` を含む `gpt-*` の正式形式は別名として読み替えません。
 
-同梱候補は `gpt-6.1-sol`（CLI 0.159.0 以上、または版不明で新鮮な catalog にある場合）、`gpt-6-sol`、`gpt-5.6-sol`、`gpt-6-astra`、`gpt-5.6-terra`、`gpt-5.6-luna`、`gpt-6-luna` です。一覧の消失だけでは正式 ID の直接起動を拒否しません。許可リストを明示した場合だけ membership を制限します。catalog の読み取りは CLI の起動や通信をせず、credential、API key、token、Keychain を探索しません。既定選択は spawner と共通の resolver で、環境の `AGENTSTACK_CODEX_BIN` → 保存済み `env.sh` → usable PATH candidate の順に起動対象を選びます。版の確認も子と同じ login shell・`~/.local/bin` を追加した PATH・guard 変数で `--version` を実行します。各候補の timeout は実 spawner と同じ10秒、候補全体の予算は15秒、cleanup を含む読み取り helper 全体は18秒で打ち切ります。負荷の高い login shell でも同じ usable 判定になるよう、既存 spawner の予算に揃えています。成功・失敗を60秒間メモリに保持し、環境・保存設定・選択された実行ファイルの参照先や stat が変われば再取得します。API と delegate は選んだ CLI と正式 model ID の組を起動へ渡します。古い稼働中 session が共有 cache を上書きするため、取得できた CLI の版を cache より優先します。起動対象を解決できない、または版が読めない場合は新鮮な catalog による判定へ戻ります。cache のアカウント識別子や `client_version` を現在の認証・実行ファイルと照合しないため、候補の表示はそのアカウントでの利用権限の証明ではありません。CLI 自身による取得・更新・認可は変更しません。
+cache は `fetched_at` の日時と `models[].slug`、`visibility`、`supported_reasoning_levels[].effort`、`default_reasoning_level` の観測済み形式だけを使います。Codex CLI 0.154.0 の実装に合わせ、候補追加・effort 情報には取得から300秒以内の一覧を利用します。既定候補の存在確認は `slug` を使い、picker の visibility や effort metadata の有無には依存しません。通常ファイル、または launcher が child の `CODEX_HOME` に作る正規の `models_cache.json` symlink だけを対象にし、2 MiB・256モデル・ID長128文字まで読み、hidden モデルは追加しません。欠損・破損・非対応形式・空・期限切れでは同梱候補へ戻ります。CLI の版が 0.159.0 以上なら GPT-6.1 Sol も残し、版不明なら除きます。異なるeffortを持つ同一IDの重複もfallback対象です。
 
-NEW AGENT と同じ判断を確認するには、dashboard の service と同じ環境変数・PATH を持つ shell で次を実行します（delegate では launcher を実行する shell で実行）。`model`、`codex_bin`、`cli_version`、`default_source`（`cli_version` / `local_catalog`）を JSON で返します。`""` を `sol` や正式 ID に置き換えて確認できます。
+同梱候補は `gpt-6.1-sol`（CLI 0.159.0 以上、または版不明で新鮮な catalog にある場合）、`gpt-6-sol`、`gpt-5.6-sol`、`gpt-6-astra`、`gpt-5.6-terra`、`gpt-5.6-luna`、`gpt-6-luna` です。一覧の消失だけでは正式 ID の直接起動を拒否しません。許可リストを明示した場合だけ membership を制限します。catalog の読み取りは CLI の起動や通信をせず、credential、API key、token、Keychain を探索しません。既定選択は spawner と共通の resolver で、環境の `AGENTSTACK_CODEX_BIN` → 保存済み `env.sh` → usable PATH candidate の順に起動対象を選びます。版の確認も子と同じ login shell・`~/.local/bin` を追加した PATH・guard 変数で `--version` を実行します。各候補の timeout は実 spawner と同じ10秒、候補全体の予算は15秒、cleanup を含む読み取り helper 全体は18秒で打ち切ります。負荷の高い login shell でも同じ usable 判定になるよう、既存 spawner の予算に揃えています。成功・失敗を60秒間メモリに保持し、環境・保存設定・選択された実行ファイルの参照先や stat が変われば再取得します。API と delegate は選んだ CLI と正式 model ID の組を起動へ渡します。古い稼働中 session が共有 cache を上書きするため、取得できた CLI の版を互換性の上限とし、cache の `client_version` が異なるだけでは除外しません。起動対象を解決できない、または版が読めない場合は新鮮な catalog による判定へ戻ります。cache の `identity` は現在のログインと照合していません。アカウントを切り替えた後に前の cache が残っていると、新しいアカウントの利用可否と異なる判断になる可能性があります。候補の表示や既定の fallback は、そのアカウントでの利用権限の証明ではありません。CLI 自身による取得・更新・認可は変更しません。
+
+NEW AGENT と同じ判断を確認するには、dashboard の service と同じ環境変数・PATH を持つ shell で次を実行します（delegate では launcher を実行する shell で実行）。`model`、`codex_bin`、`cli_version`、`default_source`（`cli_version` / `local_catalog`）を JSON で返します。既定を変更した要求には `model_note` も含まれます。`default_source` は CLI の互換性判定に使った情報源を示し、最終的な既定は cache によって下がることがあります。`""` を `sol` や正式 ID に置き換えて確認できます。
 
 ```bash
 python3 "$AGENTSTACK_HOME/dashboard/codex_models.py" resolve ""
