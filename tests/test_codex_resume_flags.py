@@ -1255,8 +1255,6 @@ def test_reserved_resume_stops_before_exec_when_binding_preconditions_fail(
         (ROOT / "bin" / "agentstack-codex-bootstrap").read_text(encoding="utf-8"),
         encoding="utf-8",
     )
-    (install_home / "hooks").mkdir()
-    shutil.copy2(ROOT / "hooks" / "project-context.sh", install_home / "hooks")
     health_status = 1 if failure_mode == "health_unreachable" else 0
     (libdir / "agentstack-register.sh").write_text(
         "ags_mail_load_token() { :; }\n"

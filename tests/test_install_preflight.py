@@ -405,13 +405,7 @@ def test_an_env_sh_that_only_names_a_render_when_run_is_not_evidence(tmp_path, m
     result = _run(env, "--dry-run")
 
     assert result.returncode != 0
-    if "$" in middle or "`" in middle:
-        # Protection migration now validates the entire generated data file
-        # before Mail evidence resolution; expanding assignments fail earlier.
-        assert "expansion inside double quotes" in result.stderr
-        assert "installed settings were not changed" in result.stderr
-    else:
-        assert "must equal the native service env" in result.stderr
+    assert "must equal the native service env" in result.stderr
     assert env_file.read_bytes() == before
     assert "ignoring a managed AGENTSTACK_MAIL_ENV" not in result.stdout
 
@@ -485,10 +479,9 @@ def test_nothing_in_env_sh_is_executed_to_produce_the_evidence(tmp_path):
     result = _run(env, "--dry-run")
 
     assert result.returncode != 0
-    # The strict literal protection reader rejects this before Mail-specific
-    # evidence checks, without executing or changing any installed settings.
-    assert "expansion inside double quotes" in result.stderr
-    assert "installed settings were not changed" in result.stderr
+    # With no protection declarations, the original Mail evidence check owns
+    # this rejection. The installed file remains data, never executed shell.
+    assert "must equal the native service env" in result.stderr
     assert env_file.read_bytes() == before
     assert not sentinel.exists()
     assert "ignoring a managed AGENTSTACK_MAIL_ENV" not in result.stdout
