@@ -561,7 +561,7 @@ raise SystemExit(int(os.environ.get("TEST_PROVIDER_EXIT", "0")))
                     cwd=target, env=env, capture_output=True, text=True, timeout=20)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout.strip(), f"{self.plain}|project/note.md")
-        # A legacy session with the original alias-root contract is untouched.
+        # Current upstream canonicalizes alias roots for legacy sessions too.
         env.pop("AGENTSTACK_PROTECTION_CONTEXT")
         env["AGENTSTACK_PROTECTED_ROOTS"] = str(alias)
         result = subprocess.run(["/bin/bash", "-e", "-c", script, "test",
@@ -569,7 +569,7 @@ raise SystemExit(int(os.environ.get("TEST_PROVIDER_EXIT", "0")))
             json.dumps({"tool_input": {"file_path": str(alias / "project/note.md")}})],
             cwd=target, env=env, capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), f"{alias}|project/note.md")
+        self.assertEqual(result.stdout.strip(), f"{self.plain}|project/note.md")
 
     def test_literal_glob_characters_in_workspace_roots_reach_reservation_guard(self) -> None:
         sibling = self.root / "workspacea"
