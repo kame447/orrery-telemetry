@@ -184,6 +184,11 @@ chmod 600 "$HOME/.agentstack/profiles/ChannelsBot.json"
 
 `environment` に token、password、credential、API key を置けません。Mail identity、parent、proxy credential の内部変数も profile から上書きできません。service manager の PATH は短いことがあるため、常駐起動では command の絶対 path を推奨します。
 
+persistent の `run` も、Mail の検査や起動 state の作成前に、profile の `working_directory` から予約の保護範囲を計算します。旧 runtime root は無視します。persistent run では移行の警告を connection の `runtime_dir` 配下の `persistent/<name>.json`（起動 process の `AGENTSTACK_PERSISTENT_RUNTIME_MANIFEST`）にある `workspace_warning` に記録し、単一 JSON の error 出力には混在させません。profile の `environment.AGENTSTACK_EXTRA_PROTECTED_ROOTS` は、空文字を含め、起動元の環境変数と install 済みの追加 root より優先します。前 session の計算済み root や 3 つの Git selector は再利用せず、profile に固定した Mail `project_key` は変えません。provider / bridge は解決した物理 directory で起動します。その後 headless bridge が独自の `-C` などで provider の作業場所を変える場合、その変更後の保護は bridge 側で扱ってください。予約が進行中なら、root を変更する前に [移行手順](configuration.md) を確認してください。
+
+
+interactive Codex profile では `working_directory` を作業場所の正本にします。command の `-C DIR`、`-CDIR`、`-C=DIR`、`--cd DIR`、`--cd=DIR` は、同じ物理 directory に解決される場合だけ許可します。相対 path の基準も `working_directory` です。別の場所を指定するか値が欠けていれば、`run` は enrollment の検査や起動 state の変更前に `profile-command-working-directory-conflict` と修正方法の `guidance` を返して停止します。意図する作業場所を `working_directory` に設定し、矛盾する command flag を外してください。`--` 以降の引数や通常の prompt 文は変更しません。この検査は任意の headless bridge の flag を解釈しません。bridge は宣言した directory で起動し、その後に作業場所を変える場合の保護は自身で管理する契約です。
+
 ### 5. 起動前確認と起動
 
 ```bash
@@ -233,7 +238,7 @@ plugin 由来の同名置換は Claude の standalone precedence では抑止で
 
 次は有限契約の外なので、見落としたまま起動せず pre-exec で停止します。
 
-- `working_directory` が symlink、Git discovery を変更する environment がある、または Git project root / separate gitdir / linked worktree の main checkout root を安全に確定できない: `claude-project-root-unsupported`。`.git` marker が無い通常の non-Git directory は対応する
+- `working_directory` が symlink、または Git project root / separate gitdir / linked worktree の main checkout root を安全に確定できない: `claude-project-root-unsupported`。`.git` marker が無い通常の non-Git directory は対応する
 - macOS の `/Library/Application Support/ClaudeCode/managed-mcp.json` または `managed-settings.json` が存在する: `claude-managed-configuration-unsupported`。v1 は内容にかかわらず非対応で、1つの Mail 定義だけを書き換えても解除されない
 - profile command が `--settings`、`--setting-sources`、`--safe-mode`、caller-owned `--mcp-config` / `--strict-mcp-config` を持つ
 - 設定、plugin inventory / marketplace registry / catalog、選択済み / enabled plugin、manifest / marketplace 参照を読めない、または解釈できない
@@ -327,6 +332,9 @@ exec "$HOME/.agentstack/bin/agentstack-persistent" run \
 - `identity-conflict` / `local-identity-conflict`: local file を別 identity の証明に流用しない
 - `agent-retired`: 正規の新規作成または retirement 運用へ戻る
 - `profile-already-running`: 既存 instance を停止または利用する
+- `profile-command-working-directory-conflict`: 意図する `working_directory` を設定し、矛盾するか値が欠けている interactive Codex の `-C` / `--cd` option を外す。同じ directory に解決される option は許可する
+- `workspace-context-helper-unavailable`: launcher と同じ版の `hooks/project-context.sh` を一緒に再 install する。custom hooks directory はこの版固有の helper の代わりにはならない
+- `workspace-context-unavailable` / `workspace-context-invalid`: profile の作業 directory、Git metadata、明示した追加 root が絶対 path であることを確認してから再試行する。この境界では enrollment や起動 state を変更しない
 - `claude-project-root-unsupported`: stderr の `path` を確認し、`working_directory` の symlink、Git root、または worktree main checkout の解決を直す
 - `claude-managed-configuration-unsupported`: managed file が存在する v1 構成は停止し、管理者と reviewed support を検討する
 - `claude-plugin-mail-conflict`: plugin を operator が明示的に無効化するか `--plugin-dir` を外し、失う機能を確認する

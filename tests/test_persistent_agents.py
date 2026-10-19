@@ -1270,7 +1270,7 @@ def test_claude_missing_git_fails_closed_before_exec(tmp_path: Path):
     )
     assert result.returncode == 2
     error = json.loads(result.stderr)
-    assert error["reason"] == "claude-project-root-unsupported"
+    assert error["reason"] == "workspace-context-unavailable"
     assert error["path"] == profile_value["working_directory"]
     assert not marker.exists()
 
@@ -1304,6 +1304,7 @@ def test_claude_git_discovery_abnormal_exit_fails_closed(
     workdir = tmp_path / "broken-repository" / "work"
     workdir.mkdir(parents=True)
     (workdir.parent / ".git").mkdir()
+    (workdir.parent / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
     fake_bin = tmp_path / "fake-bin"
     _write_executable(fake_bin / "git", f"#!/bin/sh\nexit {exit_code}\n")
     profile_value = json.loads(profile.read_text(encoding="utf-8"))
@@ -1321,7 +1322,7 @@ def test_claude_git_discovery_abnormal_exit_fails_closed(
     )
     assert result.returncode == 2
     error = json.loads(result.stderr)
-    assert error["reason"] == "claude-project-root-unsupported"
+    assert error["reason"] == "workspace-context-unavailable"
     assert error["path"] == str(workdir)
     assert not marker.exists()
 

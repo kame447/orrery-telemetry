@@ -184,6 +184,11 @@ The existing `standalone` value in dashboard/launcher flows still means “no pa
 
 Do not place tokens, passwords, credentials, or API keys in `environment`. The profile also cannot override internal Mail identity, parent, or proxy-credential variables. Service managers often have a short PATH, so absolute command paths are recommended for persistent startup.
 
+Each persistent `run` derives reservation protection from the declared `working_directory` before inspecting Mail or creating launch state. Legacy runtime roots are ignored. For persistent runs, legacy-root migration warnings are recorded as `workspace_warning` in the owner-only `<connection runtime_dir>/persistent/<name>.json` manifest (the launched process exposes this path as `AGENTSTACK_PERSISTENT_RUNTIME_MANIFEST`) rather than mixed into the single-JSON error stream. A profile `environment.AGENTSTACK_EXTRA_PROTECTED_ROOTS` value, including an empty string, overrides the launching environment and installed extras. Runtime roots and the three Git selectors are never reused from a previous session; the profile’s pinned Mail `project_key` is unchanged. The provider/bridge starts in the resolved physical directory. A headless bridge that later launches its provider elsewhere (for example with its own `-C`) must handle that changed workspace itself. See [protection migration](configuration.en.md#reservation-protection-and-migration) before changing roots while reservations are active.
+
+
+For interactive Codex profiles, `working_directory` is authoritative. A command's `-C DIR`, `-CDIR`, `-C=DIR`, `--cd DIR`, or `--cd=DIR` must resolve to that same physical directory; relative paths are evaluated from `working_directory`. A different target or missing value stops `run` before enrollment inspection or launch-state changes with `profile-command-working-directory-conflict` and corrective `guidance`. Set `working_directory` to the intended workspace and remove conflicting command flags. Arguments after `--` and ordinary prompt text are left untouched. This check does not interpret an arbitrary headless bridge's flags: its contract remains to start in the declared directory and manage protection itself if it later changes workspaces.
+
 ### 5. Inspect and start the profile
 
 ```bash
@@ -233,7 +238,7 @@ Claude's standalone precedence cannot suppress a same-named server supplied by a
 
 The following are outside the finite contract and stop before `exec` instead of being overlooked:
 
-- `working_directory` is a symlink, Git-discovery-changing environment is present, or the Git project root / separate gitdir / linked-worktree main-checkout root cannot be resolved safely: `claude-project-root-unsupported`. An ordinary non-Git directory with no `.git` marker is supported
+- `working_directory` is a symlink, or the Git project root / separate gitdir / linked-worktree main-checkout root cannot be resolved safely: `claude-project-root-unsupported`. An ordinary non-Git directory with no `.git` marker is supported
 - macOS `/Library/Application Support/ClaudeCode/managed-mcp.json` or `managed-settings.json` exists: `claude-managed-configuration-unsupported`; v1 rejects either file regardless of its contents, so changing only one Mail entry does not bypass the refusal
 - the profile command contains `--settings`, `--setting-sources`, `--safe-mode`, or caller-owned `--mcp-config` / `--strict-mcp-config`
 - a configuration, plugin inventory / marketplace registry / catalog, selected/enabled plugin, or manifest / marketplace reference cannot be read or interpreted
@@ -327,6 +332,9 @@ Stop instead of creating an alias or recovering automatically when you see:
 - `identity-conflict` / `local-identity-conflict`: do not reuse a local file as proof for another identity
 - `agent-retired`: return to the normal creation or retirement workflow
 - `profile-already-running`: use or stop the existing instance
+- `profile-command-working-directory-conflict`: set the intended `working_directory` and remove conflicting or incomplete interactive Codex `-C` / `--cd` options; same-directory options are allowed
+- `workspace-context-helper-unavailable`: reinstall the matching launcher and `hooks/project-context.sh` together; a custom hooks directory does not replace this version-owned helper
+- `workspace-context-unavailable` / `workspace-context-invalid`: verify the profile working directory, its Git metadata, and absolute explicit extra roots before retrying; no enrollment or launch state is changed at this boundary
 - `claude-project-root-unsupported`: use stderr's `path` to correct a `working_directory` symlink, Git-root resolution, or worktree main-checkout resolution
 - `claude-managed-configuration-unsupported`: v1 stops while a managed file exists; consult the administrator about reviewed product support
 - `claude-plugin-mail-conflict`: explicitly disable the plugin or remove `--plugin-dir`, after accounting for the features that will be lost

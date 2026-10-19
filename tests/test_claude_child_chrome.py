@@ -37,13 +37,15 @@ REMINDER = ROOT / "hooks" / "session-start-reminder.sh"
 # (hooks/spawn_child.sh at 0a43a3c, both launch sites), except that the
 # binary is now the path the launcher resolved (CLAUDE_CHILD_BIN), bare
 # `claude` when it found none.
-PRE_CHROME_INNER = (
+LEGACY_PROVIDER_INNER = (
     'export PATH="$HOME/.local/bin:$PATH"; MCP_ARGS=(); '
     '[[ -n "$CLAUDE_CHILD_MCP_CONFIG" ]] && MCP_ARGS=(--mcp-config '
     '"$CLAUDE_CHILD_MCP_CONFIG" --strict-mcp-config); '
     '"${CLAUDE_CHILD_BIN:-claude}" --model "$CLAUDE_CHILD_MODEL" "${MCP_ARGS[@]}"; '
     '/bin/bash "$AGENTSTACK_HOOKS_DIR/cleanup-child-agent.sh"'
 )
+WORKSPACE_PRELUDE = 'cd "$AGENTSTACK_LAUNCH_WORK_DIR" || exit $?; _ags_workspace_context="$(AGENTSTACK_EXTRA_PROTECTED_ROOTS="$AGENTSTACK_LAUNCH_EXTRA_PROTECTED_ROOTS" /bin/bash "$AGENTSTACK_LAUNCH_CONTEXT_HELPER" workspace-context-exports "$PWD" "$AGENTSTACK_LAUNCH_PROJECT_KEY")" || exit $?; eval "$_ags_workspace_context"; unset _ags_workspace_context AGENTSTACK_LAUNCH_WORK_DIR AGENTSTACK_LAUNCH_PROJECT_KEY AGENTSTACK_LAUNCH_EXTRA_PROTECTED_ROOTS AGENTSTACK_LAUNCH_CONTEXT_HELPER; '
+PRE_CHROME_INNER = WORKSPACE_PRELUDE + LEGACY_PROVIDER_INNER
 CHROME_INNER = PRE_CHROME_INNER.replace(
     '"${MCP_ARGS[@]}";', '"${MCP_ARGS[@]}" --chrome;'
 )
@@ -185,7 +187,7 @@ def _builder_output(chrome: bool) -> str:
     ).stdout
 
 
-def test_builder_is_byte_identical_to_the_pre_chrome_command_when_not_requested():
+def test_builder_preserves_provider_command_after_workspace_setup():
     # Covers the legacy launch site too: both sites call this one builder.
     assert _builder_output(False) == f"/bin/bash -lc '{PRE_CHROME_INNER}'"
 
@@ -233,6 +235,15 @@ def test_default_spawn_matches_the_pre_chrome_launcher_exactly(tmp_path):
                 assert launch[index] == "-e"
                 del launch[index:index + 2]
             launch[-1] = launch[-1].replace(ARGV_PROMPT, "").replace('"${CLAUDE_CHILD_BIN:-claude}"', "claude")
+            launch[-1] = launch[-1].replace(WORKSPACE_PRELUDE, "")
+            workspace_fields = ("AGENTSTACK_PROJECT_REPOSITORY=", "AGENTSTACK_PROJECT_WORK_DIR=",
+                                "AGENTSTACK_PROJECT_WORKTREE_ROOT=", "AGENTSTACK_PROTECTED_ROOTS=",
+                                "AGENTSTACK_EXTRA_PROTECTED_ROOTS=", "AGENTSTACK_PROTECTION_CONTEXT=",
+                                "AGENTSTACK_PROJECT_CONTEXT=", "AGENTSTACK_LOOKUP_PROJECT_KEY=",
+                                "AGENTSTACK_LAUNCH_")
+            for index in range(len(launch) - 2, 0, -1):
+                if launch[index].startswith(workspace_fields) and launch[index - 1] == "-e":
+                    del launch[index - 1:index + 1]
             prompts[label] = log.split("ARGV_TASK\034600\034", 1)[1].split("CALL", 1)[0]
             assert "\034load-buffer\034" not in log and "\034paste-buffer\034" not in log
         launches[label] = launch
@@ -244,13 +255,16 @@ def test_default_spawn_matches_the_pre_chrome_launcher_exactly(tmp_path):
 
 
 @pytest.mark.parametrize("warm_model", ["opus", "sonnet"])
-def test_default_spawn_still_claims_a_ready_warm_session(tmp_path, warm_model):
+def test_workspace_protection_uses_cold_start_even_when_pool_model_matches(tmp_path, warm_model):
     env, workdir = _launch_env(tmp_path)
     env["AGENTSTACK_HOOKS_DIR"] = str(_hooks_with_warm_pool(tmp_path))
     result = _spawn(tmp_path, env, workdir, "WarmChild", "--model", warm_model)
     assert result.returncode == 0, result.stderr
     model = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5"}[warm_model]
-    assert (tmp_path / "warm.log").read_text() == f"claim-model WarmChild {model}\n"
+    assert not (tmp_path / "warm.log").exists()
+    assert "Cold start" in result.stderr
+    assert f"CLAUDE_CHILD_MODEL={model}" in _new_session(env)
+    assert "workspace-context-exports" in _new_session(env)[-1]
 
 
 @pytest.mark.parametrize("pool", [
@@ -271,14 +285,16 @@ def test_a_claim_that_cannot_promise_the_model_falls_back_to_cold_start(tmp_path
     assert "CLAUDE_CHILD_MODEL=claude-opus-5-5" in launch
 
 
-def test_a_claim_reporting_another_model_is_stopped(tmp_path):
+
+def test_workspace_launch_does_not_ask_an_unverifiable_pool_to_claim(tmp_path):
     env, workdir = _launch_env(tmp_path)
     env["AGENTSTACK_HOOKS_DIR"] = str(_hooks_with_warm_pool(tmp_path))
     env["FAKE_WARM_REPORT"] = "LyingChild claude-opus-7"
     result = _spawn(tmp_path, env, workdir, "LyingChild", "--model", "opus")
-    assert result.returncode != 0
-    assert "reported 'LyingChild claude-opus-7' instead of 'LyingChild claude-opus-5-5'" in result.stderr
-    assert "Cold start" not in result.stderr
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "warm.log").exists()
+    assert "Cold start" in result.stderr
+    assert "CLAUDE_CHILD_MODEL=claude-opus-5-5" in _new_session(env)
 
 
 @pytest.mark.parametrize("status", ["opus ready\nsonnet ready", "opus ready (claude-opus-5)\nsonnet ready (claude-sonnet-5)"])
@@ -356,7 +372,7 @@ def test_codex_child_process_does_not_inherit_the_chrome_env(tmp_path):
     tmux_env = dict(
         session[i + 1].split("=", 1)
         for i, arg in enumerate(session[:-1])
-        if arg == "-e" and session[i + 1].startswith("AGENTSTACK_CODEX_PROMPT_FILE=")
+        if arg == "-e" and session[i + 1].startswith(("AGENTSTACK_CODEX_PROMPT_FILE=", "AGENTSTACK_LAUNCH_"))
     )
     assert tmux_env, session
 
@@ -856,10 +872,12 @@ def test_new_agent_form_offers_chrome_only_for_claude():
 
 
 
-def test_warm_handoff_refuses_a_different_resolved_identity(tmp_path):
+def test_workspace_launch_cannot_inherit_a_warm_pool_identity(tmp_path):
     env,workdir=_launch_env(tmp_path)
     env['AGENTSTACK_HOOKS_DIR']=str(_hooks_with_warm_pool(tmp_path))
     env['FAKE_WARM_IDENTITY_OVERRIDE']='AnotherIdentity'
     result=_spawn(tmp_path,env,workdir,'WarmChild','--model','opus')
-    assert result.returncode!=0 and 'LAUNCH_IDENTITY_UNAVAILABLE' in result.stderr
-    assert 'load-buffer' not in (tmp_path/'tmux.log').read_text()
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / 'warm.log').exists()
+    assert 'Cold start' in result.stderr
+    assert 'AGENT_NAME=WarmChild' in _new_session(env)

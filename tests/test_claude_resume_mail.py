@@ -289,7 +289,10 @@ def tmux_resume(resume, monkeypatch):
     monkeypatch.setattr(server, '_mcp_call', mail)
     monkeypatch.setattr(server, '_has_session', lambda name: name in sessions.values())
     monkeypatch.setattr(server, 'lookup_agent', lambda name, _rows=[{'name': NAME, 'category': 'finished'}]: next((r for r in _rows if r['name'] == name), None))
+    real_run = subprocess.run
     def run(argv, **kw):
+        if argv[:1] == ['/bin/bash'] and 'workspace-context-exports' in argv:
+            return real_run(argv, **kw)
         state['commands'].append(argv)
         assert calls and calls[0][0] == 'register_agent'
         if argv[0] == 'env':

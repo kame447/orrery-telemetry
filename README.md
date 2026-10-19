@@ -16,6 +16,8 @@ cd orrery-telemetry
 ./scripts/install.sh --project-key /absolute/path/to/your-project
 ```
 
+managed 起動は、実際の作業フォルダと明示した共有フォルダ（`AGENTSTACK_EXTRA_PROTECTED_ROOTS`）を予約で保護します。更新時には保存済みの旧保護設定を一度だけ引き継ぎます。[保護設定の移行](docs/configuration.md#reservation-の保護範囲と移行)を dry-run で確認し、予約の解放後に更新して関係する session を再起動してください。
+
 `--project-key` は、agent に作業させる folder の絶対パスです（この repository ではありません）。変更内容は表示され、承認してから入ります。終わったら `~/.agentstack/bin/agentstack-doctor` と `~/.agentstack/bin/agentstack-selftest` で確かめ、同じ環境でログイン済みの Claude Code か Codex CLI を用意して、Claude Code なら `~/.agentstack/bin/agent-start <project folder>`、Codex CLI なら `~/.agentstack/bin/agent-start-codex <project folder>` で agent を起動して `http://127.0.0.1:8770/` を開きます。手順は[単独の導入手順](docs/getting-started.md#telemetry-単独の導入と確認)にあります。
 
 子に渡す道具の既定は installer の `--child-default-tools`（既定は空）で選べます。明示の指定を優先し、使えない既定の項目は通知して外します。[道具の選び方](docs/delegation.md#installer-の既定の道具)を参照してください。
