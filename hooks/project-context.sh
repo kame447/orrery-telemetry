@@ -228,15 +228,10 @@ agentstack_resolve_extra_protected_roots() {
 # EXTRAS marks an installed legacy value as migrated; it does not legitimize
 # a different inherited ROOTS value from an older shell or tmux server.
 agentstack_warn_legacy_protected_roots() {
-    local project="$1" repository="$2" work_dir="$3" worktree="$4" roots="$5" extras="$6"
-    local env_file="${7:-${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh}"
+    local roots="$1" extras="$2"
+    local env_file="${3:-${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh}"
     local inherited="${AGENTSTACK_PROTECTED_ROOTS:-}" installed="" legacy="" extras_present=""
     if [ "${AGENTSTACK_PROTECTION_CONTEXT:-}" = workspace-v1 ] &&
-       [ "${AGENTSTACK_PROJECT_KEY:-}" = "$project" ] &&
-       [ "${PROJECT_KEY:-}" = "$project" ] &&
-       [ "${AGENTSTACK_PROJECT_REPOSITORY:-}" = "$repository" ] &&
-       [ "${AGENTSTACK_PROJECT_WORK_DIR:-}" = "$work_dir" ] &&
-       [ "${AGENTSTACK_PROJECT_WORKTREE_ROOT:-}" = "$worktree" ] &&
        [ "${AGENTSTACK_EXTRA_PROTECTED_ROOTS:-}" = "$extras" ] &&
        [ "$inherited" = "$roots" ]; then
         return 0
@@ -305,15 +300,14 @@ agentstack_physical_dir() {
 # - project_key is the ORRERY Mail coordination namespace and follows the
 #   caller-selected key, including empty. When omitted, the existing hook
 #   resolver supplies its usual live > installed > cwd fallback;
-# - repository/work_dir/worktree_root describe the actual target workspace.
+# - work_dir/worktree_root describe the actual target workspace.
 # A namespace may intentionally span repositories. Workspace provenance and
 # mandatory protection come from TARGET. The launcher separately retains
 # configured extra roots; a namespace path is never workspace ownership proof.
 agentstack_resolve_invocation_context() {
     [ "$#" -ge 1 ] && [ "$#" -le 2 ] || return 2
     local target="$1" explicit_key="${2:-}"
-    local work_dir="" worktree_root="" common="" common_abs=""
-    local repository="" project_key="" probe=""
+    local work_dir="" worktree_root="" common="" project_key="" probe=""
 
     work_dir="$(agentstack_physical_dir "$target")" || {
         printf 'agentstack: invocation target must be an existing directory\n' >&2
@@ -358,16 +352,6 @@ agentstack_resolve_invocation_context() {
                 return 1
                 ;;
         esac
-        case "$common" in
-            /*) common_abs="$(agentstack_physical_dir "$common")" || return 1 ;;
-            *) common_abs="$(agentstack_physical_dir "$work_dir/$common")" || return 1 ;;
-        esac
-        if [ "${common_abs##*/}" = ".git" ]; then
-            repository="${common_abs%/*}"
-            [ -n "$repository" ] || repository=/
-        else
-            repository="$common_abs"
-        fi
     fi
 
     if [ "$#" -eq 2 ]; then
@@ -378,14 +362,13 @@ agentstack_resolve_invocation_context() {
         project_key="$(agentstack_resolve_project_key "$work_dir")" || return 1
     fi
     "${AGENTSTACK_PYTHON:-python3}" - \
-        "$project_key" "$repository" "$work_dir" "$worktree_root" <<'PY'
+        "$project_key" "$work_dir" "$worktree_root" <<'PY'
 import json
 import sys
 
-project_key, repository, work_dir, worktree_root = sys.argv[1:]
+project_key, work_dir, worktree_root = sys.argv[1:]
 print(json.dumps({
     "project_key": project_key,
-    "repository_key": repository or None,
     "work_dir": work_dir,
     "worktree_root": worktree_root or None,
     "protected_roots": [worktree_root or work_dir],
@@ -418,14 +401,13 @@ import sys
 
 try:
     data = json.loads(sys.argv[1])
-    fields = [data["project_key"], data["repository_key"] or "",
-              data["work_dir"], data["worktree_root"] or ""]
+    fields = [data["project_key"], data["work_dir"]]
     workspace_roots = data["protected_roots"]
     if not isinstance(workspace_roots, list) or not workspace_roots:
         raise ValueError("protected roots must be a nonempty array")
     if not all(isinstance(value, str) for value in fields + workspace_roots):
         raise ValueError("context fields must be strings")
-    if not fields[2] or any(not root for root in workspace_roots):
+    if not fields[1] or any(not root for root in workspace_roots):
         raise ValueError("context contains an empty workspace")
     if any(any(ord(char) < 32 or ord(char) == 127 for char in value)
            for value in fields + workspace_roots + [sys.argv[2]]):
@@ -457,20 +439,17 @@ except (KeyError, TypeError, ValueError) as exc:
 PYCONTEXT
 )" || return 1
     while IFS= read -r value; do fields+=("$value"); done <<< "$decoded"
-    [ "${#fields[@]}" -eq 7 ] || return 1
-    agentstack_warn_legacy_protected_roots "${fields[0]}" "${fields[1]}" "${fields[2]}" \
-        "${fields[3]}" "${fields[4]}" "${fields[5]}" || return 1
+    [ "${#fields[@]}" -eq 5 ] || return 1
+    agentstack_warn_legacy_protected_roots "${fields[2]}" "${fields[3]}" || return 1
     AGENTSTACK_PROJECT_KEY="${fields[0]}"
     PROJECT_KEY="${fields[0]}"
-    AGENTSTACK_PROJECT_REPOSITORY="${fields[1]}"
-    AGENTSTACK_PROJECT_WORK_DIR="${fields[2]}"
-    AGENTSTACK_PROJECT_WORKTREE_ROOT="${fields[3]}"
-    AGENTSTACK_PROTECTED_ROOTS="${fields[4]}"
-    AGENTSTACK_EXTRA_PROTECTED_ROOTS="${fields[5]}"
-    export AGENTSTACK_PROJECT_KEY PROJECT_KEY AGENTSTACK_PROJECT_REPOSITORY
-    export AGENTSTACK_PROJECT_WORK_DIR AGENTSTACK_PROJECT_WORKTREE_ROOT
+    AGENTSTACK_PROJECT_WORK_DIR="${fields[1]}"
+    AGENTSTACK_PROTECTED_ROOTS="${fields[2]}"
+    AGENTSTACK_EXTRA_PROTECTED_ROOTS="${fields[3]}"
+    export AGENTSTACK_PROJECT_KEY PROJECT_KEY AGENTSTACK_PROJECT_WORK_DIR
     export AGENTSTACK_PROTECTED_ROOTS AGENTSTACK_EXTRA_PROTECTED_ROOTS
     export AGENTSTACK_PROTECTION_CONTEXT=workspace-v1
+    unset AGENTSTACK_PROJECT_REPOSITORY AGENTSTACK_PROJECT_WORKTREE_ROOT
     unset AGENTSTACK_PROJECT_CONTEXT AGENTSTACK_LOOKUP_PROJECT_KEY
     unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR
 }
@@ -535,12 +514,12 @@ import json
 import os
 import shlex
 import sys
-names = ("AGENTSTACK_PROJECT_KEY", "PROJECT_KEY", "AGENTSTACK_PROJECT_REPOSITORY",
-         "AGENTSTACK_PROJECT_WORK_DIR", "AGENTSTACK_PROJECT_WORKTREE_ROOT",
+names = ("AGENTSTACK_PROJECT_KEY", "PROJECT_KEY", "AGENTSTACK_PROJECT_WORK_DIR",
          "AGENTSTACK_PROTECTED_ROOTS", "AGENTSTACK_EXTRA_PROTECTED_ROOTS",
          "AGENTSTACK_PROTECTION_CONTEXT")
 values = {name: os.environ[name] for name in names}
-unset = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "AGENTSTACK_PROJECT_CONTEXT", "AGENTSTACK_LOOKUP_PROJECT_KEY"]
+unset = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "AGENTSTACK_PROJECT_CONTEXT",
+         "AGENTSTACK_LOOKUP_PROJECT_KEY", "AGENTSTACK_PROJECT_REPOSITORY", "AGENTSTACK_PROJECT_WORKTREE_ROOT"]
 if sys.argv[1] == "workspace-context-json":
     print(json.dumps({"environment": values, "unset": unset}))
 else:

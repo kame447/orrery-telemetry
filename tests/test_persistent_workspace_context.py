@@ -172,8 +172,8 @@ def test_persistent_launch_uses_declared_workspace_not_identity_or_ambient_roots
     assert snapshot["cwd"] == str(workdir)
     assert snapshot["argv"][0] == "literal argument; $(never-run)"
     assert env["AGENTSTACK_PROJECT_KEY"] == env["PROJECT_KEY"] == launch.value()["project_key"]
-    assert env["AGENTSTACK_PROJECT_REPOSITORY"] == ("" if workspace == "plain" else str(main))
-    assert env["AGENTSTACK_PROJECT_WORKTREE_ROOT"] == ("" if workspace == "plain" else str(workspace_root))
+    assert "AGENTSTACK_PROJECT_REPOSITORY" not in env
+    assert "AGENTSTACK_PROJECT_WORKTREE_ROOT" not in env
     assert env["AGENTSTACK_PROJECT_WORK_DIR"] == str(workdir)
     assert env["AGENTSTACK_PROTECTED_ROOTS"] == str(workdir if workspace == "plain" else workspace_root)
     assert env["AGENTSTACK_EXTRA_PROTECTED_ROOTS"] == ""

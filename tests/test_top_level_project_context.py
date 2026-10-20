@@ -78,7 +78,8 @@ if args[0] == "has-session":
 if args[0] == "set-environment":
     if len(args) != 5 or args[1:3] != ["-r", "-t"] or not args[3].startswith("="):
         raise SystemExit("non-session environment mutation: " + repr(args))
-    if args[4] not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+    if args[4] not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR",
+                       "AGENTSTACK_PROJECT_REPOSITORY", "AGENTSTACK_PROJECT_WORKTREE_ROOT"):
         raise SystemExit("unexpected environment removal: " + repr(args))
     raise SystemExit(0)
 if args[0] != "new-session":
@@ -209,9 +210,9 @@ raise SystemExit(int(os.environ.get("TEST_PROVIDER_EXIT", "0")))
         env = actual["env"]
         self.assertEqual(env["AGENTSTACK_PROJECT_KEY"], key)
         self.assertEqual(env["PROJECT_KEY"], key)
-        self.assertEqual(env["AGENTSTACK_PROJECT_REPOSITORY"], str(repository))
+        self.assertIsNone(env["AGENTSTACK_PROJECT_REPOSITORY"])
         self.assertEqual(env["AGENTSTACK_PROJECT_WORK_DIR"], str(target))
-        self.assertEqual(env["AGENTSTACK_PROJECT_WORKTREE_ROOT"], str(worktree))
+        self.assertIsNone(env["AGENTSTACK_PROJECT_WORKTREE_ROOT"])
         self.assertEqual(env["AGENTSTACK_PROTECTED_ROOTS"], str(worktree))
         self.assertEqual(env["AGENTSTACK_PROTECTION_CONTEXT"], "workspace-v1")
         for name in ("AGENTSTACK_PROJECT_CONTEXT", "AGENTSTACK_LOOKUP_PROJECT_KEY",
@@ -255,7 +256,7 @@ raise SystemExit(int(os.environ.get("TEST_PROVIDER_EXIT", "0")))
                 self.assertEqual(record["cwd"], str(nested))
                 self.assert_context(record, nested, worktree=self.linked)
 
-    def test_independent_clone_keeps_namespace_but_tracks_repository_separately(self) -> None:
+    def test_independent_clone_keeps_namespace_but_protects_its_own_workspace(self) -> None:
         clone = self.root / "clone"
         self.git("clone", "-q", str(self.repo), str(clone))
         result = self.run_launcher("codex", clone)
@@ -288,7 +289,7 @@ raise SystemExit(int(os.environ.get("TEST_PROVIDER_EXIT", "0")))
                     env = self.read("provider")["env"]
                     self.assertEqual(env["AGENTSTACK_PROJECT_KEY"], key)
                     self.assertEqual(env["PROJECT_KEY"], key)
-                    self.assertEqual(env["AGENTSTACK_PROJECT_REPOSITORY"], "")
+                    self.assertIsNone(env["AGENTSTACK_PROJECT_REPOSITORY"])
                     self.assertEqual(env["AGENTSTACK_PROJECT_WORK_DIR"], str(self.plain))
                     self.assertEqual(env["AGENTSTACK_PROTECTED_ROOTS"], str(self.plain))
 
@@ -327,7 +328,7 @@ raise SystemExit(int(os.environ.get("TEST_PROVIDER_EXIT", "0")))
         actual = self.read("provider")["env"]
         self.assertEqual(actual["AGENTSTACK_PROJECT_WORK_DIR"], str(nested))
         self.assertEqual(actual["AGENTSTACK_PROTECTED_ROOTS"], str(nested))
-        self.assertEqual(actual["AGENTSTACK_PROJECT_WORKTREE_ROOT"], "")
+        self.assertIsNone(actual["AGENTSTACK_PROJECT_WORKTREE_ROOT"])
 
     def test_repository_config_cannot_redirect_protection_outside_launch_target(self) -> None:
         self.git("config", "core.worktree", str(self.other), cwd=self.repo)
@@ -400,7 +401,7 @@ raise SystemExit(int(os.environ.get("TEST_PROVIDER_EXIT", "0")))
         self.assertEqual(result.returncode, 0, result.stderr)
         env = self.read("provider")["env"]
         self.assertEqual(env["AGENTSTACK_PROJECT_KEY"], str(self.plain))
-        self.assertEqual(env["AGENTSTACK_PROJECT_REPOSITORY"], str(self.repo))
+        self.assertIsNone(env["AGENTSTACK_PROJECT_REPOSITORY"])
         self.assertEqual(env["AGENTSTACK_PROTECTED_ROOTS"], str(self.repo))
 
     def test_logical_namespace_without_declared_roots_protects_only_target(self) -> None:
@@ -751,9 +752,7 @@ raise SystemExit(subprocess.run([os.environ["TEST_REAL_TMUX"], "-S", os.environ[
                             self.assertEqual(result.returncode, 0, result.stderr)
                             expected = {
                                 "AGENTSTACK_PROJECT_KEY": "live-project", "PROJECT_KEY": "live-project",
-                                "AGENTSTACK_PROJECT_REPOSITORY": str(self.repo) if target == self.linked else "",
                                 "AGENTSTACK_PROJECT_WORK_DIR": str(target),
-                                "AGENTSTACK_PROJECT_WORKTREE_ROOT": str(target) if target == self.linked else "",
                                 "AGENTSTACK_PROTECTED_ROOTS": f"{extras}:{target}" if extras else str(target),
                                 "AGENTSTACK_EXTRA_PROTECTED_ROOTS": extras,
                                 "AGENTSTACK_PROTECTION_CONTEXT": "workspace-v1",
@@ -774,7 +773,8 @@ raise SystemExit(subprocess.run([os.environ["TEST_REAL_TMUX"], "-S", os.environ[
                                     [*command, "show-environment", "-t", session, name], env=self.env,
                                     check=True, capture_output=True, text=True, timeout=10)
                                 self.assertEqual(actual.stdout.rstrip("\n"), name + "=" + value)
-                            for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+                            for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR",
+                                         "AGENTSTACK_PROJECT_REPOSITORY", "AGENTSTACK_PROJECT_WORKTREE_ROOT"):
                                 removal = subprocess.run(
                                     [*command, "show-environment", "-t", session, name], env=self.env,
                                     check=True, capture_output=True, text=True, timeout=10)
@@ -793,7 +793,8 @@ raise SystemExit(subprocess.run([os.environ["TEST_REAL_TMUX"], "-S", os.environ[
                                 for name, value in expected.items():
                                     self.assertEqual(record["env"][name], value, (record_name, name))
                                 for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR",
-                                             "AGENTSTACK_PROJECT_CONTEXT", "AGENTSTACK_LOOKUP_PROJECT_KEY"):
+                                             "AGENTSTACK_PROJECT_CONTEXT", "AGENTSTACK_LOOKUP_PROJECT_KEY",
+                                             "AGENTSTACK_PROJECT_REPOSITORY", "AGENTSTACK_PROJECT_WORKTREE_ROOT"):
                                     self.assertFalse(record["env"][name], (record_name, name))
                             # Check after each launch, rather than letting a later
                             # launch accidentally restore a globally leaked value.

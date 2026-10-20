@@ -74,9 +74,9 @@ def test_child_target_replaces_parent_and_recomputes_worktree_before_forwarding(
     lines = result.stdout.splitlines()
     context = json.loads(lines[0])
     assert context["PROJECT_KEY"] == "shared-mail"
-    assert context["AGENTSTACK_PROJECT_REPOSITORY"] == str(source)
+    assert context["AGENTSTACK_PROJECT_REPOSITORY"] is None
+    assert context["AGENTSTACK_PROJECT_WORKTREE_ROOT"] is None
     assert context["AGENTSTACK_PROJECT_WORK_DIR"] == str(vault)
-    assert context["AGENTSTACK_PROJECT_WORKTREE_ROOT"] == str(linked)
     assert context["AGENTSTACK_PROTECTED_ROOTS"] == f"{vault}:{linked}"
     assert all(context[key] is None for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"))
     assert f"AGENTSTACK_PROTECTED_ROOTS={vault}:{linked}" in lines
@@ -283,9 +283,9 @@ def test_gemini_runner_recomputes_its_isolated_worktree_context(tmp_path, launch
     assert launched.returncode == 0, launched.stderr
     context = json.loads(launched.stdout)
     assert context["AGENTSTACK_PROJECT_KEY"] == "shared-namespace"
-    assert context["AGENTSTACK_PROJECT_REPOSITORY"] == str(source)
+    assert context["AGENTSTACK_PROJECT_REPOSITORY"] is None
+    assert context["AGENTSTACK_PROJECT_WORKTREE_ROOT"] is None
     assert context["AGENTSTACK_PROJECT_WORK_DIR"] == str(linked)
-    assert context["AGENTSTACK_PROJECT_WORKTREE_ROOT"] == str(linked)
     assert context["AGENTSTACK_PROTECTED_ROOTS"] == f"{vault}:{linked}"
     assert context["AGENTSTACK_EXTRA_PROTECTED_ROOTS"] == str(vault)
     assert all(context[key] is None for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"))
