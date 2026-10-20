@@ -2,9 +2,21 @@
 
 [English](README.en.md)
 
-複数の Claude Code / Codex が直接話し、仕事を分担し、結果を確かめ合う。その働きと Mail の往復を一枚の画面で見渡せるのが ORRERY Telemetry です。端末も同じ画面で使う [ORRERY cockpit](https://github.com/gyroid-eth/orrery) と組み合わせて使えます。
+複数の coding agent が直接話し、仕事を分担し、結果を確かめ合う。その働きと Mail の往復を一枚の画面で見渡せるのが ORRERY Telemetry です。Claude Code / Codex CLI に加え、設定済みの DeepSeek / Local の model を dsh / Hermes で動かす agent も扱います。端末も同じ画面で使う [ORRERY cockpit](https://github.com/gyroid-eth/orrery) と組み合わせて使えます。
 
 ![NETWORK を開いたまま子が加わり、ready の後にしりとりの Mail が3往復する](docs/img/network-mail.gif)
+
+## 目的から始める
+
+| やりたいこと | 入口 |
+| --- | --- |
+| 手元の agent の働きを見る | 下の導入手順から、ログイン済みの Claude Code / Codex CLI を起動し、DECK / NETWORK を開く |
+| API の model を選んで agent を作る | [provider・model・harness の違い](docs/getting-started.md#provider-model-harness)と[現在の対応組合せ](docs/managed-catalog.md)を確認し、[dsh / Hermes を任意導入](docs/install.md#dsh--hermes-の任意導入)する |
+| agent 同士で仕事を分担する | [delegate と Mail の通し確認](docs/getting-started.md#5-しりとりで通しの確認をする)へ進む |
+
+provider は接続先、model はそこで使うモデル、harness は道具や会話を動かす CLI です。現在、API を使う標準の組合せは DeepSeek / Local × dsh / Hermes に限り、設定済みの model ごとに利用可否を検査します。任意の API と任意の harness の組合せを保証するものではありません。
+
+API を使う子の起動は現在 macOS の legacy mode 向けです。backend・資格の参照は手動準備が必要で、共通ログイン、子ごとの独立した Hermes 記憶、共通 Telegram 入口は未完成、Local の手動 effort は実接続の受け入れ前です。同梱 NEW AGENT は harness を送らないため、この子の起動には対応していません。cockpit を追加した環境の New Agent / Harness / Lineage での[確認手順](docs/getting-started.md#5-しりとりで通しの確認をする)を参照してください。
 
 ## Telemetry だけを入れる
 
@@ -54,7 +66,7 @@ cockpit の **Your first flight → help map → Full tour** を順に試しま�
 
 Telemetry の header の `HELP MAP`（NETWORK では `SETTINGS` の隣）を押すと、いま表示されている DECK / NETWORK の操作に注記が付きます。agent の詳細パネルでは、操作列の `HELP MAP` を押すと、そのパネルの操作に注記が付きます。cockpit 内に埋め込まれた Telemetry でも同じ操作で使えます。注記が収まらない場合は凡例で表示し、`Esc` または `Close` で閉じられます。
 
-Full tour は delegate skill（Claude Code: `/delegate`、Codex: `$delegate`）で子を1体作り、ORRERY Mail でしりとりを3往復し、端末の配置、Telemetry の EXIT / RESUME、NETWORK / REPLAY を試す案内です。画面の説明に従って操作すると進みます。[現在のクイックスタート](https://github.com/gyroid-eth/orrery/blob/master/README.md#クイックスタート)と [Full tour](https://github.com/gyroid-eth/orrery/blob/master/docs/FULL_TOUR.md)を参照してください。
+Full tour は delegate skill（Claude Code: `/delegate`、Codex: `$delegate`）で子を1体作り、ORRERY Mail でしりとりを3往復し、端末の配置、Telemetry の EXIT / RESUME、NETWORK / REPLAY を試す案内です。画面の説明に従って操作すると進みます。DeepSeek・Local の子でも、dsh・Hermes それぞれで同じ3往復を手動で確認できます（[確認手順](docs/getting-started.md#5-しりとりで通しの確認をする)）。[現在のクイックスタート](https://github.com/gyroid-eth/orrery/blob/master/README.md#クイックスタート)と [Full tour](https://github.com/gyroid-eth/orrery/blob/master/docs/FULL_TOUR.md)を参照してください。
 
 端末で仕事をするのは cockpit、チームの状態や履歴を見るのが Telemetry です。画面内のガイドを入口にし、詳しい参照は[目的別索引](docs/README.md)から開けます。
 

@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from service_teardown import TEST_LABEL_PREFIX  # noqa: E402
 
 import dashboard.server as server
+from claude_resume_harness import cleanup_mail
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -424,7 +425,7 @@ def test_standalone_resume_uses_current_home_without_child_lifecycle(
     assert rollout.read_bytes() == original
 
 
-def test_deck_resume_exec_receives_the_fresh_launch_pair(policy_env, monkeypatch):
+def test_deck_resume_exec_receives_the_fresh_launch_pair(policy_env, monkeypatch, cleanup_mail):
     tmp_path, project = policy_env
     zsh = shutil.which("zsh")
     if not zsh:
@@ -585,7 +586,7 @@ def test_deck_resume_exec_receives_the_fresh_launch_pair(policy_env, monkeypatch
     monkeypatch.setenv("AGENTSTACK_HOME", str(install_home))
     monkeypatch.setenv("AGENTSTACK_PROJECT_KEY", str(project))
     monkeypatch.setenv("AGENTSTACK_RUNTIME_DIR", str(runtime))
-    monkeypatch.setenv("AGENTSTACK_MCP_URL", "http://127.0.0.1:1/mcp")
+    monkeypatch.setenv("AGENTSTACK_MCP_URL", cleanup_mail)
     # server.py resolves service configuration at import time.  Updating only
     # os.environ here made this fixture inherit the caller's import-time mode;
     # under env -i that was the default `auto`, so cleanup correctly stopped

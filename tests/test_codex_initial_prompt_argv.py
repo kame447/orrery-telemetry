@@ -557,9 +557,13 @@ def _cleanup(tmp_path, screen: str, which: str) -> list[str]:
         body = spawn[spawn.index("cleanup_on_failure() {"):spawn.index("\n}\n", spawn.index("cleanup_on_failure() {")) + 3]
         state = "SPAWN_COMPLETED=false\nCHILD_SESSION_STARTED=true\nRESOURCES=\nPROJECT_KEY=/p\n"
         call = "cleanup_on_failure"
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    (hooks / "cleanup-child-agent.sh").write_text(
+        'printf "confirmed-cleanup\\n" >> "$DIR/calls"\n', encoding="utf-8")
     script = (
-        f"DIR={shlex.quote(str(tmp_path))}\nCHILD_NAME=Child\nUSE_CODEX=true\n" + state
-        + 'tmux() { printf "%s\\n" "$*" >> "$DIR/calls"; [[ "$1" == capture-pane ]] && cat "$DIR/screen"; return 0; }\n'
+        f"export DIR={shlex.quote(str(tmp_path))}\nHOOKS_DIR=\"$DIR/hooks\"\nCHILD_NAME=Child\nUSE_CODEX=true\n" + state
+        + 'tmux() { printf "%s\\n" "$*" >> "$DIR/calls"; case "$1" in capture-pane) cat "$DIR/screen" ;; kill-session) : > "$DIR/killed" ;; has-session) [[ ! -f "$DIR/killed" ]] ;; esac; }\n'
         + "warn_if_uninjected() { :; }\ndiscard_claude_launch_record() { :; }\n"
         + "call_mcp() { :; }\nretire_agent_with_token_file() { :; }\nspawn_note() { printf '%s\\n' \"$1\" >&2; }\n"
         + f"SPAWN_INCIDENT_LOG={shlex.quote(str(tmp_path / 'incidents'))}\nAGENTSTACK_CODEX_UPDATE_WATCH_SECONDS=0\n"
@@ -576,12 +580,17 @@ def test_cleanup_never_kills_a_codex_updating_itself(tmp_path, which):
     # Killing the session mid `npm install -g` left neither the old nor the
     # new codex usable on the machine (#60).
     updating = "Updating Codex via `npm install -g @openai/codex`...\n\nadded 1 package in 41s\n"
-    assert not any(c.startswith("kill-session") for c in _cleanup(tmp_path, updating, which))
+    calls = _cleanup(tmp_path, updating, which)
+    assert not any(c.startswith("kill-session") for c in calls)
+    assert "confirmed-cleanup" not in calls
 
 
 @pytest.mark.parametrize("which", ["pre-registered", "direct"])
 def test_cleanup_still_kills_an_ordinary_half_started_child(tmp_path, which):
-    assert any(c.startswith("kill-session") for c in _cleanup(tmp_path, PROVISIONAL, which))
+    calls = _cleanup(tmp_path, PROVISIONAL, which)
+    assert any(c.startswith("kill-session") for c in calls)
+    if which == "direct":
+        assert "confirmed-cleanup" in calls
 
 
 # --- #165 review P2-1: who closes a child left updating ------------------------
@@ -605,7 +614,7 @@ def _update_watch(tmp_path, screens: list[str], *, alive_polls: int = 99, limit:
         '  printf "%s\\n" "$*" >> "$DIR/calls"\n'
         '  local i; i="$(cat "$DIR/i")"\n'
         '  case "$1" in\n'
-        '    has-session) [[ -f "$DIR/killed" ]] && return 1; (( i < ALIVE )) ;;\n'
+        '    has-session) if [[ -f "$DIR/killed" ]] || (( i >= ALIVE )); then echo "can\'t find session: Child" >&2; return 1; fi ;;\n'
         '    capture-pane) (( CAPTURE_FAILS )) && return 1; cat "$DIR/screen$(( i < SCREENS ? i : SCREENS - 1 ))" ;;\n'
         '    kill-session) (( KILL_FAILS )) && return 1; : > "$DIR/killed" ;;\n'
         "  esac\n"

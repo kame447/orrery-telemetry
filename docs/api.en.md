@@ -1,5 +1,9 @@
 # API reference
 
+段A の前半: 表示と残高。DeepSeek の子の起動は次の版。
+明示opt-inはDeepSeek assetとUSD残高だけを有効化し、spawn catalogへdshを追加しない。
+`/assets/deepseek.svg` は無効時404・有効時200。残高型はAPI 21の既存 `/api/quotas` に載せる。
+
 > 日本語版: [api.md](api.md)
 
 [Previous: Dashboard](dashboard.en.md) · [Back to README](../README.en.md) · [Next: Configuration](configuration.en.md)
@@ -61,7 +65,7 @@ curl -s http://127.0.0.1:8770/api/version
 ```
 
 ```json
-{"name":"orrery-telemetry","version":"2026.09.16.1","api":19}
+{"name":"orrery-telemetry","version":"2026.09.16.1","api":25}
 ```
 
 See [Installation](install.en.md#version) for version resolution order.
@@ -88,7 +92,26 @@ Instruction `data` follows the shared [status schema](../bin/lib/instruction_con
 
 In API 12 distributions, bundled ORRERY Mail's MCP `health_check` returns `server_instance_id`, the same persistent UUID as management-socket inspect. It is neither a secret nor authentication. Daemons compare both transports with the operator-pinned connection UUID, refusing older builds without the field or mismatches. Existing `status`, `environment`, `http_host`, and `http_port` fields remain. This adds no dashboard HTTP route. See [daemon bindings and notifications](daemon-agents.en.md).
 
+## GET `/api/quotas` — 任意のDeepSeek残高（API 21）
+
+dsh opt-inが有効な時だけ `providers` に `provider: "dsh"` を加える。
+無効時は取得せず、既存のquota応答の形も変えない。
+残高型は `measurement_kind: "balance"`、`buckets: []` とし、
+`balance` に `currency: "USD"`、`total_balance`（金額文字列又はUSDなしのnull）、
+`is_available` を持つ。CNYは返さない。金額の原精度を保持する。
+`is_available: false` は取得成功で利用不可という意味であり、通信失敗とは区別する。
+失敗・未取得では `status: "unavailable"`、`balance: null`、固定の理由codeを返す。
+0円や百分率bucketへ置き換えない。`observed_at` / `last_observed_at` / `checked_at`
+で取得時刻を示し、4分cacheを使う。鍵・Keychainの応答・HTTPの生エラーは返さない。
+
+取得workerだけがKeychainの `deepseek-api` を読み、dashboardのenvへ鍵を入れない。
+既存の同一origin検査とglobal operator admissionはそのまま使う。
+[公式の残高API](https://api-docs.deepseek.com/api/get-user-balance/) と
+[取得・実確認の手順](dsh-stage-a.md)も参照。
+
 ## GET `/api/spawn-names`
+
+API 23 includes explicitly configured DeepSeek (`provider=deepseek`) and Local (`provider=strata`, `locality=local`) in standard spawn. Use the model's `harnesses` availability and `efforts` / `default_effort` / `effort_source`. Capabilities come from checked local evidence, never trial effort settings. The normal catalog does not require managed task modes or attempt IDs. Missing runtimes and disabled opt-ins are unavailable.
 
 The Claude provider exposes `model_source` (`override`, `local_cache`, or `bundled`) and `model_error` for explicit-setting diagnostics. Invalid overrides return an empty Claude `models` list without disabling other providers. Top-level `models` / `default_model` mirror the same Claude candidates. See [Claude model catalog](configuration.en.md#claude-model-catalog) for discovery and authorization boundaries.
 
@@ -207,6 +230,8 @@ When `path` is omitted, the first `AGENTSTACK_SPAWN_ROOTS` entry is used. For a 
 Hidden directories and symlinks that leave the root are excluded. Up to 500 entries are returned in name order because the page filters the complete list by the typed prefix. With 501 or more entries, `truncated` is `true`.
 
 ## GET `/api/agents`
+
+API generation 24 lets running dsh/Hermes agent rows and `/api/graph` nodes return `work`, `question` or `ask` in `act_state` from supported current operation controls. A complete current input frame with no work/question/approval evidence returns `wait`. Hidden, incomplete or unsupported shapes return `null` (unknown); absence alone never implies waiting. Activity does not determine liveness, completion or stop eligibility. Existing Claude/Codex classification is unchanged. See [supported native displays and limits](native-capabilities.md#activity-classification-boundary).
 
 API generation 19 adds nullable `provider_stall` to live legacy Codex CLI agent rows and graph nodes: `{kind: "model_capacity", since: <UTC epoch seconds>, error: <one error line>, notification_status: <status>}`. Status is `sent`, `no_parent`, `parent_unverified`, `delivery_unknown`, or `failed`. It does not change `act_state`. The dashboard observes two distinct current capacity-error captures and sends one notice from the existing child identity to its verified parent. Observed work rearms it; a proven append of "previous stop → newly submitted input → new capacity error" in the same pane also produces a new notice after two captures confirm that boundary. Ambiguous history retains the current episode. GET requests never send messages. An uncertain delivery is not retried. Global mode is not supported yet; see [provider stops](dashboard.en.md#provider-stop-notifications-legacy).
 
@@ -457,11 +482,13 @@ Request:
 {"session":"WindyFermi"}
 ```
 
-Optional `open` is a boolean. An explicit `false` creates a detached tmux resume with no OS terminal window; `true` opens a window. When omitted, Claude / Codex resume follows `AGENTSTACK_AUTO_OPEN_CHILD` (`0` means detached, unset / `1` opens). Explicit `open` takes precedence. A running session with `open: false` is left running without attach; the environment setting only controls automatic resume opening, so manual Open tmux remains available. Detached resume works without a terminal adapter. This request field is available from API generation 3.
+Optional `open` is a boolean. An explicit `false` creates a detached tmux resume with no OS terminal window; `true` opens a window. When omitted, Claude / Codex / dsh / Hermes resume follows `AGENTSTACK_AUTO_OPEN_CHILD` (`0` means detached, unset / `1` opens). Explicit `open` takes precedence. A running session with `open: false` is left running without attach; the environment setting only controls automatic resume opening, so manual Open tmux remains available. Detached resume works without a terminal adapter. This request field is available from API generation 3.
 
 The response is `{ok, session, actions}`. An existing tmux session is opened / focused in the configured terminal. When no session exists, or when a finished husk must be restored from its transcript, the server rechecks the same predicate used for GET rows. A Claude row displayed as `verification_required` receives its full check inside this one request and continues through resume if it becomes `ready`. A Codex child gets a fresh home; credential-backed registration and a fresh binding expectation complete before the identity is un-retired immediately before Codex exec. A refusal returns HTTP 400 with a confirmed fixed reason code such as `{"ok":false,"error":"...","resume_capability":"provenance_missing"}` and does not kill the husk or open a terminal. Bootstrap or unretire failure also prevents Codex startup and removes only generated home / configuration artifacts.
 
 Claude verifies its saved owner credential against the original project, numeric ID, name, and program, then completes credential-backed registration and unretire before opening a terminal. Claude child state / credentials are also retained for 30 days by default, and resume regenerates the child-owned Mail proxy configuration. Top-level Claude uses its existing owner token. Credentials deleted by older cleanup yield `credential_missing`; expired material yields `retention_expired`, and explicit purge yields `purged`. Authentication or unretire failure also prevents terminal launch. Resume never issues credentials or registers an alias. Codex top-level resumes also call unretire.
+
+dsh / Hermes children resume only from the native ID recorded by their own session creation event. Resume never selects recent history; a missing ID yields `no_history`. It checks the same registration, retention and owner credential, preserving the original `harness_state_dir` and native profile without repeating the initial task. Config / MCP generation completes before Mail unretire and release of the tmux launch gate. A changed profile or generation failure preserves the original husk, state and credentials. The internal `--resume-native` entry runs in the existing pane foreground and creates neither a tmux session nor a registration.
 
 If Claude startup preparation fails, the original husk is preserved and Mail is re-retired only if it was originally retired. An originally active identity is not retired. Failures of the restoration itself are reported in `rollback_errors`; they are not reported as successful recovery. The CLI waits until tmux and window preparation succeed.
 
@@ -563,23 +590,31 @@ Request:
 | `task` | yes | Task body. The UI accepts up to 4,000 characters |
 | `name` | no | Remove hyphens when specified; must be `available` |
 | `dir` | no | Existing working directory. Defaults to the source repository |
-| `provider` | no | `claude` (default) or `codex` |
-| `model` | no | From the provider catalog. Each provider has a default |
-| `effort` | Codex only | Model-specific; use `model_efforts` / `model_effort_defaults`. Unknown metadata: omit for CLI default. |
+| `provider` | no | `claude` (default), `codex`, `deepseek`, or `strata`. The Local display group sends `strata` |
+| `harness` | DeepSeek / Local required | `dsh` or `hermes`. Claude optionally accepts `claude-code` (legacy alias `claudecode`), Codex `codex-cli` (legacy alias `codex`) |
+| `helper_model` | no | Omitted or `same` inherits the main model. DeepSeek / Local also accepts same-backend formal IDs in the selected model/harness `helper_models`; undeclared or foreign IDs are rejected |
+| `model` | DeepSeek / Local required | Formal ID matching an available provider/model/harness catalog entry. Existing Claude/Codex omitted-model defaults are unchanged |
+| `effort` | no | Send only explicit choices. Claude/Codex use model-specific metadata; DeepSeek/Local validate the selected model and harness capability. Omit to use CLI settings; unknown values are never guessed |
 | `role` | no | At most 40 characters |
 | `group` | no | At most 24 characters |
 | `worktree` | no | Isolated worktree |
 | `worktree_base` | no | Base revision; default `HEAD` |
 | `claude_chrome` | Claude only | Boolean. `true` adds `--chrome` to the child. Omitted or `false` means inherit (the user's Claude settings decide). The launcher's env defaults are not used. See [Claude in Chrome](delegation.en.md#claude-children-and-browser-control-claude-in-chrome) |
 | `claude_chrome_device` | Claude only | deviceId of the browser to use (`[A-Za-z0-9._:-]{1,128}`). Implies `claude_chrome: true`; combining it with `claude_chrome: false` is rejected |
-| `base` | Claude / Codex | `"default"` (explicitly suppresses installer tool defaults) or `"mail-only"` (ORRERY Mail and only what `tools` selects). Since api 7 |
-| `tools` | Claude / Codex | Object: `browser` (`true` for Claude/Codex, `{"device": "<deviceId>"}` with a Claude-only deviceId), `screen` (`"read"` / `"operate"` or `{"access": ..., "server": "<name>"}`; without a server it is the macOS computer use, Claude only), `mcp` (array of server names; no tool is approved), `approve_all` (servers in `mcp` whose every tool is approved; rejected for a version not in the table). Rejected when its deviceId differs from `claude_chrome_device`. Since api 7. See [Choosing the tools a child gets](delegation.en.md#choosing-the-tools-a-child-gets---base----tools) |
+| `base` | Claude / Codex / dsh / Hermes | `"default"` (explicitly suppresses installer tool defaults) or `"mail-only"` (ORRERY Mail and only what `tools` selects). Since api 7 |
+| `tools` | Claude / Codex / dsh / Hermes | Object: `browser` (`true` for Claude/Codex, `{"device": "<deviceId>"}` with a Claude-only deviceId), `screen` (`"read"` / `"operate"` or `{"access": ..., "server": "<name>"}`; without a server it is the macOS computer use, Claude only), `mcp` (array of server names; no tool is approved), `approve_all` (servers in `mcp` whose every tool is approved; rejected for a version not in the table). Rejected when its deviceId differs from `claude_chrome_device`. Since api 7. See [Choosing the tools a child gets](delegation.en.md#choosing-the-tools-a-child-gets---base----tools) |
+
+The ordinary DeepSeek / Local catalog shares plain-generation admission and generator static validation with the launcher. Older managed generations are not automatically admitted. Effort uses the checked cache for the selected model and harness; unknown capabilities remain unknown. Liveness checks native CLI descendants of the pane and does not classify an unconfirmed observation as finished. Provider identity comes from the child's explicit harness_backend, rather than the model name.
+
+dsh / Hermes accept `base` / `tools` only when the selection can be represented in native configuration. They copy stdio / HTTP MCP servers and reject built-in computer use, Chrome devices, and unrepresentable per-tool approvals or filters with a reason. A successful launch does not imply those approvals are enabled.
 
 In API 8, explicit `tools: {}` or `base: "default"` passes `--base default`. Dashboard/API launches honor the form selection and remove installer `AGENTSTACK_CHILD_DEFAULT_TOOLS` from the launcher environment, so removed choices are not appended again. Unavailable explicit tools stop the launch. Only CLI launches omitting base/tools/MCP profile use the path that omits unavailable defaults with a notice.
 
 A child with a `base` or `tools` selection is not started when the selection cannot be applied (no Mail proxy, a server that cannot be copied, `mail-only` in a project where the computer use is enabled, ...). Malformed selections return 400 here; errors that depend on the child's directory are returned as a launcher failure. Other providers such as Gemini reject `mail-only` and `tools`.
 
 Unknown request fields return HTTP 400 before model resolution or launch. When the optional Gemini provider is installed, it also accepts `resources` (see [Gemini delegation](delegation.en.md)); other providers reject that field.
+
+After failed startup, the API calls the launcher's common cleanup. If cleanup cannot be confirmed, the response has `ok: false`, `cleanup_state: "unknown"` and `cleanup_incomplete: true`; the API preserves child state, owner credentials and handoff files. A successful cleanup may retain resumable material, which the API also leaves intact.
 
 Adding `"dry_run": true` validates the request and resolves provider, model, effort and directory, then returns HTTP 200 with a preview:
 
@@ -670,3 +705,6 @@ Explicit same-intent replay from registration status sends `registration_sha256`
 Each item returns `liveness`, nullable `act_state` / `ctx_used`, `session_count`, `parent_agent_id` / `parent_state`, and `activity_freshness` / `reason`. Tokens, pane captures and private paths are excluded. Unknown is never replaced with waiting or context zero. See [observation and capability checks](dashboard.en.md#global-runtime-observation).
 
 Capabilities include `global_runtime_observation=1` and `operator_session=1`. Global `/api/quotas` and `/portrait` use the same admission and existing read helpers. Images use shared-session `apiBlob` object URLs, revoked on Lock.
+
+
+API 25: legacy managed `attempt_id` spawn/status requests are retired and return `unsupported_attempt`. Use standard `POST /api/spawn` and `GET /api/spawn-status?name=<name>`.

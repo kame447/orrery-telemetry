@@ -37,6 +37,7 @@ SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 PROXY_AGENT_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,127}")
 CODEX_PROGRAMS = {"codex", "codex-cli"}
 CLAUDE_PROGRAMS = {"claude", "claude-code"}
+HARNESS_PROGRAMS = {"dsh", "hermes"}
 MCP_PROFILES = {"inherit", "orrery-only"}
 MAX_STATE_BYTES = 65536
 MAX_TOKEN_BYTES = 4096
@@ -48,6 +49,8 @@ def _provider(program: object) -> str | None:
             return "codex"
         if program in CLAUDE_PROGRAMS:
             return "claude"
+        if program in HARNESS_PROGRAMS:
+            return program
     return None
 
 
@@ -913,6 +916,56 @@ def cancel_resume(
         )
         state.pop("resume_in_progress_at", None)
         _atomic_json(state_path, state)
+
+
+def native_resume_input(runtime_dir: Path, state: dict[str, Any]) -> dict[str, Any]:
+    """Read this child's own native ID and configuration, never a latest ID.
+
+    The caller first authenticates retained identity/expiry with inspect_retained.
+    Callback metadata is separate from the shared credential-bearing child file.
+    """
+    name, harness = state.get('agent_name'), state.get('program')
+    if (not isinstance(name, str) or not SAFE_NAME.fullmatch(name)
+            or harness not in HARNESS_PROGRAMS or state.get('harness') != harness
+            or state.get('harness_backend') not in {'deepseek', 'strata'}):
+        raise ResumeStateError('identity_mismatch', 'Native child identity is invalid')
+    runtime_dir = runtime_dir.resolve()
+    owned = runtime_dir / 'child-agents' / (name + '.harness')
+    raw_directory = state.get('harness_state_dir')
+    if not isinstance(raw_directory, str):
+        raise ResumeStateError('config_unrestorable', 'Native configuration is unavailable')
+    directory = Path(raw_directory)
+    if (not directory.is_absolute() or directory.is_symlink() or owned.is_symlink()
+            or not directory.is_dir() or not owned.is_dir()
+            or (directory != owned and directory.parent != owned)):
+        raise ResumeStateError('identity_mismatch', 'Native configuration belongs to another child')
+    try:
+        event = json.loads(_read_private(directory / 'native-session.json', 'native session', 16384))
+        document = json.loads(_read_private(directory / 'input.json', 'native input', MAX_STATE_BYTES))
+    except ResumeStateError as exc:
+        if exc.code == 'credential_missing':
+            raise ResumeStateError('no_history', 'This child has no recorded native session') from None
+        raise
+    except (UnicodeError, ValueError):
+        raise ResumeStateError('config_unrestorable', 'Native resume metadata is invalid') from None
+    if not isinstance(event, dict) or not isinstance(document, dict):
+        raise ResumeStateError('config_unrestorable', 'Native resume metadata is invalid')
+    session_id = event.get('native_session_id')
+    if (event.get('harness') != harness or event.get('agent_name', name) != name
+            or not isinstance(session_id, str)
+            or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,255}', session_id)):
+        raise ResumeStateError('identity_mismatch', 'Native session identity is invalid')
+    _parse_timestamp(event.get('created_at'), 'native session creation')
+    if (document.get('agent_name') != name or document.get('program') != harness
+            or document.get('backend_id') != state['harness_backend']
+            or document.get('project_key') != state.get('project_key')
+            or document.get('state_dir') != str(directory)
+            or document.get('runtime_dir') != str(runtime_dir)):
+        raise ResumeStateError('identity_mismatch', 'Native input belongs to another child')
+    cwd = document.get('cwd')
+    if not isinstance(cwd, str) or not Path(cwd).is_absolute() or not Path(cwd).is_dir():
+        raise ResumeStateError('cwd_missing', 'Native working directory is unavailable')
+    return {**document, 'resume_session_id': session_id}
 
 
 def inspect_retained(
@@ -1990,14 +2043,14 @@ def main() -> int:
     active.add_argument("--agent-name", required=True)
     active.add_argument("--project-key", required=True)
     active.add_argument("--mcp-profile", choices=sorted(MCP_PROFILES), default="inherit")
-    active.add_argument("--program", choices=sorted(CODEX_PROGRAMS | CLAUDE_PROGRAMS))
+    active.add_argument("--program", choices=sorted(CODEX_PROGRAMS | CLAUDE_PROGRAMS | HARNESS_PROGRAMS))
     active.add_argument("--generation")
     active.add_argument("--parent-agent")
     stage = sub.add_parser("stage-registration")
     stage.add_argument("--runtime-dir", required=True)
     stage.add_argument("--agent-name", required=True)
     stage.add_argument("--project-key", required=True)
-    stage.add_argument("--program", required=True, choices=sorted(CODEX_PROGRAMS | CLAUDE_PROGRAMS))
+    stage.add_argument("--program", required=True, choices=sorted(CODEX_PROGRAMS | CLAUDE_PROGRAMS | HARNESS_PROGRAMS))
     stage.add_argument("--generation", required=True)
     stage.add_argument("--source")
     stage.add_argument("--binding")

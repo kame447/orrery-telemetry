@@ -45,7 +45,7 @@ PRODUCTION_LABELS = tuple(
     )
     if label
 )
-SAMPLE_SECONDS = 2.0
+SAMPLE_SECONDS = 10.0
 
 
 @pytest.fixture(autouse=True)
@@ -86,6 +86,20 @@ def _no_inherited_agentstack_env():
         yield
     finally:
         os.environ.update(inherited)
+
+
+@pytest.fixture(autouse=True)
+def _dashboard_quotas_are_offline_by_default(monkeypatch):
+    """HTTP/browser fixtures must not read host credentials or start providers.
+
+    HOME isolation does not cover Keychain. The optional provider entry loads a
+    separate dashboard core, so bind both before any per-test HTTP fixture.
+    Quota-specific tests may then install their own synthetic service.
+    """
+    from dashboard import server, provider_server
+    from _dashboard_http_fixture import install_offline_quotas
+    for dashboard in (server, provider_server):
+        install_offline_quotas(dashboard, monkeypatch=monkeypatch)
 
 
 @pytest.fixture(autouse=True)
@@ -367,7 +381,6 @@ class _Watcher(threading.Thread):
                     )
 
 
-@pytest.fixture(scope="session", autouse=True)
 def _the_suite_leaves_real_services_alone():
     watcher = _Watcher(PRODUCTION_LABELS)
     watcher.start()
@@ -412,3 +425,30 @@ def _the_suite_leaves_real_services_alone():
             "(AGENTSTACK_MAIL_LAUNCHD_LABEL / AGENTSTACK_LABEL_PREFIX).",
             pytrace=False,
         )
+
+
+def pytest_sessionstart(session):
+    # Session fixtures run in every xdist worker, but not in its controller.
+    # Own this monitor in the controller hook instead; workers use a no-op.
+    if hasattr(session.config, 'workerinput') or os.environ.get('PYTEST_XDIST_WORKER'):
+        return
+    guard = _the_suite_leaves_real_services_alone()
+    next(guard)
+    session.config._orrery_service_watch_guard = guard
+
+
+def pytest_sessionfinish(session, exitstatus):
+    guard = getattr(session.config, '_orrery_service_watch_guard', None)
+    if guard is None:
+        return
+    del session.config._orrery_service_watch_guard
+    try:
+        next(guard)
+    except StopIteration:
+        pass
+    except pytest.fail.Exception as exc:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+        reporter = session.config.pluginmanager.get_plugin('terminalreporter')
+        if reporter is not None:
+            reporter.write_sep('=', 'production-service monitor failed', red=True)
+            reporter.write_line(str(exc), red=True)
