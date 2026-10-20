@@ -26,6 +26,12 @@ _REAL_RUN = subprocess.run
 _REAL_POPEN = subprocess.Popen
 
 
+@pytest.fixture(autouse=True)
+def _no_live_gemini_catalog(monkeypatch):
+    # Existing launch tests use static fixtures, never the developer's live agy CLI.
+    monkeypatch.setattr(gemini_runtime, "_discover_models", lambda: ())
+
+
 def _git(*args: str, cwd: pathlib.Path) -> str:
     result = _REAL_RUN(
         ["git", "-c", "user.name=test", "-c", "user.email=test@example.invalid", *args],
@@ -243,6 +249,18 @@ def test_spawn_catalog_exposes_gemini_provider(monkeypatch):
             "resources_required": True,
         },
     }
+
+
+def test_argon_from_cli_uses_selected_effort_in_launch(gemini_env, monkeypatch):
+    monkeypatch.setattr(gemini_runtime, "_discover_models", lambda: (
+        "gemini-4-argon-medium", "gemini-4-argon-high", "gemini-4-argon-low"))
+    model_list, error = gemini_runtime._gemini_models(server)
+    assert error == "" and "gemini-4-argon-medium" in model_list
+    result = server.do_spawn(_gemini_payload(
+        gemini_env, model="gemini-4-argon-medium", effort="high", dry_run=True))
+    assert result["ok"] is True
+    assert result["model"] == "gemini-4-argon-high"
+    assert result["argv"][result["argv"].index("--model") + 1] == "gemini-4-argon-high"
 
 
 def test_spawn_catalog_honors_gemini_model_override(monkeypatch):

@@ -11,6 +11,7 @@ readiness stay in the core; this module only resolves a trusted
 from __future__ import annotations
 
 import fnmatch
+from functools import lru_cache
 import logging
 import os
 import re
@@ -18,6 +19,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import unicodedata
 from typing import Any
 
@@ -60,6 +62,51 @@ _MAX_SYMLINK_HOPS = 40
 
 _log = logging.getLogger("agentstack.dashboard.gemini")
 
+_CLI_CATALOG_TIMEOUT = 5
+_CLI_CATALOG_TTL = 300
+_CLI_CATALOG_MAX_BYTES = 64 * 1024
+_CLI_CATALOG_MAX_MODELS = 128
+
+
+@lru_cache(maxsize=8)
+def _cli_models(binary: str, stamp: tuple[int, int], window: int) -> tuple[str, ...]:
+    """Read only Gemini IDs from the installed Antigravity CLI's model list."""
+    try:
+        result = subprocess.run(
+            [binary, "models"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, timeout=_CLI_CATALOG_TIMEOUT, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ()
+    if result.returncode or len(result.stdout) > _CLI_CATALOG_MAX_BYTES:
+        return ()
+    try:
+        output = result.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return ()
+    models: list[str] = []
+    for line in output.splitlines():
+        model, separator, _label = line.partition("\t")
+        if not separator or not model.startswith("gemini-") or not _MODEL_RE.fullmatch(model):
+            continue
+        if model not in models:
+            models.append(model)
+        if len(models) > _CLI_CATALOG_MAX_MODELS:
+            return ()
+    return tuple(models)
+
+
+def _discover_models() -> tuple[str, ...]:
+    binary = shutil.which(os.environ.get("AGENTSTACK_GEMINI_BIN") or "agy")
+    if not binary:
+        return ()
+    try:
+        info = os.stat(binary)
+    except OSError:
+        return ()
+    return _cli_models(binary, (info.st_mtime_ns, info.st_size),
+                       int(time.monotonic() // _CLI_CATALOG_TTL))
+
 
 # --------------------------------------------------------------------------- #
 # Catalog / model policy
@@ -71,7 +118,10 @@ def _gemini_models(base: Any) -> tuple[list[str], str]:
         value = raw.strip()
         if value and value not in values:
             values.append(value)
-    models = values or list(_DEFAULT_MODELS)
+    models = values or list(_discover_models()) or list(_DEFAULT_MODELS)
+    if not values and _DEFAULT_MODELS[0] in models:
+        models.remove(_DEFAULT_MODELS[0])
+        models.insert(0, _DEFAULT_MODELS[0])
     native = (
         ("claude", set(base._SPAWN_MODELS)),
         ("codex", set(base._codex_models())),
