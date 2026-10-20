@@ -18,6 +18,61 @@ Do not use Claude Code's built-in Agent or Task tool, agent teams, or `SendMessa
 
 The goal is not only to launch a child. The parent agent remains responsible for scoping the task, reducing collision risk, monitoring the child, reading the result, and reporting a verified outcome to the user.
 
+<!-- native-delegate:start -->
+## DeepSeek / Local children: choose this route before preregistration
+
+For a **DeepSeek or Local (Strata) child**, use the dashboard's standard `POST /api/spawn`, with `provider=deepseek|strata` and `harness=dsh|hermes`. This applies whether the parent is Claude, Codex, dsh or Hermes. For a **Claude or Codex child**, continue with the existing procedure below. Explicit global mode still follows the global contract above.
+
+Do the risk/task preparation in sections 1–2, then use this route instead of sections 3–5. Do not preregister separately or call `spawn_child.sh --harness` yourself: the API owns preregistration and its launcher handoff. Do not search private manifests, credentials, child state or `~/.agentstack` to reconstruct a request.
+
+1. Read the public catalog: `curl -sS "http://127.0.0.1:${AGENTSTACK_PORT:-8770}/api/spawn-names"`. Select the requested provider's formal `models[].id` and a matching `harnesses[]` entry with `available: true`. Local's API ID is `strata`. If the requested model/harness is unavailable, report its reason; if the user's choice is ambiguous, ask rather than substituting a provider/model. Do not guess effort from a different harness.
+2. Prepare the complete task in a file, including scope, expected result and a completion report to the parent over ORRERY Mail. The API's `parent` is **your own `AGENT_NAME`**, even when you are somebody else's child; never use `PARENT_AGENT`. If your identity is unresolved, stop. Set `DELEGATE_PROVIDER`, `DELEGATE_HARNESS`, `DELEGATE_MODEL`, `DELEGATE_DIR` (the child's existing absolute working directory), and `DELEGATE_TASK_FILE` to those selected values. These are inputs for the example, not new product configuration.
+3. Send a 0600 JSON file using curl. The quoted Python heredoc reads the task as data, preserving quotes, newlines, backticks and `$()` without shell evaluation. This uses only curl and the install prerequisite Python 3; no development fixture/helper is needed.
+
+```bash
+(
+  set -eu
+  : "${AGENT_NAME:?resolved parent identity required}"
+  : "${DELEGATE_PROVIDER:?}" "${DELEGATE_HARNESS:?}" "${DELEGATE_MODEL:?}"
+  : "${DELEGATE_DIR:?}" "${DELEGATE_TASK_FILE:?}"
+  umask 077
+  request_file='' response_file=''
+  trap 'rm -f -- "$request_file" "$response_file"' EXIT
+  request_file="$(mktemp "${TMPDIR:-/tmp}/delegate-request.XXXXXX")"
+  response_file="$(mktemp "${TMPDIR:-/tmp}/delegate-response.XXXXXX")"
+  python3 - "$request_file" "$DELEGATE_PROVIDER" "$DELEGATE_HARNESS" \
+    "$DELEGATE_MODEL" "$DELEGATE_DIR" "$DELEGATE_TASK_FILE" <<'PY'
+import json, os, pathlib, sys
+output, provider, harness, model, directory, task_file = sys.argv[1:]
+payload = {"provider": provider, "harness": harness, "model": model,
+           "parent": os.environ["AGENT_NAME"], "dir": directory,
+           "task": pathlib.Path(task_file).read_text(), "async": True}
+pathlib.Path(output).write_text(json.dumps(payload))
+PY
+  dashboard="http://127.0.0.1:${AGENTSTACK_PORT:-8770}"
+  curl -sS --max-time 120 -X POST "$dashboard/api/spawn" \
+    -H 'Content-Type: application/json' --data-binary "@$request_file" > "$response_file"
+  cat "$response_file"
+  child_name="$(python3 - "$response_file" <<'PY'
+import json, pathlib, sys
+reply = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if reply.get("ok") is not True or not reply.get("child_name"):
+    raise SystemExit("Spawn not confirmed; inspect the response, do not resend automatically")
+print(reply["child_name"])
+PY
+  )"
+  curl -sS --get --data-urlencode "name=$child_name" "$dashboard/api/spawn-status"
+)
+```
+
+Add optional fields to `payload` only when selected: `name` (omit for Auto), `role`, `group`, `worktree` / `worktree_base`, `effort`, `helper_model`, `base`, `tools`. `effort` must be supported by the selected model × harness; omission keeps the native setting. `helper_model` is `same` or a formal ID in that entry's `helper_models`. Preserve the user's tool selection; do not silently add MCP servers or reduce it to mail-only. Tool choices that native config cannot express fail with a reason. Do not send `attempt_id` or the old managed task/scope fields. Field definitions are in the installed `docs/api.md`, `POST /api/spawn` section.
+
+4. Save the returned `child_name` before continuing. `ok: true, pending: true` means accepted, not ready. Check `GET /api/spawn-status?name=<child_name>`: `launching` is still starting, `ready` confirms startup, and `failed` carries `error` / `detail`. Check the same name again when needed; do not repeat POST to check progress. A transport failure, `registration_retained`, or `cleanup_incomplete` is not permission to create a replacement: report it and use the known child's status, or ask the operator if its name is unknown. An unknown/expired status is not success.
+5. Wait for the child's actual work report through ORRERY Mail notifications or the bundled `agentstack-await-reply` (section 6); follow-ups use Mail, never pane injection or inbox polling. Verify the result as in section 7. When truly finished, use standard `POST /api/exit` with `{"session":"<child_name>"}` and confirm its state; common cleanup owns release/retire. Do not read token files or retire another agent. Startup readiness is distinct from task completion.
+
+The generator already links this product skill into `DSH_HOME/skills/delegate` or `HERMES_HOME/skills/delegate`; read it there, without searching private runtime state. Use the native bash/terminal tool for curl and keep its normal guard/approval behavior. If an approval or hook denies it, report the reason; do not disable approvals or change transports.
+
+<!-- native-delegate:end -->
 ## Environment
 
 Use these variables instead of hard-coded personal paths:

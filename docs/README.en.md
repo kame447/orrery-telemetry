@@ -12,6 +12,7 @@ Overview: the cockpit is the screen for operating terminals; Telemetry is the da
 
 ## Start here
 
+- [Choose a goal, provider, model and harness](getting-started.en.md#provider-model-harness) — Observe agents, create one with an API model, or coordinate agents. Check the [combinations and limitations (Japanese)](managed-catalog.md): native API spawning needs macOS legacy mode and manual configuration; the bundled NEW AGENT lacks harness selection. Common login/Telegram are in design, independent Hermes memory is in implementation, and manual Local effort awaits real-server acceptance.
 - [ORRERY cockpit](https://github.com/gyroid-eth/orrery/blob/master/README.en.md#quick-start) — Install both with one line and start with the on-screen first-flight guide.
 - [Standalone getting started](getting-started.en.md) — Audience, terms, standalone install, agent startup, and an end-to-end Mail check.
 
@@ -30,6 +31,7 @@ Overview: the cockpit is the screen for operating terminals; Telemetry is the da
 - [Reusable Codex plugin lifecycle (Japanese)](codex-plugin-lifecycle.md) — Shared operations, scoped hook trust, and isolated verification.
 - [Codex App integration](codex-app.en.md) — Add Desktop tasks/subagents as an optional provider.
 - [Antigravity / Gemini](antigravity.en.md) — Add an optional provider and understand authentication and feature boundaries.
+- [DeepSeek display and balance (Japanese)](dsh-stage-a.md) — Historical stage-A record. For current dsh / Hermes installation, see [Installation](install.en.md); child spawning needs provider and harness selection ([API](api.en.md)).
 - [Persistent agents](persistent-agents.en.md) — Enrollment, interactive/headless startup, and credential recovery.
 - [Deterministic daemons](daemon-agents.en.md) — Dedicated identity, canonical binding, notification waits, and shutdown.
 - [Mail service updates](agentstack-mail-update.en.md) — Operational procedure to verify and replace a running Mail build.
@@ -76,3 +78,8 @@ Documents without a translation are labelled with their original language. Image
 - [Instruction block migration](instruction-migration.en.md) — User scope, recovery and backup retention.
 
 - [Dedicated tmux launch and termination acceptance plan (Japanese)](r2-tb-lifecycle-plan-v3.md) — Approved R2-Tb callers, schemas, interruption points and fixtures.
+
+- [dsh thin launch (Japanese)](dsh-thin.md)
+
+- [Native context and helper models](native-capabilities.md) — dsh / Hermes context observations and per-model capabilities.
+- [Native catalog and effort capabilities (Japanese)](managed-catalog.md)

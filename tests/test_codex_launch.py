@@ -1508,7 +1508,7 @@ def test_the_dashboard_never_kills_a_codex_updating_itself(monkeypatch):
                             lambda argv, s=screen, **_kw: server.subprocess.CompletedProcess(argv, 0, s, ""))
         assert server._codex_self_update_on_screen("Child") is (name == "updating")
     source = (_ROOT / "dashboard" / "server.py").read_text(encoding="utf-8")
-    body = source[source.index("    def kill_spawn_session() -> None:"):]
+    body = source[source.index("    def kill_spawn_session() -> bool:"):]
     body = body[:body.index("\n\n")]
     assert body.index("_codex_self_update_on_screen") < body.index("'kill-session'")
 

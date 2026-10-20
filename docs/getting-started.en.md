@@ -9,7 +9,24 @@ For the usual entry point, use the [ORRERY cockpit quick start](https://github.c
 - **People who run coding agents, not chat**: not chat in the ChatGPT sense, but agents like Claude Code or Codex that take an instruction, write code, change files, and run commands on their own. It does not matter whether you drive them from a terminal or from a desktop app such as Claude Desktop or the ChatGPT app.
 - **A good fit**: you run several agents and find yourself acting as the go-between: pasting Codex output into Claude Code, or hopping between apps and tabs to check on each one. You want that manual relay gone and the whole picture on one screen.
 - **Not a fit**: one agent is enough for you. The value here is in coordinating several agents and watching them.
-- **Supported agents**: Claude Code and Codex CLI are the core. Codex Desktop tasks and subagents, and Google Antigravity / Gemini, are optional providers you can add after the core install, and they appear on the same dashboard.
+- **Supported agents**: Claude Code / Codex CLI and agents running configured DeepSeek / Local models through dsh / Hermes. Codex Desktop tasks and subagents, and Google Antigravity / Gemini, are optional providers you can add after the core install. Their connection methods and supported features differ.
+
+## Choose by goal
+
+To observe agents on your machine, [install and verify below](#standalone-installation-and-verification), then start Claude Code / Codex CLI. To create an agent with an API model, read the three terms below and the [supported combinations (Japanese)](managed-catalog.md), then follow [optional installation and manual preparation](install.en.md#optional-dsh--hermes-installation). To coordinate agents, run the [delegate and Mail check](#5-play-shiritori-as-an-end-to-end-check) in a configured environment.
+
+<a id="provider-model-harness"></a>
+## Provider, model and harness
+
+| Choice | Meaning and current examples |
+| --- | --- |
+| provider / backend | Connection and credential settings. API spawn provider IDs are `deepseek` and `strata` (displayed as Local). Existing `claude` / `codex` routes use each CLI's login |
+| model | A formal model ID selected from the models configured for the same backend |
+| harness | The CLI that runs the conversation and tools. API spawning requires `dsh` or `hermes`; Claude Code / Codex CLI each use their own harness |
+
+The model's maker need not be the API host: a DeepSeek model hosted locally still uses Local as its connection. Agent identity, parent, work project and Mail recipient are separate from these choices. Selecting a model or harness does not select a parent or recipient.
+
+API spawning currently targets macOS in legacy mode; the WSL2 steps below cover Claude Code / Codex CLI. Arbitrary API × harness combinations are not promised. Common login and a common Telegram entry point are in design; independent per-child Hermes memory is in implementation. Manual Local effort is exposed as a capability but has not passed real Local server acceptance. See [current limitations (Japanese)](managed-catalog.md#現在の制限).
 
 
 ## Six words
@@ -18,7 +35,7 @@ These six terms help you read this standalone procedure and the reference guides
 
 | Term | Meaning |
 | --- | --- |
-| agent | One Claude Code / Codex CLI session running in a terminal. Each one gets a scientist's name. |
+| agent | One session running through Claude Code / Codex CLI, dsh / Hermes, or another supported runtime. Each gets a scientist's name. |
 | child | Another agent that an agent started by asking it to do a job. The one that asked is the parent. A parent creates a child with `/delegate`; when the child is done it reports back to the parent. See [what happens after completion](dashboard.en.md#after-a-child-completes). |
 | ORRERY Mail | The small bundled server through which agents message each other and that manages names and file reservations. |
 | dashboard | The page you open in a browser. It shows every agent's state, the parent-child tree, and the messages going back and forth. |
@@ -94,6 +111,12 @@ This standalone example uses ten round trips. [Workshop shiritori](https://githu
 
 If you start from Codex, make the child a Claude Code agent. Either way, the point is to see the game go round between agents from two vendors.
 
+The same shiritori check also works with DeepSeek or Local children in an environment with cockpit added and a configured provider and harness. In cockpit New Agent, select a [configured provider](install.en.md) (DeepSeek or Local) and Harness (dsh or Hermes), select the Claude Code or Codex agent you will play with as the parent under Lineage, and create the child for three round trips.
+
+With Telemetry alone, the bundled dashboard NEW AGENT lists provider and model from the catalog but does not send a harness, so it cannot launch these children. For a launch without the screen, use `POST /api/spawn` in the [API reference](api.en.md), including its authentication and parent (parent or standalone) contract, and always specify `harness`.
+
+Have the parent start by sending the child “Play three shiritori round trips over ORRERY Mail, putting each turn’s word in the subject of each Mail” using ORRERY Mail `send_message`. Success looks the same: lines flow back and forth in NETWORK, and the last instruction on both DECK cards updates to the latest Mail subject (that turn’s word). Check dsh and Hermes separately; success with one does not verify the other.
+
 **Success**: lines keep flowing back and forth between the two agents in NETWORK, and the "last instruction" on both DECK cards updates word by word. On the author's machine each turn took about five to six seconds per agent ([post with video](https://x.com/i/status/2095650715008168255), played at double speed).
 
 Once you are here, just use your agents as usual. See [Installation](install.en.md) and [Configuration](configuration.en.md) for settings, and [Delegation and child agents](delegation.en.md) for how children work.
@@ -113,7 +136,7 @@ Screen examples: [DECK](img/deck.jpg), [NETWORK](img/network.jpg), and [NEW AGEN
 
 - **ORRERY Mail**: one place for agent names, inboxes, and file reservations. It remains the source of truth even if the dashboard goes down.
 - **Launchers**: `agent-start` registers the name, creates the tmux session, and starts the CLI in one step, so dashboard jumps and notification targets resolve to exactly one place.
-- **Hooks**: Eight Claude event hooks stop unregistered sessions and unreserved writes, and inject arriving messages into the agent's prompt.
+- **Hooks**: Nine Claude event hooks stop unregistered sessions and unreserved writes, and inject arriving messages into the agent's prompt.
 
 Details of these mechanisms and the API are in [Hooks](hooks.en.md), [Launchers](launchers.en.md), and the [API reference](api.en.md). Every dashboard view and control is available through the local HTTP API.
 
@@ -121,7 +144,7 @@ Details of these mechanisms and the API are in [Hooks](hooks.en.md), [Launchers]
 ## How it fits together
 
 ```text
-Claude Code / Codex CLI
+Claude Code / Codex CLI / dsh / Hermes
         │ launchers + hooks
         ▼
 tmux session ── telemetry ──► dashboard
@@ -145,7 +168,9 @@ The bundled ORRERY Mail server is the source of truth, with launchers, operation
 | Linux | Field reports received. On Ubuntu 24.04 / tmux 3.4, install, the dashboard, and Codex agents worked, and the two problems found there ([#26](https://github.com/gyroid-eth/orrery-telemetry/issues/26), [#27](https://github.com/gyroid-eth/orrery-telemetry/issues/27)) are fixed. The author has not verified `systemd --user` registration, so please report results as issues |
 | Windows native (without WSL2) | The supported route is WSL2, but community contributions provide an experimental PowerShell helper that starts Mail and the dashboard, and a native Codex child launcher ([startup helper](windows-local.en.md), [Codex launcher](windows-codex-launcher.en.md)). Policy: [#3](https://github.com/gyroid-eth/orrery-telemetry/issues/3) |
 
-Python 3.11 or newer, `git`, `tmux`, and `uv` are required, and at runtime at least one of Claude Code or Codex CLI. The installer checks these before writing anything and stops without changes if something is missing. The details of the checks and the optional dependencies (`fswatch`, `fzf`, Ghostty, Obsidian) are in the [install guide's environment section](install.en.md#supported-environment).
+The table above covers the common infrastructure and existing CLI routes. The standard DeepSeek / Local × dsh / Hermes catalog and spawn route currently require macOS in legacy mode.
+
+Python 3.11 or newer, `git`, `tmux`, and `uv` are required. The CLI procedure above needs a signed-in Claude Code or Codex CLI; API spawning separately needs dsh / Hermes and backend configuration. The installer checks common dependencies before writing anything and stops without changes if something is missing. The details of the checks and the optional dependencies (`fswatch`, `fzf`, Ghostty, Obsidian) are in the [install guide's environment section](install.en.md#supported-environment).
 
 
 ## Look before installing

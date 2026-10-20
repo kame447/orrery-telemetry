@@ -307,6 +307,8 @@ def check_provider(spec: dict, provider: str) -> None:
             raise ToolsError(
                 "a Codex child has no built-in screen tool; name the user's "
                 "screen server (screen:<read|operate>:<server>)")
+    elif provider in ("dsh", "hermes"):
+        return
     elif provider != "claude":
         if restrictive(spec):
             raise ToolsError(f"base and tools are not supported for provider: {provider}")
@@ -580,6 +582,48 @@ def claude_plan(spec: dict, *, cwd: str, chrome: bool, claude_json: str,
     if disallowed:
         flags += ["--disallowed-tools", ",".join(disallowed)]
     return {"servers": servers, "flags": flags}
+
+
+def native_plan(spec: dict, *, cwd: str, claude_json: str,
+                transports=("stdio", "http"),
+                tool_filtering=False, tool_approval=False) -> dict:
+    """Project the same selection; refuse any promise the CLI cannot express."""
+    spec = normalize(spec.get('base'), spec.get('tools'))
+    tools = spec['tools']
+    screen = tools.get('screen')
+    if screen and screen['server'] is None:
+        raise ToolsError('native_mcp_selection_unsupported: built-in computer use')
+    names = list(tools.get('mcp', ()))
+    if not tools:
+        return dict(servers={}, inherit=spec['base']!='mail-only', approved={}, enabled_tools={})
+    settings = _load_claude_settings(claude_json)
+    if screen:
+        names.append(screen['server'])
+    browser_server = None
+    if 'browser' in tools:
+        if tools['browser'].get('device'):
+            raise ToolsError('native_mcp_selection_unsupported: Chrome device')
+        combined = dict(settings.get('mcpServers') or {})
+        combined.update(_project_entry(settings,cwd).get('mcpServers') or {})
+        browser_server = codex_browser_server(combined)
+        names.append(browser_server)
+    servers, approved, enabled = {}, {}, {}
+    for name in dict.fromkeys(names):
+        definition = _copyable_definition(name, settings, cwd)
+        if definition.get('type','stdio') not in transports:
+            raise ToolsError('native_mcp_transport_unsupported')
+        allow, hide = _approval(spec, name, definition, browser_server)
+        if allow and not tool_approval:
+            raise ToolsError('native_mcp_approval_unsupported')
+        if hide and not tool_filtering:
+            raise ToolsError('native_mcp_filter_unsupported')
+        servers[name] = definition
+        if allow:
+            approved[name] = allow
+        if hide:
+            enabled[name] = allow
+    return dict(servers=servers, inherit=spec['base']!='mail-only', approved=approved,
+                enabled_tools=enabled)
 
 
 def mail_alias_names(settings: dict) -> list[str]:
@@ -944,6 +988,7 @@ def main(argv: list[str]) -> int:
         cfg.add_argument(name, required=True)
     cfg.add_argument("--python-bin", default="")
     cfg.add_argument("--parent-agent", default="")
+    cfg.add_argument("--program", default="claude-code", choices=("claude-code","dsh","hermes"))
     rec = sub.add_parser("codex-record")
     rec.add_argument("--spec", required=True)
     rec.add_argument("--out", required=True)
@@ -989,7 +1034,7 @@ def main(argv: list[str]) -> int:
             env = dict(
                 AGENTSTACK_PROXY_AGENT_NAME=args.child,
                 AGENTSTACK_PROXY_TOKEN_FILE=args.token_file,
-                AGENTSTACK_PROXY_PROGRAM="claude-code",
+                AGENTSTACK_PROXY_PROGRAM=args.program,
                 AGENTSTACK_PROJECT_KEY=args.project_key,
                 AGENTSTACK_MCP_URL=args.mcp_url,
                 AGENTSTACK_MAIL_ENV=args.mail_env,

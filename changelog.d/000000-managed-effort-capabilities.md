@@ -1,0 +1,5 @@
+### effortの段と既定を固定runtimeから自動取得
+
+dshのinstall/updateで鍵なし・通信なしの能力cacheを作り、model×harnessごとのefforts/default_effort/effort_sourceをcatalogへ投影します。手書きmanifestのlow/highと試行既定を能力の根拠にせず、未取得・版違いはunknownとして未指定の起動を残します。Strataもharness由来と明記し、Hermesの初版はunknownです。
+
+APIのmodel.harnesses[]へ上記3fieldを追加します。API世代の更新は対話のI0契約拡張とまとめて行います。

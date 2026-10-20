@@ -1,0 +1,130 @@
+# Hermes adapters
+
+## Thin native launch
+
+`thin_config.py --input INPUT --out PLAN` generates an upstream Hermes command,
+configuration and environment references without invoking a credential helper.
+`validate_input(document)` is the read-only admission used by the standard
+launcher and catalog. It imports no Hermes code and starts no subprocess.
+
+The standard launcher supplies the registered identity, product-generated MCP
+configuration, shared rendered Codex instructions and the actual working directory.
+The generator selects the installed committed executable and a custom provider
+with native `key_cmd`; provider credentials remain Hermes's responsibility.
+Each child uses a private provider name and minimal route in its overlay, so
+old endpoint aliases, inline keys and named credential pools in the persistent
+profile cannot override the selected route. Route projection does not rewrite
+or copy the profile or its auth store. Legacy model credential pointers are cleared only in
+the child overlay; memory and skills remain in the fixed backend profile.
+Auxiliary tasks and delegation use that same private provider, with old direct
+endpoint and credential pointers cleared in the overlay. Existing helper
+settings cannot pair the selected credential with a previous endpoint.
+Optional model and helper selections must belong to the selected backend's
+configured formal model IDs. An omitted effort leaves the native default intact.
+The helper model applies to auxiliary tasks and delegation on that same provider.
+
+For Chat Completions routes, effort choices are read as data from the installed
+Hermes CLI vocabulary and custom-provider wire policy. Other transports retain
+unknown metadata. The catalog and generator use the same route projection,
+including the official DeepSeek transport correction described below.
+Choices retain native names rather than dsh's four steps; `ultra`, clamped to
+`max`, is not a separate step. DeepSeek accepts `none` as thinking off,
+`minimal`/`low` as low, `medium`/`high`/`xhigh` as high, and `max` as max on its
+[official Chat API](https://api-docs.deepseek.com/api/create-chat-completion/).
+These are harness choices, not independent capability claims about local servers.
+The public default is unspecified: saved global and model-specific reasoning
+settings take precedence over the custom profile's `medium` fallback. The UI
+therefore keeps its neutral default display, and no explicit CLI value is added
+until selected. Missing or changed native declarations yield unknown capabilities.
+Metadata reads execute only the product's data projection, no Hermes code or
+credential helper, and do not read or change persistent profile configuration.
+
+The pinned upstream Anthropic converter drops DeepSeek thinking blocks carrying a
+nonempty signature. For the DeepSeek backend's official `/anthropic` endpoint,
+the generator selects the same provider's `/v1` chat-completions transport so
+thinking survives subsequent tool requests, including when effort is omitted.
+Main, auxiliary and delegation routes share this selection; Strata and custom
+hosts keep their configured transport. No reasoning level or token cap is added.
+
+Memory and skills persist in the fixed backend profile. Each child uses the
+official `HERMES_MANAGED_DIR` overlay for its MCP entries and instructions;
+profile configuration is not swapped or cloned. Product skills are links to
+their canonical source, and existing unowned skills are never overwritten.
+The native input queue uses `busy_input_mode=queue`. The initial prompt uses
+`chat --query-file`; empty input opens the normal interactive CLI. No request,
+output-token or session-lifetime limit, native-command ban, egress preload or
+usage evaluator is added by this entry.
+
+`thin_guard.py` adapts native pre-tool events to the common credential-read,
+registration and acquired-reservation hooks, in that order. A failed check
+blocks the tool with a fixed diagnostic, without exposing hook output.
+An allowed hook's structured `systemMessage` warning remains visible; raw
+success stdout/stderr are not forwarded. Blocking exit-2 hooks return their
+public JSON reason or stderr to the caller, limited to the first 2000 Unicode
+code points without a truncation marker. Internal traceback/error diagnostics
+are excluded, terminal control sequences are removed and invalid UTF-8 is
+replaced. Other failed exit codes keep the fixed hook-name diagnostic.
+Successful native edits call the common reservation release hook. Both
+checks and release run in the native tool's current directory.
+Generation checks the plugin file and
+configuration statically; it does not import or verify runtime registration.
+Explicit MCP selections that cannot be represented are rejected. As with the
+standard launcher's strict MCP config, inherited profile servers not in the
+selected set are disabled in the child overlay. Product Mail and explicitly
+selected additional MCP servers use the freshly generated definitions, even
+when a profile retained the same server name. The profile's MCP data is unchanged.
+If native deep-merge would retain extra inherited fields in a selected server,
+generation refuses with `inherited_mcp_conflict` and logs the server name in the
+child's `config-generation.log`,
+rather than silently using the old endpoint or credentials.
+Profiles with enabled third-party plugins are rejected when inheritance is
+explicitly disabled because portable plugins can append servers after loading.
+
+The native packaging locale directory is supplied through the official
+`HERMES_BUNDLED_LOCALES` environment setting, so translated strings are available
+even when PM's editable workspace omits non-Python catalog files.
+
+Before chat or exact resume, an unanswered shared-metrics offer defaults to
+`enabled: false`, `send: false`, `offer_version: 2`. Native consent checks raw
+profile configuration, so these three fields are saved under the existing
+profile lock with an atomic replacement; all other YAML bytes remain unchanged.
+An explicit opt-in, local-only choice or current-version opt-out is preserved.
+The child's `telemetry-defaults.log` records a default only when written.
+This affects only the product-selected profile and never the user's separate
+Hermes home. No global noninteractive setting or upstream patch is added.
+
+The plugin saves the native session-start event in `native-session.json` under
+the child's existing state directory. Delegated sessions cannot overwrite it.
+An explicit `resume_session_id` becomes native `--resume`; no shared MRU is used.
+An optional `native_profile_env` pin is checked using canonical paths before
+creating files or links; a changed profile is rejected.
+Missing resume metadata does not prevent startup. Standard launcher cleanup,
+Mail delivery and process observation own the lifecycle.
+
+## Installation and offline checks
+
+Installer generation v2 writes the pinned upstream install stamp with external
+update ownership and validates its receipt/hash. Runtime version import then
+needs no git process. Existing generations and profile data are retained; after
+installation the operator points the private template at the selected generation.
+The installer does not rewrite that template automatically.
+
+With separately prepared dependencies, run all current Hermes fixtures serially:
+
+```sh
+scripts/check-hermes.sh --config PRIVATE_RUNTIME_TEMPLATE --out RESULT_JSON
+```
+
+The check reads PM facts to select the committed dependency interpreter, without
+importing Hermes or running install/repair. It uses a temporary HOME and offline
+cache. Missing dependencies fail setup rather than being accepted as a skip.
+Results contain `success`, `tests_run`, `failures`, `errors`, `skips`,
+`allowed_skip_reasons` and `unapproved_skips`. Approved skip reasons are exact
+strings; the default list is empty, so every skip fails acceptance.
+
+Fixtures cover native configuration and hook dispatch, main/helper credential
+routing, generation ownership and version stamps. They use isolated profiles and
+synthetic credentials; they do not certify live authentication or operator
+acceptance. Standard spawn, native resume and common cleanup retain their own
+integration tests. The former managed controller, private-copy runner, provider
+allowlist/usage evaluator and separate lifecycle status are removed.

@@ -2,9 +2,21 @@
 
 [日本語](README.md)
 
-Multiple Claude Code / Codex agents can talk directly, divide the work, and check each other's results. ORRERY Telemetry shows their work and Mail round trips in one screen. Pair it with [ORRERY cockpit](https://github.com/gyroid-eth/orrery) to use their terminals in the same workspace.
+Multiple coding agents can talk directly, divide the work, and check each other's results. ORRERY Telemetry shows their work and Mail round trips in one screen. Alongside Claude Code / Codex CLI, it supports agents running configured DeepSeek / Local models through dsh / Hermes. Pair it with [ORRERY cockpit](https://github.com/gyroid-eth/orrery) to use their terminals in the same workspace.
 
 ![A child joins the open NETWORK view, sends ready, and exchanges three shiritori Mail round trips](docs/img/network-mail.gif)
+
+## Start from your goal
+
+| Goal | Entry point |
+| --- | --- |
+| Observe agents on your machine | Install below, start a signed-in Claude Code / Codex CLI agent, and open DECK / NETWORK |
+| Create an agent with an API model | Read [provider, model and harness](docs/getting-started.en.md#provider-model-harness) and the [current combinations (Japanese)](docs/managed-catalog.md), then [optionally install dsh / Hermes](docs/install.en.md#optional-dsh--hermes-installation) |
+| Have agents divide work | Follow the [delegate and Mail end-to-end check](docs/getting-started.en.md#5-play-shiritori-as-an-end-to-end-check) |
+
+A provider supplies the connection, a model identifies what runs there, and a harness is the CLI that runs tools and the conversation. Standard API combinations currently cover DeepSeek / Local × dsh / Hermes, with availability checked per configured model. This does not promise arbitrary API and harness combinations.
+
+API-backed children currently target macOS in legacy mode. Backend and credential references need manual preparation. Common login, independent per-child Hermes memory and a common Telegram entry point are unfinished; manual Local effort has not passed real-server acceptance. The bundled NEW AGENT does not send a harness and cannot launch these children. See the [New Agent / Harness / Lineage check](docs/getting-started.en.md#5-play-shiritori-as-an-end-to-end-check) for an environment with cockpit added.
 
 ## Install Telemetry only
 
@@ -54,7 +66,7 @@ Try **Your first flight → help map → Full tour** in cockpit. Learn the basic
 
 In the Telemetry header, choose `HELP MAP` (beside `SETTINGS` in NETWORK) to annotate the visible DECK / NETWORK controls. In an agent detail panel, choose the `HELP MAP` button in its action row to annotate the panel’s controls. These entries also work when Telemetry is embedded in cockpit. If the annotations do not fit, they appear as a legend; press `Esc` or choose `Close` to dismiss it.
 
-Full tour guides you through creating one child with the delegate skill (Claude Code: `/delegate`, Codex: `$delegate`), playing three shiritori round trips over ORRERY Mail, arranging terminals, and trying Telemetry EXIT / RESUME and NETWORK / REPLAY. Follow the controls described on screen to advance. See the [current quick start](https://github.com/gyroid-eth/orrery/blob/master/README.en.md#quick-start) and [Full tour](https://github.com/gyroid-eth/orrery/blob/master/docs/en/FULL_TOUR.md).
+Full tour guides you through creating one child with the delegate skill (Claude Code: `/delegate`, Codex: `$delegate`), playing three shiritori round trips over ORRERY Mail, arranging terminals, and trying Telemetry EXIT / RESUME and NETWORK / REPLAY. Follow the controls described on screen to advance. DeepSeek and Local children can use the same manual three-round-trip check; verify dsh and Hermes separately ([steps](docs/getting-started.en.md#5-play-shiritori-as-an-end-to-end-check)). See the [current quick start](https://github.com/gyroid-eth/orrery/blob/master/README.en.md#quick-start) and [Full tour](https://github.com/gyroid-eth/orrery/blob/master/docs/en/FULL_TOUR.md).
 
 Cockpit is where you work in terminals; Telemetry is where you view the team's status and history. Start with the in-app guides, then use the [documentation index](docs/README.en.md) for detailed references.
 

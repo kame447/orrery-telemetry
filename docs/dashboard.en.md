@@ -292,13 +292,16 @@ Scientist-rail `available` means that at least one pairing with the 134 adjectiv
 
 ### Engine
 
-- Claude / Codex provider tabs
+- provider tabs built from the server catalog; configured environments also list DeepSeek / Local
 - model cards and usage guidance per provider
 - Claude: Sonnet / Opus / Haiku
 - Codex defaults to `gpt-6.1-sol` when the selected CLI is 0.159.0 or later (fresh catalog evidence is used if its version is unknown), otherwise `gpt-6-sol`; prior generations remain available through formal IDs such as `gpt-6-sol`
 - Codex effort choices follow `model_efforts` / `model_effort_defaults`; Codex CLI makes the final decision for an explicit effort
+- DeepSeek / Local launches require a harness (dsh / hermes). This NEW AGENT does not send it, so listing them in the catalog does not make them launchable here. See the [check with cockpit added](getting-started.en.md#5-play-shiritori-as-an-end-to-end-check), or `POST /api/spawn` in the [API reference](api.en.md) for a launch without the screen
 
 The server uses the provider / model / effort allowlist for both catalog and validation.
+
+This section and its NEW AGENT image describe the bundled Telemetry screen. Its choices differ from cockpit New Agent / Harness / Lineage. DeepSeek / Local currently require macOS legacy mode and manual backend/credential configuration. Common login and Telegram integration are in design; independent per-child Hermes memory is in implementation. Manual Local effort has not passed real Local server acceptance. See the [current combinations (Japanese)](managed-catalog.md).
 
 ### Directory
 

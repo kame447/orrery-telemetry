@@ -6,6 +6,9 @@
 
 ## 基本
 
+DeepSeek / Local は、opt-in と検証済みの native runtime 設定が揃うと標準 spawn の候補に加わります。
+`/assets/deepseek.svg` は無効時404・有効時200。残高型はAPI 21の既存 `/api/quotas` に載せる。
+
 base URL:
 
 ```text
@@ -61,7 +64,7 @@ curl -s http://127.0.0.1:8770/api/version
 ```
 
 ```json
-{"name":"orrery-telemetry","version":"2026.09.16.1","api":19}
+{"name":"orrery-telemetry","version":"2026.09.16.1","api":25}
 ```
 
 version の解決順は [インストール](install.md#version)を参照してください。
@@ -88,7 +91,26 @@ API 17 は global dashboard の返信表示と次の認可済み読取 route を
 
 API 12の配布物では、同梱 ORRERY Mail の MCP `health_check` が `server_instance_id` を返します。これは管理 socket の inspect と同じ永続 UUID で、秘密や認証の代わりにはなりません。常駐 daemon は両方の transport の UUID と確認済みの connection pin を照合し、field の無い旧 build や不一致では停止します。既存の `status` / `environment` / `http_host` / `http_port` は維持します。これは dashboard の新しい HTTP route ではありません。[専用 binding と通知](daemon-agents.md)を参照してください。
 
+## GET `/api/quotas` — 任意のDeepSeek残高（API 21）
+
+dsh opt-inが有効な時だけ `providers` に `provider: "dsh"` を加える。
+無効時は取得せず、既存のquota応答の形も変えない。
+残高型は `measurement_kind: "balance"`、`buckets: []` とし、
+`balance` に `currency: "USD"`、`total_balance`（金額文字列又はUSDなしのnull）、
+`is_available` を持つ。CNYは返さない。金額の原精度を保持する。
+`is_available: false` は取得成功で利用不可という意味であり、通信失敗とは区別する。
+失敗・未取得では `status: "unavailable"`、`balance: null`、固定の理由codeを返す。
+0円や百分率bucketへ置き換えない。`observed_at` / `last_observed_at` / `checked_at`
+で取得時刻を示し、4分cacheを使う。鍵・Keychainの応答・HTTPの生エラーは返さない。
+
+取得workerだけがKeychainの `deepseek-api` を読み、dashboardのenvへ鍵を入れない。
+既存の同一origin検査とglobal operator admissionはそのまま使う。
+[公式の残高API](https://api-docs.deepseek.com/api/get-user-balance/) と
+[取得・実確認の手順](dsh-stage-a.md)も参照。
+
 ## GET `/api/spawn-names`
+
+API 23 では、明示設定された DeepSeek (`provider=deepseek`) と Local (`provider=strata`, `locality=local`) も標準 spawn の候補です。モデルの `harnesses` にある `available` と `efforts` / `default_effort` / `effort_source` を使います。能力はローカルの検証済み cache 由来で、試運転の effort 設定を既定値へ転用しません。通常の catalog は managed task mode や attempt ID を要求しません。runtime 未準備や opt-in 無効の候補を起動可能とは表示しません。
 
 Claude provider の `model_source` は `override` / `local_cache` / `bundled`、`model_error` は明示設定の診断です。不正な明示指定ではClaudeの `models` は空になり、他providerは残ります。top-levelの `models` / `default_model` は同じClaude候補を返します。探索規則と権限の境界は [Claude model catalog](configuration.md#claude-model-catalog) を参照してください。
 
@@ -207,6 +229,8 @@ curl -s 'http://127.0.0.1:8770/api/fs/dirs?path=/Users/me/code'
 を返します。hidden directory と root 外へ出る symlink は除外し、名前順に最大 500 件を返します（page 側が入力中の prefix で絞るので、一覧全体が要ります）。501 件以上なら `truncated: true` です。
 
 ## GET `/api/agents`
+
+API 世代24では dsh/Hermes の稼働中 row と `/api/graph` node の `act_state` が、確認できた現在の操作表示から `work`・`question`・`ask` を返します。完全な入力欄の形があり、作業・質問・承認の印が無い場合は `wait` です。非表示・不完全・未対応の形は `null`（不明）とし、単なる表示の欠如を入力待ちにしません。生存・終了・停止可能性の判定には使いません。既存 Claude/Codex の分類は不変です。[対応する native 表示と制限](native-capabilities.md#activity-classification-boundary)を参照してください。
 
 API 世代19では legacy の稼働中 Codex CLI row と `/api/graph` node に nullable な `provider_stall` を追加します。停止中は `{kind: "model_capacity", since: <UTC epoch秒>, error: <エラー1行>, notification_status: <状態>}`。通知状態は `sent`、`no_parent`、`parent_unverified`、`delivery_unknown`、`failed` です。停止しても `act_state` の既存の意味は変えません。provider での停止は独立した field です。
 
@@ -459,11 +483,13 @@ request:
 {"session":"WindyFermi"}
 ```
 
-`open` は任意の boolean です。`false` は OS の窓を開かず detached tmux で resume、`true` は窓を開きます。省略時、Claude / Codex resume は `AGENTSTACK_AUTO_OPEN_CHILD` に従います（`0` は detached、未設定 / `1` は窓を開く）。明示した `open` が設定より優先します。稼働中の session に `open: false` を渡すと attach せず、そのままにします。環境設定は resume 時の自動表示だけに適用され、手動の Open tmux は使えます。detached resume には terminal adapter は不要です。この field は API 世代3から使えます。
+`open` は任意の boolean です。`false` は OS の窓を開かず detached tmux で resume、`true` は窓を開きます。省略時、Claude / Codex / dsh / Hermes resume は `AGENTSTACK_AUTO_OPEN_CHILD` に従います（`0` は detached、未設定 / `1` は窓を開く）。明示した `open` が設定より優先します。稼働中の session に `open: false` を渡すと attach せず、そのままにします。環境設定は resume 時の自動表示だけに適用され、手動の Open tmux は使えます。detached resume には terminal adapter は不要です。この field は API 世代3から使えます。
 
 response は `{ok, session, actions}` です。既存 tmux session は configured terminal で open / focus します。session が無い場合と finished husk を transcript から復元する場合は、GET row と同じ判定を server が再検査します。表示が `verification_required` だった Claude row も、この1回の request 内で full 検証して `ready` になれば、そのまま resume します。Codex child は fresh home を生成し、credential 付き再登録と fresh binding expectation を作成した後、Codex exec の直前に unretire します。拒否時は HTTP 400 で `{"ok":false,"error":"...","resume_capability":"provenance_missing"}` のように確定した固定 reason code を返し、husk の kill や terminal 起動は行いません。bootstrap / unretire が失敗した場合も Codex は起動せず、生成した home / config だけを片付けます。
 
 Claude は保存済み owner credential で同じ project・数値 ID・name・program の登録を検証し、credential 付き再登録と unretire が成功してから端末を起動します。Claude child の state / credential も既定30日保持し、resume 時は子専用 Mail proxy config を再生成します。top-level Claude は既存 owner token を使います。旧 cleanup で credential が消えた場合は `credential_missing`、期限切れは `retention_expired`、明示 purge 後は `purged` で起動を拒否します。認証・unretire の失敗でも端末を開きません。credential を自動発行したり別名で登録したりはしません。Codex top-level resume も unretire の対象です。
+
+dsh / Hermes の子は、本人の session 作成イベントで保存した native ID だけで再開します。最新の履歴を探すことはせず、ID が無ければ `no_history` です。同じ登録・保持期限・owner credential を検査し、元の `harness_state_dir` と native profile を維持します。元の task は再送しません。Mail の再開と tmux の起動ゲートの解放より先に config / MCP を生成し、profile の変更や生成失敗では元の husk・state・資格を残します。内部の `--resume-native` は既存 pane の foreground で実行し、新しい tmux や登録は作りません。
 
 Claude の起動準備が失敗した場合、元の husk を残し、元が retired だった Mail を再 retire します。元から active の identity は retire しません。復元にも失敗した場合は `rollback_errors` を返し、成功したようには報告しません。CLI は tmux と窓の準備が成功するまで待機します。
 
@@ -565,23 +591,31 @@ request:
 | `task` | yes | task 本文。UI は最大4000文字 |
 | `name` | no | 指定時は hyphen を除去し、`available` 必須 |
 | `dir` | no | 存在する working directory。既定は source repo |
-| `provider` | no | `claude`（既定）または `codex` |
-| `model` | no | provider catalog 内。provider の default あり |
-| `effort` | Codex only | モデル別。`model_efforts` / `model_effort_defaults` を参照。対応情報がなければ省略してCLI既定を使用 |
+| `provider` | no | `claude`（既定）、`codex`、`deepseek`、`strata`。Local の表示グループも送信 ID は `strata` |
+| `harness` | DeepSeek / Local 必須 | `dsh` または `hermes`。Claude は `claude-code`（従来 alias `claudecode`）、Codex は `codex-cli`（従来 alias `codex`）を省略可 |
+| `helper_model` | no | 省略または `same` は主モデルを継承。DeepSeek / Local は選択した model × harness の `helper_models` にある同 backend の正式 ID も指定可。未提供・別 backend の ID は拒否 |
+| `model` | DeepSeek / Local 必須 | 正式 ID。DeepSeek / Local は選択した provider と harness の有効な catalog entry と一致必須。Claude / Codex は既存の省略時の既定を維持 |
+| `effort` | no | 明示時だけ送る。Claude / Codex は `model_efforts` / `model_effort_defaults`、DeepSeek / Local は選択した model × harness の能力で検証。未指定は CLI 設定を使用し、能力不明の値は推測しない |
 | `role` | no | 最大40文字 |
 | `group` | no | 最大24文字 |
 | `worktree` | no | isolated worktree |
 | `worktree_base` | no | base revision。既定 `HEAD` |
 | `claude_chrome` | Claude only | boolean。`true` で child に `--chrome` を付ける。省略・`false` は inherit（利用者の Claude 設定に従う）。launcher の env 既定は使わない。[Claude in Chrome](delegation.md#claude-child-とブラウザ操作claude-in-chrome) |
 | `claude_chrome_device` | Claude only | 使うブラウザの deviceId（`[A-Za-z0-9._:-]{1,128}`）。指定すると `claude_chrome: true` と同じ。`claude_chrome: false` との併用は拒否 |
-| `base` | Claude / Codex | `"default"`（明示すると installer の道具の既定を適用しない）または `"mail-only"`（ORRERY Mail と `tools` で選んだものだけ）。api 7 から |
-| `tools` | Claude / Codex | object。`browser`（`true` は Claude/Codex、`{"device": "<deviceId>"}` の deviceId は Claude only）、`screen`（`"read"` / `"operate"` または `{"access": ..., "server": "<name>"}`。server を省くと Mac の computer use で Claude only）、`mcp`（server 名の配列。tool は承認しない）、`approve_all`（`mcp` のうち全 tool を承認する server。表に無い版は拒否）。`claude_chrome_device` と deviceId が食い違えば拒否。api 7 から。[子に渡す道具を選ぶ](delegation.md#子に渡す道具を選ぶ--base----tools) |
+| `base` | Claude / Codex / dsh / Hermes | `"default"`（明示すると installer の道具の既定を適用しない）または `"mail-only"`（ORRERY Mail と `tools` で選んだものだけ）。api 7 から |
+| `tools` | Claude / Codex / dsh / Hermes | object。`browser`（`true` は Claude/Codex、`{"device": "<deviceId>"}` の deviceId は Claude only）、`screen`（`"read"` / `"operate"` または `{"access": ..., "server": "<name>"}`。server を省くと Mac の computer use で Claude only）、`mcp`（server 名の配列。tool は承認しない）、`approve_all`（`mcp` のうち全 tool を承認する server。表に無い版は拒否）。`claude_chrome_device` と deviceId が食い違えば拒否。api 7 から。[子に渡す道具を選ぶ](delegation.md#子に渡す道具を選ぶ--base----tools) |
+
+DeepSeek / Local の通常 catalog は、plain 世代の識別と generator の静的検査を launcher と共用します。旧 managed 世代を自動で利用可能にはしません。effort は選択した model × harness の検証済み cache を使用し、不明は不明のまま返します。生存判定は pane の子プロセスに native CLI があるかを確認し、確認不能を終了済みにはしません。provider は子の明示的な harness_backend から読み、モデル名から推測しません。
+
+dsh / Hermes では、選択を native config で表せる場合だけ `base` / `tools` を受け付けます。stdio / HTTP の MCP server を写し、内蔵 computer use・Chrome device・表せない tool 単位の承認やフィルターは理由つきで拒否します。起動できたことを、それらの承認が有効になった意味にはしません。
 
 API 8 では、`tools: {}` または `base: "default"` を明示すると `--base default` を渡します。dashboard/API はフォームの選択を正とし、installer の `AGENTSTACK_CHILD_DEFAULT_TOOLS` を launcher の env から外して、選択から外した道具を追加しません。明示した道具が使えなければ起動を止めます。CLI で base/tools/MCP profile を省略したときだけ、使えない既定の項目を通知して外す経路を使います。
 
 `base` か `tools` で選択した child は、選択どおりにできなければ（Mail の proxy が無い、server を写せない、computer use が有効な project での `mail-only` など）起動しません。形の誤りはここで 400、child の起動ディレクトリで決まる誤りは launcher の失敗として返ります。Gemini など他の provider では、`mail-only` と `tools` を拒否します。
 
 未知の request field はモデル解決や起動の前に HTTP 400 で拒否します。任意の Gemini provider を導入した環境では `resources` も受け付けます（[Gemini の委任](delegation.md)を参照）。他の provider では拒否します。
+
+起動失敗後は launcher と同じ共通 cleanup を呼びます。cleanup が確認に失敗した場合、応答は `ok: false`・`cleanup_state: "unknown"`・`cleanup_incomplete: true` となり、API は子の state・owner credential・handoff を消しません。cleanup が正常に完了した場合も、保持期間内の再開に必要な state と資格を API が追加で削除することはありません。
 
 `"dry_run": true` を付けると request を検証し、provider・model・effort・directory を解決した起動プレビューを HTTP 200 で返します。
 
@@ -672,3 +706,6 @@ curl -s 'http://127.0.0.1:8770/api/spawn-status?name=WindyFermi'
 `items` は各 ID の `liveness`、nullable な `act_state` / `ctx_used`、`session_count`、`parent_agent_id` / `parent_state`、`activity_freshness` / `reason` を返します。token・pane capture・私有 path は返しません。未知を waiting や context 0 に置き換えません。[観測と能力の確認](dashboard.md#global-runtime-observation)を参照してください。
 
 `global_runtime_observation=1` と `operator_session=1` を広告します。global の `/api/quotas` と `/portrait` も同じ admission を通り、既存の読取処理を使用します。画像は共有 session の `apiBlob` で取得して object URL とし、Lock で revoke します。
+
+
+API 25: 旧 managed の `attempt_id` による起動・状態照会は廃止しました。`POST /api/spawn` と `GET /api/spawn-status?name=<name>` の標準の経路を使います。旧要求には `unsupported_attempt` を返します。

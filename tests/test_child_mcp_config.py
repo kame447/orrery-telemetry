@@ -13,6 +13,8 @@ Runnable two ways (no third-party dependency required):
 """
 from __future__ import annotations
 
+from _cleanup_mail import cleanup_mail_server
+
 import json
 import os
 import pathlib
@@ -656,9 +658,10 @@ def test_fresh_codex_child_shares_records_that_survive_cleanup():
             "AGENTSTACK_MAIL_HTTP_BEARER_MODE": "disabled",
             "AGENTSTACK_MCP_URL": "http://127.0.0.1:1/mcp",
         })
-        cleanup = subprocess.run(
-            ["/bin/bash", str(_ROOT / "hooks" / "cleanup-child-agent.sh"), "Red-Euler"],
-            env=env, text=True, capture_output=True, timeout=30)
+        with cleanup_mail_server() as mail_url:
+            cleanup = subprocess.run(
+                ["/bin/bash", str(_ROOT / "hooks" / "cleanup-child-agent.sh"), "Red-Euler"],
+                env={**env, "AGENTSTACK_MCP_URL": mail_url}, text=True, capture_output=True, timeout=30)
         assert cleanup.returncode == 0, cleanup.stderr
         assert not home.exists()
         assert "deleting unshared Codex sessions" not in cleanup.stderr
