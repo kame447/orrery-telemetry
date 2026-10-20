@@ -9406,6 +9406,11 @@ class Handler(BaseHTTPRequestHandler):
             # Managed this way from 2 on; every earlier release reported 1.
             self._send(200, json.dumps({"name": "orrery-telemetry", "version": version, "api": API_GENERATION}).encode(), "application/json; charset=utf-8")
         elif path == "/api/spawn-names":
+            # This read can launch the authenticated Antigravity model-list CLI.
+            if not _same_origin_request(self):
+                self._send(403, b'{"error":"cross_origin_spawn_names_request"}',
+                           "application/json; charset=utf-8")
+                return
             try:
                 self._send(200, json.dumps(spawn_names_payload()).encode(), "application/json; charset=utf-8")
             except ValueError as e:

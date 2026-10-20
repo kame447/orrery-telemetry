@@ -130,23 +130,29 @@ start does not leave a retained child identity behind:
   (default `HEAD`) must resolve to a commit;
 - `agy`, `tmux`, the selected Python, `git`, the adapter hook, and the Gemini
   provider helpers under `~/.agentstack/bin` must be present;
-- the model must be in the Gemini allow-list. An explicit `AGENTSTACK_GEMINI_MODELS`
-  overrides discovery. Otherwise, the Dashboard reads Gemini IDs from the installed
-  `agy models` output (up to 5 seconds, cached for 5 minutes). `agy` may contact
-  its model service; ORRERY does not directly read CLI credentials. If discovery
-  fails, it falls back to the bundled `gemini-3.8-flash-{high,medium,low}` models.
-  Claude and GPT IDs returned by `agy models` are excluded. An explicit allow-list
-  that reuses a Claude or Codex model ID disables the Antigravity tab.
+- `AGENTSTACK_GEMINI_MODELS`, when explicitly set, is the restrictive model
+  allow-list. Otherwise, the picker combines the bundled `gemini-3.8-flash-{high,medium,low}`
+  candidates with valid Gemini IDs from the installed `agy models` CLI. This
+  read may contact the CLI's model service; ORRERY reads no CLI credentials.
+  Queries are limited to 5 seconds and 64 KiB of output. Successful results are
+  cached for 5 minutes; a failure is retried after 5 seconds without discarding
+  the last successful list. Claude and GPT entries are excluded. A known Gemini
+  model can also be supplied by formal ID without discovery, but that does not
+  prove access to it; the CLI ultimately checks availability at launch. An
+  explicit allow-list that reuses a Claude/Codex ID disables the Antigravity tab.
 
-The model card displays each discovered Gemini family once (for example,
-`gemini-3.8-flash` and `gemini-4-argon`). When the previous `gemini-3.8-flash-high`
-default remains available, it is preferred over the order returned by the CLI.
-Before registration, Dashboard resolves the selected effort to the matching allowed CLI model:
+The model card displays each Gemini family once (for example, `gemini-3.8-flash`
+and `gemini-4-argon`). The original `gemini-3.8-flash-high` remains the default;
+only efforts present in the current model list are offered for each family.
+Before registration, Dashboard resolves the selected effort to the corresponding CLI model:
 `low` → `gemini-3.8-flash-low`, `medium` → `gemini-3.8-flash-medium`, and
 `high` → `gemini-3.8-flash-high`. Registration, launch logs, and `agy --model`
 use that same resolved id alongside the explicit `--effort`. A custom model
 allow-list must include the matching variant; otherwise the request is rejected
-before registration. Model ids without an effort suffix are passed unchanged.
+before registration. Without a custom allow-list, a formal `gemini-*` ID is
+validated by the CLI instead of being refused simply because discovery omitted it.
+Model IDs without an effort suffix are passed unchanged. Spawn and `dry_run`
+do not run `agy models`; discovery is used only for the picker.
 
 Engine and isolation rules:
 

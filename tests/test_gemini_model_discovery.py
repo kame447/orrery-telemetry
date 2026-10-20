@@ -1,13 +1,20 @@
-"""Antigravity CLI model discovery must not change the explicit spawn policy."""
+"""Bounded Antigravity discovery and the independent Gemini spawn policy."""
 from __future__ import annotations
 
-import subprocess
+from concurrent.futures import ThreadPoolExecutor
+from http.server import ThreadingHTTPServer
+import json
+import os
+from pathlib import Path
 import sys
+import threading
 from types import SimpleNamespace
+import urllib.error
+import urllib.request
 
 import pytest
 
-import dashboard.provider_server  # noqa: F401 - loads the optional Gemini provider
+import dashboard.provider_server as server
 
 
 gemini = sys.modules["_orrery_provider_dashboard_gemini"]
@@ -15,71 +22,145 @@ BASE = SimpleNamespace(_SPAWN_MODELS=(), _codex_models=lambda: ())
 FALLBACK = ["gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low"]
 
 
-def _fake_cli(monkeypatch, tmp_path, body: str):
+@pytest.fixture(autouse=True)
+def _isolated_cache(monkeypatch):
+    monkeypatch.setattr(gemini, "_CLI_CATALOG_CACHE", None)
+
+
+def _fake_cli(monkeypatch, tmp_path: Path, body: str) -> Path:
     binary = tmp_path / "agy"
-    binary.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
+    binary.write_text(f"#!{sys.executable}\n{body}\n", encoding="utf-8")
     binary.chmod(0o755)
     monkeypatch.setenv("AGENTSTACK_GEMINI_BIN", str(binary))
     monkeypatch.delenv("AGENTSTACK_GEMINI_MODELS", raising=False)
     return binary
 
 
-def test_cli_adds_argon_without_mixing_claude_or_gpt(monkeypatch, tmp_path):
-    rows = (
-        "gemini-4-argon-medium\tArgon Medium\n"
-        "gemini-4-argon-high\tArgon High\n"
-        "gemini-4-argon-low\tArgon Low\n"
-        "gemini-3.8-flash-high\tFlash High\n"
-        "gemini-4-argon-high\tDuplicate\n"
-        "claude-opus-5-5-high\tClaude\n"
-        "gpt-oss-120b-medium\tGPT\n"
-        "gemini-invalid model\tBad\n"
-    )
-    _fake_cli(monkeypatch, tmp_path, "cat <<'EOF'\n" + rows + "EOF")
+def test_cli_adds_argon_without_mixing_other_providers(monkeypatch, tmp_path):
+    rows = ("gemini-4-argon-medium\tMedium\n"
+            "gemini-4-argon-high\tHigh\n"
+            "gemini-4-argon-low\tLow\n"
+            "gemini-4-argon-high\tDuplicate\n"
+            "claude-opus-5-5-high\tClaude\n"
+            "gpt-oss-120b-medium\tGPT\n"
+            "gemini-invalid model\tInvalid\n")
+    _fake_cli(monkeypatch, tmp_path, f"import sys\nsys.stdout.write({rows!r})")
     models, error = gemini._gemini_models(BASE)
     assert error == ""
-    assert models == ["gemini-3.8-flash-high", "gemini-4-argon-medium",
-                      "gemini-4-argon-high", "gemini-4-argon-low"]
+    assert models == FALLBACK + ["gemini-4-argon-medium", "gemini-4-argon-high",
+                                 "gemini-4-argon-low"]
+    assert gemini._catalog_item(models)["default_model"] == FALLBACK[0]
+    assert gemini._catalog_item(models)["model_efforts"]["gemini-4-argon-medium"] == [
+        "low", "medium", "high"]
 
 
-def test_cli_list_is_cached_and_override_skips_discovery(monkeypatch, tmp_path):
+def test_single_effort_is_the_only_offered_effort():
+    models = FALLBACK + ["gemini-4-argon-high"]
+    catalog = gemini._catalog_item(models)
+    assert catalog["model_efforts"]["gemini-4-argon-high"] == ["high"]
+    assert catalog["model_efforts"]["gemini-3.8-flash-high"] == ["low", "medium", "high"]
+    assert gemini._catalog_item(["custom-model"])["model_efforts"]["custom-model"] == [
+        "low", "medium", "high"]
+
+
+def test_cache_coalesces_concurrent_queries_and_override_skips_cli(monkeypatch, tmp_path):
     counter = tmp_path / "calls.txt"
     monkeypatch.setenv("AGY_TEST_COUNTER", str(counter))
-    _fake_cli(monkeypatch, tmp_path, "echo call >> \"$AGY_TEST_COUNTER\"\n"
-              "printf 'gemini-4-argon-high\\tArgon High\\n'")
-    assert gemini._gemini_models(BASE)[0] == ["gemini-4-argon-high"]
-    assert gemini._gemini_models(BASE)[0] == ["gemini-4-argon-high"]
+    _fake_cli(monkeypatch, tmp_path, "import os,time\n"
+              "with open(os.environ['AGY_TEST_COUNTER'], 'a') as f: f.write('call\\n')\n"
+              "time.sleep(0.2)\nprint('gemini-4-argon-high\\tArgon')")
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        results = list(pool.map(lambda _: gemini._gemini_models(BASE)[0], range(6)))
+    assert all(models == FALLBACK + ["gemini-4-argon-high"] for models in results)
     assert counter.read_text().splitlines() == ["call"]
 
-    monkeypatch.setenv("AGENTSTACK_GEMINI_MODELS", "gemini-custom-high")
-    assert gemini._gemini_models(BASE) == (["gemini-custom-high"], "")
+    monkeypatch.setenv("AGENTSTACK_GEMINI_MODELS", "custom-model")
+    assert gemini._gemini_models(BASE) == (["custom-model"], "")
     assert counter.read_text().splitlines() == ["call"]
 
 
-@pytest.mark.parametrize("returncode, output", [
-    (1, b"gemini-4-argon-high\tArgon\n"),
-    (0, b"claude-opus-5-5-high\tClaude\n"),
-    (0, b"gemini-4-argon-high no-tab\n"),
-    (0, b"gemini-4-argon-high\tArgon\n" * 6000),
-    (0, b"".join(f"gemini-test-{i}\tTest\n".encode() for i in range(129))),
-    (0, b"\xff\xfe"),
+def test_failure_recovers_soon_and_keeps_last_success(monkeypatch, tmp_path):
+    _fake_cli(monkeypatch, tmp_path, "import os,sys\n"
+              "if os.environ.get('AGY_TEST_FAIL') == '1': sys.exit(1)\n"
+              "print('gemini-4-argon-high\\tArgon')")
+    monkeypatch.setenv("AGY_TEST_FAIL", "1")
+    assert gemini._gemini_models(BASE) == (FALLBACK, "")
+    assert gemini._CLI_CATALOG_CACHE[2] == ()
+
+    monkeypatch.setenv("AGY_TEST_FAIL", "0")
+    key, _, last = gemini._CLI_CATALOG_CACHE
+    monkeypatch.setattr(gemini, "_CLI_CATALOG_CACHE", (key, 0, last))
+    assert gemini._gemini_models(BASE)[0] == FALLBACK + ["gemini-4-argon-high"]
+
+    monkeypatch.setenv("AGY_TEST_FAIL", "1")
+    key, _, last = gemini._CLI_CATALOG_CACHE
+    monkeypatch.setattr(gemini, "_CLI_CATALOG_CACHE", (key, 0, last))
+    assert gemini._gemini_models(BASE)[0] == FALLBACK + ["gemini-4-argon-high"]
+
+
+@pytest.mark.parametrize("body", [
+    "import sys; sys.exit(1)",
+    "print('claude-opus-5-5-high\\tClaude')",
+    "print('gemini-4-argon-high invalid-no-tab')",
+    "import sys; sys.stdout.buffer.write(b'gemini-4-argon-high\\tArgon\\n'*6000)",
+    "import sys; sys.stdout.buffer.write(b'\\xff\\xfe')",
+    "for i in range(129): print(f'gemini-test-{i}\\tTest')",
 ])
-def test_cli_unusable_response_falls_back(monkeypatch, tmp_path, returncode, output):
-    _fake_cli(monkeypatch, tmp_path, "exit 0")
-    gemini._cli_models.cache_clear()
-    monkeypatch.setattr(gemini.subprocess, "run", lambda *a, **k:
-                        subprocess.CompletedProcess(a[0], returncode, output))
+def test_cli_invalid_response_falls_back(monkeypatch, tmp_path, body):
+    _fake_cli(monkeypatch, tmp_path, body)
     assert gemini._gemini_models(BASE) == (FALLBACK, "")
 
 
-def test_cli_timeout_falls_back(monkeypatch, tmp_path):
-    _fake_cli(monkeypatch, tmp_path, "exit 0")
-    gemini._cli_models.cache_clear()
-
-    def timeout(*args, **kwargs):
-        assert args[0][-1] == "models"
-        assert kwargs["timeout"] == gemini._CLI_CATALOG_TIMEOUT
-        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
-
-    monkeypatch.setattr(gemini.subprocess, "run", timeout)
+def test_cli_timeout_is_bounded(monkeypatch, tmp_path):
+    _fake_cli(monkeypatch, tmp_path, "import time; time.sleep(3)")
+    monkeypatch.setattr(gemini, "_CLI_CATALOG_TIMEOUT", 0.1)
     assert gemini._gemini_models(BASE) == (FALLBACK, "")
+
+
+def test_spawn_dry_run_does_not_query_cli(monkeypatch, tmp_path):
+    def unexpected():
+        pytest.fail("Gemini explicit spawn/dry_run started model discovery")
+    monkeypatch.setattr(gemini, "_discover_models", unexpected)
+    monkeypatch.delenv("AGENTSTACK_GEMINI_MODELS", raising=False)
+    result = server.do_spawn({"parent":"Parent", "task":"audit", "dir":str(tmp_path),
+                              "provider":"gemini", "model":"gemini-4-argon-high",
+                              "effort":"high", "resources":"../invalid", "dry_run":True})
+    assert result == {"ok":False, "error":"resource must not contain parent traversal: ../invalid"}
+
+
+def test_cross_origin_catalog_request_does_not_trigger_discovery(monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(server, "spawn_names_payload", lambda: calls.append("read") or {})
+    http = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    worker = threading.Thread(target=http.handle_request, daemon=True)
+    worker.start()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{http.server_port}/api/spawn-names",
+        headers={"Origin":"https://example.invalid", "Sec-Fetch-Site":"cross-site"},
+    )
+    try:
+        with pytest.raises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(request, timeout=5)
+        assert raised.value.code == 403
+        assert json.loads(raised.value.read()) == {"error":"cross_origin_spawn_names_request"}
+    finally:
+        worker.join(timeout=6)
+        http.server_close()
+    assert not worker.is_alive()
+    assert calls == []
+
+
+def test_same_origin_catalog_request_still_works(monkeypatch):
+    monkeypatch.setattr(server, "spawn_names_payload", lambda: {"providers":[]})
+    http = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    worker = threading.Thread(target=http.handle_request, daemon=True)
+    worker.start()
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{http.server_port}/api/spawn-names", timeout=5,
+        ) as response:
+            assert json.loads(response.read()) == {"providers":[]}
+    finally:
+        worker.join(timeout=6)
+        http.server_close()
+    assert not worker.is_alive()

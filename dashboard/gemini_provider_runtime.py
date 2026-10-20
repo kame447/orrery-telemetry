@@ -11,10 +11,11 @@ readiness stay in the core; this module only resolves a trusted
 from __future__ import annotations
 
 import fnmatch
-from functools import lru_cache
 import logging
 import os
 import re
+import selectors
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -64,28 +65,57 @@ _log = logging.getLogger("agentstack.dashboard.gemini")
 
 _CLI_CATALOG_TIMEOUT = 5
 _CLI_CATALOG_TTL = 300
+_CLI_CATALOG_RETRY = 5
 _CLI_CATALOG_MAX_BYTES = 64 * 1024
 _CLI_CATALOG_MAX_MODELS = 128
+_CLI_CATALOG_LOCK = threading.Lock()
+_CLI_CATALOG_CACHE: tuple[tuple[str, int, int], float, tuple[str, ...]] | None = None
 
 
-@lru_cache(maxsize=8)
-def _cli_models(binary: str, stamp: tuple[int, int], window: int) -> tuple[str, ...]:
-    """Read only Gemini IDs from the installed Antigravity CLI's model list."""
+def _cli_models(binary: str) -> tuple[str, ...]:
+    """Read a bounded, non-secret Gemini model list from the installed CLI."""
+    process = None
+    output = bytearray()
+    deadline = time.monotonic() + _CLI_CATALOG_TIMEOUT
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             [binary, "models"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, timeout=_CLI_CATALOG_TIMEOUT, check=False,
+            stderr=subprocess.DEVNULL, start_new_session=os.name == "posix",
         )
-    except (OSError, subprocess.TimeoutExpired):
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    return ()
+                chunk = os.read(process.stdout.fileno(),
+                                min(8192, _CLI_CATALOG_MAX_BYTES + 1 - len(output)))
+                if not chunk:
+                    break
+                output.extend(chunk)
+                if len(output) > _CLI_CATALOG_MAX_BYTES:
+                    return ()
+        if process.wait(timeout=max(0.01, deadline - time.monotonic())) != 0:
+            return ()
+        decoded = output.decode("utf-8")
+    except (OSError, UnicodeError, ValueError, subprocess.TimeoutExpired):
         return ()
-    if result.returncode or len(result.stdout) > _CLI_CATALOG_MAX_BYTES:
-        return ()
-    try:
-        output = result.stdout.decode("utf-8")
-    except UnicodeDecodeError:
-        return ()
+    finally:
+        if process is not None:
+            if process.poll() is None:
+                try:
+                    if os.name == "posix":
+                        os.killpg(process.pid, signal.SIGKILL)
+                    else:
+                        process.kill()
+                except ProcessLookupError:
+                    pass
+            process.wait()
+            if process.stdout:
+                process.stdout.close()
+
     models: list[str] = []
-    for line in output.splitlines():
+    for line in decoded.splitlines():
         model, separator, _label = line.partition("\t")
         if not separator or not model.startswith("gemini-") or not _MODEL_RE.fullmatch(model):
             continue
@@ -104,24 +134,34 @@ def _discover_models() -> tuple[str, ...]:
         info = os.stat(binary)
     except OSError:
         return ()
-    return _cli_models(binary, (info.st_mtime_ns, info.st_size),
-                       int(time.monotonic() // _CLI_CATALOG_TTL))
+    key = (binary, info.st_mtime_ns, info.st_size)
+    global _CLI_CATALOG_CACHE
+    with _CLI_CATALOG_LOCK:
+        now = time.monotonic()
+        cached = _CLI_CATALOG_CACHE
+        if cached is not None and cached[0] == key and now < cached[1]:
+            return cached[2]
+        discovered = _cli_models(binary)
+        # Keep the last successful list during a temporary CLI outage; retry
+        # shortly instead of caching a failure for the full five minutes.
+        models = discovered or (cached[2] if cached is not None and cached[0] == key else ())
+        ttl = _CLI_CATALOG_TTL if discovered else _CLI_CATALOG_RETRY
+        _CLI_CATALOG_CACHE = (key, time.monotonic() + ttl, models)
+        return models
 
 
 # --------------------------------------------------------------------------- #
 # Catalog / model policy
 # --------------------------------------------------------------------------- #
-def _gemini_models(base: Any) -> tuple[list[str], str]:
-    """Return the Gemini model allow-list, or an error that disables it."""
+def _gemini_models(base: Any, *, discover: bool = True) -> tuple[list[str], str]:
+    """Return suggested models, or the explicit operator allow-list."""
     values: list[str] = []
     for raw in os.environ.get("AGENTSTACK_GEMINI_MODELS", "").split(","):
         value = raw.strip()
         if value and value not in values:
             values.append(value)
-    models = values or list(_discover_models()) or list(_DEFAULT_MODELS)
-    if not values and _DEFAULT_MODELS[0] in models:
-        models.remove(_DEFAULT_MODELS[0])
-        models.insert(0, _DEFAULT_MODELS[0])
+    discovered = _discover_models() if discover and not values else ()
+    models = values or list(dict.fromkeys((*_DEFAULT_MODELS, *discovered)))
     native = (
         ("claude", set(base._SPAWN_MODELS)),
         ("codex", set(base._codex_models())),
@@ -146,6 +186,13 @@ def _gemini_models(base: Any) -> tuple[list[str], str]:
 
 
 def _catalog_item(models: list[str]) -> dict:
+    available = set(models)
+    model_efforts = {}
+    for model in models:
+        family, _, level = model.rpartition("-")
+        model_efforts[model] = ([effort for effort in _EFFORTS
+                                 if f"{family}-{effort}" in available]
+                                if level in _EFFORTS else list(_EFFORTS))
     return {
         "id": PROVIDER_ID,
         "label": "Antigravity",
@@ -153,6 +200,7 @@ def _catalog_item(models: list[str]) -> dict:
         "models": list(models),
         "default_model": models[0],
         "efforts": list(_EFFORTS),
+        "model_efforts": model_efforts,
         "effort_default": "" if CAPABILITIES["effort_required"] else "high",
         "provider_key": "google",
         "capabilities": dict(CAPABILITIES),
@@ -642,9 +690,9 @@ class _Integration:
             self._ui_key, self._ui_error = key, error
         return error
 
-    def availability(self) -> tuple[list[str], str]:
-        """Return the model allow-list, or why Gemini fails closed."""
-        models, error = _gemini_models(self.base)
+    def availability(self, *, discover: bool = True) -> tuple[list[str], str]:
+        """Return the models, or why Gemini fails closed."""
+        models, error = _gemini_models(self.base, discover=discover)
         if not error:
             error = self.ui_error()
         if error:
@@ -691,11 +739,19 @@ def _install_spawn(base: Any, integration: _Integration) -> None:
             return error
         if request["standalone"] and not CAPABILITIES["standalone"]:
             return {"ok": False, "error": "standalone not supported for provider gemini"}
-        models, error = integration.availability()
+        # Explicit spawn IDs, including dry_run, do not need CLI discovery.
+        models, error = integration.availability(discover=False)
         if error:
             return {"ok": False, "error": f"provider gemini unavailable: {error}"}
         model = str(payload.get("model") or models[0]).strip()
-        if model not in models:
+        explicit = bool(os.environ.get("AGENTSTACK_GEMINI_MODELS", "").strip())
+
+        def permitted(candidate: str) -> bool:
+            # Discovery offers choices; explicit operator allow-lists restrict them.
+            return (candidate in models if explicit else
+                    candidate.startswith("gemini-") and _MODEL_RE.fullmatch(candidate) is not None)
+
+        if not permitted(model):
             return {"ok": False, "error": f"model not allowed for provider gemini: {model}"}
         effort = str(payload.get("effort") or "").strip().lower()
         if not effort:
@@ -709,7 +765,7 @@ def _install_spawn(base: Any, integration: _Integration) -> None:
         family, separator, model_effort = model.rpartition("-")
         if separator and model_effort in _EFFORTS:
             resolved_model = f"{family}-{effort}"
-            if resolved_model not in models:
+            if not permitted(resolved_model):
                 return {"ok": False, "error": (
                     f"model not allowed for provider gemini at effort {effort}: {resolved_model}"
                 )}
