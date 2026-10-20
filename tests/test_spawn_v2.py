@@ -761,7 +761,7 @@ cleanup() {
   : > "$TEST_MARK.cleanup-started"
   # Stands in for a mail release/retire or worktree removal still in progress.
   sleep "$TEST_CLEANUP_SECONDS"
-  rm -f "$TEST_RUNTIME/agent_token_$name"
+  # The fixture common cleanup owns credential deletion after stop proof.
   : > "$TEST_MARK.cleanup-done"
 }
 trap cleanup EXIT
@@ -772,11 +772,23 @@ while :; do sleep 0.05; done
 """
 
 
+def _successful_fake_cleanup(monkeypatch, tmp_path):
+    """A fixture cleanup owns deletion, as the product helper does."""
+    def cleanup(script, name, environment):
+        runtime = pathlib.Path(environment['AGENTSTACK_RUNTIME_DIR'])
+        assert runtime == tmp_path / 'runtime'
+        (runtime / ('agent_token_' + name)).unlink(missing_ok=True)
+        (runtime / 'child-agents' / (name + '.json')).unlink(missing_ok=True)
+        return True
+    monkeypatch.setattr(server, '_failed_spawn_cleanup', cleanup)
+
+
 def _prepare_real_spawn(monkeypatch, tmp_path, script=_CLEANUP_LAUNCHER):
     launcher = tmp_path / "launcher.sh"
     launcher.write_text(script, encoding="utf-8")
     launcher.chmod(0o755)
     runtime = tmp_path / "runtime"
+    _successful_fake_cleanup(monkeypatch, tmp_path)
 
     def mcp(method, args, timeout=15):
         data = {"id": 73, "name": "QuietCurie", "registration_token": "child-owner-token"} \
@@ -788,7 +800,7 @@ def _prepare_real_spawn(monkeypatch, tmp_path, script=_CLEANUP_LAUNCHER):
     monkeypatch.setattr(server, "_project_key", lambda: "/project")
     monkeypatch.setattr(server, "_spawn_name_status", lambda _: "available")
     monkeypatch.setattr(server, "_mcp_call", mcp)
-    monkeypatch.setattr(server.subprocess, "run", lambda *a, **k: type("R", (), {"returncode": 1})())
+    monkeypatch.setattr(server.subprocess, "run", lambda *a, **k: type("R", (), {"returncode": 1, "stderr": "can't find session: QuietCurie"})())
     real_popen = server.subprocess.Popen
     pid_mark = tmp_path / "mark.pid"
 
@@ -934,7 +946,8 @@ def test_canonical_launcher_timeout_keeps_5s_grace_and_removes_credentials(monke
     launcher.chmod(0o755)
     runtime = tmp_path / "runtime"
     runtime.mkdir()
-    (runtime / "agent_token_QuietCurie").write_text("child-owner-token")
+    _successful_fake_cleanup(monkeypatch, tmp_path)
+    (runtime / "agent_token_QuietCurie").write_text("tok")
     events = []
 
     class StuckProc:
@@ -962,7 +975,7 @@ def test_canonical_launcher_timeout_keeps_5s_grace_and_removes_credentials(monke
 
     for payload in ({"provider": "claude"}, {"provider": "codex", "model": server._codex_models()[0]}):
         events.clear()
-        (runtime / "agent_token_QuietCurie").write_text("child-owner-token")
+        (runtime / "agent_token_QuietCurie").write_text("tok")
         result = server.do_spawn({"standalone": True, "name": "QuietCurie", "task": "work",
                                   "dir": str(tmp_path), **payload})
         assert result["ok"] is False
@@ -1199,9 +1212,9 @@ def test_verdict_deadline_covers_each_launchers_worst_case():
         worst = (server._SPAWN_READINESS_TIMEOUT_SECONDS + server._spawn_termination_grace(spec)
                  + server._SPAWN_KILL_REAP_SECONDS)
         assert server._spawn_verdict_deadline_seconds(spec) >= worst + 2
-    assert server._spawn_verdict_deadline_seconds(canonical) == 140
-    assert server._spawn_verdict_deadline_seconds(group) == 285
-    assert server._spawn_verdict_deadline_seconds(tuned) == 435
+    assert server._spawn_verdict_deadline_seconds(canonical) == 170
+    assert server._spawn_verdict_deadline_seconds(group) == 315
+    assert server._spawn_verdict_deadline_seconds(tuned) == 465
 
 
 def test_async_pending_deadline_comes_from_the_spec_not_the_payload(monkeypatch, tmp_path):
@@ -1236,7 +1249,7 @@ def test_async_pending_deadline_comes_from_the_spec_not_the_payload(monkeypatch,
                      if key != "verdict_deadline_seconds"}
             pending = server.do_spawn({**valid, **extra})
             assert pending["pending"] is True
-            assert pending["verdict_deadline_seconds"] == 140
+            assert pending["verdict_deadline_seconds"] == 170
         group = server.SpawnLaunchSpec(provider="gemini", program="antigravity", model="m",
                                        script=str(launcher), signal_process_group=True)
         pending = server.spawn_with_launch_spec(valid, group)
@@ -1275,8 +1288,8 @@ async function run(pending,verdictSeconds){
   const out={};
   out.groupWorst=await run({verdict_deadline_seconds:GROUP_DEADLINE},GROUP_WORST);
   out.groupWithoutDeadline=await run({},GROUP_WORST);
-  out.canonicalWorst=await run({verdict_deadline_seconds:140},CANONICAL_WORST);
-  out.canonicalLate=await run({verdict_deadline_seconds:140},150);
+  out.canonicalWorst=await run({verdict_deadline_seconds:CANONICAL_DEADLINE},CANONICAL_WORST);
+  out.canonicalLate=await run({verdict_deadline_seconds:CANONICAL_DEADLINE},CANONICAL_DEADLINE+10);
   out.legacyLate=await run({},150);
   now=0;toasts.length=0;verdictAt=150000;
   await watchSpawnLaunch('QuietCurie','/repo');
@@ -1316,13 +1329,15 @@ def test_rendered_watcher_waits_for_the_server_verdict_deadline():
     base = dict(provider="p", program="x", model="m", script="/bin/true")
     group = server.SpawnLaunchSpec(**base, signal_process_group=True)
     group_worst = (server._SPAWN_READINESS_TIMEOUT_SECONDS + server._SPAWN_CLEANUP_GRACE_SECONDS
-                   + server._SPAWN_KILL_REAP_SECONDS)
+                   + server._SPAWN_KILL_REAP_SECONDS + server._SPAWN_FAILURE_CLEANUP_SECONDS)
+    canonical = server.SpawnLaunchSpec(**base)
     canonical_worst = (server._SPAWN_READINESS_TIMEOUT_SECONDS + server._SPAWN_TERMINATE_GRACE_SECONDS
-                       + server._SPAWN_KILL_REAP_SECONDS)
+                       + server._SPAWN_KILL_REAP_SECONDS + server._SPAWN_FAILURE_CLEANUP_SECONDS)
     harness = (_WATCH_HARNESS
                .replace("GROUP_DEADLINE", str(server._spawn_verdict_deadline_seconds(group)))
                .replace("GROUP_WORST", repr(group_worst))
-               .replace("CANONICAL_WORST", repr(canonical_worst)))
+               .replace("CANONICAL_WORST", repr(canonical_worst))
+               .replace("CANONICAL_DEADLINE", str(server._spawn_verdict_deadline_seconds(canonical))))
     result = _REAL_RUN(["node", "-e", "\n".join(parts) + "\n" + harness],
                        capture_output=True, text=True, timeout=20, check=False)
     assert result.returncode == 0, result.stderr
@@ -1334,9 +1349,11 @@ def test_rendered_watcher_waits_for_the_server_verdict_deadline():
     # where the old fixed 140s watch had already given up.
     assert out["groupWorst"]["toasts"] == spawned
     assert out["groupWithoutDeadline"]["toasts"] == timed_out
-    # Claude/Codex keep exactly the 140s watch, with or without the field.
+    # New server budgets include the final shared cleanup; legacy replies keep 140s.
     assert out["canonicalWorst"]["toasts"] == spawned
-    for key in ("canonicalLate", "legacyLate", "defaultArgument"):
+    assert out["canonicalLate"]["toasts"] == [["✕ SPAWN", "> QuietCurie :: no verdict after 170s", True]]
+    assert 170000 <= out["canonicalLate"]["elapsed"] < 172100
+    for key in ("legacyLate", "defaultArgument"):
         assert out[key]["toasts"] == timed_out, key
         assert 140000 <= out[key]["elapsed"] < 142100, key
     limits = out["limits"]

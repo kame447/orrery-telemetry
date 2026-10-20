@@ -334,8 +334,8 @@ def test_gemini_spawn_rejects_standalone_and_invalid_engine_options(tmp_path):
 def test_native_providers_keep_canonical_validation():
     for module in (server, canonical_server):
         assert module.do_spawn({"parent": "P", "task": "w", "provider": "claude",
-                                "model": "claude-opus-5", "effort": "high"}) == {
-            "ok": False, "error": "effort not supported for provider: claude",
+                                "model": "claude-haiku-4-5-20251001", "effort": "high"}) == {
+            "ok": False, "error": "effort not supported for model: claude-haiku-4-5-20251001",
         }
         assert module.do_spawn({"parent": "P", "task": "w", "provider": "codex",
                                 "model": "gemini-3.8-flash-high"})["error"] == (
@@ -931,8 +931,9 @@ def test_concurrent_gemini_and_native_spawns_do_not_cross_contaminate(gemini_env
     assert not hasattr(gemini_runtime, "_PATCH_LOCK")
 
 
+@pytest.mark.parametrize("cleanup_confirmed", [False, True])
 def test_readiness_timeout_signals_gemini_process_group_and_cleans_handoff(
-        gemini_env, monkeypatch):
+        gemini_env, monkeypatch, cleanup_confirmed):
     signals = []
 
     class SlowProc:
@@ -964,11 +965,15 @@ def test_readiness_timeout_signals_gemini_process_group_and_cleans_handoff(
     monkeypatch.setattr(server.subprocess, "Popen", popen)
     monkeypatch.setattr(server.os, "killpg", lambda pid, signum: signals.append((pid, signum)))
 
+    # Model the common cleanup verdict without touching installed services.
+    monkeypatch.setattr(server, "_failed_spawn_cleanup", lambda *args: cleanup_confirmed)
     result = server.do_spawn(_gemini_payload(gemini_env))
     assert result["ok"] is False
     assert "did not finish readiness checks within 120s" in result["error"]
     assert signals == [(31337, signal.SIGTERM)]
-    assert not pathlib.Path(launched[0][1]["env"]["AGENTSTACK_GEMINI_TASK_FILE"]).exists()
+    assert pathlib.Path(launched[0][1]["env"]["AGENTSTACK_GEMINI_TASK_FILE"]).exists() is (not cleanup_confirmed)
+    if not cleanup_confirmed:
+        assert result["cleanup_incomplete"] and result["cleanup_state"] == "unknown"
 
     signals.clear()
     server.do_spawn({"parent": "Parent", "name": "Zesty-Bohr", "task": "work",
@@ -1208,7 +1213,7 @@ core = sys.modules["_orrery_provider_dashboard_core"]
 print(json.dumps({{
     "failures": core._PROVIDER_EXTENSION_FAILURES,
     "gemini": core.do_spawn({{"parent": "P", "task": "w", "provider": "gemini"}}),
-    "claude": core.do_spawn({{"parent": "P", "task": "w", "provider": "claude", "effort": "x"}}),
+    "claude": core.do_spawn({{"parent": "P", "task": "w", "provider": "claude", "model": "claude-haiku-4-5-20251001", "effort": "x"}}),
 }}))
 """
     result = _REAL_RUN([sys.executable, "-c", probe], capture_output=True, text=True,
@@ -1217,7 +1222,7 @@ print(json.dumps({{
     out = json.loads(result.stdout.strip().splitlines()[-1])
     assert out["failures"] == ["gemini_provider_runtime.py"]
     assert out["gemini"] == {"ok": False, "error": "provider not allowed: gemini"}
-    assert out["claude"] == {"ok": False, "error": "effort not supported for provider: claude"}
+    assert out["claude"] == {"ok": False, "error": "effort not supported for model: claude-haiku-4-5-20251001"}
     assert "optional dashboard provider extension disabled" in result.stderr
 
 

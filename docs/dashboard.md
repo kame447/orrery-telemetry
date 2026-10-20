@@ -314,13 +314,16 @@ scientist rail の `available` は bare surname ではなく、134 adjective の
 
 ### Engine
 
-- Claude / Codex provider tab
+- provider tab（server の catalog から作られ、設定済みの環境では DeepSeek / Local も並びます）
 - provider ごとの model card と用途 guide
 - Claude は Sonnet / Opus / Haiku
 - Codex の既定は起動対象 CLI が 0.159.0 以上なら `gpt-6.1-sol`、古い版なら `gpt-6-sol`（版不明なら新鮮な catalog で判定）。旧世代は `gpt-6-sol` など正式 ID で指定できます
 - Codex の effort 候補は model catalog の `model_efforts` / `model_effort_defaults` に従います。明示 effort の最終可否は Codex CLI が判定します
+- DeepSeek / Local は起動に harness（dsh / hermes）が必須です。この NEW AGENT はその指定を送らないため、catalog に並んでも画面からは起動できません。[cockpit を追加した環境での確認手順](getting-started.md#5-しりとりで通しの確認をする)、画面を使わない起動は [API reference](api.md) の `POST /api/spawn` を参照してください
 
 server の provider / model / effort allow-list を catalog と validation の両方に使います。
+
+この節と NEW AGENT の画像は Telemetry 同梱画面の説明です。cockpit の New Agent / Harness / Lineage とは選べる項目が異なります。DeepSeek / Local の現在の OS・設定・effort の範囲は[対応組合せ](managed-catalog.md)を参照してください。
 
 ### Directory
 

@@ -1,6 +1,8 @@
 """Claude resume restores the existing Mail identity before creating a terminal."""
 from __future__ import annotations
 
+from _cleanup_mail import cleanup_mail_server
+
 import asyncio
 import json
 import os
@@ -211,10 +213,11 @@ def test_real_mail_cleanup_resume_receive_and_reply(resume, monkeypatch, tmp_pat
             private(runtime / "child-agents" / f"{NAME}.json", json.dumps(state))
             child_resume.prepare_active_state(runtime, NAME, project_key=project)
             # Exercise the actual normal cleanup chain with disposable files.
-            cleaned = subprocess.run(["/bin/bash", str(ROOT / "hooks" / "cleanup-child-agent.sh"), NAME],
-                env={**os.environ, "AGENTSTACK_RUNTIME_DIR": str(runtime), "AGENTSTACK_HOOKS_DIR": str(ROOT / "hooks"),
-                     "AGENTSTACK_MCP_URL": "http://127.0.0.1:1/mcp", "AGENTSTACK_MAIL_HTTP_BEARER_MODE": "disabled",
-                     "AGENTSTACK_CHILD_RESUME_RETENTION_DAYS": "30"}, capture_output=True, text=True, timeout=15)
+            with cleanup_mail_server(call) as mail_url:
+                cleaned = subprocess.run(["/bin/bash", str(ROOT / "hooks" / "cleanup-child-agent.sh"), NAME],
+                    env={**os.environ, "AGENTSTACK_RUNTIME_DIR": str(runtime), "AGENTSTACK_HOOKS_DIR": str(ROOT / "hooks"),
+                         "AGENTSTACK_MCP_URL": mail_url, "AGENTSTACK_MAIL_HTTP_BEARER_MODE": "disabled",
+                         "AGENTSTACK_CHILD_RESUME_RETENTION_DAYS": "30"}, capture_output=True, text=True, timeout=15)
             assert cleaned.returncode == 0, cleaned.stderr
             assert (runtime / f"agent_token_{NAME}").stat().st_mode & 0o777 == 0o600
             assert json.loads((runtime / "child-agents" / f"{NAME}.json").read_text())["retired_at"]

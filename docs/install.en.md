@@ -2,6 +2,24 @@
 
 > 日本語版: [install.md](install.md)
 
+## Optional dsh / Hermes installation
+
+For Claude Code / Codex CLI, start with the common installation and each CLI's login below. For an API model through dsh / Hermes, first check the [supported combinations and limitations (Japanese)](managed-catalog.md). This route currently targets macOS in legacy mode; the common WSL2 / Linux installation alone does not enable it.
+
+Before launching, prepare the optional harness, backend URL and formal model IDs, credential references, the private manifest and harness configuration connecting them, a work folder, and a choice of parent or standalone. The installer does not create backends or logins; common provider login is in design. Preparing these settings is a separate step from installing a runtime.
+
+`install.sh --enable-dsh --dsh-node /absolute/node` installs dsh 0.2.1-rc.2 / TUI 0.16.1 and its native hook adapter for standard spawning. `--enable-hermes` installs Hermes commit d923a5eb487a17c0a68801bba9ef0f56c81040a8. Each lives in `harnesses/{dsh,hermes}/<generation>`. Supply both enable flags for both harnesses. Neither is acquired by default; updates preserve each saved enabled choice. Supply an existing Node >=24.2 by absolute path; Node itself is not downloaded. Acquisition uses npm/GitHub and the distributions required by Hermes PM. `--harness-cache PATH` supplies dsh tarballs/npm offline cache and local Hermes source; Hermes PM may still acquire its dependencies. `--dry-run` downloads and writes nothing.
+
+The absolute Node path is saved as `AGENTSTACK_DSH_NODE` in env.sh and preserved on ordinary updates. Older installs recover an unsaved path from dsh’s `current.json`. `--managed-spawn-config /absolute/manifest.json` saves only the private manifest reference used by the standard DeepSeek/Local catalog and launcher as `AGENTSTACK_MANAGED_SPAWN_CONFIG` and passes it to dashboard launchd/systemd/background services. It survives restarts, subsequent logins and ordinary updates; the manifest and credentials are not copied. Explicit options/environment override saved values.
+
+When a standard catalog manifest is configured, dsh installation/update extracts effort levels and defaults from the pinned runtime without credentials or network requests and stores a capability cache inside that generation. Stale model/runtime metadata is not reused; an unavailable cache leaves the picker unknown. It never falls back to handwritten low/high choices. Launching without an effort uses the harness default.
+
+`--disable-dsh` / `--disable-hermes` disable the selection and retain installed files. Normal uninstall removes receipt-owned runtime generations and adapters, retaining memories/skills in `harnesses/<harness>/profiles`. Manual `hermes-managed` and Hermes homes are neither read nor modified. External Node and supplied caches remain untouched. Credentials and logins are never installed or migrated. Each harness's `current.json` records its runtime references. Configure backend URL/model and Keychain service/account separately; startup performs static configuration validation. Installation alone does not make the catalog available.
+
+Once configured, check catalog availability, then [exchange Mail through cockpit New Agent / Harness / Lineage](getting-started.en.md#5-play-shiritori-as-an-end-to-end-check). The bundled dashboard NEW AGENT does not send a harness and cannot launch DeepSeek / Local children. See the [API reference](api.en.md) for a launch without the screen. Catalog visibility does not test credentials, connections, tools or Mail delivery.
+
+Independent per-child Hermes memory is in implementation; the current pinned version shares a profile per backend. Conversation resume and memory separation are different features. A common Telegram entry point is in design, and manual Local effort has not passed real Local server acceptance. See [current limitations (Japanese)](managed-catalog.md#現在の制限).
+
 [Back to README](../README.en.md) · [Next: Launchers and identity](launchers.en.md)
 
 This document is for people installing ORRERY Telemetry (this repository) for the first time. It takes three commands to install, two to verify, and one to start the first agent. Migration instructions for previous users of the third-party MCP Agent Mail are collected in the [appendix](#appendix-for-previous-mcp-agent-mail-users) at the end.

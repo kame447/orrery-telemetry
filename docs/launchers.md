@@ -121,6 +121,16 @@ ${AGENTSTACK_RUNTIME_DIR:-$HOME/.agentstack/runtime}/child-agents/<name>.json
 
 に child-owned state を持ちます。
 
+### 標準 spawn の追加 harness（opt-in）
+
+`spawn_child.sh --harness dsh|hermes --backend deepseek|strata --model <正式ID>` は、名前・登録応答の binding・実際の作業場所・tmux session・Mail proxy を標準の子と同じ経路で用意します。明示 opt-in と、patch を当てない別の導入世代が必要です。launcher は native config を生成し、上流 CLI を pane でそのまま動かします。専用 supervisor・通信先の制限・usage 必須・task の寿命は加えません。報告後も pane は生存し、`--harness` を指定しない Claude / Codex は従来どおりです。
+
+private な `harness_state_dir` に初期 prompt・native launch plan・共通 renderer が既存 Codex template から作る指示を保存します。鍵や親 token の値は含めません。追加の stdio/HTTP MCP は共通の tool 選択からコピーし、native config に写せない承認や filter は明示して拒否します。native tool の adapter は、既存の鍵読取・登録・予約 hook の判定を呼びます。 明示していない installer の default-tools は追加 harness へ暗黙に落とさず、未対応として停止します。利用者が `--base default` または対応する `--tools` を明示して選択できます。
+
+終了は Codex と同じ `cleanup-child-agent.sh <name>` を使います。すべての provider で、予約の解放・retire の応答・`whois` の retired 確認に失敗したら、identity の state と owner credential を保持して非0を返します。
+
+通常の Claude・Codex の直接登録による起動も、登録後に失敗したら停止を確認してから同じ cleanup を呼びます。作成要求の応答が未確認なら、同名の別 session を止めないため kill・予約解放・retire をせず、state・credential・worktree を残します。停止や Mail の確認ができない場合も保持し、起動は非0で終わります。失敗した起動は確認付き retire 後に資格と state を即削除し、正常終了の再開用 retention は適用しません。Codex が自身を更新中なら watch に資格を引き継ぎ、停止と共通 cleanup の確認後だけ worktree を片付けます。未確認ならその旨を記録して保持します。pre-registered の起動 rollback は従来どおりです。
+
 pre-registered child へ親 token は渡しません。dashboard spawn は child 専用 token を生成し、mode `0600` の一時 token file 経由で `spawn_child.sh --pre-registered` へ渡します。Claude / Codex では正式な登録応答の数値 ID・name・project・program を非秘密の `.binding.json` sidecar に添えます。launcher は token と sidecar を検証します。Claude / Codex とも incoming receipt の正式 ID・name・project・provider と token の安全性を保存前に検証し、CLI の起動準備が成功してから一時 handoff を消費します。検証失敗では handoff と既存 canonical state / credential を変更しません。起動失敗では今回作ったファイルだけを片付け、置き換えた既存の canonical material を private undo record から戻します。token を transcript、command-line argument、dashboard response に表示しません。
 
 `agentstack-preregister-child` は Claude / Codex の正式な登録応答を、一時 handoff だけでなく上記の canonical token と child state にも mode `0600` で保存します。そのため `spawn_child.sh --pre-registered <name> --codex ...` は `--child-token-file` を省略しても、同じ登録に由来する token・数値 ID・name・project・program から fresh expectation を作れます。canonical token が無くても完全な child state からは復元できますが、破損 metadata、project/name/provider の不一致、token と state の世代不一致は推測で補いません。まだ起動していない子なら、`agentstack-preregister-child` を同じ project で再実行するか、一時 token と対応する `.binding.json` を `--child-token-file` で渡します。一度動いた子を preregister し直すと別の名前が登録され、元の子と同じ役割の体が二重になります。以前の版の Claude の子（3項目の state）は、下の「以前の版で作った Claude child の移行」の手順で引き継ぎます。登録済み Codex child は fresh expectation を永続化できなければ CLI 起動前に停止します。以前に動いた子を `--pre-registered` で起動し直すときは、起動前に `whois` で ORRERY Mail の retired を確かめます。retired なら、子自身の token で `unretire_agent` を呼びます（Mail は retired の agent への送信を拒否するため）。判断するのは Mail で、手元の state ではありません（dashboard の retire ボタンや以前の版の子では、state は何も言わないため）。active に戻せなければ起動せず、起動に失敗したら retire し直します。Mail に問い合わせられず、state も retired と言っていないときは、警告を出して起動します。新しく preregister した子では Mail を呼びません。
