@@ -149,6 +149,18 @@ def set_attr(path, name, value):
     else:subprocess.run(['/usr/bin/xattr','-wx',name,data.hex(),str(path)],check=True,capture_output=True)
 
 
+def attrs_match_recorded(recorded_sha, actual):
+    if sha(canonical(actual)) == recorded_sha:
+        return True
+    # macOS may attach this OS-owned attribute to every newly created file,
+    # including atomic replacements of older files which did not have it.
+    # Allow only that addition; other existing xattrs must still match exactly.
+    if sys.platform == 'darwin' and 'com.apple.provenance' in actual:
+        without_provenance = {k: v for k, v in actual.items() if k != 'com.apple.provenance'}
+        return sha(canonical(without_provenance)) == recorded_sha
+    return False
+
+
 def has_marker(data):
     return any(marker in (data or b'') for marker in (*BEGIN.values(), END))
 
@@ -211,13 +223,17 @@ def verify(entry, expected, *, completed=False):
     if now['resolved_path'] != entry['resolved_path'] or now['link_chain'] != entry['link_chain'] or (sha(data) if data is not None else None) != expected:
         raise Refused('INSTRUCTION_PLAN_CHANGED', entry['requested_path'])
     old, new = entry['metadata'], now['metadata']
-    keys = ('mode', 'nlink', 'acl_sha256', 'xattr_sha256') if completed else tuple(old)
+    keys = ('mode', 'nlink', 'acl_sha256') if completed else tuple(old)
     # An originally absent file acquires ordinary private metadata on first write.
     if completed and old['ino'] is None:
         if new['mode'] != 0o600 or new['nlink'] != 1:
             raise Refused('INSTRUCTION_PLAN_CHANGED', entry['requested_path'])
     elif any(old[k] != new[k] for k in keys):
         raise Refused('INSTRUCTION_PLAN_CHANGED', entry['requested_path'])
+    if completed and old['ino'] is not None:
+        current_attrs = attrs(now['resolved_path'])
+        if sha(canonical(current_attrs)) != new['xattr_sha256'] or not attrs_match_recorded(old['xattr_sha256'], current_attrs):
+            raise Refused('INSTRUCTION_PLAN_CHANGED', entry['requested_path'])
     return data
 
 
@@ -263,7 +279,9 @@ def atomic(path, data, *, entry=None):
             set_attr(tmp, key, value)
         if old_acl:
             subprocess.run(['/bin/chmod', '-E', str(tmp)], input=old_acl + b'\n', check=True, capture_output=True)
-        if entry and old is not None and (attrs(tmp) != old_attrs or acl(tmp) != old_acl):
+        if entry and old is not None and (
+            not attrs_match_recorded(sha(canonical(old_attrs)), attrs(tmp)) or acl(tmp) != old_acl
+        ):
             raise Refused('INSTRUCTION_PATH_UNSAFE', 'metadata transfer failed')
         sync_fd=os.open(tmp,os.O_RDONLY)
         try:os.fsync(sync_fd)
