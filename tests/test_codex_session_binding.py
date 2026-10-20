@@ -433,9 +433,6 @@ def _codex_entrypoint_layout(tmp_path: Path, layout: str) -> dict[str, Path]:
         for relative in (
             "bin/agentstack-preregister-child",
             "hooks/spawn_child.sh",
-            "hooks/project-context.sh",
-            "hooks/installed-env.py",
-
             "hooks/codex-bin.sh",
             "dashboard/codex_models.py",
             "hooks/child_resume.py",
