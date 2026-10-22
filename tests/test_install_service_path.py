@@ -10,12 +10,45 @@ from __future__ import annotations
 
 import pathlib
 import re
+import shlex
 import subprocess
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 INSTALLER = ROOT / "scripts" / "install.sh"
 DEFAULT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+def test_dashboard_only_payload_copies_and_updates_internal_reader(tmp_path):
+    text = INSTALLER.read_text()
+    body = text.split('install_payload() {', 1)[1].split('\n}\n', 1)[0]
+    target = tmp_path / 'install'
+    (target / 'bin').mkdir(parents=True)
+    variables = {
+        'TIER': 'tier0', 'DRY_RUN': 'false', 'REPO_ROOT': str(ROOT),
+        'SCRIPT_DIR': str(ROOT / 'scripts'), 'INSTALL_DIR': str(target),
+        'HOOKS_DIR': str(target / 'hooks'), 'DASHBOARD_DIR': str(target / 'dashboard'),
+        'BIN_DIR': str(target / 'bin'),
+        'MERGE_SETTINGS_SCRIPT': str(ROOT / 'scripts/lib/merge_settings.py'),
+        'MERGE_CLAUDE_MCP_SCRIPT': str(ROOT / 'scripts/lib/merge_claude_mcp.py'),
+        'RUNTIME_SCHEMA_SOURCE': str(ROOT / 'packages/agentstack_mail/src/agentstack_mail/schema_contract.py'),
+        'RUNTIME_FIXTURE_SOURCE': str(ROOT / 'packages/agentstack_mail/fixtures/global-server-s2a.json'),
+    }
+    script = '\n'.join(['set -e', *[key + '=' + shlex.quote(value) for key, value in variables.items()],
+        'RUNTIME_CLIENT_CONTRACT_SOURCES=()', 'RUNTIME_PUBLIC_ENTRY_SOURCES=()',
+        'plan() { :; }', 'copy_core_tree() { :; }',
+        'install_payload() {' + body + '\n}', 'install_payload'])
+    private = target / 'private-config'
+    private.write_bytes(b'keep configuration bytes')
+    for _ in range(2):
+        done = subprocess.run(['/bin/bash', '-c', script], cwd='/', stdin=subprocess.DEVNULL,
+            env={'HOME': str(tmp_path), 'PATH': '/usr/bin:/bin:/usr/sbin:/sbin'},
+            text=True, capture_output=True, timeout=10)
+        assert done.returncode == 0, done.stderr
+        assert (target / 'hooks/llm_secret_reader.py').read_bytes() == (ROOT / 'hooks/llm_secret_reader.py').read_bytes()
+        assert private.read_bytes() == b'keep configuration bytes'
+        if _ == 0:
+            (target / 'hooks/llm_secret_reader.py').write_bytes(b'old installed reader')
 
 
 def _codex_path_block() -> str:

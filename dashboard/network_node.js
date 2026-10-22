@@ -64,8 +64,8 @@ function assetURL(name){
 }
 function providerKeyFor(g){
   const raw=String((g&&g.provider)||'').toLowerCase();
-  // localは共通profileの投影だけを受ける。engine名やURLから推測しない。
-  if(raw==='local'){
+  // Localは公開backend/localityだけから判定し、engine名やURLから推測しない。
+  if(raw==='local'||raw==='strata'||String((g&&g.locality)||'').toLowerCase()==='local'){
     const model=String(g.model_raw||g.model||'').toLowerCase();
     if(/(?:^|[\/\s_-])qwen/.test(model))return 'local:qwen';
     if(/(?:^|[\/\s_-])deepseek/.test(model)&&window.AGENTSTACK_DSH_ENABLED===true)

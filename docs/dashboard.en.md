@@ -275,7 +275,7 @@ The history range auto-fits to the oldest and newest events, widening ranges too
 
 ## NEW AGENT
 
-![NEW AGENT modal — launch manifest for identity / engine / directory / task](img/new-agent.jpg)
+![Configured Local Qwen model and dsh / Hermes Harness choices in NEW AGENT](img/native-harness-picker.png)
 
 `+ NEW AGENT` is a launch manifest that confirms identity, engine, directory, and task in order. Common fields form a one-way path; parent / role / group / isolation are folded into ADVANCED, creating the shortest path for a standalone agent.
 
@@ -297,11 +297,24 @@ Scientist-rail `available` means that at least one pairing with the 134 adjectiv
 - Claude: Sonnet / Opus / Haiku
 - Codex defaults to `gpt-6.1-sol` when the selected CLI is 0.159.0 or later (fresh catalog evidence is used if its version is unknown), otherwise `gpt-6-sol`; prior generations remain available through formal IDs such as `gpt-6-sol`
 - Codex effort choices follow `model_efforts` / `model_effort_defaults`; Codex CLI makes the final decision for an explicit effort
-- DeepSeek / Local launches require a harness (dsh / hermes). This NEW AGENT does not send it, so listing them in the catalog does not make them launchable here. See the [check with cockpit added](getting-started.en.md#5-play-shiritori-as-an-end-to-end-check), or `POST /api/spawn` in the [API reference](api.en.md) for a launch without the screen
+- DeepSeek / Local show Model and Harness (dsh / Hermes) choices from the configured catalog. Select a model, then an available harness; unavailable choices are disabled and labeled “Coming soon”. Helper and Effort follow that model and harness's capabilities. See the [setup guide](install.en.md) and [API reference](api.en.md).
 
 The server uses the provider / model / effort allowlist for both catalog and validation.
 
-This section and its NEW AGENT image describe the bundled Telemetry screen. Its choices differ from cockpit New Agent / Harness / Lineage. DeepSeek / Local currently require macOS legacy mode and manual backend/credential configuration. Common login and Telegram integration are in design; independent per-child Hermes memory is in implementation. Manual Local effort has not passed real Local server acceptance. See the [current combinations (Japanese)](managed-catalog.md).
+This section describes the bundled Telemetry screen. Model / Harness uses the same English vocabulary as cockpit; directory dialogs and Lineage controls need not be identical. See the [current combinations and limitations (Japanese)](managed-catalog.md) for OS credential setup, memory and manual Local effort.
+
+<a id="native-models-and-harnesses"></a>
+### DeepSeek / Local with dsh / Hermes
+
+Choose a configured provider, its Model, and an available Harness. The selection GIF stops before SPAWN: [watch the Model / Harness selection](img/native-harness-selection.gif).
+
+The NEW AGENT image and GIF show the actual bundled Telemetry screen, real catalog, scientist names and official portraits. They show Claude / Codex / DeepSeek / Local models and dsh / Hermes selection before launching, with the working directory and task cropped out. The [cockpit NEW AGENT](https://github.com/gyroid-eth/orrery/blob/master/docs/en/usage.md) is a different screen. The DECK / NETWORK examples below still use synthetic data. These images do not demonstrate credential setup or end-to-end acceptance of every combination.
+
+![DECK examples for DeepSeek and Local Qwen with dsh and Hermes](img/native-local-deck.png)
+
+Local Qwen uses the Qwen logo inside a hexagon; DeepSeek uses its provider badge. Check Harness separately when comparing agents.
+
+![NETWORK medallions distinguish Local Qwen from DeepSeek](img/native-local-network.png)
 
 ### Directory
 

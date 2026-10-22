@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import socket
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -51,7 +52,7 @@ class ThinConfig(unittest.TestCase):
         self.save(self.base / 'mcp.json', {'mcpServers': {'orrery_mail': {'command': '/fixture/proxy', 'args': ['--bound-token-file', '/fixture/token-reference']}}})
         (self.base / 'instructions').write_text('Shared canonical instructions')
         (self.base / 'prompt').write_text('literal `date` $(touch forbidden)\nsecond line')
-        self.document = {'program': 'hermes', 'agent_name': 'FixtureAgent', 'backend_id': 'deepseek',
+        self.document = {'program': 'hermes', 'agent_name': 'FixtureAgent', 'project_key': '/fixture/project', 'backend_id': 'deepseek',
             'model': 'fixture-main', 'manifest_file': str(self.manifest), 'product_root': str(ROOT),
             'state_dir': str(self.base / 'child'), 'cwd': str(self.base), 'mcp_config': str(self.base / 'mcp.json'),
             'instructions_file': str(self.base / 'instructions'), 'prompt_file': str(self.base / 'prompt')}
@@ -64,6 +65,10 @@ class ThinConfig(unittest.TestCase):
 
     def generate(self, **overrides):
         return config.generate({**self.document, **overrides})
+
+    @property
+    def profile(self):
+        return config.child_home(self.document)
 
     def test_static_admission_does_not_create_profile_or_state(self):
         subset = {key: self.document[key] for key in ('manifest_file', 'product_root', 'backend_id', 'model')}
@@ -89,7 +94,7 @@ class ThinConfig(unittest.TestCase):
         self.assertFalse(any('API_KEY' in name or name == 'HERMES_MANAGED' for name in plan['env']))
         self.assertFalse((self.base / 'forbidden').exists())
 
-    def test_two_children_share_memory_profile_but_not_overlay_or_mcp(self):
+    def test_two_children_keep_separate_memory_profiles_and_overlays(self):
         first = self.generate()
         profile = Path(first['profile_home'])
         self.save(profile / 'config.yaml', {'agent': {'system_prompt': 'User instructions'}, 'memory': {'memory_enabled': True}})
@@ -97,12 +102,18 @@ class ThinConfig(unittest.TestCase):
         marker.parent.mkdir()
         marker.write_text('kept memory')
         second = self.generate(agent_name='OtherAgent', state_dir=str(self.base / 'other'))
-        self.assertEqual(first['profile_home'], second['profile_home'])
+        self.assertNotEqual(first['profile_home'], second['profile_home'])
         self.assertNotEqual(first['config_dir'], second['config_dir'])
         self.assertNotEqual(first['argv'][3], second['argv'][3])
         self.assertEqual(marker.read_text(), 'kept memory')
-        self.assertIn('User instructions', config.read(Path(second['config_dir']) / 'config.yaml')['agent']['system_prompt'])
-        self.assertNotIn('mcp_servers', config.read(profile / 'config.yaml'))
+        self.assertNotIn('User instructions', config.read(Path(second['config_dir']) / 'config.yaml')['agent']['system_prompt'])
+        self.assertFalse((Path(second['profile_home']) / 'memories/MEMORY.md').exists())
+        again = self.generate(state_dir=str(self.base / 'again'))
+        self.assertEqual(again['profile_home'], first['profile_home'])
+        self.assertIn('User instructions', config.read(Path(again['config_dir']) / 'config.yaml')['agent']['system_prompt'])
+        self.assertEqual(config.read(profile / 'config.yaml')['mcp_servers'], {
+            'orrery_mail': {'enabled': True, 'command': '/fixture/proxy',
+                            'args': ['--bound-token-file', '/fixture/token-reference']}})
 
     def test_preexisting_private_provider_slug_is_not_merged(self):
         first = self.generate()
@@ -163,7 +174,10 @@ class ThinConfig(unittest.TestCase):
 
     def test_resume_only_exact_id_and_empty_prompt_stays_interactive(self):
         (self.base / 'prompt').write_text('')
-        plan = self.generate(resume_session_id='session-exact-123')
+        first = self.generate()
+        (self.profile / 'state.db').write_bytes(b'synthetic history presence fixture')
+        plan = self.generate(resume_session_id='session-exact-123',
+            native_profile_env={'HERMES_HOME': first['profile_home']})
         self.assertEqual(plan['argv'][-2:], ['--resume', 'session-exact-123'])
         self.assertNotIn('--query-file', plan['argv'])
         for value in ('', 'latest', '-c'):
@@ -171,7 +185,7 @@ class ThinConfig(unittest.TestCase):
                 self.generate(resume_session_id=value)
 
     def test_resume_reads_new_and_existing_yaml_profile_without_changing_answer(self):
-        profile = self.runtime / 'profiles/deepseek'
+        profile = self.profile
         path = profile / 'config.yaml'
         for raw in (None, '# keep comment\nmemory: {memory_enabled: true}\n'):
             with self.subTest(existing_yaml=raw is not None):
@@ -181,10 +195,12 @@ class ThinConfig(unittest.TestCase):
                     profile.mkdir(parents=True, exist_ok=True)
                     path.write_text(raw)
                 first = self.generate()
+                (profile / 'state.db').write_bytes(b'synthetic history presence fixture')
                 before = path.read_bytes()
                 self.assertEqual(config.read(path)['telemetry']['shared_metrics'],
                                  {'enabled': False, 'send': False, 'offer_version': 2})
-                resumed = self.generate(resume_session_id='exact-owned-fixture-id')
+                resumed = self.generate(resume_session_id='exact-owned-fixture-id',
+                    native_profile_env={'HERMES_HOME': first['profile_home']})
                 index = resumed['argv'].index('--resume')
                 self.assertEqual(resumed['argv'][index + 1], 'exact-owned-fixture-id')
                 self.assertEqual(resumed['profile_home'], first['profile_home'])
@@ -193,7 +209,7 @@ class ThinConfig(unittest.TestCase):
                     self.assertIn(raw.encode(), before)
 
     def test_invalid_telemetry_config_keeps_specific_cli_reason(self):
-        self.save(self.runtime / 'profiles/deepseek/config.yaml', {'telemetry': 'invalid fixture'})
+        self.save(self.profile / 'config.yaml', {'telemetry': 'invalid fixture'})
         source, output = self.base / 'invalid-input.json', self.base / 'invalid-plan.json'
         self.save(source, self.document)
         stderr = io.StringIO()
@@ -212,7 +228,7 @@ class ThinConfig(unittest.TestCase):
         persistent = self.base / 'persistent'
         persistent.mkdir()
         (self.runtime / 'profiles').symlink_to(persistent, target_is_directory=True)
-        profile = persistent / 'deepseek'
+        profile = self.profile
         plan = self.generate(native_profile_env={'HERMES_HOME': str(profile)})
         self.assertEqual(Path(plan['env']['HERMES_HOME']).resolve(), profile)
 
@@ -237,7 +253,7 @@ class ThinConfig(unittest.TestCase):
         self.assertFalse((self.runtime / 'profiles').exists())
 
     def test_mcp_inheritance_is_disabled_explicitly_or_refused(self):
-        profile = self.runtime / 'profiles/deepseek'
+        profile = self.profile
         self.save(profile / 'config.yaml', {'mcp_servers': {'unselected': {'command': '/never/run'}}})
         plan = self.generate(mcp_selection={'inherit': False})
         overlay = config.read(Path(plan['config_dir']) / 'config.yaml')
@@ -246,8 +262,8 @@ class ThinConfig(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '^inherited_mcp_conflict$'):
             self.generate(mcp_selection={'inherit': False})
 
-    def test_selected_mcp_servers_replace_inheritance_without_rewriting_profile(self):
-        profile = self.runtime / 'profiles/deepseek'
+    def test_selected_mcp_servers_project_raw_without_rewriting_other_profile_fields(self):
+        profile = self.profile
         old = {'telemetry': {'shared_metrics': {'enabled': False, 'send': False, 'offer_version': 2}},
                'mcp_servers': {'orrery-mail': {'command': '/stale/retired-child-proxy'},
                                'chosen': {'command': '/stale/selected-server'},
@@ -261,15 +277,21 @@ class ThinConfig(unittest.TestCase):
         self.assertEqual(overlay['mcp_servers']['orrery-mail'], {'enabled': False})
         self.assertEqual(overlay['mcp_servers']['orrery_mail']['command'], '/fixture/proxy')
         self.assertEqual(overlay['mcp_servers']['unrelated'], {'enabled': False})
-        self.assertEqual(overlay['mcp_servers']['chosen'], {'command': '/selected/native-server'})
-        self.assertEqual((profile / 'config.yaml').read_bytes(), before)
+        self.assertEqual(overlay['mcp_servers']['chosen'], {'enabled': True, 'command': '/selected/native-server'})
+        revised = (profile / 'config.yaml').read_bytes()
+        self.assertEqual(revised.split(b'"mcp_servers"')[0], before.split(b'"mcp_servers"')[0])
+        raw = config.read(profile / 'config.yaml')['mcp_servers']
+        self.assertEqual(raw['chosen'], {'enabled': True, 'command': '/selected/native-server'})
+        self.assertEqual(raw['unrelated'], {'command': '/keep/native-server', 'enabled': False})
+        self.assertEqual(raw['orrery-mail'], {'command': '/stale/retired-child-proxy', 'enabled': False})
+        self.assertEqual(raw['orrery_mail'], {'enabled': True, 'command': '/fixture/proxy'})
 
     def test_packaging_locale_reference_is_from_selected_source(self):
         plan = self.generate()
         self.assertEqual(plan['env']['HERMES_BUNDLED_LOCALES'], str(self.source / 'locales'))
 
     def test_same_named_mcp_transport_conflict_has_named_diagnostic_without_profile_writes(self):
-        profile = self.runtime / 'profiles/deepseek'
+        profile = self.profile
         old = {'mcp_servers': {'orrery_mail': {'url': 'https://stale.invalid/mcp'}}}
         self.save(profile / 'config.yaml', old)
         before = (profile / 'config.yaml').read_bytes()
@@ -290,12 +312,43 @@ class ThinConfig(unittest.TestCase):
         self.assertEqual((profile / 'config.yaml').read_bytes(), before)
 
     def test_same_named_mcp_command_and_args_are_replaced_by_selection(self):
-        profile = self.runtime / 'profiles/deepseek'
+        profile = self.profile
         self.save(profile / 'config.yaml', {'mcp_servers': {'orrery_mail': {
             'command': '/old/proxy', 'args': ['old-reference']}}})
         plan = self.generate()
         overlay = config.read(Path(plan['config_dir']) / 'config.yaml')
-        self.assertEqual(overlay['mcp_servers']['orrery_mail'], config.read(self.base / 'mcp.json')['mcpServers']['orrery_mail'])
+        self.assertEqual(overlay['mcp_servers']['orrery_mail'], {'enabled': True, **config.read(self.base / 'mcp.json')['mcpServers']['orrery_mail']})
+
+    def test_raw_mcp_reselection_updates_refs_and_honors_explicit_disabled(self):
+        first = self.generate()
+        profile = Path(first['profile_home'])
+        path = profile / 'config.yaml'
+        self.save(self.base / 'mcp.json', {'mcpServers': {}})
+        disabled = self.generate()
+        self.assertEqual(config.read(path)['mcp_servers']['orrery_mail']['enabled'], False)
+        self.assertEqual(config.read(Path(disabled['config_dir']) / 'config.yaml')['mcp_servers']['orrery_mail'], {'enabled': False})
+        selected = {'command': '/updated/proxy', 'args': ['new-reference']}
+        self.save(self.base / 'mcp.json', {'mcpServers': {'orrery_mail': selected}})
+        # Presence is the pre-existing static resume precondition, not native history evidence.
+        (profile / 'state.db').write_bytes(b'synthetic history presence fixture')
+        resumed = self.generate(resume_session_id='fixture-native-id', native_profile_env={'HERMES_HOME': str(profile)})
+        self.assertEqual(resumed['env']['HERMES_HOME'], str(profile))
+        self.assertEqual(resumed['argv'][-2:], ['--query-file', str(self.base / 'prompt')])
+        self.assertEqual(resumed['argv'][resumed['argv'].index('--resume') + 1], 'fixture-native-id')
+        self.assertEqual(config.read(path)['mcp_servers']['orrery_mail'], {'enabled': True, **selected})
+        self.save(self.base / 'mcp.json', {'mcpServers': {'orrery_mail': {**selected, 'enabled': False}}})
+        self.generate()
+        self.assertIs(config.read(path)['mcp_servers']['orrery_mail']['enabled'], False)
+
+    def test_invalid_raw_mcp_map_is_rejected_without_profile_writes(self):
+        for value in (None, [], 'invalid', {'fixture': None}):
+            with self.subTest(value=value):
+                path = self.profile / 'config.yaml'
+                self.save(path, {'mcp_servers': value})
+                before = path.read_bytes()
+                with self.assertRaisesRegex(ValueError, '^invalid_mcp_config$'):
+                    self.generate()
+                self.assertEqual(path.read_bytes(), before)
 
     def test_product_delegate_is_linked_into_native_skills(self):
         plan = self.generate()
@@ -306,7 +359,7 @@ class ThinConfig(unittest.TestCase):
                          (ROOT / 'skills/delegate/SKILL.md').read_bytes())
 
     def test_unowned_skill_is_not_replaced(self):
-        path = self.runtime / 'profiles/deepseek/skills/delegate'
+        path = self.profile / 'skills/delegate'
         path.mkdir(parents=True)
         (path / 'SKILL.md').write_text('user skill')
         with self.assertRaisesRegex(ValueError, '^owned_link_conflict$'):
@@ -315,7 +368,7 @@ class ThinConfig(unittest.TestCase):
 
     def test_native_personality_kept_with_shared_instructions(self):
         (self.source / 'hermes_cli/personality.py').write_text("BUILTIN_PERSONALITIES: dict = {'concise': 'Be concise'}\n")
-        self.save(self.runtime / 'profiles/deepseek/config.yaml', {'display': {'personality': 'concise'}})
+        self.save(self.profile / 'config.yaml', {'display': {'personality': 'concise'}})
         plan = self.generate()
         self.assertEqual(plan['env']['HERMES_EPHEMERAL_SYSTEM_PROMPT'], 'Be concise\n\nShared canonical instructions')
 
@@ -459,6 +512,39 @@ class NativeThinConfig(unittest.TestCase):
 
     def test_broken_plugin_warns_and_native_continues_without_added_gate(self):
         self.run_native(broken=True)
+
+
+def test_secret_service_ref_projects_to_native_route_and_guard_without_lookup(monkeypatch):
+    fixture = ThinConfig()
+    fixture.setUp()
+    try:
+        reference = {'store': 'secret-service', 'attributes': {'service': 'fixture', 'account': 'child'}}
+        fixture.manifest_data['backends']['deepseek']['credential_ref'] = reference
+        fixture.save(fixture.manifest, fixture.manifest_data)
+        with fixture.assertRaisesRegex(ValueError, '^credential_reference_conflict$'):
+            config.validate_input(fixture.document)
+        del fixture.profile_spec['key_cmd']
+        fixture.save(fixture.template, fixture.template_data)
+        # Metadata needs the route, not a key_cmd synthesized by generation.
+        fixture.assertEqual(config.profile_route(fixture.profile_spec, 'deepseek')['route']['api_mode'], 'chat_completions')
+        real_file, real_access = Path.is_file, os.access
+        monkeypatch.setattr(sys, 'platform', 'linux')
+        monkeypatch.setenv('DBUS_SESSION_BUS_ADDRESS', 'unix:path=/fixture/bus')
+        monkeypatch.setattr(Path, 'is_file', lambda p: str(p) == '/usr/bin/secret-tool' or real_file(p))
+        monkeypatch.setattr(os, 'access', lambda p, m: str(p) == '/usr/bin/secret-tool' or real_access(p, m))
+        plan = fixture.generate()
+        fixture.assertEqual(plan['env']['DBUS_SESSION_BUS_ADDRESS'], 'unix:path=/fixture/bus')
+        definitions = config.read(plan['env']['AGENTSTACK_LLM_KEY_DEFINITIONS'])['backends']['hermes']
+        fixture.assertEqual(definitions['credential_ref'], reference)
+        command = definitions['auth_command']
+        fixture.assertEqual(command[-4:], ['--manifest', str(fixture.manifest), '--backend', 'deepseek'])
+        fixture.assertNotIn('service', plan['env'])
+        overlay = config.read(Path(plan['config_dir']) / 'config.yaml')
+        native = overlay['custom_providers'][0] if overlay.get('custom_providers') else overlay['providers'][plan['argv'][3]]
+        import shlex
+        fixture.assertEqual(shlex.split(native['key_cmd']), command)
+    finally:
+        fixture.doCleanups()
 
 
 if __name__ == '__main__':

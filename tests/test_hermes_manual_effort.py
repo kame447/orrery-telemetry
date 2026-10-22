@@ -35,7 +35,7 @@ class UnknownManualPolicy(unittest.TestCase):
         try:
             fixture.profile_spec.update(base_url='https://fixture.invalid/anthropic', api_mode='anthropic_messages')
             fixture.save(fixture.template, fixture.template_data)
-            saved = fixture.runtime / 'profiles/deepseek/config.yaml'
+            saved = fixture.profile / 'config.yaml'
             fixture.save(saved, {'agent': {'reasoning_effort': 'high',
                 'reasoning_overrides': {'fixture-main': 'medium'}}})
             default = fixture.generate()

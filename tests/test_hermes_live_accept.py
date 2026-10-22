@@ -76,6 +76,33 @@ class TelemetryDefaults(unittest.TestCase):
                 self.assertEqual(self.path.read_bytes(), raw.encode())
         self.assertFalse(self.state.exists())
 
+    def test_projected_mcp_changes_only_its_yaml_fields_and_is_idempotent(self):
+        for raw in ['# keep header\nmodel: "keep" # comment\nmcp_servers:\n  old: {command: /fixture/old}\n# keep memory comment\nmemory: {enabled: true}\n',
+                    '{ "model" : "keep", "mcp_servers": {"old": {"command": "/fixture/old"}}, "memory" : {"enabled": true} }\r\n']:
+            with self.subTest(raw=raw):
+                self.path.write_bytes(raw.encode())
+                selected = {'old': {'command': '/fixture/new', 'enabled': True}}
+                self.assertTrue(defaults.project_mcp(self.profile, selected))
+                result = self.path.read_bytes()
+                self.assertEqual(read_yaml(result)['mcp_servers'], selected)
+                self.assertIn(b'"keep"', result)
+                for literal in ('# keep header', '# comment', '# keep memory comment', 'memory: {enabled: true}', '"model" : "keep"', '"memory" : {"enabled": true}', '\r\n'):
+                    if literal in raw:self.assertIn(literal.encode(), result)
+                self.assertFalse(defaults.project_mcp(self.profile, selected))
+                self.assertEqual(self.path.read_bytes(), result)
+
+    def test_block_mcp_numeric_name_remains_string(self):
+        raw = '# keep header\nmodel: "keep" # comment\nmcp_servers:\n  old: {command: /fixture/old}\nmemory: {enabled: true}\n'
+        self.path.write_bytes(raw.encode())
+        selected = {'old': {'command': '/fixture/old'}, '123': {'command': '/fixture/new', 'enabled': True}}
+        self.assertTrue(defaults.project_mcp(self.profile, selected))
+        result = self.path.read_bytes()
+        self.assertEqual(read_yaml(result)['mcp_servers'], selected)
+        self.assertIn(b'model: "keep" # comment\n', result)
+        self.assertIn(b'memory: {enabled: true}\n', result)
+        self.assertFalse(defaults.project_mcp(self.profile, selected))
+        self.assertEqual(self.path.read_bytes(), result)
+
     def test_foreign_config_symlink_is_not_read_or_replaced(self):
         foreign = self.root / 'foreign.yaml'
         foreign.write_text('model: private\n')
@@ -145,12 +172,123 @@ with tempfile.TemporaryDirectory() as temporary:
 '''
 
 
+FAKE_MCP_SCRIPT = r'''
+import json,sys
+from pathlib import Path
+trace=Path(sys.argv[1])
+for line in sys.stdin:
+    request=json.loads(line)
+    method=request.get('method')
+    with trace.open('a') as out:out.write(str(method)+'\n')
+    if 'id' not in request:continue
+    if method=='initialize':
+        result={'protocolVersion':request['params']['protocolVersion'],'capabilities':{'tools':{}},'serverInfo':{'name':'offline-fixture','version':'1'}}
+    elif method=='tools/list':
+        result={'tools':[{'name':'fixture_ping','description':'Offline synthetic probe','inputSchema':{'type':'object','properties':{}}}]}
+    elif method=='ping':result={}
+    else:result={}
+    print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':result}),flush=True)
+'''
+
+NATIVE_MCP_SCRIPT = r'''
+import json,logging,os,sys
+from pathlib import Path
+source=Path(sys.argv[1]).resolve();root=Path(sys.argv[2]).resolve();plan=json.loads(Path(sys.argv[3]).read_text());expected=sys.argv[4]
+os.environ.update(plan['env'])
+blocked=[]
+def audit(event,args):
+    if event=='open' and args and isinstance(args[0],(str,bytes,os.PathLike)):
+        path=Path(os.fsdecode(args[0]))
+        if path.name in ('.env','.op.env') and not path.resolve().is_relative_to(root):
+            blocked.append('external_dotenv');raise SystemExit('external dotenv forbidden')
+    if event in ('socket.connect','socket.getaddrinfo'):
+        blocked.append(event);raise AssertionError('No network in stdio fixture')
+    if event=='subprocess.Popen':
+        argv=args[1]
+        if isinstance(argv,(list,tuple)) and list(argv)==[sys.executable,'-I','-B',str(root/'fake-mcp.py'),str(root/'methods.log')]:return
+        if isinstance(argv,(list,tuple)) and list(argv)==[sys.executable,str(source/'tools/mcp_death_supervisor.py'),'--parent-pgid',str(os.getpgid(0))]:return
+        if isinstance(argv,(list,tuple)) and Path(argv[0]).name=='git' and any(x in argv for x in ('rev-parse','describe','log','status','show','rev-list','branch','tag')):return
+        blocked.append('unexpected_subprocess');raise AssertionError('Unexpected subprocess')
+sys.addaudithook(audit)
+sys.path.insert(0,str(source))
+import httpx,mcp
+from hermes_cli import config
+from hermes_cli.mcp_startup import ensure_mcp_discovery_before_agent_build,_has_configured_mcp_servers
+from tools.mcp_tool_discovery import get_mcp_status
+from tools.mcp_tool_lifecycle import shutdown_mcp_servers
+from tools.registry import registry
+from tools.mcp_tool_schema import mcp_prefixed_tool_name
+assert Path(config.__file__).resolve().is_relative_to(source)
+assert all(Path(module.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()) for module in (httpx,mcp))
+try:
+    gate=_has_configured_mcp_servers()
+    ensure_mcp_discovery_before_agent_build(logger=logging.getLogger('offline-fixture'),single_query=True)
+    status=get_mcp_status()
+    name=mcp_prefixed_tool_name('orrery-mail','fixture_ping')
+    methods=(root/'methods.log').read_text().splitlines() if (root/'methods.log').exists() else []
+    registered=registry.get_entry(name) is not None
+    summary={'startup_gate':gate,'methods':methods,'registered':registered,'blocked':blocked,
+             'connected':any(row['name']=='orrery-mail' and row['connected'] and row['tools']==1 for row in status),
+             'imports':{module.__name__:str(Path(module.__file__).resolve()) for module in (config,httpx,mcp)}}
+    print(json.dumps(summary),flush=True)
+    if expected=='selected':
+        assert gate and 'initialize' in methods and 'tools/list' in methods and registered and summary['connected'], 'Native MCP discovery did not register the selected stdio tool'
+    else:
+        assert not methods and not registered and not summary['connected'], 'Disabled or unselected MCP was started'
+    assert not blocked
+finally:
+    shutdown_mcp_servers()
+'''
+
+
 class NativeAcceptanceData(unittest.TestCase):
     def native(self):
         source, python = os.environ.get('ORRERY_HERMES_TEST_SOURCE'), os.environ.get('ORRERY_HERMES_TEST_PYTHON')
         if not source or not python:
             self.skipTest('Explicit installed dependency interpreter/source required')
         return source, python
+
+    def test_real_native_managed_mcp_discovery_reaches_stdio_tools(self):
+        self.mcp_case('selected')
+
+    def test_real_native_empty_disabled_and_unselected_mcp_never_spawns(self):
+        for mode in ('empty', 'disabled', 'unselected'):
+            with self.subTest(mode=mode):
+                self.mcp_case(mode)
+
+    def mcp_case(self, mode):
+        source, python = self.native()
+        real_popen = subprocess.Popen
+        fixture = fixtures.ThinConfig()
+        fixture.setUp()
+        try:
+            (fixture.base / 'fake-mcp.py').write_text(FAKE_MCP_SCRIPT)
+            definition = {'command': python, 'args': ['-I', '-B', str(fixture.base / 'fake-mcp.py'), str(fixture.base / 'methods.log')]}
+            servers = {'orrery-mail': definition} if mode == 'selected' else {'orrery-mail': {**definition, 'enabled': False}} if mode == 'disabled' else {}
+            fixture.save(fixture.base / 'mcp.json', {'mcpServers': servers})
+            if mode == 'unselected':
+                fixture.save(fixture.profile / 'config.yaml', {'mcp_servers': {'orrery-mail': definition}})
+            plan = fixture.generate()
+            plan_file = fixture.base / 'plan.json'
+            fixture.save(plan_file, plan)
+            with patch.object(subprocess, 'Popen', real_popen):
+                result = subprocess.run([python, '-I', '-B', '-c', NATIVE_MCP_SCRIPT,
+                    source, str(fixture.base), str(plan_file), mode], cwd=fixture.base,
+                    env={'HOME': str(fixture.base), 'TMPDIR': str(fixture.base), 'PATH': os.defpath,
+                         'PYTHONDONTWRITEBYTECODE': '1', 'HERMES_DISABLE_LAZY_INSTALLS': '1', 'UV_OFFLINE': '1'},
+                    capture_output=True, text=True, timeout=40)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            summary = json.loads(result.stdout)
+            print('MCP_DISCOVERY_EVIDENCE=' + json.dumps({'mode': mode, **summary}))
+            if mode == 'selected':
+                self.assertTrue(summary['startup_gate'] and summary['registered'] and summary['connected'])
+                self.assertIn('tools/list', summary['methods'])
+            else:
+                self.assertFalse(summary['registered'] or summary['connected'])
+                self.assertEqual(summary['methods'], [])
+            self.assertEqual(summary['blocked'], [])
+        finally:
+            fixture.doCleanups()
 
     def test_real_native_locale_fallback_and_consent_offer(self):
         source, python = self.native()
@@ -168,7 +306,7 @@ class NativeAcceptanceData(unittest.TestCase):
         fixture = fixtures.ThinConfig()
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
-        profile = fixture.runtime / 'profiles/deepseek'
+        profile = fixture.profile
         profile.mkdir(parents=True)
         raw = '# unchanged\nmodel: "preserve" # verbatim\ntelemetry:\n  shared_metrics:\n    enabled: false\n    send: false\n    offer_version: 1 # old\nmemory: {enabled: true}\n'
         (profile / 'config.yaml').write_text(raw)
@@ -191,7 +329,10 @@ class NativeAcceptanceData(unittest.TestCase):
             for process in processes:
                 if process.poll() is None:
                     process.terminate();process.wait(timeout=5)
-        self.assertEqual((profile/'config.yaml').read_text(),raw.replace('offer_version: 1','offer_version: 2'))
+        expected = raw.replace('offer_version: 1','offer_version: 2')
+        self.assertEqual((profile/'config.yaml').read_text(), expected + 'mcp_servers: ' + json.dumps({
+            'orrery_mail': {'enabled': True, 'command': '/fixture/proxy',
+                            'args': ['--bound-token-file', '/fixture/token-reference']}}) + '\n')
         logs=list(fixture.base.glob('*/telemetry-defaults.log'))
         self.assertEqual(len(logs),1)
         self.assertEqual(len(logs[0].read_text().splitlines()),1)

@@ -1706,12 +1706,15 @@ def _worktree_hook_trust(config_text: str, work_dir: Path | None) -> list[str]:
     # a symlink to it): every candidate for a worktree key is gathered first,
     # each key is written once, and a key whose candidates disagree is left to
     # Codex's own review rather than picked by order (review of #174).
-    carried: dict[str, set[str]] = {}
+    carried: dict[str, set[tuple[str | None, bool]]] = {}
     for key, entry in state.items():
         trusted = entry.get("trusted_hash") if isinstance(entry, dict) else None
         parts = key.rsplit(":", 3)
-        if not isinstance(trusted, str) or len(parts) != 4:
+        disabled = isinstance(entry, dict) and entry.get("enabled") is False
+        if (not isinstance(trusted, str) and not disabled) or len(parts) != 4:
             continue
+        if not isinstance(trusted, str):
+            trusted = None
         source = _source_checkout(parts[0], common)
         if source is None:
             continue
@@ -1719,18 +1722,136 @@ def _worktree_hook_trust(config_text: str, work_dir: Path | None) -> list[str]:
         for root in sorted(roots):
             new_key = root + relative
             if new_key not in state:
-                carried.setdefault(new_key, set()).add(trusted)
+                carried.setdefault(new_key, set()).add((trusted, disabled))
     lines: list[str] = []
     for new_key in sorted(carried):
         hashes = carried[new_key]
         if len(hashes) != 1:
             continue
-        lines.extend(["", "[hooks.state." + _toml_string(new_key) + "]",
-                      "trusted_hash = " + _toml_string(next(iter(hashes)))])
+        trusted, disabled = next(iter(hashes))
+        lines.extend(["", "[hooks.state." + _toml_string(new_key) + "]"])
+        if isinstance(trusted, str):
+            lines.append("trusted_hash = " + _toml_string(trusted))
+        if disabled:
+            lines.append("enabled = false")
     if lines:
         lines[0:0] = ["", "# Written by spawn_child.sh: hook trust the user gave to this",
                       "# worktree's source checkout, for the same hooks here."]
     return lines
+
+
+def _checked_home_hook_state(
+    runtime: Path, name: str, project_key: str, runner: Path, *, active: bool
+) -> dict[str, dict] | None:
+    """Read approval metadata from an owned canonical home, never its credentials."""
+    state_path, token_path, home, _mcp, lock = _paths(runtime, name)
+    config_path = home / "config.toml"
+    paths = (runtime, state_path.parent, home, state_path, token_path, config_path, lock)
+    try:
+        if runtime.absolute() != runtime.resolve():
+            return None
+        before = {}
+        for path in paths:
+            info = path.lstat()
+            directory = path in paths[:3]
+            if (not (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode))
+                    or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) & (0o022 if directory and path != home else 0o077)
+                    or (not directory and info.st_nlink != 1)):
+                return None
+            before[path] = info
+        state = _load_state(state_path)
+        _validate_identity(state, agent_name=name, project_key=project_key, program="codex")
+        if not _retained_shape(state):
+            return None
+        if active and (state.get("retired_at") is not None
+                       or state.get("resume_in_progress_at") is not None
+                       or state.get("tools_change_generation")
+                       or any(os.path.lexists(path) for path in (
+                           _tools_journal(state_path), _legacy_pending(state_path),
+                           state_path.with_name(f".{name}.registration-pending.json")))):
+            return None
+        config = _toml().loads(_read_private(config_path, "hook approval config", 1024 * 1024).decode("utf-8"))
+        servers = config.get("mcp_servers", {})
+        if not isinstance(servers, dict):
+            return None
+        expected = {"AGENTSTACK_PROXY_AGENT_NAME": name, "AGENTSTACK_PROXY_PROGRAM": "codex",
+                    "AGENTSTACK_PROJECT_KEY": project_key, "AGENTSTACK_RUNTIME_DIR": os.fspath(runtime),
+                    "AGENTSTACK_PROXY_TOKEN_FILE": os.fspath(token_path)}
+        for alias in ("orrery-mail", "agentstack"):
+            proxy = servers.get(alias)
+            if (not isinstance(proxy, dict) or proxy.get("enabled") is False
+                    or proxy.get("command") != os.fspath(runner)
+                    or not isinstance(proxy.get("env"), dict)
+                    or any(proxy["env"].get(k) != v for k, v in expected.items())):
+                return None
+        hooks = config.get("hooks", {})
+        approvals = hooks.get("state", {}) if isinstance(hooks, dict) else None
+        if not isinstance(approvals, dict):
+            return None
+        result = {}
+        for key, entry in approvals.items():
+            if (not isinstance(entry, dict) or ("enabled" in entry and type(entry["enabled"]) is not bool)
+                    or ("trusted_hash" in entry and (not isinstance(entry["trusted_hash"], str)
+                        or re.fullmatch(r"sha256:[0-9a-f]{64}", entry["trusted_hash"]) is None))):
+                return None
+            if "trusted_hash" in entry or entry.get("enabled") is False:
+                result[key] = {k: entry[k] for k in ("trusted_hash", "enabled") if k in entry}
+        for path, original in before.items():
+            current = path.lstat()
+            if any(getattr(current, k) != getattr(original, k) for k in (
+                "st_dev", "st_ino", "st_mode", "st_uid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns"
+            )):
+                return None
+        return result
+    except (OSError, ValueError, UnicodeError):
+        return None
+
+
+def _inherit_parent_hook_trust(
+    text: str, runtime: Path, parent: str, child: str, project_key: str, runner: Path
+) -> str:
+    """Carry existing human decisions only; unavailable parents add no trust."""
+    if not parent or parent == child or not PROXY_AGENT_NAME.fullmatch(parent):
+        return text
+    descriptor = None
+    try:
+        _state, _token, _home, _mcp, lock = _paths(runtime, parent)
+        # The child lock is already held. Never create/repair a parent lock or
+        # wait for it: another child can be generating that very parent's home.
+        descriptor = os.open(lock, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        locked = os.fstat(descriptor)
+        current = lock.lstat()
+        if ((locked.st_dev, locked.st_ino) != (current.st_dev, current.st_ino)
+                or not stat.S_ISREG(locked.st_mode) or locked.st_uid != os.getuid()
+                or stat.S_IMODE(locked.st_mode) & 0o077 or locked.st_nlink != 1):
+            return text
+        approvals = _checked_home_hook_state(runtime, parent, project_key, runner, active=True)
+        if not approvals or (lock.lstat().st_dev, lock.lstat().st_ino) != (locked.st_dev, locked.st_ino):
+            return text
+        child_home = _paths(runtime, child)[2]
+        own = _checked_home_hook_state(runtime, child, project_key, runner, active=False) if os.path.lexists(child_home) else {}
+        if own is None:
+            return text
+        config = _toml().loads(text)
+        hooks = config.setdefault("hooks", {})
+        if not isinstance(hooks, dict) or not isinstance(hooks.get("state", {}), dict):
+            return text
+        target = hooks.setdefault("state", {})
+        for key, entry in approvals.items():
+            if entry.get("enabled") is False or "trusted_hash" not in entry:
+                continue
+            existing = target.get(key, {})
+            if not isinstance(existing, dict) or existing.get("enabled") is False:
+                continue
+            target[key] = own[key] if own.get(key, {}).get("enabled") is False else entry
+        return _emit_toml(config)
+    except (OSError, ValueError, UnicodeError):
+        return text
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def _build_home_unlocked(
@@ -1898,7 +2019,6 @@ def _build_home_unlocked(
                         'approval_mode = "approve"',
                     ]
                 )
-        lines.extend(_worktree_hook_trust("\n".join(lines) + "\n", work_dir))
         config_text = "\n".join(lines) + "\n"
         if overlay_setting.strip():
             try:
@@ -1920,6 +2040,13 @@ def _build_home_unlocked(
                     + "; continuing without it",
                     file=os.sys.stderr,
                 )
+        # Interpret final operator disable decisions before carrying approvals
+        # or giving the same checkout's hooks their worktree path.
+        config_text = _inherit_parent_hook_trust(config_text, runtime_dir, parent_agent,
+                                                 child, project_key, runner)
+        carried = _worktree_hook_trust(config_text, work_dir)
+        if carried:
+            config_text += "\n".join(carried) + "\n"
         if mcp_profile == "orrery-only":
             config = _toml().loads(config_text)
             for name, server in config.get("mcp_servers", {}).items():

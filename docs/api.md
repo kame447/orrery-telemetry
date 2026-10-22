@@ -64,7 +64,7 @@ curl -s http://127.0.0.1:8770/api/version
 ```
 
 ```json
-{"name":"orrery-telemetry","version":"2026.09.16.1","api":25}
+{"name":"orrery-telemetry","version":"2026.09.16.1","api":26}
 ```
 
 version の解決順は [インストール](install.md#version)を参照してください。
@@ -109,6 +109,8 @@ dsh opt-inが有効な時だけ `providers` に `provider: "dsh"` を加える�
 [取得・実確認の手順](dsh-stage-a.md)も参照。
 
 ## GET `/api/spawn-names`
+
+同梱 NEW AGENT も Model → Harness → Helper model → Effort の順で選択します。未操作・Use default では catalog が報告した有効な具体 effort を送り、既定が null・不明・候補外なら effort を省略します。候補先頭を既定と推測せず、effort 必須の provider は明示選択を要求します。Helper model は Same as main なら省略します。Terminal は未操作なら headless を省略して現行の起動方針を継承し、明示操作時だけ送ります。
 
 API 23 では、明示設定された DeepSeek (`provider=deepseek`) と Local (`provider=strata`, `locality=local`) も標準 spawn の候補です。モデルの `harnesses` にある `available` と `efforts` / `default_effort` / `effort_source` を使います。能力はローカルの検証済み cache 由来で、試運転の effort 設定を既定値へ転用しません。通常の catalog は managed task mode や attempt ID を要求しません。runtime 未準備や opt-in 無効の候補を起動可能とは表示しません。
 
@@ -277,6 +279,8 @@ API 世代5からの追加 field です。resume できる（`ready` または `
 `mail_reason: mail_schema_unsupported` の row と応答には `mail_remedy` も付きます。この installer が入れた ORRERY Mail を `./scripts/install.sh --update-mail` で更新し、会話だけのセッションを終えてから再開し直す手順で、dry-run が拒否したら [Mail の更新手順](agentstack-mail-update.md) に従うよう案内します。同じ文は `mail_message` の末尾にも入るので、`mail_message` を表示する利用側には新しい field を読まなくても届きます（API 世代は変えていません）。`credential_absent` と `retention_expired` は dashboard から直せないので付きません。稼働中の会話だけのセッションは、Mail の row が retired で `program` が空でも `mail_status` / `mail_reason` / `mail_message` を出します。
 
 ## GET `/api/graph`
+
+API 世代26では `/api/graph` の node に正規化前の `model_raw` を追加します。`provider=strata` / `locality=local` を既存の Local 六角形で表示し、`model_raw` を優先して Qwen などの maker を選びます。未知の maker は空の六角形です。provider / locality の意味は変わりません。
 
 query:
 

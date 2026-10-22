@@ -56,9 +56,9 @@ out.explicitHidden=SPM('spm-model-note').hidden;
 
 def test_model_switch_removes_unsupported_effort_and_preserves_id(provider):
     result = run_ui(provider, """
-selectSpawnModel('gpt-6.1-sol');selectSpawnEffort('ultra');out.sol=state();
+selectSpawnModel('gpt-6.1-sol');chooseEffort('ultra');out.sol=state();
 selectSpawnModel('gpt-6-luna');out.luna=state();
-out.lunaEfforts=SPM('spm-efforts').children.map(x=>x.dataset.effort);
+out.lunaEfforts=displayedEfforts();
 """)
     assert result["sol"]["payload"]["model"] == "gpt-6.1-sol"
     assert result["sol"]["payload"]["effort"] == "ultra"
@@ -97,14 +97,19 @@ def test_unknown_metadata_omits_effort_from_payload(provider):
     provider["models"].append("gpt-future")
     provider["model_efforts"]["gpt-future"] = []
     provider["model_effort_defaults"]["gpt-future"] = ""
-    result = run_ui(provider, "selectSpawnModel('gpt-future');out.state=state();out.hidden=SPM('spm-effort-row').hidden;")
+    result = run_ui(provider, """
+selectSpawnModel('gpt-future');out.state=state();out.hidden=SPM('spm-effort-row').hidden;
+out.unsupported=SPM('spm-efforts').querySelector('.effort-not-supported').textContent;
+""")
     assert result["state"]["payload"]["model"] == "gpt-future"
     assert "effort" not in result["state"]["payload"]
-    assert result["hidden"] and not result["state"]["launchDisabled"]
+    # The slider keeps its row visible even when the catalog offers no effort.
+    assert result["hidden"] is False and result["unsupported"] == "Not supported"
+    assert not result["state"]["launchDisabled"]
 
 
 def test_supported_effort_survives_model_change(provider):
-    result = run_ui(provider, "selectSpawnModel('gpt-6.1-sol');selectSpawnEffort('high');selectSpawnModel('gpt-6-luna');out.state=state();out.note=SPM('spm-engine-note').textContent;")
+    result = run_ui(provider, "selectSpawnModel('gpt-6.1-sol');chooseEffort('high');selectSpawnModel('gpt-6-luna');out.state=state();out.note=SPM('spm-engine-note').textContent;")
     assert result["state"]["payload"]["effort"] == "high"
     assert "gpt-6-luna" in result["note"] and "high" in result["note"]
 

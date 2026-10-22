@@ -32,7 +32,7 @@ class InstallTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.home = Path(self.tmp.name)
+        self.home = Path(self.tmp.name).resolve()
         self.install = self.home / '.agentstack'
         self.enterContext(patch.object(installer, 'run', return_value=installer.HERMES_COMMIT))
 
@@ -44,13 +44,29 @@ class InstallTests(unittest.TestCase):
         function = re.search(r'^write_manifest\(\) \{\n.*?(?=^main\(\) \{)', text, re.M | re.S).group(0)
         values = {name: '' for name in re.findall(r'\$\{?([A-Z][A-Z_]+)', function)}
         values.update(INSTALL_DIR=str(self.install), MANIFEST=str(self.install / 'install-state.json'),
-            REPO_ROOT=str(ROOT), PYTHON_BIN=sys.executable, DRY_RUN='false',
+            REPO_ROOT=str(ROOT), SCRIPT_DIR=str(ROOT / 'scripts'), PYTHON_BIN=sys.executable, DRY_RUN='false',
             AGENT_MAIL_NAME_CAPABILITY_JSON='{}', ENV_FILE=str(self.install / 'env.sh'),
             SAFE_MERGE_RESULT_FILE=str(self.home / 'absent-settings.json'),
             MCP_MERGE_RESULT_FILE=str(self.home / 'absent-mcp.json'))
+        # provision() uses the parent process's run stub. The real manifest
+        # writer validates the same synthetic owned source in a new process.
+        tools = self.home / 'writer-tools'
+        tools.mkdir(exist_ok=True)
+        git = tools / 'git'
+        git.write_text('#!/bin/sh\nif [ "$#" -eq 2 ] && [ "$1" = rev-parse ] && [ "$2" = HEAD ]; then\n'
+                       '  printf "%s\\n" ' + shlex.quote(installer.HERMES_COMMIT) + '\nelse exit 2; fi\n')
+        git.chmod(0o700)
+        # The validator intentionally resets PATH to os.defpath. Isolate that
+        # default inside this fixture process, not in the production validator.
+        python = tools / 'fixture-python'
+        code = ('import os,sys;os.defpath=' + repr(str(tools)) + '+os.pathsep+os.defpath;'
+                'sys.argv=sys.argv[1:];exec(compile(sys.stdin.read(),"<manifest-fixture>","exec"))')
+        python.write_text('#!/bin/sh\nexec ' + shlex.quote(sys.executable) + ' -B -c ' + shlex.quote(code) + ' "$@"\n')
+        python.chmod(0o700)
+        values['PYTHON_BIN'] = str(python)
         script = 'set -euo pipefail\nplan() { :; }\n' + '\n'.join(name + '=' + shlex.quote(value) for name, value in values.items())
         result = subprocess.run(['/bin/bash', '-c', script + '\n' + function + '\nwrite_manifest manual ""\n'],
-            env={'HOME': str(self.home), 'PATH': os.defpath}, capture_output=True, text=True)
+            env={'HOME': str(self.home), 'PATH': str(tools) + os.pathsep + os.defpath}, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         return installer.read(self.install / 'install-state.json')
 
@@ -88,6 +104,7 @@ class InstallTests(unittest.TestCase):
         installer.save(store / 'facts.json', {'packages': {'venv': {'environment': str(generation)}}})
         (generation / 'pyvenv.cfg').write_text('synthetic venv')
         return {'hermes_source': str(source), 'managed_root': str(root), 'hermes_executable': str(generation / 'bin/hermes'),
+                'variant': 'plain', 'thin_config_contract': 1,
                 **fixture_stamp(source)}
 
     def test_default_and_dry_run_do_not_acquire_or_copy(self):

@@ -192,6 +192,51 @@ def test_wait_and_work_transition_does_not_retain_a_previous_state(program):
         'wait', 'work', 'wait', None]
 
 
+def _dsh_metrics_footer(above='', hint=''):
+    # Native classic spinner above PromptInput; hover replaces the interrupt
+    # hint with StatusMetrics below the context row (dsh-tui 0.16.1).
+    return '\n'.join(filter(None, [above, '╭' + '─' * 60 + '╮',
+        '⌸ ❯                                              ⛶',
+        '╰' + '─' * 60 + '╯', '158k/1.0M 15.8%',
+        'deepseek │ ctx 16% (158k/1.0m)', '·  ·  ·',
+        'sys 981  pr 478  ast 6.7k  th 25k  tl 124k  free 842k', hint]))
+
+
+@pytest.mark.parametrize('glyph', ['·', '•', '●'])
+@pytest.mark.parametrize('duration', ['0s', '1m', '1h', '1h 2m 3s'])
+def test_dsh_busy_metrics_footer_without_interrupt_hint(glyph, duration):
+    text = _dsh_metrics_footer(f'{glyph} Searching… ({duration} · thought for 9s)')
+    assert parse_activity(text, 'dsh') == 'work'
+    assert parse_activity(text + '\nnew transcript' * 46, 'dsh') is None
+
+
+def test_dsh_metrics_footer_requires_positive_current_activity():
+    # A complete composer is shared by busy and idle states; missing evidence
+    # must not imply wait, nor may arbitrary prose replace the actual spinner.
+    assert parse_activity(_dsh_metrics_footer(), 'dsh') is None
+    assert parse_activity(_dsh_metrics_footer('Searching…'), 'dsh') is None
+    assert parse_activity(_dsh_metrics_footer(hint='? for shortcuts'), 'dsh') == 'wait'
+    assert parse_activity(_dsh_metrics_footer(hint='? 查看快捷键'), 'dsh') == 'wait'
+    busy = '● Searching… (5m 20s · thought for 9s)'
+    assert parse_activity(_dsh_metrics_footer(busy) + '\nordinary output', 'dsh') is None
+    assert parse_activity(_dsh_metrics_footer(busy + '\nnot the current spinner'), 'dsh') is None
+    assert parse_activity(_dsh_metrics_footer(busy).replace('❯', ''), 'dsh') is None
+
+
+def test_dsh_current_shortcut_supersedes_old_busy_and_modal_text():
+    old = '● Searching… (5m 20s)\nAwaiting approval · bash\n'
+    assert parse_activity(_dsh_metrics_footer(old, '? for shortcuts'), 'dsh') == 'wait'
+
+
+@pytest.mark.parametrize('status', [
+    '12s · thinking',
+    '12s · ↓ ↓ 1.2k tokens · thought for 9s',
+    '12s · ↑ ↑ 128 · ↓ 64 tokens',
+])
+def test_dsh_metrics_footer_classic_thinking_and_token_parts(status):
+    assert parse_activity(_dsh_metrics_footer(f'● Thinking… ({status})'), 'dsh') == 'work'
+
+
 _DSH_PANELS = json.loads((_CAPTURES / 'dsh-panels.json').read_text())['cases']
 
 

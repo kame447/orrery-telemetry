@@ -66,7 +66,8 @@ fi
 PROJECT_FOLDER="$({ sed -n 's/^export AGENTSTACK_PROJECT_KEY=//p' "$INSTALL_DIR/env.sh" 2>/dev/null | head -n 1 | tr -d "'\"" ; } || true)"
 
 python3 - "$MANIFEST" "$DRY_RUN" "$PURGE_DATA" "$MERGE_TOOL" \
-  "$MCP_MERGE_TOOL" <<'PY'
+  "$MCP_MERGE_TOOL" "$SCRIPT_DIR/lib/install_examples.py" <<'PY'
+import importlib.util
 import json
 import os
 import pathlib
@@ -234,6 +235,14 @@ for svc in data.get("services", []):
 
 remove_claude_mcp()
 remove_settings_hooks()
+
+# Examples have separate content ownership. Run before the library itself is
+# removed with the ordinary bin payload; never recursively purge this subtree.
+if data.get("example_files") or data.get("example_dirs"):
+    example_spec = importlib.util.spec_from_file_location("install_examples", sys.argv[6])
+    example_module = importlib.util.module_from_spec(example_spec)
+    example_spec.loader.exec_module(example_module)
+    example_module.remove_examples(data, dry_run=dry_run)
 
 owned_files = [safe_path(p) for p in data.get("owned_files", [])]
 if manifest_path not in owned_files:

@@ -45,7 +45,7 @@ def test_two_children_resume_only_their_own_id(tmp_path, harness):
 
 
 @pytest.mark.parametrize('mismatch', ['directory', 'event_name', 'event_harness',
-                                      'input_backend', 'input_name', 'unsafe_id'])
+                                      'input_backend', 'input_name', 'input_project', 'unsafe_id'])
 def test_foreign_or_invalid_native_binding_is_rejected(tmp_path, mismatch):
     runtime, state, document, event = child(tmp_path, 'FirstAgent')
     _, other, _, _ = child(tmp_path, 'SecondAgent')
@@ -60,6 +60,8 @@ def test_foreign_or_invalid_native_binding_is_rejected(tmp_path, mismatch):
         document['backend_id'] = 'deepseek'
     elif mismatch == 'input_name':
         document['agent_name'] = 'SecondAgent'
+    elif mismatch == 'input_project':
+        document['project_key'] = '/fixture/foreign-project'
     else:
         event['native_session_id'] = '../latest'
     resume._atomic_json(directory / 'native-session.json', event)
@@ -143,12 +145,15 @@ def prepared_native(tmp_path, monkeypatch, harness='dsh'):
     (directory / 'native-exit.status').write_text('0\n')
     generator = tmp_path / 'generator.py'
     generator.write_text('''import argparse,json,sys,os
-p=argparse.ArgumentParser();p.add_argument('--input');p.add_argument('--out');a=p.parse_args()
-s=json.load(open(a.input))
-plan={'argv':[sys.executable,'-c','import sys; print(sys.argv[1])',s['resume_session_id']],
-      'env':{PROFILE_KEY:PROFILE},'cwd':s['cwd']}
-with open(a.out,'w') as f:json.dump(plan,f)
-os.chmod(a.out,0o600)
+def child_home(document):
+    assert document['native_profile_env'] == {PROFILE_KEY:PROFILE}
+if __name__ == '__main__':
+    p=argparse.ArgumentParser();p.add_argument('--input');p.add_argument('--out');a=p.parse_args()
+    s=json.load(open(a.input))
+    plan={'argv':[sys.executable,'-c','import sys; print(sys.argv[1])',s['resume_session_id']],
+          'env':{PROFILE_KEY:PROFILE},'cwd':s['cwd']}
+    with open(a.out,'w') as f:json.dump(plan,f)
+    os.chmod(a.out,0o600)
 '''.replace('PROFILE_KEY', repr(profile_key)).replace('PROFILE', repr(profile)))
     monkeypatch.setenv('AGENTSTACK_CLAUDE_JSON', str(tmp_path / 'no-settings.json'))
     monkeypatch.setenv('AGENTSTACK_MCP_URL', 'http://127.0.0.1:9/mcp')
@@ -290,7 +295,7 @@ def test_real_dsh_generator_round_trip_preserves_owned_native_session(tmp_path, 
     # never executes a runtime, provider plugin, credential helper or Mail RPC.
 
 
-@pytest.mark.parametrize('changed_profile', [False, True])
+@pytest.mark.parametrize('changed_profile', [False, True, 'legacy', 'missing_home', 'missing_pin', 'missing_history', 'unknown_reason'])
 def test_real_hermes_generator_round_trip_preserves_owned_native_session(tmp_path, monkeypatch, request, changed_profile):
     from unittest.mock import patch
     from test_hermes_thin_config import ThinConfig, config
@@ -319,6 +324,10 @@ def test_real_hermes_generator_round_trip_preserves_owned_native_session(tmp_pat
     with patch.object(subprocess, 'Popen', original_popen):
         directory = native.prepare(args)
         first = native.read(directory / 'launch.json')
+        memory = Path(first['env']['HERMES_HOME']) / 'memories/MEMORY.md'
+        memory.parent.mkdir()
+        memory.write_text('synthetic-memory-marker-distinct-from-conversation')
+        (memory.parent.parent / 'state.db').write_bytes(b'synthetic history presence fixture')
         runtime = Path(args.runtime_dir)
         resume.finish_registration(runtime, args.agent_name, generation=args.generation, rollback=False)
         resume._atomic_json(directory / 'native-session.json', {
@@ -329,18 +338,48 @@ def test_real_hermes_generator_round_trip_preserves_owned_native_session(tmp_pat
                             project_key=args.project_key, program='hermes')
         if changed_profile:
             source = native.read(directory / 'input.json')
-            source['native_profile_env'] = {'HERMES_HOME': str(tmp_path / 'foreign-profile')}
+            reason = 'native_resume_profile_changed'
+            if changed_profile == 'legacy':
+                shared = fixture.runtime / 'profiles/deepseek'
+                fixture.save(shared / 'config.yaml', {'synthetic': 'unchanged'})
+                source['native_profile_env'] = {'HERMES_HOME': str(shared)}
+                reason = 'native_resume_legacy_profile'
+            elif changed_profile == 'missing_home':
+                import shutil
+                shutil.rmtree(Path(first['env']['HERMES_HOME']))
+                reason = 'native_resume_home_missing'
+            elif changed_profile == 'missing_pin':
+                source['native_profile_env'] = None
+                reason = 'native_resume_profile_missing'
+            elif changed_profile == 'missing_history':
+                (memory.parent.parent / 'state.db').unlink()
+                reason = 'native_resume_history_missing'
+            elif changed_profile == 'unknown_reason':
+                reason = 'native_resume_profile_changed-untrusted-private-text'
+                def unknown_home(document):
+                    raise ValueError(reason)
+                monkeypatch.setattr(native.runpy, 'run_path', lambda _: {'child_home': unknown_home})
+            else:
+                source['native_profile_env'] = {'HERMES_HOME': str(tmp_path / 'foreign-profile')}
             native.save(directory / 'input.json', source)
-            original = (directory / 'overlay/config.yaml').read_bytes()
-            with pytest.raises(ValueError, match='native_resume_profile_changed'):
+            original = {str(p.relative_to(directory)): p.read_bytes() for p in directory.rglob('*') if p.is_file()}
+            with pytest.raises(ValueError) as failure:
                 native.prepare_resume(runtime, args.agent_name)
-            assert (directory / 'overlay/config.yaml').read_bytes() == original
+            if changed_profile == 'unknown_reason':
+                assert not hasattr(failure.value, 'code')
+            else:
+                assert isinstance(failure.value, resume.ResumeStateError)
+                assert failure.value.code == reason
+            assert {str(p.relative_to(directory)): p.read_bytes() for p in directory.rglob('*') if p.is_file()} == original
             assert not (tmp_path / 'foreign-profile').exists()
             assert resume._load_state(runtime / 'child-agents' / (args.agent_name + '.json'))['retired_at']
+            if changed_profile == 'legacy':
+                assert native.read(shared / 'config.yaml') == {'synthetic': 'unchanged'}
             return
         assert native.prepare_resume(runtime, args.agent_name) == directory
         resumed = native.read(directory / 'launch.json')
         assert resumed['env']['HERMES_HOME'] == first['env']['HERMES_HOME']
+        assert memory.read_text() == 'synthetic-memory-marker-distinct-from-conversation'
         assert resumed['argv'][-2:] == ['--resume', 'exact-hermes-id']
         source = native.read(directory / 'input.json')
         assert Path(source['prompt_file']).read_text() == ''
@@ -354,7 +393,10 @@ def test_real_hermes_generator_round_trip_preserves_owned_native_session(tmp_pat
 
 
 @pytest.mark.parametrize('harness', ['dsh', 'hermes'])
-def test_jump_preserves_finished_native_husk_when_generation_fails(tmp_path, monkeypatch, harness):
+@pytest.mark.parametrize('reason', [None, 'native_resume_profile_changed', 'native_resume_profile_missing',
+                                  'native_resume_legacy_profile', 'native_resume_home_missing',
+                                  'native_resume_history_missing'])
+def test_jump_preserves_finished_native_husk_when_generation_fails(tmp_path, monkeypatch, harness, reason):
     runtime, state, _, _ = child(tmp_path, 'FirstAgent', harness)
     monkeypatch.setattr(server, 'RUNTIME_DIR', str(runtime))
     monkeypatch.setattr(server, '_agent_program', lambda _: harness)
@@ -364,12 +406,16 @@ def test_jump_preserves_finished_native_husk_when_generation_fails(tmp_path, mon
     monkeypatch.setattr(server, '_resume_registration', lambda *a: state)
     monkeypatch.setattr(server, '_native_resume_launcher_ready', lambda: True)
     def fail(*args):
-        raise ValueError('native_resume_profile_changed')
+        if reason:
+            raise resume.ResumeStateError(reason, 'Native resume HOME prerequisites are unavailable')
+        raise ValueError('untrusted-private-exception-text')
     monkeypatch.setattr(server, '_native_prepare_resume', fail)
     monkeypatch.setattr(server, '_tmux_run', lambda *a, **k: pytest.fail('husk changed before config generation'))
     monkeypatch.setattr(server, '_register_claude_resume', lambda *a: pytest.fail('Mail called'))
     result = server.do_jump('FirstAgent', open_terminal=False)
     assert not result['ok']
+    assert result['resume_capability'] == (reason or 'config_unrestorable')
+    assert 'untrusted-private-exception-text' not in json.dumps(result)
     current = resume._load_state(runtime / 'child-agents/FirstAgent.json')
     assert current['retired_at'] == state['retired_at'] and 'resume_in_progress_at' not in current
     assert (runtime / 'agent_token_FirstAgent').read_text() == state['registration_token']

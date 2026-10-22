@@ -113,6 +113,28 @@ ${AGENTSTACK_RUNTIME_DIR:-$HOME/.agentstack/runtime}/child-agents/<name>.json
 
 Private `harness_state_dir` contains the initial prompt, native launch plan and shared instructions rendered from the existing Codex template. Credential values and parent tokens are not included. Additional plain stdio/HTTP MCP selections use the common tool policy; approvals or filters the native configuration cannot express are explicitly rejected. Native tool adapters call the existing credential-read, registration and reservation hooks. Installer default-tools are not silently omitted for an additional harness: unsupported implicit defaults stop launch; select an explicit `--base default` or supported `--tools`.
 
+New Hermes children use `children/<SHA256 of project key>/<canonical name>` beneath the
+generation-external profiles directory as their persistent `HERMES_HOME`. Different names or
+projects have different homes. Standard resume for the same project and canonical name checks
+the saved HOME pin and exact native session ID, then uses the same home. Normal exit does not
+delete it. Native MEMORY/USER enable flags and limits stay unchanged. Shared memory, auth,
+`.env`, user configuration, allowlists and personal skills are not read and distributed to new
+children. The existing generator configures routes, guards, Mail and product skills in an empty
+home. Unspecified settings therefore use native defaults rather than saved shared-profile effort
+or other personal settings.
+
+Resume with an old shared-HOME pin stops explicitly with `native_resume_legacy_profile`.
+It does not rewrite shared data or pins, migrate conversation databases, or switch silently to
+a fresh conversation. Deployment requires explicit operator acceptance of the affected legacy
+resume interruption. Missing or mismatched pins and missing homes are rejected before rewriting
+resume Mail configuration, prompts or instructions. Resume also checks that HOME/state.db exists
+and is readable, returning `native_resume_history_missing` if unavailable; fresh launch does
+not require a database. This file check does not read database contents or prove that the
+requested session or conversation history exists. Memory restoration still
+requires a real CLI exit/resume acceptance check of both stored values and the initial memory
+snapshot; matching conversation text alone is insufficient. Managed-setting refusal and notices
+remain in place. No automatic GC or purge is added.
+
 Exit uses the same `cleanup-child-agent.sh <name>` as Codex. For all providers, failed release/retire acknowledgments or unavailable retired `whois` confirmation return nonzero and preserve identity state and owner credentials for recovery.
 
 Ordinary Claude/Codex launches that register directly also call this cleanup after a startup failure, once stopping is confirmed. An unacknowledged creation request preserves state, credentials and the worktree without killing a possibly unrelated same-named session or releasing/retiring its identity. Unconfirmed stopping or Mail cleanup also preserves recovery material, and launch exits nonzero. Confirmed retirement after a failed start deletes credentials and state immediately; normal-exit resume retention does not apply. A Codex self-update hands its retained identity to the watch, which removes the worktree only after stopping and common cleanup are confirmed. Otherwise it records unknown cleanup and preserves recovery material. Preregistered startup rollback keeps its existing behavior.

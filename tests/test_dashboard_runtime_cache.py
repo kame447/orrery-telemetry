@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 import dashboard.server as server
 
 
@@ -173,3 +175,168 @@ def test_fresh_codex_approval_in_current_tail_is_ask():
     )
 
     assert server._parse_runtime(text)["act_state"] == "ask"
+
+
+_CLAUDE_INPUT = (
+    "────────────────────────────────────────\n"
+    "❯ \n"
+    "────────────────────────────────────────\n"
+    "fixture | Sonnet 5 | ctx: 33% used\n"
+)
+_CODEX_INPUT = "› Ask Codex to do anything\ngpt-5.6-terra medium · Context 70% left\n"
+_OLD_WORK = "✽ Stewing… (18s · ↓ 1.2k tokens)\n"
+_CLAUDE_ASK = "Do you want to run this command?\n❯ 1. Yes\n  2. No\n"
+_CODEX_ASK = "Would you like to run this command?\n› Yes\n  No\nPress enter to confirm or esc to cancel\n"
+_QUESTION = "Choose a result\n❯ 1. Option\nEnter to select · Esc to cancel\n"
+
+
+@pytest.mark.parametrize("history,current,state", [
+    (_OLD_WORK + "\n⏺ Finished the requested work.\n\n", _CLAUDE_INPUT, "wait"),
+    (_OLD_WORK + "\n✻ Worked for 6s · done 6:39 PM\n", _CLAUDE_INPUT, "wait"),
+    ("• Working (18s • esc to interrupt)\n\n• Finished.\n\n", _CODEX_INPUT, "wait"),
+    ("The example mentions esc to interrupt and · 1.2k tokens.\n\n", _CLAUDE_INPUT, "wait"),
+    ("```text\n" + _OLD_WORK + "```\n", _CLAUDE_INPUT, "wait"),
+    (_OLD_WORK + "\n", _CLAUDE_ASK, "ask"),
+    (_OLD_WORK + "\n", "\n".join("  " + row for row in _CLAUDE_ASK.splitlines()), "ask"),
+    (_OLD_WORK + "\n", _CODEX_ASK, "ask"),
+    (_OLD_WORK + "\n", _QUESTION, "question"),
+    (_CLAUDE_ASK + "\n⏺ Permission was granted; the task is complete.\n", _CLAUDE_INPUT, "wait"),
+    (_QUESTION + "\n⏺ Your answer was recorded.\n", _CLAUDE_INPUT, "wait"),
+])
+def test_current_terminal_activity_ignores_history(history, current, state):
+    parsed = server._parse_runtime(history + current)
+    assert parsed["act_state"] == state
+    assert parsed["work_secs"] is None
+    assert parsed["work_disp"] is None
+
+
+@pytest.mark.parametrize("current,footer,seconds", [
+    ("✳ Stewing… (7s · ↓ 1.1k tokens)\n", _CLAUDE_INPUT, 7),
+    ("✽ Inspecting files…\n", _CLAUDE_INPUT, None),
+    ("✽\n Inspecting files…\n", _CLAUDE_INPUT, None),
+    ("✽ Inspecting several\n wrapped task labels…\n", _CLAUDE_INPUT, None),
+    ("✽ Inspecting several\n wrapped task\n labels…\n", _CLAUDE_INPUT, None),
+    ("✽\n", _CLAUDE_INPUT, None),
+    ("• Working (2s • esc to interrupt)\n", _CODEX_INPUT, 2),
+    ("▌ Thinking (2s • esc to interrupt)\n", _CODEX_INPUT, 2),
+    ("● Working (2s • esc to interrupt)\n", _CODEX_INPUT, 2),
+    ("• Starting MCP servers (2/3): fixture (0s • esc to interrupt)\n", _CODEX_INPUT, 0),
+])
+def test_current_terminal_activity_keeps_work_with_an_input_prompt(current, footer, seconds):
+    # Old completed controls and an old elapsed time must not win either way.
+    parsed = server._parse_runtime(_OLD_WORK + _CLAUDE_ASK + _QUESTION + "\n" + current + footer)
+    assert parsed["act_state"] == "work"
+    assert parsed["work_secs"] == seconds
+    assert parsed["work_disp"] == (None if seconds is None else f"{seconds}s")
+
+
+# Transcribed from the operator-supplied hook review screenshot. This is not
+# the repository's older folder-access trust fixture.
+_HOOK_REVIEW = (
+    "Hooks need review\n"
+    "1 hook is new or changed.\n"
+    "Hooks can run outside the sandbox after you trust them.\n\n"
+    "› 1. Review hooks\n"
+    "  2. Trust all and continue\n"
+    "  3. Continue without trusting (hooks won't run)\n\n"
+    "enter confirm · esc skip\n"
+)
+
+
+@pytest.mark.parametrize("history", ["", _OLD_WORK + "\n"])
+def test_current_hook_review_is_approval(history):
+    parsed = server._parse_runtime(history + _HOOK_REVIEW)
+    assert parsed["act_state"] == "ask"
+    assert parsed["work_disp"] is None
+
+
+@pytest.mark.parametrize("text", [
+    "The Hooks need review screen offers Review hooks or Trust all and continue.\n",
+    "```text\n" + _HOOK_REVIEW + "```\n" + _CLAUDE_INPUT,
+    _HOOK_REVIEW.replace("  3. Continue without trusting (hooks won't run)\n", ""),
+    _HOOK_REVIEW.replace("enter confirm · esc skip", ""),
+])
+def test_quoted_or_incomplete_hook_review_is_not_approval(text):
+    assert server._parse_runtime(text)["act_state"] == "wait"
+
+
+def test_current_work_after_hook_review_remains_work():
+    parsed = server._parse_runtime(_HOOK_REVIEW + "\n• Working (3s • esc to interrupt)\n" + _CODEX_INPUT)
+    assert parsed["act_state"] == "work"
+    assert parsed["work_disp"] == "3s"
+
+
+@pytest.mark.parametrize("prefix", ["", "  "])
+def test_reply_after_old_work_is_not_a_wrapped_task_label(prefix):
+    parsed = server._parse_runtime(
+        _OLD_WORK + prefix + "⏺ The completed reply contains an ellipsis…\n" + _CLAUDE_INPUT
+    )
+    assert parsed["act_state"] == "wait"
+    assert parsed["work_disp"] is None
+
+
+def test_current_work_above_an_indented_task_widget_is_retained():
+    # The existing parser documents a 25-line work window for task widgets.
+    parsed = server._parse_runtime(
+        _OLD_WORK + "\n✽ Inspecting files…\n"
+        "  Current tasks\n    first task\n    second task\n    third task\n"
+        + _CLAUDE_INPUT
+    )
+    assert parsed["act_state"] == "work"
+    assert parsed["work_disp"] is None
+
+
+def test_newest_indented_work_label_owns_the_elapsed_time():
+    parsed = server._parse_runtime(
+        _OLD_WORK + "\n  ✳ Stewing… (7s · ↓ 1.1k tokens)\n" + _CLAUDE_INPUT
+    )
+    assert parsed["act_state"] == "work"
+    assert parsed["work_disp"] == "7s"
+
+
+def test_question_footer_before_numbered_options_remains_question():
+    # Preserve the existing literal in test_runtime_tmux_target.py.
+    parsed = server._parse_runtime("Enter to select · Esc to cancel\n❯ 1. Option")
+    assert parsed["act_state"] == "question"
+    assert parsed["work_disp"] is None
+
+
+_CLAUDE_EDIT_APPROVAL = (
+    "Edit file\nfixture.json\n"
+    "────────────────────────────────────────\n"
+    "Do you want to make this edit to fixture.json?\n"
+    "❯ 1. Yes\n"
+    "  2. Yes, and allow Claude to edit files in its folder for this session\n"
+    "  3. No\n\n"
+    "Esc to cancel · Tab to amend\n"
+)
+
+
+@pytest.mark.parametrize("history", ["", _OLD_WORK + "\n"])
+@pytest.mark.parametrize("footer", ["Esc to cancel", "Esc to cancel · Tab to amend"])
+def test_current_claude_edit_approval_with_cancel_footer_is_ask(history, footer):
+    text = history + _CLAUDE_EDIT_APPROVAL.replace("Esc to cancel · Tab to amend", footer)
+    parsed = server._parse_runtime(text)
+    assert parsed["act_state"] == "ask"
+    assert parsed["work_secs"] is None
+    assert parsed["work_disp"] is None
+
+
+@pytest.mark.parametrize("text", [
+    "Esc to cancel · Tab to amend\n",
+    "❯ 1. Yes\n2. No\nEsc to cancel · Tab to amend\n",
+    _CLAUDE_EDIT_APPROVAL + "The tool finished.\n",
+    _CLAUDE_EDIT_APPROVAL.replace("Esc to cancel · Tab to amend", "Please use Esc to cancel · Tab to amend"),
+    "```text\n" + _CLAUDE_EDIT_APPROVAL + "```\n" + _CLAUDE_INPUT,
+    _CLAUDE_EDIT_APPROVAL + _CLAUDE_INPUT,
+])
+def test_claude_edit_approval_footer_does_not_promote_old_or_incomplete_ui(text):
+    assert server._parse_runtime(text)["act_state"] == "wait"
+
+
+def test_current_work_after_claude_edit_approval_remains_work():
+    parsed = server._parse_runtime(
+        _CLAUDE_EDIT_APPROVAL + "\n✳ Stewing… (7s · ↓ 1.1k tokens)\n" + _CLAUDE_INPUT
+    )
+    assert parsed["act_state"] == "work"
+    assert parsed["work_disp"] == "7s"

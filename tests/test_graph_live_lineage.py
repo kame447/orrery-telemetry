@@ -182,3 +182,21 @@ def test_live_parents_does_not_cache_a_missing_tmux_server(tmp_path, monkeypatch
 
     assert graph_data._live_parents() == {}
     assert graph_data._live_parents() == {"child": "Parent"}
+
+
+def test_graph_nodes_preserve_raw_model_and_local_backend_metadata(monkeypatch):
+    from dashboard import server
+
+    raw = 'qwen3.8-flash-next-iq3_xxs'
+    node = {'name': 'FixtureLocal', 'program': 'dsh', 'model': raw, 'last_active': BASE}
+    monkeypatch.setattr(server, '_raw_graph', lambda: {'nodes': [node], 'edges': [], 'spawn': []})
+    monkeypatch.setattr(server, '_graph_keep', lambda *args: ({node['name']}, BASE, {}, {}, None))
+    for name in ('_deliverables_index', '_annotations', '_name_substitutions', '_persistent_profiles'):
+        monkeypatch.setattr(server, name, lambda: {})
+    monkeypatch.setattr(server.harness_runtime, 'metadata', lambda *args: {'provider': 'strata', 'locality': 'local', 'harness': 'dsh'})
+    monkeypatch.setattr(server, '_resume_capability_for_row', lambda *args, **kwargs: 'ready')
+    monkeypatch.setattr(server, '_claude_row_mail_fields', lambda *args, **kwargs: {})
+    row = server.graph_payload(4, True)['nodes'][0]
+    assert row['model_raw'] == raw
+    assert row['provider'] == 'strata' and row['locality'] == 'local'
+    assert row['harness'] == 'dsh'

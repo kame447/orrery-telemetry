@@ -8,7 +8,34 @@ import {pathToFileURL} from 'node:url';
 import {spawn, spawnSync} from 'node:child_process';
 import http from 'node:http';
 import {once} from 'node:events';
-import {providerClass} from '../integrations/dsh/keychain_credentials.mjs';
+import {providerClass, secretServiceLookup} from '../integrations/dsh/keychain_credentials.mjs';
+
+test('secret service reader keeps selected value in memory and failure cannot fall back', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ss-reader-'));
+  const original = Object.getOwnPropertyDescriptor(process, 'platform');
+  try {
+    Object.defineProperty(process, 'platform', {value: 'linux'});
+    const python = path.join(root, 'synthetic-python');
+    fs.writeFileSync(python, '#!/bin/sh\nprintf "synthetic-ss-value\\n"\n', {mode: 0o700});
+    const config = {ref: 'selected', reader_command: [python, '-I', '-B', path.join(root, 'llm_secret_reader.py'),
+      '--manifest', path.join(root, 'manifest.json'), '--backend', 'deepseek']};
+    let calls = 0;
+    const Provider = providerClass(Local, {init: INIT}, config, async value => {calls++; return secretServiceLookup(value);});
+    const provider = new Provider({});
+    assert.equal((await provider.resolve('selected')).value, 'synthetic-ss-value');
+    assert.equal((await provider.resolve('selected')).value, 'synthetic-ss-value');
+    assert.equal(calls, 1);
+    await assert.rejects(provider.write('selected', 'private'), /READ_ONLY/);
+    fs.writeFileSync(python, '#!/bin/sh\nexit 1\n');
+    const failed = new Provider({});
+    await assert.rejects(failed.resolve('selected'), /UNAVAILABLE/);
+    assert.equal(Local.calls, 0);
+    await assert.rejects(secretServiceLookup({...config, reader_command: ['/bin/sh', '-c', 'forbidden']}), /INVALID/);
+  } finally {
+    Object.defineProperty(process, 'platform', original);
+    fs.rmSync(root, {recursive: true, force: true});
+  }
+});
 
 const INIT = Symbol('init');
 class Local {

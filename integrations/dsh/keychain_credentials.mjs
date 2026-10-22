@@ -6,6 +6,24 @@ import path from 'node:path';
 import {pathToFileURL} from 'node:url';
 export const name = 'orrery-keychain-credentials';
 
+export function secretServiceLookup(config) {
+  const argv = config.reader_command;
+  if (process.platform !== 'linux' || !Array.isArray(argv) || argv.length !== 8 ||
+      !path.isAbsolute(argv[0]) || argv[1] !== '-I' || argv[2] !== '-B' ||
+      !path.isAbsolute(argv[3]) || path.basename(argv[3]) !== 'llm_secret_reader.py' ||
+      argv[4] !== '--manifest' || !path.isAbsolute(argv[5]) || argv[6] !== '--backend' ||
+      !['deepseek', 'strata'].includes(argv[7]))
+    return Promise.reject(new Error('DSH_CREDENTIAL_REFERENCE_INVALID'));
+  return new Promise((resolve, reject) => {
+    const env = Object.fromEntries(['HOME', 'PATH', 'LANG', 'DBUS_SESSION_BUS_ADDRESS', 'XDG_RUNTIME_DIR']
+      .filter(key => typeof process.env[key] === 'string').map(key => [key, process.env[key]]));
+    execFile(argv[0], argv.slice(1), {encoding: 'utf8', timeout: 8000, maxBuffer: 65536, env}, (error, stdout) => {
+      if (error || !stdout.trim()) reject(new Error('DSH_CREDENTIAL_UNAVAILABLE'));
+      else resolve(stdout.replace(/\r?\n$/, ''));
+    });
+  });
+}
+
 export function keychainLookup({service, account}) {
   if (process.platform !== 'darwin') return Promise.reject(new Error('DSH_KEYCHAIN_UNSUPPORTED'));
   return new Promise((resolve, reject) => {
@@ -43,8 +61,10 @@ export function providerClass(Local, Service, config, lookup) {
 }
 
 export async function install(ctx, config, lookup = keychainLookup) {
+  if (config.reader_command && ('service' in config || 'account' in config))
+    throw new Error('DSH_CREDENTIAL_REFERENCE_CONFLICT');
   if (!path.isAbsolute(config.runtime) || !path.isAbsolute(config.dshHome) ||
-      !['ref', 'service', 'account'].every(k => typeof config[k] === 'string' && config[k]))
+      !['ref', ...(config.reader_command ? [] : ['service', 'account'])].every(k => typeof config[k] === 'string' && config[k]))
     throw new Error('DSH_KEYCHAIN_CONFIG_INVALID');
   const root = path.join(config.runtime, 'node_modules/@deepseek-ai');
   const [{LocalCredentialProvider}, {Service}] = await Promise.all([
@@ -54,4 +74,6 @@ export async function install(ctx, config, lookup = keychainLookup) {
   await ctx.plugin(providerClass(LocalCredentialProvider, Service, config, lookup));
 }
 
-export async function apply(ctx, config) { await install(ctx, config); }
+export async function apply(ctx, config) {
+  await install(ctx, config, config.reader_command ? secretServiceLookup : keychainLookup);
+}

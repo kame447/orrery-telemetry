@@ -1057,7 +1057,9 @@ def test_rendered_dashboard_keeps_server_language_defaults(monkeypatch):
 _UI_FUNCTIONS = (
     "normalizeSpawnProviders", "spawnModelTone", "renderSpawnProviders",
     "selectSpawnProvider", "renderSpawnModels", "selectSpawnModel",
-    "spawnModelEfforts", "renderSpawnEfforts", "selectSpawnEffort", "renderSpawnEngineNote",
+    "spawnSelectedModel", "spawnSelectedHarness", "renderSpawnHarnesses",
+    "spawnEffortInfo", "resolveSpawnEffort", "spawnEffectiveEffort",
+    "spawnModelEfforts", "renderSpawnEfforts", "paintSpawnEffortDefault", "renderSpawnEngineNote",
     "updateSpawnButton", "setSpawnDraftStatus", "setSpawnStat", "buildSpawnPayload",
 )
 
@@ -1066,19 +1068,46 @@ const els={};
 function makeEl(id){
   const classes=new Set();
   return {id,value:'',checked:false,disabled:false,hidden:false,textContent:'',
-    style:{},dataset:{},children:[],_html:'',
+    style:{},dataset:{},children:[],_html:'',listeners:{},attrs:{},
     classList:{toggle(c,on){if(on===undefined?!classes.has(c):on)classes.add(c);else classes.delete(c);},
       add(c){classes.add(c)},remove(c){classes.delete(c)},contains(c){return classes.has(c)}},
-    setAttribute(){},
+    setAttribute(k,v){this.attrs[k]=v;},
+    addEventListener(type,callback){this.listeners[type]=callback;},
+    dispatchEvent(event){this.listeners[event.type]?.(event);},focus(){},
+    append(...children){this.children.push(...children);},
+    replaceChildren(...children){this.children=[...children];this._html='';},
     get innerHTML(){return this._html},
-    set innerHTML(v){this._html=v;this.children=[...v.matchAll(/data-(provider|model|effort)="([^"]*)"/g)]
-      .map(m=>({dataset:{[m[1]]:m[2]},classList:{toggle(){}},setAttribute(){}}));},
-    querySelectorAll(){return this.children;}};
+    set innerHTML(v){this._html=v;this.children=[...v.matchAll(/data-(provider|model|harness)="([^"]*)"/g)]
+      .map(m=>Object.assign(makeEl('button'),{dataset:{[m[1]]:m[2]},className:m[1]==='model'?'spm-model-chip':m[1]==='provider'?'spm-provider-tab':''}));},
+    querySelectorAll(selector){
+      const found=[],match=el=>selector.startsWith('.')?el.className?.split(' ').includes(selector.slice(1)):
+        selector.startsWith('[data-')?Object.hasOwn(el.dataset,selector.slice(6,-1)):el.id===selector;
+      const visit=el=>{for(const child of el.children){if(match(child))found.push(child);visit(child);}};
+      visit(this);return found;
+    },
+    querySelector(selector){return this.querySelectorAll(selector)[0]||null;}};
+}
+const document={createElement:makeEl,createElementNS:(_namespace,tag)=>makeEl(tag)};
+// Operate the extracted production slider; do not recreate its selection logic.
+function chooseEffort(value){
+  const input=SPM('spm-efforts').querySelector('.effort-range');
+  if(!input)throw Error('effort slider unavailable');
+  const levels=spawnModelEfforts(spmProviders.find(p=>p.id===spmSelectedProvider));
+  const index=levels.indexOf(value);if(index<0)throw Error('effort is not offered');
+  input.value=index;input.dispatchEvent({type:'input'});
+}
+function displayedEfforts(){
+  const input=SPM('spm-efforts').querySelector('.effort-range'),values=[];
+  if(input)for(let i=0;i<=Number(input.max);i++){
+    input.value=i;input.dispatchEvent({type:'input'});values.push(spmSelectedEffort);
+  }
+  return values;
 }
 const SPM=id=>els[id]||(els[id]=makeEl(id));
 const esc=s=>String(s);
 let spmSelectedName='',spmSelectedProvider='',spmSelectedModel='';
-let spmSelectedEffort='',spmProviders=[];
+let spmSelectedEffort='',spmProviders=[],spmSelectedHarness='';
+let spmTerminalExplicit=false;
 let spmBusy=false,spmReady=true,spmIdentityState='auto',spmSuggestedName='';
 let spmDraftDir='/repo',spmDraftRestored=false;
 const spmNameStatus=new Map();
@@ -1097,12 +1126,12 @@ selectSpawnProvider('gemini');
 out.geminiSelected=state();
 SPM('spm-resources').value='src/**';SPM('spm-resources').oninput();
 out.geminiResourcesOnly=state();
-selectSpawnEffort('medium');
+chooseEffort('medium');
 out.geminiReady=state();
 selectSpawnProvider('claude');
 out.claudeAfterGemini=state();
 selectSpawnProvider('gemini');
-SPM('spm-resources').value='tests/**';selectSpawnEffort('high');
+SPM('spm-resources').value='tests/**';chooseEffort('high');
 selectSpawnProvider('codex');
 out.codexAfterGemini=state();
 selectSpawnProvider('claude');
@@ -1115,7 +1144,7 @@ setSpawnDraftStatus(true);
 selectSpawnProvider('gemini');
 out.restoredGeminiMissing=state();
 SPM('spm-resources').value='docs/**';SPM('spm-resources').oninput();
-selectSpawnEffort('medium');
+chooseEffort('medium');
 out.restoredGeminiReady=state();
 process.stdout.write(JSON.stringify(out));
 """
@@ -1126,7 +1155,11 @@ def _extract_ui_script(rendered: str) -> str:
         r"/\* provider-capabilities:start \*/.*?/\* provider-capabilities:end \*/",
         rendered, re.DOTALL)
     assert helpers, "provider capability helpers missing"
-    parts = [helpers.group(0)]
+    picker = re.search(r"/\* Catalog-only model choices.*?\n\}\);", rendered, re.DOTALL)
+    slider = re.search(r"window\.EffortSlider=\{.*?\n\};", rendered, re.DOTALL)
+    assert picker and slider, "production picker and effort slider missing"
+    parts = ["const window={};", picker.group(0), "const SpawnPicker=module.exports;",
+             slider.group(0), "const EffortSlider=window.EffortSlider;", helpers.group(0)]
     for constant in ("SPM_MODEL_TONES", "SPM_EFFORT_HINTS"):
         match = re.search(rf"const {constant}=Object\.freeze\(\{{.*?\}}\);", rendered, re.DOTALL)
         assert match, constant

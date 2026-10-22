@@ -115,6 +115,26 @@ ${AGENTSTACK_RUNTIME_DIR:-$HOME/.agentstack/runtime}/child-agents/<name>.json
 
 private な `harness_state_dir` に初期 prompt・native launch plan・共通 renderer が既存 Codex template から作る指示を保存します。鍵や親 token の値は含めません。追加の stdio/HTTP MCP は共通の tool 選択からコピーし、native config に写せない承認や filter は明示して拒否します。native tool の adapter は、既存の鍵読取・登録・予約 hook の判定を呼びます。 明示していない installer の default-tools は追加 harness へ暗黙に落とさず、未対応として停止します。利用者が `--base default` または対応する `--tools` を明示して選択できます。
 
+Hermes の新しい子は、世代の外にある profiles 実体の
+`children/<project key の SHA256>/<canonical name>` を永続的な `HERMES_HOME` として使います。
+別名・別 project は別 HOME で、同じ project と canonical 名の標準 resume は保存 pin と
+exact native session ID を照合して同じ HOME を使います。通常の exit でその HOME は消しません。
+組込み MEMORY/USER の有効 flag と上限は native のままです。共通 MEMORY/USER、auth、`.env`、
+利用者 config、allowlist、個人 skills は読み出して配布せず、新しい子は空の HOME から
+既存の route・guard・Mail・製品 skills を構成します。共通 profile の保存 effort や個人設定を
+引き継がないため、新しい子の未指定設定は native の既定に従います。
+
+旧共有 HOME の pin を持つ resume は `native_resume_legacy_profile` で明示して停止し、
+共通データや pin の書換え・会話 DB の移行・空の新規会話への切替は行いません。
+この方式の導入には、旧 resume を中断する対象への operator の明示了承が必要です。
+pin 不一致・欠落・HOME 欠落も、resume の Mail/prompt/指示の更新より前に拒否します。
+resume 時は HOME 内の `state.db` の存在と読取可も確認し、欠落は
+`native_resume_history_missing` で停止します。初回起動には DB を要求しません。
+この検査は DB 内容を読まず、該当 session や会話履歴の存在を保証するものではありません。
+新方式の memory 復帰は、同じ HOME の保存値と初期 memory snapshot を実 CLI の exit/resume で
+別途確認します。会話履歴に同じ文字があることだけでは memory 復帰の証拠にしません。
+managed 設定の保存拒否や通知は維持します。自動 GC・purge は追加しません。
+
 終了は Codex と同じ `cleanup-child-agent.sh <name>` を使います。すべての provider で、予約の解放・retire の応答・`whois` の retired 確認に失敗したら、identity の state と owner credential を保持して非0を返します。
 
 通常の Claude・Codex の直接登録による起動も、登録後に失敗したら停止を確認してから同じ cleanup を呼びます。作成要求の応答が未確認なら、同名の別 session を止めないため kill・予約解放・retire をせず、state・credential・worktree を残します。停止や Mail の確認ができない場合も保持し、起動は非0で終わります。失敗した起動は確認付き retire 後に資格と state を即削除し、正常終了の再開用 retention は適用しません。Codex が自身を更新中なら watch に資格を引き継ぎ、停止と共通 cleanup の確認後だけ worktree を片付けます。未確認ならその旨を記録して保持します。pre-registered の起動 rollback は従来どおりです。

@@ -29,7 +29,7 @@ try:
     effort=os.environ.get('FIXTURE_EFFORT')
     saved=json.loads(os.environ.get('FIXTURE_SAVED_REASONING','{}'))
     if saved:
-        fixture.save(fixture.runtime/'profiles/deepseek/config.yaml',{'agent':saved})
+        fixture.save(fixture.profile/'config.yaml',{'agent':saved})
     if effort is not None:
         fixture.document['effort']=effort
     plan=fixture.generate()

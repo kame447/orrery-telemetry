@@ -13,9 +13,8 @@ The generator selects the installed committed executable and a custom provider
 with native `key_cmd`; provider credentials remain Hermes's responsibility.
 Each child uses a private provider name and minimal route in its overlay, so
 old endpoint aliases, inline keys and named credential pools in the persistent
-profile cannot override the selected route. Route projection does not rewrite
-or copy the profile or its auth store. Legacy model credential pointers are cleared only in
-the child overlay; memory and skills remain in the fixed backend profile.
+profile cannot override the selected route. Route projection does not rewrite the profile model route or copy its auth store. Legacy model credential pointers are cleared only in
+the child overlay; memory and skills remain in the stable private HOME for each project and canonical child name.
 Auxiliary tasks and delegation use that same private provider, with old direct
 endpoint and credential pointers cleared in the overlay. Existing helper
 settings cannot pair the selected credential with a previous endpoint.
@@ -46,9 +45,10 @@ thinking survives subsequent tool requests, including when effort is omitted.
 Main, auxiliary and delegation routes share this selection; Strata and custom
 hosts keep their configured transport. No reasoning level or token cap is added.
 
-Memory and skills persist in the fixed backend profile. Each child uses the
+Memory and skills persist in the stable private HOME for each project and canonical child name. Each child uses the
 official `HERMES_MANAGED_DIR` overlay for its MCP entries and instructions;
-profile configuration is not swapped or cloned. Product skills are links to
+profile configuration is not swapped or cloned. The selected MCP section is also
+projected into the same private profile as described below. Product skills are links to
 their canonical source, and existing unowned skills are never overwritten.
 The native input queue uses `busy_input_mode=queue`. The initial prompt uses
 `chat --query-file`; empty input opens the normal interactive CLI. No request,
@@ -70,9 +70,17 @@ Generation checks the plugin file and
 configuration statically; it does not import or verify runtime registration.
 Explicit MCP selections that cannot be represented are rejected. As with the
 standard launcher's strict MCP config, inherited profile servers not in the
-selected set are disabled in the child overlay. Product Mail and explicitly
-selected additional MCP servers use the freshly generated definitions, even
-when a profile retained the same server name. The profile's MCP data is unchanged.
+selected set are disabled in both the child overlay and private raw configuration.
+Product Mail and explicitly selected additional MCP servers use the freshly
+generated definitions in both places, even when a profile retained the same
+server name. An omitted `enabled` means enabled; an explicit false stays disabled.
+Native startup checks raw `config.yaml` before starting discovery, so an overlay
+alone is insufficient. Generation manages only the raw MCP section under the
+existing profile lock with atomic replacement, preserving all non-MCP YAML bytes
+apart from the existing shared-metrics answer described below. Unselected server
+definitions are retained but disabled, and a later explicit selection can enable
+them again. The private HOME, memory, native session ID and generation pins are
+unchanged; ordinary regeneration applies the selection to existing profiles too.
 If native deep-merge would retain extra inherited fields in a selected server,
 generation refuses with `inherited_mcp_conflict` and logs the server name in the
 child's `config-generation.log`,
@@ -87,7 +95,7 @@ even when PM's editable workspace omits non-Python catalog files.
 Before chat or exact resume, an unanswered shared-metrics offer defaults to
 `enabled: false`, `send: false`, `offer_version: 2`. Native consent checks raw
 profile configuration, so these three fields are saved under the existing
-profile lock with an atomic replacement; all other YAML bytes remain unchanged.
+profile lock with an atomic replacement; all YAML bytes outside those fields remain unchanged by that step.
 An explicit opt-in, local-only choice or current-version opt-out is preserved.
 The child's `telemetry-defaults.log` records a default only when written.
 This affects only the product-selected profile and never the user's separate

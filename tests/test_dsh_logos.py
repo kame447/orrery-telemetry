@@ -81,12 +81,13 @@ def test_deck_and_usage_consume_flags():
     logo_map = re.search(r'^const USAGE_LOGO=.*?;', HTML, re.M).group(0)
     script = '''global.window={};
 function assetURL(p){return '/assets/'+p+'.svg';}
+function providerKeyFor(a){return a.provider;}
 ''' + logo_map + _function('deckProviderLogo') + _function('usageLogo') + '''
 const out=[];
 for(const enabled of [false,true]){
  window.AGENTSTACK_DSH_ENABLED=enabled;
- out.push({enabled,deck:deckProviderLogo('deepseek','on'),usage:usageLogo('dsh',''),
-    claude:deckProviderLogo('anthropic','on')});
+ out.push({enabled,deck:deckProviderLogo({provider:'deepseek'},'on'),usage:usageLogo('dsh',''),
+    claude:deckProviderLogo({provider:'anthropic'},'on')});
 }
 process.stdout.write(JSON.stringify(out));
 '''
@@ -119,3 +120,78 @@ process.stdout.write(JSON.stringify(w.AGENTSTACK_DEMO.payloads.spawnNames()));''
         # fixtureの公開payload名はsourceのexportに従う。
         providers = _node(script)['providers']
         assert all(item['id'] != 'dsh' for item in providers)
+
+
+def test_strata_badges_share_local_metadata_in_network_deck_and_global():
+    script = HARNESS + (ROOT / 'dashboard/network_node.js').read_text() + (ROOT / 'dashboard/runtime_node.js').read_text() + """
+Object.defineProperty(El.prototype,'outerHTML',{get(){return '<'+this.tag+' '+Object.entries(this.attrs).map(([k,v])=>k+'="'+v+'"').join(' ')+'>'+this.children.map(c=>c.outerHTML).join('')+'</'+this.tag+'>';}});
+const {providerKeyFor,providerBadge}=window.OrreryNetworkNode;
+""" + _function('deckProviderLogo') + """
+const rows=[
+ {provider:'strata',locality:'local',program:'dsh',harness:'dsh',model:'Qwen 3.8 flash',model_raw:'qwen3.8-flash-next-iq3_xxs'},
+ {provider:'strata',program:'hermes',model:'fixture',model_raw:'Qwen/Qwen3-Coder'},
+ {provider:'fixture',locality:'local',model:'fixture',model_raw:'qwen3'},
+ {provider:'local',model:'Qwen3',model_raw:'unknown'},
+ {provider:'strata',model:'unknown'},
+];
+const out=[];
+for(const enabled of [false,true]){
+ window.AGENTSTACK_DSH_ENABLED=enabled;
+ out.push(rows.map((row,i)=>{
+  const globalRow=window.OrreryRuntimeNode.adapt([{...row,agent_id:i+1}],[]).get(i+1);
+  return {key:providerKeyFor(row),network:snapshot(window.OrreryNetworkNode.render('Fixture',row,{avatar:()=>null})),
+    deck:deckProviderLogo(row,'on'),globalKey:providerKeyFor(globalRow)};
+ }));
+}
+process.stdout.write(JSON.stringify(out));
+"""
+    for state in _node(script):
+        for i, row in enumerate(state):
+            maker = i < 3
+            assert row['key'] == row['globalKey'] == ('local:qwen' if maker else 'local')
+            assert 'provider-local-ring' in json.dumps(row['network'])
+            assert ('qwen.svg' in json.dumps(row['network'])) is maker
+            assert 'provider-local-ring' in row['deck']
+            assert ('qwen.svg' in row['deck']) is maker
+            assert 'prov-logo' in row['deck'] and 'on' in row['deck']
+
+
+def test_network_projection_keeps_locality_and_raw_model():
+    assignment = re.search(r'Object.assign\(g,\{model:n.model,provider:n.provider.*?\}\);', HTML, re.S).group(0)
+    script = 'const g={},n={model:"display",model_raw:"qwen3",provider:"strata",locality:"local"};' + assignment + 'process.stdout.write(JSON.stringify(g));'
+    row = _node(script)
+    assert row['model_raw'] == 'qwen3' and row['locality'] == 'local'
+
+
+def test_network_badge_rebuilds_when_only_resolved_local_maker_changes():
+    tick = HTML[HTML.index('async function netTick(){'):]
+    tick = tick[:tick.index('\n}\n') + 2]
+    script = HARNESS + (ROOT / 'dashboard/network_node.js').read_text() + """
+const {providerKeyFor}=window.OrreryNetworkNode;
+const info={innerHTML:'',textContent:''};
+document.getElementById=()=>info;
+const gmap=new Map(),gEls={node:new Map()};
+let gWin='all',gWinLabel='',graphStateAt,gedges=[],gspawn=[],netRenderKey='';
+let drag=null,pan=null,fitPending=false,viewUserAdjusted=true,simHot=0;
+const netDims=()=>({w:800,h:600}),refreshPanelButtons=()=>{},esc=String;
+const runSim=()=>{},fitView=()=>{},scheduleFit=()=>{};
+const builds=[];
+function buildEls(){builds.push(snapshot(window.OrreryNetworkNode.render('Fixture',gmap.get('Fixture'),{avatar:()=>null})));}
+const row={name:'Fixture',provider:'fixture',model:'same display',model_raw:'qwen3',locality:'cloud'};
+const fetch=async()=>({status:200,json:async()=>({nodes:[{...row}],edges:[],spawn:[]})});
+""" + tick + """
+(async()=>{
+ const counts=[];
+ for(const patch of [{},{locality:'local'},{model_raw:'unknown'},{},{model_raw:'qwen3'},{locality:'cloud'}]){
+  Object.assign(row,patch);await netTick();counts.push(builds.length);
+ }
+ process.stdout.write(JSON.stringify({counts,builds,caught:info.textContent}));
+})().catch(error=>{console.error(error);process.exit(1)});
+"""
+    result = _node(script)
+    assert result['caught'] == ''
+    assert result['counts'] == [1, 2, 3, 3, 4, 5]
+    for tree, local, qwen in zip(result['builds'], [False, True, True, True, False], [False, True, False, True, False]):
+        dom = json.dumps(tree)
+        assert ('provider-local-ring' in dom) is local
+        assert ('qwen.svg' in dom) is qwen

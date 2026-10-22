@@ -34,7 +34,7 @@ try:
     fixture.profile_spec.update(base_url='https://api.deepseek.com/anthropic',
                                 api_mode='anthropic_messages', key_cmd=command)
     fixture.save(fixture.template, fixture.template_data)
-    profile = fixture.runtime / 'profiles/deepseek'
+    profile = fixture.profile
     old = {'memory': {'memory_enabled': True},
            'telemetry': {'shared_metrics': {'enabled': False, 'send': False, 'offer_version': 2}}}
     entry = {'base_url': selected_url}

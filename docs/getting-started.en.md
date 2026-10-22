@@ -26,7 +26,7 @@ To observe agents on your machine, [install and verify below](#standalone-instal
 
 The model's maker need not be the API host: a DeepSeek model hosted locally still uses Local as its connection. Agent identity, parent, work project and Mail recipient are separate from these choices. Selecting a model or harness does not select a parent or recipient.
 
-API spawning currently targets macOS in legacy mode; the WSL2 steps below cover Claude Code / Codex CLI. Arbitrary API × harness combinations are not promised. Common login and a common Telegram entry point are in design; independent per-child Hermes memory is in implementation. Manual Local effort is exposed as a capability but has not passed real Local server acceptance. See [current limitations (Japanese)](managed-catalog.md#現在の制限).
+API spawning uses legacy mode with macOS Keychain or explicitly configured Linux Secret Service references; it separately requires backend, runtime and credential configuration. Arbitrary API × harness combinations are not promised. New Hermes children use a separate HOME per project and canonical name. Common login and Telegram entry points are in design; real-server acceptance of manual Local effort remains incomplete. See the [current limitations (Japanese)](managed-catalog.md#現在の制限) and the [Model / Harness screen examples and selection GIF](dashboard.en.md#native-models-and-harnesses).
 
 
 ## Six words
@@ -101,6 +101,8 @@ By default the child's OS terminal opens automatically in the background. If you
 
 ### 5. Play shiritori as an end-to-end check
 
+For an unconfigured dsh / Hermes backend, first [prepare non-secret settings from bundled examples with agent assistance](install.en.md#prepare-settings-from-bundled-examples). Secret input and activation require the person; example distribution and end-to-end acceptance are separate steps.
+
 The quickest way to confirm the whole install at once is a game of shiritori (Japanese word chain) between a Claude Code agent and a Codex child. Name registration, ORRERY Mail round trips, notification injection, and dashboard rendering all have to work for even one round to complete.
 
 ```text
@@ -113,7 +115,7 @@ If you start from Codex, make the child a Claude Code agent. Either way, the poi
 
 The same shiritori check also works with DeepSeek or Local children in an environment with cockpit added and a configured provider and harness. In cockpit New Agent, select a [configured provider](install.en.md) (DeepSeek or Local) and Harness (dsh or Hermes), select the Claude Code or Codex agent you will play with as the parent under Lineage, and create the child for three round trips.
 
-With Telemetry alone, the bundled dashboard NEW AGENT lists provider and model from the catalog but does not send a harness, so it cannot launch these children. For a launch without the screen, use `POST /api/spawn` in the [API reference](api.en.md), including its authentication and parent (parent or standalone) contract, and always specify `harness`.
+With Telemetry alone, the bundled dashboard NEW AGENT also lets you select a provider, model and Harness (dsh or Hermes) marked available in the catalog. For a launch without the screen, use `POST /api/spawn` in the [API reference](api.en.md), including its authentication and parent (parent or standalone) contract, and always specify `harness`.
 
 Have the parent start by sending the child “Play three shiritori round trips over ORRERY Mail, putting each turn’s word in the subject of each Mail” using ORRERY Mail `send_message`. Success looks the same: lines flow back and forth in NETWORK, and the last instruction on both DECK cards updates to the latest Mail subject (that turn’s word). Check dsh and Hermes separately; success with one does not verify the other.
 
@@ -168,7 +170,7 @@ The bundled ORRERY Mail server is the source of truth, with launchers, operation
 | Linux | Field reports received. On Ubuntu 24.04 / tmux 3.4, install, the dashboard, and Codex agents worked, and the two problems found there ([#26](https://github.com/gyroid-eth/orrery-telemetry/issues/26), [#27](https://github.com/gyroid-eth/orrery-telemetry/issues/27)) are fixed. The author has not verified `systemd --user` registration, so please report results as issues |
 | Windows native (without WSL2) | The supported route is WSL2, but community contributions provide an experimental PowerShell helper that starts Mail and the dashboard, and a native Codex child launcher ([startup helper](windows-local.en.md), [Codex launcher](windows-codex-launcher.en.md)). Policy: [#3](https://github.com/gyroid-eth/orrery-telemetry/issues/3) |
 
-The table above covers the common infrastructure and existing CLI routes. The standard DeepSeek / Local × dsh / Hermes catalog and spawn route currently require macOS in legacy mode.
+The table above covers the common infrastructure and existing CLI routes. DeepSeek / Local × dsh / Hermes use a separate legacy-mode route requiring backend, runtime and OS credential-reference configuration. Catalog visibility does not guarantee a successful connection: verify launch and Mail round trips for each configured combination.
 
 Python 3.11 or newer, `git`, `tmux`, and `uv` are required. The CLI procedure above needs a signed-in Claude Code or Codex CLI; API spawning separately needs dsh / Hermes and backend configuration. The installer checks common dependencies before writing anything and stops without changes if something is missing. The details of the checks and the optional dependencies (`fswatch`, `fzf`, Ghostty, Obsidian) are in the [install guide's environment section](install.en.md#supported-environment).
 

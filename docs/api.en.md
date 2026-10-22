@@ -65,7 +65,7 @@ curl -s http://127.0.0.1:8770/api/version
 ```
 
 ```json
-{"name":"orrery-telemetry","version":"2026.09.16.1","api":25}
+{"name":"orrery-telemetry","version":"2026.09.16.1","api":26}
 ```
 
 See [Installation](install.en.md#version) for version resolution order.
@@ -110,6 +110,8 @@ dsh opt-inが有効な時だけ `providers` に `provider: "dsh"` を加える�
 [取得・実確認の手順](dsh-stage-a.md)も参照。
 
 ## GET `/api/spawn-names`
+
+The bundled NEW AGENT selects Model → Harness → Helper model → Effort. Untouched Effort and Use default send a supported concrete default reported by the catalog; a null, unknown, or unsupported default omits effort. The first candidate is not guessed as a default, and providers requiring explicit effort still require a selection. Same as main omits helper_model. Untouched Terminal omits headless to inherit the existing launch policy; only an explicit change sends it.
 
 API 23 includes explicitly configured DeepSeek (`provider=deepseek`) and Local (`provider=strata`, `locality=local`) in standard spawn. Use the model's `harnesses` availability and `efforts` / `default_effort` / `effort_source`. Capabilities come from checked local evidence, never trial effort settings. The normal catalog does not require managed task modes or attempt IDs. Missing runtimes and disabled opt-ins are unavailable.
 
@@ -276,6 +278,8 @@ API generation 5 adds `resume_mode` to finished Claude rows that can be resumed 
 Rows and responses with `mail_reason: mail_schema_unsupported` also carry `mail_remedy`: update the ORRERY Mail this installer deployed with `./scripts/install.sh --update-mail`, let the conversation-only session exit, then resume again; if the dry run refuses, follow [the Mail update guide](agentstack-mail-update.en.md) instead. The same text ends `mail_message`, so a caller that shows `mail_message` gets it without reading the new field (the API generation is unchanged). `credential_absent` and `retention_expired` cannot be fixed from the dashboard and carry no remedy. A running conversation-only session reports `mail_status` / `mail_reason` / `mail_message` even when its retired Mail row leaves `program` empty.
 
 ## GET `/api/graph`
+
+API generation 26 adds the unnormalized `model_raw` field to `/api/graph` nodes. The dashboard displays `provider=strata` / `locality=local` with the existing Local hexagon and prefers `model_raw` when selecting a maker such as Qwen. Unknown makers keep an empty hexagon. Provider and locality meanings are unchanged.
 
 Query:
 

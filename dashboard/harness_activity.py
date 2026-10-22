@@ -35,6 +35,53 @@ _HERMES_BUSY = re.compile(r'☤(?:\s+❯)?(?:\s.*)?')
 _HERMES_IDLE = re.compile(r'(?:[\w.-]+\s+)?❯(?:\s.*)?')
 _HERMES_APPROVAL_PROMPT = re.compile(r'⚠\ufe0f?(?:\s+❯)?(?:\s.*)?')
 _HERMES_QUESTION_PROMPT = re.compile(r'[?✎](?:\s+❯)?(?:\s.*)?')
+_DSH_DURATION = r'(?:\d+h(?: \d+m)?(?: \d+s)?|\d+m(?: \d+s)?|\d+s)'
+_DSH_TOKEN_NUMBER = r'\d+(?:\.\d+)?[kKmMbB]?'
+_DSH_TOKEN_PART = (r'[↑↓]\s+(?:↑ ' + _DSH_TOKEN_NUMBER + r' · )?↓ '
+                   + _DSH_TOKEN_NUMBER + r' tokens')
+_DSH_CLASSIC_BUSY = re.compile(
+    r'[·•●]\s+[^\n()]+…\s+\(' + _DSH_DURATION
+    + r'(?: · ' + _DSH_TOKEN_PART + r')?'
+    + r'(?: · (?:thinking|thought for \d+s))?\)')
+_DSH_METRICS = re.compile(
+    r'(?:\d+(?:\.\d+)?[kKmM]?/\d+(?:\.\d+)?[kKmM]? \d+(?:\.\d+)?%'
+    r'|·(?:\s+·)*'
+    r'|sys\s+\S+\s+pr\s+\S+\s+ast\s+\S+\s+th\s+\S+\s+tl\s+\S+\s+free\s+\S+)')
+
+
+def _dsh_extended_input(lines):
+    """Observe the current composer plus bounded StatusLine hover metrics.
+
+    Native Chat gates WorkingSpinner on channel.working. Only its adjacent
+    classic form is recognized here; absent spinner is not evidence of idle.
+    A recognized composer suppresses stale modal examples even when unknown.
+    """
+    rows = [line.strip() for line in lines if line.strip()]
+    interrupts = ('esc to interrupt', 'esc 中断')
+    shortcuts = ('? for shortcuts', '? 查看快捷键')
+    for index in reversed(range(max(0, len(rows) - 10), len(rows) - 2)):
+        top, prompt, bottom = rows[index:index + 3]
+        if not (re.fullmatch(r'╭─{8,}╮', top)
+                and bottom == '╰' + top[1:-1] + '╯'
+                and re.fullmatch(r'⌸\s+❯.*\s+⛶', prompt)):
+            continue
+        tail = rows[index + 3:]
+        if not 1 <= len(tail) <= 6:
+            return False, None
+        contexts = [parse_context(row, 'dsh')['ctx_used'] is not None for row in tail]
+        if not any(contexts) or not all(
+            context or _DSH_METRICS.fullmatch(row) or row in interrupts + shortcuts
+            for row, context in zip(tail, contexts)
+        ):
+            return False, None
+        if tail[-1] in interrupts:
+            return True, 'work'
+        if tail[-1] in shortcuts:
+            return True, 'wait'
+        if index and _DSH_CLASSIC_BUSY.fullmatch(rows[index - 1]):
+            return True, 'work'
+        return True, None
+    return False, None
 
 
 def _hermes_prompt(lines):
@@ -95,6 +142,10 @@ def parse_activity(text, program):
     if current_input is not None:
         # Panel-like text above an ordinary current input is transcript output.
         return current_input
+    if program == 'dsh':
+        observed_input, activity = _dsh_extended_input(lines)
+        if observed_input:
+            return activity
     footer = rows[-6:]
     titles = rows[-36:]
 

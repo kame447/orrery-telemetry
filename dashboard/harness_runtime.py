@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import shlex
 import stat
+import sys
 
 HARNESSES = ('dsh', 'hermes')
 
@@ -33,7 +34,8 @@ def matches_command(program, command):
 
 def possible_process(program, name):
     executable = os.path.basename(name).lower()
-    return (program == 'dsh' and executable == 'node'
+    return (program == 'dsh' and (executable == 'node'
+            or sys.platform == 'linux' and executable == 'mainthread')
             or program == 'hermes' and (executable == 'hermes' or executable.startswith('python')))
 
 

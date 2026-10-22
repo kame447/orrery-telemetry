@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import sys
 from urllib.parse import urlsplit
@@ -136,13 +137,30 @@ def validate_input(document):
             raise ValueError('guard_unavailable')
         if not credential_plugin.is_file():
             raise ValueError('credential_adapter_unavailable')
-        selector = backend['keychain']
-        if not all(isinstance(selector.get(k), str) and selector[k] for k in ('service', 'account')):
-            raise ValueError('invalid_credential_selector')
+        credential_ref = metadata.get('credential_ref')
+        reader_command = None
+        credential_context = {}
+        if 'credential_ref' in metadata:
+            if backend.get('keychain') is not None:
+                raise ValueError('credential_reference_conflict')
+            reader_file = root / 'hooks/llm_secret_reader.py'
+            if not reader_file.is_file():
+                raise ValueError('credential_reader_unavailable')
+            reader = runpy.run_path(str(reader_file))
+            reader['validate_ref'](credential_ref)
+            reader['validate_environment']()
+            reader_command = reader['command'](root, document['manifest_file'], backend_id, sys.executable)
+            credential_context = reader['context']()
+        else:
+            selector = backend['keychain']
+            if not all(isinstance(selector.get(k), str) and selector[k] for k in ('service', 'account')):
+                raise ValueError('invalid_credential_selector')
         rows = mcp_rows(document)
         return dict(root=root, template=template, backend=backend, backend_file=backend_file,
                     node=node, runtime=runtime, entry=entry, plugin=plugin,
-                    credential_plugin=credential_plugin, helper=helper, mcp_rows=rows)
+                    credential_plugin=credential_plugin, helper=helper, mcp_rows=rows,
+                    credential_ref=credential_ref, reader_command=reader_command,
+                    credential_context=credential_context)
     except (KeyError, TypeError, OSError, json.JSONDecodeError):
         raise ValueError('invalid_configuration') from None
 
@@ -221,7 +239,9 @@ def generate(document):
         {'id': 'dsh-tui', 'config': tui},
         {'insert': [
             {'id': 'orrery-keychain-credentials', 'name': str(facts['credential_plugin']),
-             'config': {'ref': ref, 'runtime': str(facts['runtime']), 'dshHome': str(home), **backend['keychain']}},
+             'config': {'ref': ref, 'runtime': str(facts['runtime']), 'dshHome': str(home),
+                        **({'reader_command': facts['reader_command']} if facts['reader_command']
+                           else backend['keychain'])}},
             {'id': 'orrery-tools', 'name': str(facts['plugin']), 'config': guard_config}, *facts['mcp_rows']]},
     ]
     if skill_roots:
@@ -246,10 +266,17 @@ def generate(document):
     if prompt:
         argv += ['--', prompt]
     protected = [str(overlay), str(home / '.credentials.yaml'), str(facts['backend_file'])]
+    definitions = facts['backend_file']
+    if facts['reader_command']:
+        definitions = state / 'credential-references.json'
+        save(definitions, {'backends': {document['backend_id']: {
+            'credential_ref': facts['credential_ref'], 'auth_command': facts['reader_command']}}})
+        protected.extend([str(definitions), str(Path(document['manifest_file']).resolve())])
     return {'argv': argv, 'cwd': str(cwd), 'config_dir': str(config_dir),
             'env': {'DSH_HOME': str(home), 'DSH_TUI_DATA_DIR': str(tui_data), 'DSH_TUI_LANG': language,
+                    **facts['credential_context'],
                     'AGENTSTACK_LLM_KEY_FILES': json.dumps(protected),
-                    'AGENTSTACK_LLM_KEY_DEFINITIONS': str(facts['backend_file'])},
+                    'AGENTSTACK_LLM_KEY_DEFINITIONS': str(definitions)},
             'guard': {'plugin': str(facts['plugin']), 'contract': 1}}
 
 

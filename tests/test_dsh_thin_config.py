@@ -2,6 +2,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -222,6 +223,42 @@ class ThinTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stderr, 'DSH_THIN_CONFIG_ERROR=unknown_backend\n')
         self.assertFalse(target.exists())
+
+
+def test_secret_service_ref_generates_one_reader_and_guard_definition(monkeypatch):
+    fixture = ThinTests()
+    fixture.setUp()
+    try:
+        import shutil
+        (fixture.product / 'hooks').mkdir()
+        shutil.copyfile(ROOT / 'hooks/llm_secret_reader.py', fixture.product / 'hooks/llm_secret_reader.py')
+        reference = {'store': 'secret-service', 'attributes': {'service': 'fixture', 'account': 'child'}}
+        manifest = thin.read(fixture.manifest)
+        manifest['backends']['strata']['credential_ref'] = reference
+        thin.save(fixture.manifest, manifest)
+        backend_file = Path(thin.read(fixture.template)['backend_file'])
+        backend = thin.read(backend_file)
+        with fixture.assertRaisesRegex(ValueError, '^credential_reference_conflict$'):
+            thin.validate_input(fixture.doc)
+        del backend['backends']['strata']['keychain']
+        thin.save(backend_file, backend)
+        real_file, real_access = Path.is_file, os.access
+        monkeypatch.setattr(sys, 'platform', 'linux')
+        monkeypatch.setenv('DBUS_SESSION_BUS_ADDRESS', 'unix:path=/fixture/bus')
+        monkeypatch.setattr(Path, 'is_file', lambda p: str(p) == '/usr/bin/secret-tool' or real_file(p))
+        monkeypatch.setattr(os, 'access', lambda p, m: str(p) == '/usr/bin/secret-tool' or real_access(p, m))
+        monkeypatch.setattr(subprocess, 'run', lambda *a, **k: fixture.fail('generation looked up a key'))
+        plan = thin.generate(fixture.doc)
+        fixture.assertEqual(plan['env']['DBUS_SESSION_BUS_ADDRESS'], 'unix:path=/fixture/bus')
+        definitions = thin.read(plan['env']['AGENTSTACK_LLM_KEY_DEFINITIONS'])['backends']['strata']
+        fixture.assertEqual(definitions['credential_ref'], reference)
+        command = definitions['auth_command']
+        fixture.assertEqual(command[-4:], ['--manifest', str(fixture.manifest.resolve()), '--backend', 'strata'])
+        config = next(row for row in fixture.rows(plan)[5]['insert'] if row['id'] == 'orrery-keychain-credentials')['config']
+        fixture.assertEqual(config['reader_command'], command)
+        fixture.assertNotIn('service', config)
+    finally:
+        fixture.doCleanups()
 
 
 if __name__ == '__main__':

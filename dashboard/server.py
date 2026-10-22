@@ -44,7 +44,7 @@ import urllib.request
 from urllib.parse import urlparse, parse_qs
 
 # Public dashboard compatibility generation (docs/tests read this source).
-API_GENERATION = 25
+API_GENERATION = 26
 # Mode admission is shared with hooks and operator/service entry points.
 import runpy as _runtime_runpy
 _MODE_API = _runtime_runpy.run_path(str(Path(__file__).resolve().parents[1] / 'bin/lib/runtime_client.py'))
@@ -2527,6 +2527,7 @@ def graph_payload(days: float, show_all: bool) -> dict:
          # モデル: pane 由来を優先 (warm pool claim で DB が乖離するケース)
          #   display 形式に揃える (build_agents と同じ正規化)
          "model": _display_model(_pane_model_for(lv.get("pane_model"), n.get("program"))) or n.get("model"),
+         "model_raw": _pane_model_for(lv.get("pane_model"), n.get("program")) or n.get("model") or "",
          # provider: family ベースで anthropic / openai 等を判定（logo 用）
          "provider": _provider_of(_pane_model_for(lv.get("pane_model"), n.get("program"))
                                   or n.get("model") or n.get("program"))}
@@ -6497,8 +6498,125 @@ def _stop_provider_stall_monitor():
         _provider_thread.join(timeout=4)
 
 
+def _runtime_activity(text: str) -> tuple[str, str]:
+    """Read the current control block; historical controls never outrank it.
+
+    An ordinary composer follows a live spinner too, so it is not by itself
+    proof of waiting. Keep the adjacent work block, including wrapped Claude
+    task labels, but not a spinner above a later reply or completed control.
+    This is display observation only; compact admission uses terminal_state.
+    """
+    lines = text.splitlines()
+
+    def rule(line):
+        return re.fullmatch(r"[─━]{8,}", line.strip()) is not None
+
+    def chrome(line):
+        row = line.strip()
+        return (not row or rule(row) or bool(_STATUSLINE_HINT_RE.search(row))
+                or row.startswith(("? for shortcuts", "⏵", "←", "→")))
+
+    # Only a complete composer suffix can supersede old modal text. Numbered
+    # choices use the same pointer, but are not an ordinary input prompt.
+    composer = None
+    for index in range(len(lines) - 1, max(-1, len(lines) - 17), -1):
+        prompt = re.fullmatch(r"\s*[❯›](?:\s+(.*))?", lines[index])
+        if prompt is None or re.match(r"\d+\.\s", prompt.group(1) or ""):
+            continue
+        suffix = lines[index + 1:]
+        if (any(_STATUSLINE_HINT_RE.search(row) or row.strip().startswith("? for shortcuts")
+                for row in suffix) and all(chrome(row) for row in suffix)):
+            composer = index
+            break
+    current = lines[:composer] if composer is not None else lines[:]
+    while current and (not current[-1].strip() or rule(current[-1])):
+        current.pop()
+
+    # The work marker must reach the end of this block, rather than merely
+    # occur somewhere in the capture. A single exact interrupt hint remains a
+    # supported minimal UI; prose mentioning that hint is not a control.
+    def continuation(row):
+        value = row.strip()
+        if not value:
+            return True
+        return (row[:1].isspace()
+                and not value.startswith(("⏺", "•", "❯", "›", "```", "~~~", "Hooks need review"))
+                and not (_ASK_Q_RE.match(value) or _QUESTION_RE.match(value) or _ASK_CODEX_RE.match(value))
+                and not (_is_activity_glyph(value[0]) and _LAST_T_RE.search(value)))
+
+    # Retain the existing 25-line task-widget window. Only indented widget
+    # continuations may follow a live work label; replies and later controls
+    # end that block. The label itself still has at most two wrapped lines.
+    for start in range(len(current) - 1, max(-1, len(current) - 26), -1):
+        block = current[start:]
+        if not block[0].strip() or not all(continuation(row) for row in block[1:]):
+            continue
+        for width in range(1, min(3, len(block)) + 1):
+            label = block[:width]
+            if any(not row.strip() for row in label):
+                continue
+            candidate = "\n".join(row.strip() for row in label)
+            if candidate == "esc to interrupt":
+                return "work", candidate
+            if not (_is_activity_glyph(candidate[0]) or candidate[0] in "▌●"):
+                continue
+            # Codex uses the same timed interrupt UI for MCP initialization.
+            if (width == 1 and candidate[0] in "•▌●"
+                    and _ACTIVE_T_RE.search(candidate) and _WORK_RE.search(candidate)
+                    and candidate.endswith("esc to interrupt)")):
+                return "work", candidate
+            if width > 1 and len(label[0].strip()) == 1:
+                candidate = label[0].strip() + " " + " ".join(row.strip() for row in label[1:])
+            match = _WORK_CODEX_RE.match(candidate) or _WORK_CLAUDE_TASK_RE.match(candidate)
+            if match and "\n" not in candidate[match.end():].rstrip():
+                return "work", "\n".join(label)
+    if composer is not None:
+        return "wait", ""
+
+    # These footer controls must still be current. Looking at the last control
+    # rather than reversing work/ask priority also preserves new work after an
+    # answered modal that remains in the scrollback.
+    rows = [row.strip() for row in current[-16:] if row.strip()]
+    if not rows:
+        return "wait", ""
+    # Codex hook trust has its own footer, not the normal command-approval one.
+    # Require the complete current menu transcribed from the reviewed screen;
+    # the title or a prose explanation of hook trust is not an approval UI.
+    hook = rows[-7:]
+    if (len(hook) == 7 and hook[0] == "Hooks need review"
+            and re.fullmatch(r"[1-9]\d* hooks? (?:is|are) new or changed\.", hook[1])
+            and hook[2] == "Hooks can run outside the sandbox after you trust them."
+            and [re.sub(r"^[›❯>]\s*", "", row) for row in hook[3:6]] == [
+                "1. Review hooks", "2. Trust all and continue",
+                "3. Continue without trusting (hooks won't run)"]
+            and any(re.match(r"[›❯>]\s*[123]\.", row) for row in hook[3:6])
+            and hook[6] == "enter confirm · esc skip"):
+        return "ask", ""
+    # The existing question literal may put its footer before numbered choices.
+    # Only those choices may follow it; arbitrary later output is not current UI.
+    for index, row in enumerate(rows):
+        if (_QUESTION_RE.fullmatch(row)
+                and all(re.fullmatch(r"[❯>›]?\s*\d+\.\s+.+", option)
+                        for option in rows[index + 1:])):
+            return "question", ""
+    if _ASK_CODEX_RE.fullmatch(rows[-1]) or _ASK_YN_RE.search(rows[-1]):
+        return "ask", ""
+    for index, row in enumerate(rows):
+        if _ASK_Q_RE.match(row) and rows[index + 1:]:
+            options = rows[index + 1:]
+            # Claude's edit approval places this control hint after the menu.
+            # Keep the question and numbered choices mandatory; arbitrary later
+            # output must still invalidate an old approval screen.
+            if options[-1] in {"Esc to cancel", "Esc to cancel · Tab to amend"}:
+                options = options[:-1]
+            if (any(_ASK_OPT_RE.match(option) for option in options)
+                    and all(re.fullmatch(r"[❯>›]?\s*\d+\.\s+.+", option) for option in options)):
+                return "ask", ""
+    return "wait", ""
+
+
 def _parse_runtime(text: str) -> dict:
-    """ペイン文字列 → runtime 値。動作状態の優先度は work>question>ask>wait。"""
+    """ペイン文字列 → runtime 値。現在の操作領域から動作状態を読む。"""
     m = _CTX_RE.search(text)
     if m:                                   # Claude: "ctx: N% used"
         ctx_used = int(m.group(1))
@@ -6523,31 +6641,10 @@ def _parse_runtime(text: str) -> dict:
     # ペイン由来の実モデル (steruslineから抽出。末尾10行に限定して
     # スクロールバッファ内のコード片やテキスト中の誤マッチを避ける)
     pane_model = _pane_model_from(tail_for_model)
-    # AskUserQuestion ウィジェットは常にペイン最下部に表示される。スクロール
-    # バッファ上部の自己マッチ（過去の出力にコードや報告文として regex 自体が
-    # 書かれているケース等）を避けるため、末尾 12 行に絞って検出する。
-    tail = "\n".join(text.splitlines()[-12:])
-    # 承認 UI も現在の TUI 末尾に出る。Codex は確定フッター自体が最下部付近、
-    # Claude は質問と番号付き選択が近接するため、少し余裕を持たせた 16 行だけを見る。
-    # 過去に回答済みの承認 UI が 45 行 capture に残っても ask に戻さない。
-    approval_tail = "\n".join(text.splitlines()[-16:])
-    # スピナー行はタスクwidget(可変長)の直上に出るため 12 行窓では不足。
-    # スクロールバッファの過去出力への誤マッチは避けたいので 25 行に限定。
-    tail25 = "\n".join(text.splitlines()[-25:])
-    if _WORK_RE.search(text) or _WORK_CODEX_RE.search(text) \
-            or _WORK_CLAUDE_TASK_RE.search(tail25):
-        act = "work"
-    elif _QUESTION_RE.search(tail):
-        act = "question"
-    elif _ASK_CODEX_RE.search(approval_tail) \
-            or (_ASK_Q_RE.search(approval_tail) and _ASK_OPT_RE.search(approval_tail)) \
-            or _ASK_YN_RE.search(approval_tail):
-        act = "ask"
-    else:
-        act = "wait"   # running だが work/question/ask でない = ユーザー入力待ち
+    act, work_block = _runtime_activity(text)
     work_secs = work_disp = last_disp = None
     if act == "work":
-        t = _ACTIVE_T_RE.search(text)
+        t = _ACTIVE_T_RE.search(work_block)
         if t:
             work_secs, work_disp = _dur(
                 int(t.group(1) or 0), int(t.group(2) or 0), int(t.group(3)))

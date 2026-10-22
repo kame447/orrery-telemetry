@@ -2466,6 +2466,12 @@ install_payload() {
   else
     plan "skip hooks copy for --dashboard-only"
     plan "skip skills copy for --dashboard-only"
+    # Balance and native credential readers use the same internal reference.
+    plan "copy internal credential reader -> $HOOKS_DIR/llm_secret_reader.py"
+    if [[ "$DRY_RUN" != true ]]; then
+      mkdir -p "$HOOKS_DIR"
+      cp "$REPO_ROOT/hooks/llm_secret_reader.py" "$HOOKS_DIR/llm_secret_reader.py"
+    fi
   fi
   copy_core_tree "$REPO_ROOT/dashboard" "$DASHBOARD_DIR" "dashboard"
   plan "copy VERSION -> $INSTALL_DIR/VERSION"
@@ -2483,6 +2489,7 @@ install_payload() {
     cp "$SCRIPT_DIR/lib/mcp_endpoint.py" "$BIN_DIR/lib/mcp_endpoint.py"
     cp "$SCRIPT_DIR/lib/mail_required_features.json" "$BIN_DIR/lib/mail_required_features.json"
     cp "$SCRIPT_DIR/lib/mail_update_notice.py" "$BIN_DIR/lib/mail_update_notice.py"
+    cp "$SCRIPT_DIR/lib/install_examples.py" "$BIN_DIR/lib/install_examples.py"
     cp "$REPO_ROOT/bin/lib/agentstack-launch.sh" "$BIN_DIR/lib/agentstack-launch.sh"
     cp "$REPO_ROOT/bin/lib/agentstack-register.sh" "$BIN_DIR/lib/agentstack-register.sh"
     cp "$REPO_ROOT/bin/lib/runtime_client.py" "$BIN_DIR/lib/runtime_client.py"
@@ -4828,6 +4835,7 @@ PY
 
 write_manifest() {
   plan "write manifest $MANIFEST"
+  plan "distribute inactive native harness examples; keep existing files"
   if [[ "$DRY_RUN" == true ]]; then
     return
   fi
@@ -4854,7 +4862,9 @@ write_manifest() {
     "${AGENT_MAIL_WATCHER_KIND:-}" "${AGENT_MAIL_WATCHER_PATH:-}" \
     "$MAIL_WATCHER_LABEL" "$NATIVE_MAIL_DEPLOYMENT_IDENTIFIED" \
     "$NATIVE_MAIL_ENROLL_AVAILABLE" "$NATIVE_MAIL_AUTOSTART_MANAGED_BY_INSTALL" \
-    "$CLAUDE_SKILLS_DIR" "$CODEX_SKILLS_DIR" <<PY
+    "$CLAUDE_SKILLS_DIR" "$CODEX_SKILLS_DIR" \
+    "$SCRIPT_DIR/lib/install_examples.py" "$REPO_ROOT" "$MANIFEST" <<PY
+import importlib.util
 import json
 import os
 import pathlib
@@ -5100,10 +5110,14 @@ manifest["env"].update({
     "AGENTSTACK_MAIL_HTTP_BEARER_MODE": "$MAIL_HTTP_BEARER_MODE",
     "AGENTSTACK_MAIL_ENROLL_BIN": "$NATIVE_MAIL_ENROLL_BIN",
 })
-out.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\\n", encoding="utf-8")
+# Publish inactive examples only now, after service/settings processing. The
+# helper commits ownership with this manifest or cleans up this run's new,
+# unchanged examples on a normal failure; existing examples are retained.
+example_spec = importlib.util.spec_from_file_location("install_examples", sys.argv[19])
+example_module = importlib.util.module_from_spec(example_spec)
+example_spec.loader.exec_module(example_module)
+example_module.write_manifest(manifest, sys.argv[21], repo=sys.argv[20], python=sys.executable)
 PY
-  "$PYTHON_BIN" -m json.tool "$tmp" >/dev/null
-  mv "$tmp" "$MANIFEST"
 }
 
 main() {

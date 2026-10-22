@@ -4,9 +4,43 @@
 
 ## dsh / Hermes の任意導入
 
-Claude Code / Codex CLI を使う人は、下の共通導入と各 CLI のログインの手順から始めます。API の model を dsh / Hermes で使う人は、先に[対応組合せと制限](managed-catalog.md)を確認してください。この経路は現在 macOS の legacy mode 向けで、WSL2 / Linux の共通導入手順だけでは使えません。
+**これまでClaude Code/Codexだけを使っていた方へ：** [DeepSeek・Localを追加する初期設定ガイド](native-setup.md)から始めてください。通常の更新だけでは、アプリの追加やAPIキーの登録は完了しません。以下は詳しい設定を調べるための参照です。
+
+### Ubuntu WSL の Secret Service 参照（実機受け入れ前）
+
+Linux の標準 catalog は、manifest の `backends.<id>.credential_ref` に
+`{"store":"secret-service","attributes":{"service":"example-service","account":"example-account"}}`
+という非秘密参照を明示した経路を静的に検査します。資格の値は書きません。
+attributes の名前は英字で始まる英数字・`_`・`.`・`-`、値は非空の文字列です。
+制御文字、option と紛らわしい先頭 `-`、未知の store は拒否します。
+
+同じ backend の参照を dsh・Hermes・DeepSeek 残高の内部 reader が使います。
+既存の dsh `keychain` や Hermes `key_cmd` と併記すると
+`credential_reference_conflict` で止まります。新しい参照を使わない Mac の設定は維持します。
+reader は `/usr/bin/secret-tool` の lookup だけを行い、登録・unlock・平文保存・別資格への fallback はしません。
+利用者や agent が内部 reader を直接実行して鍵を表示する確認手順ではありません。
+
+Ubuntu WSL の Secret Service、同じユーザー session の D-Bus、collection の unlock は別途必要です。
+`DBUS_SESSION_BUS_ADDRESS` / `XDG_RUNTIME_DIR` は秘密値ではない接続 context として必要な取得 process にだけ引き継ぎます。
+`credential_reader_unavailable` は実行 file の不足、`credential_unavailable` は取得不可、
+`credential_timeout` は取得時間切れです。catalog の静的な可否は、鍵の存在や unlock を検査しません。
+残高の取得不可は会話の成功・失敗とは別に表示します。
+
+ここで確認済みなのは合成 store・設定生成・guard の対照です。実 WSL の版・arch・サービス環境、
+runtime の Linux 依存と認証・Mail・終了/resume は受け入れ前です。Secret Service/D-Bus の構築を
+動作済みの手順として案内するものではありません。Windows bridge、公開 login CLI、設定の自動移行は含みません。
+
+### 既存の導入と設定
+
+Claude Code / Codex CLI を使う人は、下の共通導入と各 CLI のログインの手順から始めます。API の model を dsh / Hermes で使う人は、先に[対応組合せと制限](managed-catalog.md)を確認してください。実機で確認した経路は現在 macOS の legacy mode で、WSL2 / Linux の共通導入手順だけでは使えません。
 
 起動までに用意するものは、任意導入する harness、接続先 backend の URL と正式な model ID、資格を取り出す参照、これらを結ぶ私有 manifest と harness 設定、作業 folder と親を使うかの選択です。installer は backend やログインを作らず、共通の provider ログイン機能は設計中です。利用者が設定を準備する工程と、runtime を導入する工程を分けてください。
+
+### 同梱例から設定を準備する
+
+installは `examples/native-harnesses/` に[日本語手順と4つの非有効例](../examples/native-harnesses/README.md)を配ります。導入済みruntimeは所有receipt/currentを検証し、参照入りの `resolved/<snapshot-id>/` を完了時に案内します（B標準）。未導入・model変更・調整では、既存agentが非秘密設定を補助するAの手順を使えます。コピー後の絶対参照3箇所と接続先を合わせ、本人が秘密入力・有効化を承認します。例は常に `enabled: false`、既存例/私有設定は非上書きで、例を置くだけでcatalogを有効にしません。
+
+MacのKeychain形式とLinuxのSecret Service `credential_ref` は同梱手順で区別します。Linux対応sourceの静的準備は、実WSLの秘密取得/接続/Mail/終了/resumeの受入を意味しません。uninstall/purgeは所有記録のhashと一致する未編集の例だけを削除し、利用者コピー・編集済み/未記録fileは保持します。
 
 `install.sh --enable-dsh --dsh-node /absolute/node` はdsh 0.2.1-rc.2 / TUI 0.16.1と標準起動用のnative hook adapter、`--enable-hermes` は固定commit d923a5eb487a17c0a68801bba9ef0f56c81040a8のHermesを `harnesses/{dsh,hermes}/<世代>` へ導入します。両方なら2つのenableを指定します。既定ではどちらも取得せず、更新時は各々の保存済みenabledを継承します。Nodeは既存の24.2以上を絶対pathで指定し、本体は取得しません。取得はnpm/GitHubとHermesの固定PMに必要な配布元から行います。`--harness-cache PATH` はdshのtarball/npm offline cacheとHermesのlocal sourceを参照します（Hermes PMの依存取得は別です）。`--dry-run` は取得・書込なしです。
 
@@ -16,9 +50,9 @@ Nodeの絶対pathは `AGENTSTACK_DSH_NODE` としてenv.shに保存され、通�
 
 `--disable-dsh` / `--disable-hermes` は選択を無効化し、導入済みfileは保持します。通常のuninstallは所有receiptに記録したruntime世代とadapterを削除し、`harnesses/<harness>/profiles` の記憶・skillsは保持します。既存の手動 `hermes-managed` / Hermes homeは読まず触れず、外部Node、提供したcacheも保持します。鍵やログインは導入/移行しません。各harnessの `current.json` がruntimeの絶対参照を記録します。backend URL・model・Keychain service/accountは別途利用者が設定し、起動前に静的に検査します。導入のみでcatalogを利用可にはしません。
 
-設定後に catalog の利用可否を確認し、[cockpit の New Agent / Harness / Lineage から Mail を往復](getting-started.md#5-しりとりで通しの確認をする)させます。同梱 dashboard の NEW AGENT は harness を送らないため、DeepSeek / Local の子の起動には使えません。画面を使わない起動の詳細は [API reference](api.md) を参照してください。catalog の候補表示は、資格・接続・tool・Mail の成功を確かめる試験ではありません。
+設定後に catalog の利用可否を確認し、[cockpit の New Agent / Harness / Lineage から Mail を往復](getting-started.md#5-しりとりで通しの確認をする)させます。同梱 dashboard の NEW AGENT でも、catalog で available な DeepSeek / Local の model と Harness（dsh または Hermes）を選べます。画面を使わない起動の詳細は [API reference](api.md) を参照してください。catalog の候補表示は、資格・接続・tool・Mail の成功を確かめる試験ではありません。
 
-Hermes の子ごとの独立した記憶は実装中で、今の固定版では backend ごとの profile を共有します。会話の resume と記憶の分離は別の機能です。共通 Telegram 入口は設計中、Local の手動 effort は実 Local server での受け入れ前です（[現在の制限](managed-catalog.md#現在の制限)）。
+Hermes の新しい子は project と canonical 名ごとの安定した独立 HOME を使い、正規 resume では保存 pin と exact native session ID を照合して同じ HOME を使います。旧共有 HOME の pin は `native_resume_legacy_profile` で停止し、旧データや pin を自動移行しません。合成 provider を使う実 CLI で保存・同 HOME / ID の復帰・別子との非共有を確認していますが、resume 時に最新 memory を初回 system prompt へ再注入するものではなく、実 provider・full Mail の通し受け入れは未完です。共通 Telegram 入口は設計中、Local の手動 effort は実 Local server での受け入れ前です（[現在の制限](managed-catalog.md#現在の制限)）。
 
 [README に戻る](../README.md) · [次: Launcher と identity](launchers.md)
 
@@ -394,7 +428,7 @@ installer は payload と `VERSION` を更新し、service を再登録して、
 2. 前回の install が書いた `~/.agentstack/env.sh` の値
 3. 既定値
 
-したがって、既定値から変えた設定は、環境変数のない新しい端末で `./scripts/install.sh` を実行しても保たれます。対象は project key と protected roots、dashboard port（`AGENTSTACK_PORT`）、label prefix（`AGENTSTACK_LABEL_PREFIX`）とそこから決まる ORRERY Mail の launchd label、terminal、MCP URL、service の `PATH`、Python、ORRERY Mail の state root（DB の場所）と service root と management socket、`AGENTSTACK_LANG` / `AGENTSTACK_MURMUR` / `AGENTSTACK_DELIVERABLE_ROOTS`、`AGENTSTACK_VAULT`、`AGENTSTACK_MANAGED_AGENTS_FILE`、dashboard の log と再起動の設定（`AGENTSTACK_DASHBOARD_LOG` / `_LOG_MAX_BYTES` / `_LOG_BACKUPS` / `_RESTART_DELAY`）、spawn の dirs / roots、worktree root、Codex child の設定、`AGENTSTACK_CODEX_BIN`、portraits、model catalog です。一覧は `hooks/project-context.sh` の `AGENTSTACK_INHERITED_SETTINGS` が正本です。
+したがって、既定値から変えた設定は、環境変数のない新しいターミナルで `./scripts/install.sh` を実行しても保たれます。対象は project key と protected roots、dashboard port（`AGENTSTACK_PORT`）、label prefix（`AGENTSTACK_LABEL_PREFIX`）とそこから決まる ORRERY Mail の launchd label、terminal、MCP URL、service の `PATH`、Python、ORRERY Mail の state root（DB の場所）と service root と management socket、`AGENTSTACK_LANG` / `AGENTSTACK_MURMUR` / `AGENTSTACK_DELIVERABLE_ROOTS`、`AGENTSTACK_VAULT`、`AGENTSTACK_MANAGED_AGENTS_FILE`、dashboard の log と再起動の設定（`AGENTSTACK_DASHBOARD_LOG` / `_LOG_MAX_BYTES` / `_LOG_BACKUPS` / `_RESTART_DELAY`）、spawn の dirs / roots、worktree root、Codex child の設定、`AGENTSTACK_CODEX_BIN`、portraits、model catalog です。一覧は `hooks/project-context.sh` の `AGENTSTACK_INHERITED_SETTINGS` が正本です。
 
 - **引き継ぐのは選んだ値だけです。** `env.sh` には既定値も含めてすべての値が書かれるので、どれを明示して選んだかを `AGENTSTACK_CHOSEN_SETTINGS` に一緒に記録し、次の install はそれだけを引き継ぎます。選んでいない値（書き出された既定値、installer が探して見つけた Python や PATH）は、次の版で既定値が変われば新しい既定値になります。この記録が無い以前の版の `env.sh` では、今の既定値と違う値を選んだものとみなします（PATH と Python は installer が自分で決めていたので除きます）。`AGENTSTACK_CODEX_BIN` は探して見つけた場所も引き継ぎます（使えなくなっていれば探し直します）。
 - 前回の値を変えるには、その option か環境変数を明示します（例: `./scripts/install.sh --port 8771`）。

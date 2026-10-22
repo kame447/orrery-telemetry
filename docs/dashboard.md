@@ -297,7 +297,7 @@ TIME-TRAVEL ON は initial snapshot から node、edge、state を再構築し�
 
 ## NEW AGENT
 
-![NEW AGENT modal — identity / engine / directory / task の launch manifest](img/new-agent.jpg)
+![NEW AGENT で設定済み Local Qwen の Model と dsh / Hermes の Harness を選ぶ](img/native-harness-picker.png)
 
 `+ NEW AGENT` は identity、engine、directory、task を順に確認する launch manifest です。通常項目を一方向に並べ、parent / role / group / isolation は ADVANCED に畳むことで、standalone agent の起動を最短経路にしています。
 
@@ -319,11 +319,24 @@ scientist rail の `available` は bare surname ではなく、134 adjective の
 - Claude は Sonnet / Opus / Haiku
 - Codex の既定は起動対象 CLI が 0.159.0 以上なら `gpt-6.1-sol`、古い版なら `gpt-6-sol`（版不明なら新鮮な catalog で判定）。旧世代は `gpt-6-sol` など正式 ID で指定できます
 - Codex の effort 候補は model catalog の `model_efforts` / `model_effort_defaults` に従います。明示 effort の最終可否は Codex CLI が判定します
-- DeepSeek / Local は起動に harness（dsh / hermes）が必須です。この NEW AGENT はその指定を送らないため、catalog に並んでも画面からは起動できません。[cockpit を追加した環境での確認手順](getting-started.md#5-しりとりで通しの確認をする)、画面を使わない起動は [API reference](api.md) の `POST /api/spawn` を参照してください
+- DeepSeek / Local は設定済み catalog の Model と Harness（dsh / Hermes）から選びます。model を選んで利用可能な harness を指定し、利用不可の項目は「Coming soon」と表示され、選択できません。Helper と Effort は選んだ model / harness の能力に従います。[設定手順](install.md)と[API reference](api.md)も参照してください。
 
 server の provider / model / effort allow-list を catalog と validation の両方に使います。
 
-この節と NEW AGENT の画像は Telemetry 同梱画面の説明です。cockpit の New Agent / Harness / Lineage とは選べる項目が異なります。DeepSeek / Local の現在の OS・設定・effort の範囲は[対応組合せ](managed-catalog.md)を参照してください。
+この節は Telemetry 同梱画面の説明です。Model / Harness は cockpit と同じ英語の語彙を使いますが、directory dialog や Lineage の項目まで同一ではありません。OS の資格設定・memory・Local effort の範囲は[対応組合せと制限](managed-catalog.md)を参照してください。
+
+<a id="native-models-and-harnesses"></a>
+### DeepSeek / Local と dsh / Hermes
+
+設定済みの provider、Model、利用可能な Harness を順に選びます。GIF は SPAWN の手前までです。[Model / Harness の選択操作を見る](img/native-harness-selection.gif)。
+
+NEW AGENT の画像と GIF は、実際の catalog・科学者名・正規の肖像を使った Telemetry 同梱画面です。Claude / Codex / DeepSeek / Local models と dsh / Hermes の選択を起動前まで撮影し、作業ディレクトリと task は切り取っています。[cockpit の NEW AGENT](https://github.com/gyroid-eth/orrery/blob/master/docs/usage.md)とは画面が異なります。以下の DECK / NETWORK は引き続き合成データの表示例です。いずれも資格の登録や全組合せの通し受け入れを示すものではありません。
+
+![DECK で DeepSeek と Local Qwen の dsh / Hermes agent を見分ける画面例](img/native-local-deck.png)
+
+Local Qwen は六角形の中に Qwen のロゴを表示し、DeepSeek は接続先の badge を表示します。agent を比べるときは Harness も別に確認してください。
+
+![NETWORK のメダリオンで Local Qwen と DeepSeek を見分ける画面例](img/native-local-network.png)
 
 ### Directory
 

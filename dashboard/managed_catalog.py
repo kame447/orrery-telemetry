@@ -103,8 +103,10 @@ def load_standard_inputs(config_file, *, mode):
                 try:
                     if mode != 'legacy':
                         raise ValueError('unsupported_mode')
-                    if sys.platform != 'darwin':
+                    if sys.platform not in ('darwin', 'linux'):
                         raise ValueError('unsupported_platform')
+                    if sys.platform == 'linux' and 'credential_ref' not in spec:
+                        raise ValueError('credential_reader_unavailable')
                     opt_in = Path(__file__).with_name(harness + '-provider.json')
                     if opt_in.exists() and _read(opt_in).get('enabled') is not True:
                         raise ValueError('disabled_by_opt_in')
