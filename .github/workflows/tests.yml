@@ -1,5 +1,9 @@
 name: tests
 
+env:
+  PIP_INDEX_URL: https://pypi.flatt.tech/simple/
+  UV_DEFAULT_INDEX: https://pypi.flatt.tech/simple/
+
 on:
   push:
   pull_request:
