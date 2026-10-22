@@ -124,7 +124,7 @@ def _run_child_session_start(
         session_cwd.symlink_to(project, target_is_directory=True)
     transcript = tmp_path / "claude" / "projects" / "-p" / "abc123.jsonl"
     transcript.parent.mkdir(parents=True)
-    transcript.write_text("{}\n", encoding="utf-8")
+    transcript.write_text(json.dumps({"cwd": str(session_cwd)}) + "\n", encoding="utf-8")
     payload = {"session_id": "sess-child-1", "hook_event_name": "SessionStart", "cwd": str(session_cwd)}
     if with_transcript:
         payload["transcript_path"] = str(transcript)
@@ -208,9 +208,11 @@ def test_an_aliased_session_cwd_binds_the_physical_workspace(mail: str, tmp_path
 
 
 def test_the_index_is_exact_authority_for_the_dashboard(mail: str, tmp_path: Path, monkeypatch) -> None:
-    _, runtime, transcript, _ = _run_child_session_start(tmp_path, mail)
+    _, runtime, transcript, project = _run_child_session_start(tmp_path, mail)
     import dashboard.server as server
 
+    monkeypatch.setattr(server, "PROJECT_KEY", str(project))
+    monkeypatch.setattr(server, "_PROJECT_KEY_CACHE", {"signature": None, "value": ""})
     monkeypatch.setattr(server, "SESSION_INDEX_DIR", str(runtime / "session_index"))
     monkeypatch.setattr(server, "_agent_id_for_name", lambda name: AGENT_ID if name == CHILD else None)
     assert server._indexed_transcript(CHILD) == str(transcript)

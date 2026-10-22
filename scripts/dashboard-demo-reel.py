@@ -836,6 +836,7 @@ def _apply_agent_add_batch(
         data = AGENTS[name]
         annot["agents"][name] = {
             "role": data["role"], "emoji": data["emoji"], "group": data["group"],
+            "project_key": str((root / "project").resolve()),
         }
     _atomic_json(root / "runtime" / "annotations.json", annot)
     for name in names:

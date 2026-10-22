@@ -275,6 +275,8 @@ Because expecting people to infer the problem from a missing face is too weak, *
 
 The record is `$AGENTSTACK_RUNTIME_DIR/name-substitutions.json` and is written only when registration substitutes a name.
 
+Records are separated by `projects[project_key][registered_name]` and checked against each entry's recorded `project_key`. The Dashboard and shell launchers use the same format. Unattributed legacy entries are preserved but are not displayed under a same-name agent in another project.
+
 To recover, configure a server that accepts the name and **restart the agent**. An already registered identity cannot be renamed later.
 
 ## Registration / inbox authentication fails

@@ -26,13 +26,13 @@ def test_canonical_dashboard_key_resolves_configured_repository(monkeypatch, tmp
     monkeypatch.delenv("AGENTSTACK_PROJECT_WORK_DIR", raising=False)
 
     def resolver(action: str, *args: str, configured_fallback: bool = False):
-        assert action == "resolve-project-key"
+        assert action == "resolve-invocation-project-key"
         return True, "/canonical/repository"
 
     monkeypatch.setattr(server, "_context_helper_result", resolver)
     assert server._canonical_dashboard_project_key() == "/canonical/repository"
-    # Phase 7b1 is primitive-only: existing reads are not switched yet.
-    assert server._project_key() == str(configured)
+    # Every read now uses the same canonical namespace as session attribution.
+    assert server._project_key() == "/canonical/repository"
 
 
 def test_session_key_mismatch_fails_before_path_fallback(monkeypatch):

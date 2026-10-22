@@ -1163,29 +1163,52 @@ ags_store_registration_token() {
 # other trace is a missing portrait — which reads as a style, not a fault.
 # Best effort: a spawn that otherwise worked must not fail over bookkeeping.
 ags_record_name_substitution() {
-  local registered="$1" requested="$2" runtime_dir store
+  local registered="$1" requested="$2"
+  local project_key="${3:-${AGENTSTACK_PROJECT_KEY:-${PROJECT_KEY:-}}}"
+  local runtime_dir store
   [[ -n "$registered" && -n "$requested" && "$registered" != "$requested" ]] || return 0
+  [[ -n "$project_key" ]] || return 1
+  project_key="$(ags_normalize_project_key "$project_key")" || return 1
   runtime_dir="$(ags_registration_runtime_dir)"
   store="$runtime_dir/name-substitutions.json"
   mkdir -p "$runtime_dir" || return 1
-  "${AGENTSTACK_PYTHON:-python3}" - "$store" "$registered" "$requested" <<'PY' || return 1
+  "${AGENTSTACK_PYTHON:-python3}" - "$store" "$registered" "$requested" "$project_key" <<'PY' || return 1
 import json
 import os
 import pathlib
 import sys
 from datetime import datetime, timezone
 
-store, registered, requested = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+store, registered, requested, project_key = (
+    pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+)
 try:
     data = json.loads(store.read_text(encoding="utf-8"))
 except (OSError, ValueError):
     data = {}
 if not isinstance(data, dict):
     data = {}
-data[registered] = {
+projects = data.get("projects")
+if not isinstance(projects, dict):
+    projects = {}
+    for legacy_name, entry in data.items():
+        if not isinstance(legacy_name, str) or not isinstance(entry, dict):
+            continue
+        owner = entry.get("project_key")
+        if isinstance(owner, str) and owner:
+            owner_store = projects.setdefault(owner, {})
+            if isinstance(owner_store, dict):
+                owner_store[legacy_name] = entry
+project_store = projects.setdefault(project_key, {})
+if not isinstance(project_store, dict):
+    project_store = {}
+    projects[project_key] = project_store
+project_store[registered] = {
     "requested": requested,
+    "project_key": project_key,
     "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
 }
+data["projects"] = projects
 tmp = store.with_name(store.name + f".{os.getpid()}.tmp")
 tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 tmp.replace(store)
@@ -1539,7 +1562,7 @@ ags_register_session() {
     return 1
   fi
   if [[ "$registered" != "$agent_name" ]]; then
-    ags_record_name_substitution "$registered" "$agent_name" || true
+    ags_record_name_substitution "$registered" "$agent_name" "$project_key" || true
   fi
   CHILD_REGISTRATION_TOKEN="$registered_token"
   AGS_REGISTERED_REGISTRATION_TOKEN="$registered_token"

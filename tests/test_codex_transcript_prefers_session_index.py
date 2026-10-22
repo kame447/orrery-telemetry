@@ -12,19 +12,21 @@ from dashboard import server
 
 
 def test_indexed_transcript_wins_over_nearest_rollout(monkeypatch):
+    monkeypatch.setattr(server, "_project_key", lambda: "transcript-fixture")
     with tempfile.TemporaryDirectory() as tmp:
         exact = os.path.join(tmp, "rollout-exact.jsonl")
         open(exact, "w", encoding="utf-8").close()
-        server._TPATH_CACHE.pop(("codex", "IndexedCodex"), None)
+        server._TPATH_CACHE.pop(("codex", "transcript-fixture", "IndexedCodex"), None)
         monkeypatch.setattr(server, "_indexed_transcript", lambda name: exact if name == "IndexedCodex" else None)
         # The heuristic path must not even be consulted: no sessions dir.
         monkeypatch.setattr(server, "_CODEX_SESSIONS_DIR", os.path.join(tmp, "absent"))
         assert server._codex_transcript_path("IndexedCodex") == exact
-        assert server._TPATH_CACHE[("codex", "IndexedCodex")][1] == exact
+        assert server._TPATH_CACHE[("codex", "transcript-fixture", "IndexedCodex")][1] == exact
 
 
 def test_without_an_index_record_the_heuristic_still_runs(monkeypatch):
-    server._TPATH_CACHE.pop(("codex", "PlainCodex"), None)
+    monkeypatch.setattr(server, "_project_key", lambda: "transcript-fixture")
+    server._TPATH_CACHE.pop(("codex", "transcript-fixture", "PlainCodex"), None)
     monkeypatch.setattr(server, "_indexed_transcript", lambda _name: None)
     monkeypatch.setattr(server, "_CODEX_SESSIONS_DIR", "/nonexistent/codex/sessions")
     assert server._codex_transcript_path("PlainCodex") is None

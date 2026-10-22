@@ -7,6 +7,7 @@ import pytest
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -37,6 +38,16 @@ PROXY_TOOLS = (
 # of these fail there with FileNotFoundError. None means "use the platform
 # default", which on Linux is /tmp and is already short.
 SHORT_TMP_DIR = "/private/tmp" if os.path.isdir("/private/tmp") else None
+
+def _socket_connectable(path: Path) -> bool:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(0.2)
+        try:
+            client.connect(str(path))
+            return True
+        except (FileNotFoundError, ConnectionRefusedError, socket.timeout):
+            return False
+
 
 def _environment(home: Path) -> dict[str, str]:
     environment = os.environ.copy()
@@ -248,9 +259,9 @@ exit 0
 
         socket_path = runtime_dir / "bridge.sock"
         deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and not socket_path.exists():
+        while time.monotonic() < deadline and not _socket_connectable(socket_path):
             time.sleep(0.05)
-        assert socket_path.is_socket()
+        assert _socket_connectable(socket_path)
 
         child_pidfile = runtime_dir / "bridge-child.pid"
         deadline = time.monotonic() + 5
@@ -267,10 +278,11 @@ exit 0
                 )
             except (FileNotFoundError, ValueError):
                 pass
-            if restarted_child_pid != first_child_pid and socket_path.is_socket():
+            if restarted_child_pid != first_child_pid and _socket_connectable(socket_path):
                 break
             time.sleep(0.05)
         assert restarted_child_pid != first_child_pid
+        assert _socket_connectable(socket_path)
         os.kill(supervisor_pid, 0)
 
         doctor = subprocess.run(

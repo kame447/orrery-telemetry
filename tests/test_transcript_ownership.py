@@ -105,11 +105,11 @@ def test_a_stronger_later_claim_evicts_the_weaker_one():
     server = _load_server()
     server._TPATH_OWNER.clear()
     server._TPATH_CACHE.clear()
-    server._TPATH_CACHE[CHILD] = (1.0, "/t/parent.jsonl")
+    server._TPATH_CACHE[("claude", server._project_key(), CHILD)] = (1.0, "/t/parent.jsonl")
     assert server._claim_transcript("/t/parent.jsonl", CHILD, 10, exact=False)
     assert server._claim_transcript("/t/parent.jsonl", PARENT, 400, exact=False)
     assert server._TPATH_OWNER["/t/parent.jsonl"][0] == PARENT
-    assert CHILD not in server._TPATH_CACHE, "the loser kept a stale cached answer"
+    assert ("claude", server._project_key(), CHILD) not in server._TPATH_CACHE, "the loser kept a stale cached answer"
 
 
 def test_an_exact_session_index_match_is_never_taken_away():
@@ -156,7 +156,9 @@ def test_a_legacy_index_record_is_not_exact_authority(tmp_path, monkeypatch):
     index_dir = tmp_path / "session_index"
     index_dir.mkdir()
     transcript = tmp_path / "legacy-parent.jsonl"
-    transcript.write_text("{}\n", encoding="utf-8")
+    transcript.write_text(json.dumps({"cwd": str(tmp_path.resolve())}) + "\n", encoding="utf-8")
+    monkeypatch.setattr(server, "PROJECT_KEY", str(tmp_path.resolve()))
+    monkeypatch.setattr(server, "VAULT", "")
     (index_dir / "77.json").write_text(
         json.dumps(
             {
@@ -183,6 +185,7 @@ def test_a_legacy_index_record_is_not_exact_authority(tmp_path, monkeypatch):
                 "registered_by": "",
                 "schema_version": 2,
                 "binding_kind": "self",
+                "project_key": str(tmp_path.resolve()),
             }
         ),
         encoding="utf-8",

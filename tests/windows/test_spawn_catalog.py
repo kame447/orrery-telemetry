@@ -79,11 +79,27 @@ def test_catalog_and_suggestions_use_same_vocabulary_without_launch(tmp_path, mo
     monkeypatch.setattr(server, "SPAWN_SCIENTISTS_SCRIPT", str(script))
     database = tmp_path / "roster.sqlite3"
     with sqlite3.connect(database) as con:
-        con.execute("CREATE TABLE agents (name TEXT)")
-        con.executemany("INSERT INTO agents VALUES (?)", [("Sunny-Curie",), ("Zesty-Curie",)])
+        con.execute("CREATE TABLE projects (id INTEGER PRIMARY KEY, human_key TEXT)")
+        con.execute("CREATE TABLE agents (project_id INTEGER, name TEXT)")
+        con.executemany(
+            "INSERT INTO projects VALUES (?, ?)",
+            [(1, "project-a"), (2, "project-b")],
+        )
+        con.executemany(
+            "INSERT INTO agents VALUES (?, ?)",
+            [
+                (1, "Sunny-Curie"),
+                (1, "Zesty-Curie"),
+                (2, "Sunny-Zulu"),
+                (2, "Zesty-Zulu"),
+            ],
+        )
     monkeypatch.setattr(server, "DB_PATH", str(database))
+    monkeypatch.setattr(server, "_canonical_dashboard_project_key", lambda: "project-a")
+
     def forbidden(*args, **kwargs):
         raise AssertionError("must not execute subprocess or register agents")
+
     monkeypatch.setattr(server.subprocess, "run", forbidden)
     monkeypatch.setattr(server, "_mcp_jsonrpc", forbidden)
     catalog = server.spawn_names_payload()

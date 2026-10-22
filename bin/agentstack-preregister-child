@@ -209,7 +209,7 @@ ags_commit_registration_ownership "$context_json" "$agent_name" "$registered" \
 if [[ "$registered" != "$agent_name" ]]; then
   # Publish annotation only after the returned host-global identity is accepted
   # and its owner/token pair is durable.
-  ags_record_name_substitution "$registered" "$agent_name" || true
+  ags_record_name_substitution "$registered" "$agent_name" "$project_key" || true
 fi
 
 token_dir="$(dirname "$token_file_out")"

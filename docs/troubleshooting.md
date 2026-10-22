@@ -295,6 +295,8 @@ listener なので、DB path を推測せず `agentstack-doctor --report` で所
 
 記録は `$AGENTSTACK_RUNTIME_DIR/name-substitutions.json` にあり、登録が置き換わった場合のみ書かれます。
 
+記録は `projects[project_key][registered_name]` に分離され、各 entry の `project_key` も照合します。Dashboard と shell launcher は同じ形式を使います。所有先不明の旧 entry は保持しますが、同名の別 project へ表示を引き継ぎません。
+
 復旧するには、名前を受け付けるサーバーにしたうえで**エージェントを起動し直します**。既に登録された identity の名前は後から変えられません。
 
 ## Registration / inbox の認証に失敗する

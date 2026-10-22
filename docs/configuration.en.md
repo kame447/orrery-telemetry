@@ -287,6 +287,10 @@ When `AGENTSTACK_RUNTIME_DIR` is unset, it becomes `~/.agentstack/runtime/annota
 
 An existing installation's `dashboard/annotations.json` is migrated automatically.
 
+The store uses `projects[project_key].agents[agent_name]`, and each entry also records its `project_key`. The Dashboard displays only entries attributable to its canonical project. Same-name agents in different projects do not share annotation updates, deletes, or cached values.
+
+Legacy entries remain readable when their recorded `project_key` verifies ownership. Unattributed legacy entries are preserved, not assigned to the current project by guessing from a name or a new binding. An unconfigured Dashboard returns no annotations and rejects annotation writes.
+
 - If the new path exists, always read it
 - If the new path is absent and only the old path exists, read the old store and write all agents to the new path on the next annotation update. This lazy migration leaves the old file
 - On reinstall, move the old store into runtime before copying payloads. Failure to remove the old file after migration is only a warning; installation and annotations are preserved
