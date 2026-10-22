@@ -2,7 +2,7 @@
 
 This folder preserves the original PR titles, descriptions, author/time metadata, head commit identifiers, and issue-level comments from `kame447/orrery-telemetry-pre-fork-history` (47 PRs) before potential deletion of the old repository. None of these records means that the changes have been newly merged.
 
-Original GitHub approvals, full CI logs, individual event timelines and deleted attachment payloads are not reproduced. Metadata for the 13 old CI runs referenced from upstream is preserved in [ci-runs.md](ci-runs.md). Original issue references inside fenced archived text refer to legacy numbering. All active work should take place in `kame447/orrery-telemetry`.
+Original GitHub approvals, full CI logs, individual event timelines and deleted attachment payloads are not reproduced. Metadata for the 39 old CI runs referenced from upstream and the migrated fork is preserved in [ci-runs.md](ci-runs.md). Original issue references inside fenced archived text refer to legacy numbering. All active work should take place in `kame447/orrery-telemetry`.
 
 | Legacy PR | Original state | Current successor | Title |
 | --- | --- | --- | --- |
