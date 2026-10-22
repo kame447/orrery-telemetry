@@ -166,6 +166,13 @@ class ReleaseHookTests(unittest.TestCase):
         env: dict[str, str],
         cwd: Path,
     ) -> subprocess.CompletedProcess[str]:
+        # Claude Code sends the session cwd with every hook payload; the
+        # missing-cwd fallback has its own tests in
+        # test_reservation_project_isolation.py.
+        document = json.loads(payload)
+        if isinstance(document, dict):
+            document.setdefault("cwd", str(cwd))
+            payload = json.dumps(document)
         return subprocess.run(
             ["/bin/bash", str(hook)],
             input=payload,
@@ -326,7 +333,8 @@ class ReleaseHookTests(unittest.TestCase):
                         "session_id": "desktop-session",
                         "agent_name": "IndexedCurie",
                         "registered_by": "IndexedCurie",
-                        "project_key": str(project),
+                        # Bindings carry the canonical key the hooks look up.
+                        "project_key": str(project.resolve()),
                     }
                 ),
                 encoding="utf-8",
@@ -388,7 +396,9 @@ class ReleaseHookTests(unittest.TestCase):
             self.assertEqual(request["params"]["name"], "release_file_reservations")
             self.assertEqual(
                 request["params"]["arguments"],
-                {"project_key": str(project), "agent_name": "PluckyEinstein"},
+                # The namespace is the validated canonical project key, so a
+                # /tmp or /var spelling becomes its physical path.
+                {"project_key": str(project.resolve()), "agent_name": "PluckyEinstein"},
             )
 
     def test_template_wires_all_release_hooks(self) -> None:

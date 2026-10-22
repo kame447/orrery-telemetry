@@ -7,9 +7,11 @@ RUNTIME_DIR="${AGENTSTACK_RUNTIME_DIR:-${RUNTIME_DIR:-$HOME/.agentstack/runtime}
 PROJECT_CONTEXT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/project-context.sh"
 # shellcheck disable=SC1090
 . "$PROJECT_CONTEXT_LIB"
-LIVE_PROJECT_KEY="${AGENTSTACK_PROJECT_KEY:-${PROJECT_KEY:-}}"
-PROJECT_KEY="$(agentstack_resolve_project_key "$(pwd -P)")"
-PROTECTED_ROOTS="$(agentstack_resolve_protected_roots "$PROJECT_KEY" "$LIVE_PROJECT_KEY")"
+# Project, workspace and protected roots are resolved per hook invocation by
+# reservation_resolve_workspace below, never from this process's own directory.
+RESERVATION_PROJECT_KEY=""
+RESERVATION_WORK_DIR=""
+PROTECTED_ROOTS=""
 
 POLICY_LIB_EARLY="$HOOKS_DIR/session-identity-policy.sh"
 if [ -f "$POLICY_LIB_EARLY" ]; then
@@ -102,79 +104,184 @@ legacy_bearer_enabled() {
     esac
 }
 
-# Populate SESSION_ID, FILE_PATH, MATCHED_ROOT, REL_PATH, and
-# RESERVATION_PROJECT_KEY from an Edit/Write hook document. Return 1 for the
-# intentional no-op cases (no file or a file outside all protected roots).
-reservation_resolve_tool_context() {
+reservation_extract_session_id_only() {
     local tool_document="$1"
     SESSION_ID=$(printf '%s' "$tool_document" | python3 -c '
 import json, sys
 try:
-    print(json.loads(sys.stdin.read()).get("session_id", ""))
+    value = json.loads(sys.stdin.read()).get("session_id", "")
+    print(value if isinstance(value, str) else "")
 except Exception:
     print("")
 ' 2>/dev/null || echo "")
     export AGENTSTACK_SESSION_ID="$SESSION_ID"
+}
+
+# Resolve the hook invocation's actual workspace and the Mail namespace it may
+# act in. The payload cwd is the only workspace evidence: the hook process's
+# own directory can belong to another session or repository, so a payload
+# without an absolute, existing cwd is unresolved rather than guessed.
+#
+# A selected key (live AGENTSTACK_PROJECT_KEY/PROJECT_KEY, else the installed
+# one) must validate against that workspace; with no selection the key derived
+# from the workspace is used. Either way the namespace is the validated
+# context's canonical project_key, never the selection's own spelling.
+# Protection always starts at the actual worktree root, so configured roots can
+# add same-repository worktrees but can never replace the workspace edited.
+#
+# Sets RESERVATION_PROJECT_KEY, RESERVATION_WORK_DIR and PROTECTED_ROOTS.
+# Returns 2 when the workspace is missing or invalid and 3 when the selected
+# project does not belong to it. Callers must not classify paths or contact
+# Mail after a nonzero return.
+reservation_resolve_workspace() {
+    local tool_document="$1" cwd_state="" target="" work_dir="" selected=""
+    local context="" repository="" workspace_root="" configured="" root=""
+    local root_context="" old_ifs=""
+    RESERVATION_PROJECT_KEY=""
+    RESERVATION_WORK_DIR=""
+    PROTECTED_ROOTS=""
+    cwd_state=$(printf '%s' "$tool_document" | python3 -c '
+import json, os, sys
+try:
+    document = json.loads(sys.stdin.read())
+except Exception:
+    document = {}
+value = document.get("cwd") if isinstance(document, dict) else None
+ok = isinstance(value, str) and os.path.isabs(value) and "\n" not in value
+print(("value:" + value) if ok else "invalid:")
+' 2>/dev/null || echo "invalid:")
+    case "$cwd_state" in
+        value:*) target="${cwd_state#value:}" ;;
+        *) return 2 ;;
+    esac
+    work_dir="$(agentstack_physical_dir "$target")" || return 2
+
+    selected="$(agentstack_resolve_project_key "" "" 0)"
+    if [ -n "$selected" ]; then
+        context="$(agentstack_validate_project_context "$work_dir" "$selected" 2>/dev/null)" || return 3
+    else
+        context="$(agentstack_resolve_invocation_context "$work_dir" 2>/dev/null)" || return 2
+    fi
+    RESERVATION_PROJECT_KEY="$(agentstack_context_field "$context" project_key)" || return 2
+    repository="$(agentstack_context_field "$context" repository_key)" || return 2
+    workspace_root="$(agentstack_context_field "$context" worktree_root)" || return 2
+    if [ -z "$workspace_root" ]; then
+        # A non-Git project root is the validated selection when it names one;
+        # validation has already proved the workspace lies inside it.
+        if [ -n "$selected" ] && [ -d "$selected" ]; then
+            workspace_root="$(agentstack_physical_dir "$selected")" || return 2
+        elif [ -n "$selected" ]; then
+            workspace_root="$(agentstack_physical_dir "${AGENTSTACK_PROJECT_WORK_DIR:-}")" || return 2
+        else
+            workspace_root="$work_dir"
+        fi
+    fi
+    [ -n "$RESERVATION_PROJECT_KEY" ] && [ -n "$workspace_root" ] || return 2
+    PROTECTED_ROOTS="$workspace_root"
+
+    configured="$(agentstack_resolve_protected_roots "$RESERVATION_PROJECT_KEY" \
+        "${AGENTSTACK_PROJECT_KEY:-${PROJECT_KEY:-}}")"
+    if [ -n "$repository" ] && [ -n "$configured" ]; then
+        old_ifs="$IFS"
+        IFS=":"
+        for root in $configured; do
+            IFS="$old_ifs"
+            root="$(agentstack_physical_dir "$(expand_path "$root")" 2>/dev/null)" || continue
+            [ "$root" != "$workspace_root" ] || continue
+            root_context="$(agentstack_resolve_invocation_context "$root" 2>/dev/null)" || continue
+            # Only another worktree root of this same repository shares the
+            # namespace and its relative paths; anything else is not ours.
+            [ "$(agentstack_context_field "$root_context" repository_key)" = "$repository" ] || continue
+            [ "$(agentstack_context_field "$root_context" worktree_root)" = "$root" ] || continue
+            PROTECTED_ROOTS="$PROTECTED_ROOTS:$root"
+        done
+        IFS="$old_ifs"
+    fi
+    RESERVATION_WORK_DIR="$work_dir"
+    export AGENTSTACK_LOOKUP_PROJECT_KEY="$RESERVATION_PROJECT_KEY"
+    return 0
+}
+
+# Populate SESSION_ID, FILE_PATH, MATCHED_ROOT, REL_PATH, and
+# RESERVATION_PROJECT_KEY from an Edit/Write hook document. Return 1 for the
+# intentional no-op cases (no file, or a file whose physical location is
+# outside every protected root), and 2/3 as reservation_resolve_workspace does.
+reservation_resolve_tool_context() {
+    local tool_document="$1" resolved="" status=0
+    reservation_extract_session_id_only "$tool_document"
     FILE_PATH=$(printf '%s' "$tool_document" | python3 -c '
 import json, sys
 try:
     data = json.loads(sys.stdin.read())
     tool_input = data.get("tool_input", {})
-    print(tool_input.get("file_path", tool_input.get("path", "")))
+    value = tool_input.get("file_path", tool_input.get("path", ""))
+    print(value if isinstance(value, str) else "")
 except Exception:
     print("")
 ' 2>/dev/null || echo "")
     [ -n "$FILE_PATH" ] || return 1
 
-    if [[ "$FILE_PATH" == /* ]]; then
-        :
-    elif [[ "$FILE_PATH" == "~/"* ]]; then
-        FILE_PATH="$HOME/${FILE_PATH:2}"
-    else
-        FILE_PATH="$(pwd)/$FILE_PATH"
-    fi
+    reservation_resolve_workspace "$tool_document" || return $?
 
-    MATCHED_ROOT=""
-    if [[ -n "$PROTECTED_ROOTS" ]]; then
-        local old_ifs="$IFS"
-        local root
-        IFS=":"
-        for root in $PROTECTED_ROOTS; do
-            root="$(expand_path "$root")"
-            [[ -z "$root" ]] && continue
-            [[ "$root" != "/" ]] && root="${root%/}"
-            case "$FILE_PATH" in
-                "$root"|"$root/"*)
-                    MATCHED_ROOT="$root"
-                    break
-                    ;;
-            esac
-        done
-        IFS="$old_ifs"
-    fi
-    [ -n "$MATCHED_ROOT" ] || return 1
-
-    REL_PATH="${FILE_PATH#$MATCHED_ROOT/}"
-    if [[ "$REL_PATH" == "$FILE_PATH" ]]; then
-        REL_PATH="$(basename "$FILE_PATH")"
-    fi
-    RESERVATION_PROJECT_KEY="${PROJECT_KEY:-$MATCHED_ROOT}"
-    export AGENTSTACK_LOOKUP_PROJECT_KEY="$RESERVATION_PROJECT_KEY"
+    # Symlinks and ".." are resolved before matching, so a path spelled under a
+    # protected root cannot stand for a file somewhere else, and vice versa.
+    resolved=$(QUERY_FILE="$FILE_PATH" QUERY_BASE="$RESERVATION_WORK_DIR" \
+        QUERY_ROOTS="$PROTECTED_ROOTS" QUERY_HOME="$HOME" python3 -c '
+import os
+raw = os.environ["QUERY_FILE"]
+if raw.startswith("~/"):
+    raw = os.path.join(os.environ["QUERY_HOME"], raw[2:])
+elif not os.path.isabs(raw):
+    raw = os.path.join(os.environ["QUERY_BASE"], raw)
+absolute = os.path.realpath(raw)
+for root in os.environ["QUERY_ROOTS"].split(":"):
+    if not root:
+        continue
+    try:
+        inside = os.path.commonpath([absolute, root]) == root
+    except ValueError:
+        inside = False
+    if inside:
+        relative = os.path.relpath(absolute, root)
+        if relative == ".":
+            relative = os.path.basename(absolute)
+        print(root + "\n" + absolute + "\n" + relative)
+        break
+' 2>/dev/null)
+    status=$?
+    [ "$status" -eq 0 ] || return 2
+    [ -n "$resolved" ] || return 1
+    MATCHED_ROOT="$(printf '%s\n' "$resolved" | sed -n '1p')"
+    FILE_PATH="$(printf '%s\n' "$resolved" | sed -n '2p')"
+    REL_PATH="$(printf '%s\n' "$resolved" | sed -n '3p')"
+    [ -n "$MATCHED_ROOT" ] && [ -n "$FILE_PATH" ] && [ -n "$REL_PATH" ] || return 2
     return 0
 }
 
+# Session-scoped hooks (SessionEnd, reservation-tool PreToolUse) have no file
+# path, but still act only in the validated namespace of their own workspace.
 reservation_extract_session_id() {
     local tool_document="$1"
-    SESSION_ID=$(printf '%s' "$tool_document" | python3 -c '
-import json, sys
-try:
-    print(json.loads(sys.stdin.read()).get("session_id", ""))
-except Exception:
-    print("")
-' 2>/dev/null || echo "")
-    export AGENTSTACK_SESSION_ID="$SESSION_ID"
-    RESERVATION_PROJECT_KEY="$PROJECT_KEY"
-    export AGENTSTACK_LOOKUP_PROJECT_KEY="$RESERVATION_PROJECT_KEY"
+    reservation_extract_session_id_only "$tool_document"
+    reservation_resolve_workspace "$tool_document"
+}
+
+# Name one debounce slot. The project namespace is part of it, so the same
+# agent name editing the same relative path in two projects never cancels the
+# other project's pending release.
+reservation_debounce_key() {
+    QUERY_PROJECT_KEY="$1" QUERY_AGENT="$2" QUERY_REL_PATH="$3" python3 -c '
+import hashlib
+import os
+import unicodedata
+
+parts = (
+    os.environ["QUERY_PROJECT_KEY"],
+    os.environ["QUERY_AGENT"],
+    unicodedata.normalize("NFC", os.environ["QUERY_REL_PATH"]),
+)
+print(hashlib.sha1("\0".join(parts).encode("utf-8")).hexdigest())
+'
 }
 
 reservation_failure_log() {
@@ -184,6 +291,48 @@ reservation_failure_log() {
     printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$detail" >> "$log_file" 2>/dev/null || true
 }
 
+# A sleeping release worker re-sources this file when its grace period ends,
+# so its request is judged by the current rules even if an older hook armed it.
+# The worker names its debounce slot in QUERY_STATE_FILE and its generation in
+# QUERY_STATE_TOKEN. Either marker means worker mode, and then the slot must be
+# exactly $RUNTIME_DIR/file_release_debounce/<reservation_debounce_key> for
+# this project, agent and first (NFC) relative path, and must still hold the
+# worker's token. A worker armed before slots carried the project cannot show
+# which project it was cancelled for, so it becomes a no-op instead of
+# releasing a reservation that may have been taken again meanwhile. Calls with
+# neither marker (immediate release, SessionEnd) are unaffected.
+reservation_worker_slot_matches() {
+    local agent="$1" project_key="$2" paths_json="$3" relative="" expected=""
+    [ -n "${QUERY_STATE_FILE+x}" ] || [ -n "${QUERY_STATE_TOKEN+x}" ] || return 0
+    [ -n "${QUERY_STATE_FILE:-}" ] && [ -n "${QUERY_STATE_TOKEN:-}" ] || return 1
+    [ -n "$paths_json" ] || return 1
+    relative="$(QUERY_PATHS_JSON="$paths_json" python3 -c '
+import json, os
+paths = json.loads(os.environ["QUERY_PATHS_JSON"])
+if not isinstance(paths, list) or not paths or not isinstance(paths[0], str) or not paths[0]:
+    raise SystemExit(1)
+print(paths[0])
+' 2>/dev/null)" || return 1
+    expected="$(reservation_debounce_key "$project_key" "$agent" "$relative" 2>/dev/null)" || return 1
+    [ -n "$expected" ] || return 1
+    [ "$QUERY_STATE_FILE" = "$RUNTIME_DIR/file_release_debounce/$expected" ] || return 1
+    # The slot may have been re-armed or invalidated between the worker's own
+    # check and this call; only the generation it was started for may release.
+    QUERY_STATE_FILE="$QUERY_STATE_FILE" QUERY_STATE_TOKEN="$QUERY_STATE_TOKEN" python3 -c '
+import os, stat
+path = os.environ["QUERY_STATE_FILE"]
+try:
+    info = os.lstat(path)
+    if not stat.S_ISREG(info.st_mode):
+        raise SystemExit(1)
+    with open(path, encoding="utf-8") as handle:
+        current = handle.read().strip()
+except (OSError, UnicodeError):
+    raise SystemExit(1)
+raise SystemExit(0 if current == os.environ["QUERY_STATE_TOKEN"] else 1)
+' 2>/dev/null
+}
+
 # Send release_file_reservations. The third argument is a JSON list of paths;
 # omit it to release every reservation owned by the agent. Errors are durable.
 reservation_release_request() {
@@ -191,6 +340,10 @@ reservation_release_request() {
     local project_key="$2"
     local paths_json="${3:-}"
     local token=""
+    if ! reservation_worker_slot_matches "$agent" "$project_key" "$paths_json"; then
+        reservation_failure_log "release agent=$agent project=$project_key error=unscoped-release-worker"
+        return 1
+    fi
     if legacy_bearer_enabled; then
         token="$(get_legacy_http_bearer 2>/dev/null || true)"
     else
