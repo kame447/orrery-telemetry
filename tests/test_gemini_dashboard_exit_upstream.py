@@ -34,6 +34,7 @@ def test_dashboard_exit_interrupts_only_delegated_antigravity_runtime(monkeypatc
         ],
     )
     monkeypatch.setattr(server, "_has_session", lambda _name: True)
+    monkeypatch.setattr(server, "_live_session_matches_dashboard_project", lambda _name: True)
     monkeypatch.setattr(server, "_agent_program", lambda _name: "antigravity")
     monkeypatch.setattr(
         server,
@@ -79,6 +80,7 @@ def test_interactive_antigravity_keeps_existing_slash_exit_path(monkeypatch) -> 
         ],
     )
     monkeypatch.setattr(server, "_has_session", lambda _name: True)
+    monkeypatch.setattr(server, "_live_session_matches_dashboard_project", lambda _name: True)
     monkeypatch.setattr(server, "_agent_program", lambda _name: "antigravity")
     monkeypatch.setattr(server, "_tmux_session_env", lambda *_args: "")
     monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
@@ -142,6 +144,7 @@ def test_jump_preserves_finished_antigravity_shell_instead_of_resuming(monkeypat
     monkeypatch.setattr(server, "_agent_program", lambda _name: "antigravity")
     monkeypatch.setattr(server, "_terminal_adapter", lambda: "terminal")
     monkeypatch.setattr(server, "_focus_existing_terminal", lambda _name: False)
+    monkeypatch.setattr(server, "_live_session_matches_dashboard_project", lambda _name: True)
     monkeypatch.setattr(
         server,
         "build_agents",

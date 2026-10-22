@@ -47,23 +47,15 @@ The murmur language is selected in the order `?lang=ja` / `?lang=en`, `AGENTSTAC
 
 ## Without a project key
 
-The following work even when both `AGENTSTACK_PROJECT_KEY` and `AGENTSTACK_VAULT` are unset.
+When both `AGENTSTACK_PROJECT_KEY` and `AGENTSTACK_VAULT` are unset, the Dashboard has
+no selected project. It does not display normal agent sessions or allow annotation reads/writes,
+terminal capture, or control mutations. Mail, history, Graph, and NEW AGENT also require a
+selected project. It never falls back to another Mail project.
 
-- DECK tmux state
-- terminal open / local capture
-- local annotations
-- bundled portraits
-- Output / deliverables (fall back to `logs/` under cwd or the Git root)
-
-The following do not work.
-
-- launcher shell-side agent registration
-- NETWORK mail edges / drawer
-- mail history / DIGEST REPLAY
-- dashboard spawn
-- project-scoped retirement
-
-Only mail features become `NOT CONFIGURED`; local telemetry remains available for diagnosis.
+The page itself, bundled portraits, and infrastructure / warmup status remain available for
+diagnostics. Configure the target project before displaying or controlling agents. A separately
+started top-level launcher can still resolve its own project context from the Git repository it
+actually launches in.
 
 ## Output / deliverables
 
@@ -95,7 +87,7 @@ export AGENTSTACK_DELIVERABLE_ROOTS="$HOME/project-a/logs:$HOME/shared logs"
 | `AGENTSTACK_MAIL_SERVICE_VENV` | derived from candidate ID | Path used to explicitly reuse a verified candidate virtual environment |
 | `AGENTSTACK_MAIL_HTTP_BEARER_MODE` | `disabled` | Do not use the legacy HTTP bearer |
 | `AGENTSTACK_PROJECT_KEY` | existing `env.sh` on reinstall; required initially | Human project key. `--project-key` has highest priority |
-| `AGENTSTACK_PROTECTED_ROOTS` | live project key, then existing `env.sh`, then resolved project key | Roots protected by the reservation hook |
+| `AGENTSTACK_PROTECTED_ROOTS` | install-time fallback | Roots protected by the reservation hook. A new Git invocation derives its runtime context from the actual worktree and does not inherit stale roots from another repository |
 | `AGENTSTACK_RELEASE_GRACE_SECONDS` | `90` | Debounce seconds before releasing a reservation after successful Edit / Write. Legacy `FILE_RESERVATION_RELEASE_GRACE_SECONDS` is also accepted as a fallback |
 | `AGENTSTACK_DELIVERABLE_ROOTS` | unset | `:`-separated Output-index scan roots, saved to env / service / manifest |
 | `AGENTSTACK_LANG` | unset | `ja` / `en` murmur override; browser-selected when unset |
@@ -111,7 +103,9 @@ export AGENTSTACK_DELIVERABLE_ROOTS="$HOME/project-a/logs:$HOME/shared logs"
 
 The installer's project-key precedence is `--project-key` / process `AGENTSTACK_PROJECT_KEY` → `PROJECT_KEY` → existing `env.sh` at the install destination. If none exist on first install, it does not guess that the repository checkout is the project; it stops with exit 2 before making changes. `AGENTSTACK_PROJECT_KEY` is recommended for persistent configuration.
 
-At hook and helper runtime the precedence is `AGENTSTACK_PROJECT_KEY` → `PROJECT_KEY` → `${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh` → current cwd. The installed `env.sh` is not sourced; only `AGENTSTACK_PROJECT_KEY`, and `AGENTSTACK_PROTECTED_ROOTS` when falling back for protected roots, are read literally. Thus an installed editor started from another directory uses the same project key for reservation and registration without executing arbitrary shell code from `env.sh`.
+At top-level runtime, `hooks/project-context.sh` resolves the project context from the actual launch directory. An explicit `--project-key KEY` selects the namespace; otherwise Git repository identity wins. Linked worktrees of the same repository share one identity, while another clone or repository remains separate. A stale `AGENTSTACK_PROJECT_KEY` or `AGENTSTACK_PROTECTED_ROOTS` inherited from a parent shell, installed `env.sh`, or an old tmux server is not authoritative for a new Git invocation. A delegated or resumed identity keeps its existing context only when durable ownership metadata and its workspace still agree.
+
+The installed `env.sh` remains an install-time / non-Git fallback and is parsed as literal exported data rather than sourced as shell code. For a runtime-only check use `bash ~/.agentstack/hooks/project-context.sh resolve-invocation-project-key "$PWD"`; do not invent a separate key from a linked-worktree path.
 
 The installer derives `AGENTSTACK_MAIL_DB`, `AGENTSTACK_MAIL_ENV`, and `AGENTSTACK_SIGNALS_DIR` from state / render and stores the state root together with `AGENTSTACK_MAIL_HTTP_BEARER_MODE=disabled` in `env.sh`.
 

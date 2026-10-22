@@ -407,6 +407,74 @@ def _cwd_matches_dashboard_project(cwd: str) -> bool:
     context, _error = _resolved_work_dir_context(cwd)
     return bool(context and _context_matches_dashboard_project(context))
 
+
+def _runtime_context_for_work_dir(
+        work_dir: str, project_key: str = "", *, require_dashboard: bool = False,
+) -> tuple[dict[str, str] | None, dict[str, str] | None, str]:
+    """Resolve one complete runtime context for a control-plane mutation.
+
+    Repository/worktree evidence is checked before an explicit logical
+    namespace is bound.  That preserves linked-worktree identity without
+    allowing an ambient key to authorize another repository.
+    """
+    target = os.path.realpath(os.path.expanduser(work_dir))
+    context, error = _resolved_work_dir_context(target)
+    if context is None:
+        return None, None, error
+    if require_dashboard and not _context_matches_dashboard_project(context):
+        return None, None, "work directory belongs to another project/repository"
+    selected = _normalize_project_key_value(project_key or context["project_key"])
+    if not selected:
+        return None, None, "could not resolve project key"
+    raw = _invocation_context(target, selected)
+    if not raw or _normalize_project_key_value(raw.get("project_key")) != selected:
+        return None, None, "could not bind project namespace to work directory"
+    roots = raw.get("protected_roots")
+    if not isinstance(roots, list) or not roots or not all(
+            isinstance(root, str) and root for root in roots):
+        return None, None, "project context has invalid protected roots"
+    if any(":" in root or any(ord(ch) < 32 or ord(ch) == 127 for ch in root)
+           for root in roots):
+        return None, None, "project roots cannot be represented in the runtime environment"
+    runtime_context = {
+        "project_key": selected,
+        "repository": raw.get("repository_key") or "",
+        "work_dir": raw.get("worktree_root") or raw["work_dir"],
+        "launch_dir": raw["work_dir"],
+        "protected_roots": ":".join(roots),
+    }
+    env = {
+        "AGENTSTACK_PROJECT_KEY": selected,
+        "PROJECT_KEY": selected,
+        "AGENTSTACK_PROJECT_REPOSITORY": raw.get("repository_key") or "",
+        "AGENTSTACK_PROJECT_WORK_DIR": raw["work_dir"],
+        "AGENTSTACK_PROJECT_WORKTREE_ROOT": raw.get("worktree_root") or "",
+        "AGENTSTACK_PROTECTED_ROOTS": ":".join(roots),
+        "AGENTSTACK_PROJECT_CONTEXT_JSON": json.dumps(
+            raw, ensure_ascii=False, separators=(",", ":")
+        ),
+        "AGENTSTACK_PROJECT_CONTEXT": "1",
+    }
+    return runtime_context, env, ""
+
+
+def _tmux_project_context_args(work_dir: str, project_key: str) -> tuple[list[str] | None, str]:
+    """Build tmux ``-e KEY=VALUE`` args from a freshly validated context."""
+    _context, env, error = _runtime_context_for_work_dir(
+        work_dir, project_key, require_dashboard=True
+    )
+    if env is None:
+        return None, error
+    args: list[str] = []
+    for key in (
+        "AGENTSTACK_PROJECT_KEY", "PROJECT_KEY", "AGENTSTACK_PROJECT_REPOSITORY",
+        "AGENTSTACK_PROJECT_WORK_DIR", "AGENTSTACK_PROJECT_WORKTREE_ROOT",
+        "AGENTSTACK_PROTECTED_ROOTS", "AGENTSTACK_PROJECT_CONTEXT_JSON",
+        "AGENTSTACK_PROJECT_CONTEXT",
+    ):
+        args.extend(["-e", f"{key}={env[key]}"])
+    return args, ""
+
 # --- Model-string normalization (read-time, non-destructive) ---------------
 # Each session registers a free-form `model` string, so the same model shows
 # up under many spellings (claude-opus-4-7 / opus-4.7 / claude-opus-4-7[1m]).
@@ -2909,6 +2977,8 @@ def do_resume(session: str) -> dict:
       Claude 用 _transcript_path の selfref 探索だと「その名前を最も多く参照
       する別 agent(=子)の transcript」を誤マッチする(親 agent が子 agent の
       会話で復元される事故の実績あり)。program で先に分岐して回避する。"""
+    if _live_session_conflicts_with_dashboard(session):
+        return {"ok": False, "error": "tmux session belongs to another project"}
     program = _agent_program(session)
     if program.startswith("antigravity"):
         return {
@@ -2953,16 +3023,20 @@ def do_resume(session: str) -> dict:
     # 内部の register_agent で AGENT_NAME 環境変数が空となり、サーバーが
     # ランダム名を発番してしまう (2026-05-22 GreenOstwald 事例、
     # 2026-05-26 PinkGuericke 事例)。
+    tmux_context_args, context_error = _tmux_project_context_args(cwd, _project_key())
+    if tmux_context_args is None:
+        return {"ok": False, "error": f"resume project context invalid: {context_error}"}
     inner = (
+        'unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR; '
         'export PATH="$HOME/.local/bin:$PATH"; '
-        f'export AGENT_NAME={session}; '
-        f'exec {ABS_CLAUDE} --resume {sid} -n {session}'
+        f'export AGENT_NAME={shlex.quote(session)}; '
+        f'exec {shlex.quote(ABS_CLAUDE)} --resume {shlex.quote(sid)} -n {shlex.quote(session)}'
     )
     # env -u TMUX -u TMUX_PANE: 端末プロセスに TMUX が継承されると
     # 以後の全ウィンドウへ幽霊 TMUX が伝播し、cx 等の `[[ -n "$TMUX" ]]` 判定が
     # 誤爆する(2026-06-02 調査)。dashboard が tmux 内から再起動された場合に備え剥がす。
     launch = _open_terminal_tmux(
-        ["tmux", "new-session", "-A", "-s", session, "-c", cwd,
+        ["tmux", "new-session", *tmux_context_args, "-A", "-s", session, "-c", cwd,
          _login_shell(), "-lic", inner],
         title=session,
     )
@@ -3062,16 +3136,20 @@ def _do_resume_codex(session: str) -> dict:
     # zsh -lic で .zshrc を読ませ codex を PATH 解決。bootstrap が無ければ
     # source をスキップ（AGENT_NAME export と resume は維持）。
     src = f'source {shlex.quote(bootstrap)}; ' if os.path.exists(bootstrap) else ''
+    tmux_context_args, context_error = _tmux_project_context_args(cwd, _project_key())
+    if tmux_context_args is None:
+        return {"ok": False, "error": f"codex resume project context invalid: {context_error}"}
     inner = (
+        'unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR; '
         'export PATH="$HOME/.local/bin:$PATH"; '
-        f'export AGENT_NAME={session}; '
+        f'export AGENT_NAME={shlex.quote(session)}; '
         f'{src}'
-        f'exec env -u OPENAI_API_KEY codex resume {sid} '
+        f'exec env -u OPENAI_API_KEY codex resume {shlex.quote(sid)} '
         f'-C {shlex.quote(cwd)} '
         f'{_codex_child_launch_flags()}'
     )
     launch = _open_terminal_tmux(
-        ["tmux", "new-session", "-A", "-s", session, "-c", cwd,
+        ["tmux", "new-session", *tmux_context_args, "-A", "-s", session, "-c", cwd,
          _login_shell(), "-lic", inner],
         title=session,
     )
@@ -4316,13 +4394,12 @@ def do_jump(session: str) -> dict:
         return _open_codex_app(session)
     if _terminal_adapter() == "none":
         return _terminal_unsupported()
-    if subprocess.run(
-        ["tmux", "has-session", "-t", f"={session}"],
-        capture_output=True,
-    ).returncode != 0:
+    if not _has_session(session):
         # tmux セッションが無い = retire済み/過去セッション(gone)。
         # transcript から claude --resume で再開する。
         return do_resume(session)
+    if not _live_session_matches_dashboard_project(session):
+        return {"ok": False, "error": "tmux session belongs to another project"}
 
     # tmux セッションは在るが、claude が死んで「素の zsh 残骸(husk)」だけが
     # 残っている場合がある(= category 'finished')。この husk に attach しても
@@ -4432,6 +4509,10 @@ def do_kill(session: str, mode: str = "both") -> dict:
                 "error": f"agent '{session}' category={target['category']} "
                          "- only finished/gone are killable"}
 
+    if mode in ("both", "tmux") and _has_session(session):
+        if not _live_session_matches_dashboard_project(session):
+            return {"ok": False, "error": "tmux session belongs to another project"}
+
     actions = []
 
     # 1) retire 先 (ORRERY Mail の retired_at を立てる)
@@ -4500,6 +4581,10 @@ SPAWN_SCRIPT = _env_path(
     "AGENTSTACK_SPAWN_SCRIPT",
     os.path.join(HOOKS_DIR, "spawn_child.sh"),
 )
+PREREGISTER_CHILD = _env_path(
+    "AGENTSTACK_PREREGISTER_CHILD",
+    os.path.join(os.path.dirname(HERE), "bin", "agentstack-preregister-child"),
+)
 SOURCE_REPO = HERE  # vault 外、自前 git の親 repo
 # UI radio と必ず一致させる。program はモデル文字列から決定。
 _SPAWN_MODELS = {
@@ -4538,9 +4623,9 @@ def _agent_name_comparison_key(name: str) -> str:
     return (name or "").replace("-", "").casefold()
 
 
-def _spawn_name_status(name: str) -> str:
+def _spawn_name_status(name: str, project_key: str | None = None) -> str:
     """Return namespace occupancy; missing ownership/database fails closed."""
-    project_key = _project_key()
+    project_key = _normalize_project_key_value(project_key or _project_key())
     if not project_key or not name or not os.path.exists(DB_PATH):
         return "unknown"
     comparison_key = _agent_name_comparison_key(name)
@@ -4607,7 +4692,9 @@ def suggest_spawn_name(scientist: str, attempts: int = 20) -> str | None:
     return None
 
 
-def _suggest_any_spawn_name(attempts: int = 75) -> str | None:
+def _suggest_any_spawn_name(
+        attempts: int = 75, project_key: str | None = None,
+) -> str | None:
     """Generate a safe explicit name for AUTO spawn instead of MCP auto-name.
 
     A stock server can return a separator-less auto-name that is later coerced
@@ -4623,7 +4710,7 @@ def _suggest_any_spawn_name(attempts: int = 75) -> str | None:
     ]
     for candidate in secrets.SystemRandom().sample(
             candidates, min(attempts, len(candidates))):
-        if _spawn_name_status(candidate) == "available":
+        if _spawn_name_status(candidate, project_key) == "available":
             return candidate
     return None
 
@@ -4950,6 +5037,83 @@ def _runtime_agent_token_project(agent_name: str) -> str | None:
     except OSError:
         return ""
     return _normalize_project_key_value(value) if value and len(value) <= 4096 else ""
+
+
+def _project_has_agent(project_key: str, name: str) -> bool:
+    if not project_key or not _valid(name) or not os.path.exists(DB_PATH):
+        return False
+    try:
+        with _db() as con:
+            row = con.execute(
+                "SELECT 1 FROM agents a JOIN projects p ON a.project_id=p.id "
+                "WHERE p.human_key=? AND a.name=? LIMIT 1",
+                (project_key, name),
+            ).fetchone()
+        return row is not None
+    except sqlite3.Error:
+        return False
+
+
+def _read_spawn_handoff_token(path: str) -> str:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+        with os.fdopen(fd, encoding="utf-8") as handle:
+            token = handle.read(_AGENT_TOKEN_MAX_CHARS + 2).strip()
+    except OSError:
+        return ""
+    return token if token and len(token) <= _AGENT_TOKEN_MAX_CHARS else ""
+
+
+def _preregister_dashboard_child(
+        *, project_key: str, requested_name: str, parent: str, program: str,
+        model: str, task_description: str, work_dir: str, token_file: str,
+) -> dict:
+    """Use the existing strong-ownership helper before any Dashboard launch."""
+    if not os.path.isfile(PREREGISTER_CHILD):
+        return {"ok": False, "error": f"preregister helper missing: {PREREGISTER_CHILD}"}
+    args = [
+        PREREGISTER_CHILD, "--project-key", project_key,
+        "--program", program, "--model", model,
+        "--task-description", task_description,
+        "--token-file-out", token_file, "--work-dir", work_dir,
+    ]
+    if requested_name:
+        args.extend(["--name", requested_name])
+    if parent:
+        args.extend(["--parent", parent])
+    env = os.environ.copy()
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+        env.pop(key, None)
+    try:
+        result = subprocess.run(
+            args, capture_output=True, text=True, timeout=45, env=env,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"ok": False, "error": f"preregister helper failed: {exc}"}
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()[-1200:]
+        return {"ok": False, "error": f"preregister helper failed: {detail or result.returncode}"}
+    names = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+    child_name = names[-1] if names else ""
+    if not child_name or _NAME_RE.fullmatch(child_name) is None:
+        return {"ok": False, "error": f"invalid child name from preregister: {child_name!r}"}
+    token = _read_spawn_handoff_token(token_file)
+    if not token:
+        return {"ok": False, "error": "preregister helper did not create a usable child token"}
+    owner_token = _runtime_agent_token(child_name)
+    owner_project = _runtime_agent_token_project(child_name)
+    if owner_token != token or owner_project != _normalize_project_key_value(project_key):
+        return {
+            "ok": False,
+            "error": "preregistered child ownership could not be verified locally",
+            "child_name": child_name,
+            "registration_retained": True,
+        }
+    return {
+        "ok": True, "child_name": child_name, "token": token,
+        "token_file": token_file,
+    }
 
 
 _SPAWN_LAUNCHES: dict[tuple[str, str], dict] = {}
@@ -5333,52 +5497,86 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
             r"[A-Z][A-Za-z]{1,63}(?:-[A-Z][A-Za-z]{1,63})?",
             requested_name) is None:
         return {"ok": False, "error": "name invalid"}
-    if requested_name and _spawn_name_status(requested_name) != "available":
-        return {"ok": False, "error": "name is occupied or cannot be verified"}
     if not os.path.isdir(work_dir):
         return {"ok": False, "error": f"dir does not exist: {work_dir}"}
     if not os.path.exists(spec.script):
         return {"ok": False, "error": f"spawn script missing: {spec.script}"}
-    project_key = _project_key()
-    if not project_key:
-        return {"ok": False, "error": "AGENTSTACK_PROJECT_KEY or AGENTSTACK_VAULT is not configured"}
+    if not os.path.isfile(PREREGISTER_CHILD):
+        return {"ok": False, "error": f"preregister helper missing: {PREREGISTER_CHILD}"}
 
-    if not requested_name:
-        requested_name = _suggest_any_spawn_name() or ""
-        if not requested_name:
+    dashboard_project = _project_key()
+    if not dashboard_project:
+        return {"ok": False, "error": "AGENTSTACK_PROJECT_KEY or AGENTSTACK_VAULT is not configured"}
+    context, project_env, context_error = _runtime_context_for_work_dir(
+        work_dir, dashboard_project if not standalone else "",
+        require_dashboard=not standalone,
+    )
+    if context is None or project_env is None:
+        prefix = "delegated child " if not standalone else "standalone child "
+        return {"ok": False, "error": prefix + context_error}
+    work_dir = context["launch_dir"]
+    project_key = context["project_key"]
+
+    parent_token = ""
+    if not standalone:
+        if not _project_has_agent(project_key, parent):
             return {"ok": False,
-                    "error": "no available agent name could be verified"}
+                    "error": f"parent '{parent}' is not registered in the selected project"}
+        parent_token = _runtime_agent_token(parent)
+        if not parent_token:
+            return {"ok": False,
+                    "error": f"parent registration token unavailable for '{parent}'"}
+        parent_project = _runtime_agent_token_project(parent)
+        if parent_project not in (None, project_key):
+            return {"ok": False,
+                    "error": f"parent registration credential for '{parent}' belongs to another project"}
+
+    current_project = _normalize_project_key_value(_project_key())
+    if requested_name:
+        name_status = (
+            _spawn_name_status(requested_name)
+            if project_key == current_project
+            else _spawn_name_status(requested_name, project_key)
+        )
+        if name_status != "available":
+            return {"ok": False, "error": "name is occupied or cannot be verified"}
+    else:
+        requested_name = (
+            _suggest_any_spawn_name()
+            if project_key == current_project
+            else _suggest_any_spawn_name(project_key=project_key)
+        ) or ""
+        if not requested_name:
+            return {"ok": False, "error": "no available agent name could be verified"}
 
     task_short = task[:80]
-
-    # 1) Always send an explicit hyphenated request name.  The response name
-    # is authoritative and may be separator-less on a local patched server.
-    child_token = secrets.token_urlsafe(32)
-    reg = _mcp_call("register_agent", {
-        "project_key": project_key,
-        "program": program,
-        "model": model_str,
-        "task_description": task_short,
-        "registration_token": child_token,
-        "name": requested_name,
-    })
-    if not reg["ok"]:
-        return {"ok": False,
-                "error": f"register_agent failed: {reg.get('error')}"}
-    registration = reg["data"] or {}
-    child_name = registration.get("name", "")
-    if not child_name or _NAME_RE.fullmatch(child_name) is None:
-        return {"ok": False,
-                "error": f"invalid child name from register: {child_name!r}"}
-    server_token = registration.get("registration_token", "")
-    if not isinstance(server_token, str):
-        server_token = ""
-    effective_child_token = server_token.strip() or child_token
+    token_dir = os.path.join(RUNTIME_DIR, "spawn-tokens")
+    try:
+        os.makedirs(token_dir, mode=0o700, exist_ok=True)
+        os.chmod(token_dir, 0o700)
+    except OSError as exc:
+        return {"ok": False, "error": f"spawn token directory unavailable: {exc}"}
+    token_file = os.path.join(
+        token_dir, f"{requested_name}.{secrets.token_hex(8)}.token"
+    )
+    prereg = _preregister_dashboard_child(
+        project_key=project_key, requested_name=requested_name,
+        parent="" if standalone else parent, program=program, model=model_str,
+        task_description=task_short, work_dir=work_dir, token_file=token_file,
+    )
+    if not prereg.get("ok"):
+        try:
+            os.unlink(token_file)
+        except OSError:
+            pass
+        return prereg
+    child_name = prereg["child_name"]
+    effective_child_token = prereg["token"]
+    token_file = prereg["token_file"]
     name_substituted = child_name != requested_name
     if name_substituted:
-        logging.warning("spawn register normalized requested name %r to %r", requested_name, child_name)
-        # A log line nobody reads is how this stayed invisible. Persist it so
-        # the agent carries the discrepancy in the UI for as long as it exists.
+        logging.warning("spawn preregister normalized requested name %r to %r",
+                        requested_name, child_name)
         _record_name_substitution(child_name, requested_name, project_key)
 
     # 2) role/emoji/group annotation (best-effort, failure is non-fatal)
@@ -5415,28 +5613,8 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
         result.update(extra)
         return result
 
-    # Registration defaults are contact-gated on ORRERY Mail. Match the
-    # normal launcher path and open the new child before delivering its task.
-    # The live schema removes registration_token for lenient builds that do
-    # not accept it, while strict builds receive the server-issued credential.
-    contact = _mcp_call("set_contact_policy", {
-        "project_key": project_key,
-        "agent_name": child_name,
-        "policy": "open",
-        "registration_token": effective_child_token,
-    })
-    if not contact["ok"]:
-        return retained_registration_error(
-            f"set_contact_policy failed: {contact.get('error')}")
-
-    # 3) Normal children receive the task through agent-mail.  Standalone
-    # children have no parent/sender, so the launcher receives the full task
-    # directly and no synthetic self-mail is created.
-    if not standalone:
-        parent_token = _runtime_agent_token(parent)
-        if not parent_token:
-            return retained_registration_error(
-                f"parent registration token unavailable for '{parent}'")
+    # Contact policy and child ownership were committed by preregistration.
+    # Parent credentials were validated before that first child side effect.
     # A launcher that delivers the task itself owns the only task authority;
     # a second copy by mail would carry conflicting completion instructions.
     if not standalone and spec.task_mail:
@@ -5474,9 +5652,10 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
             return retained_registration_error(
                 f"send_message failed: {snd.get('error')}")
 
-    # 4) spawn_child.sh --pre-registered を background で起動
-    token_file = ""
-    token_created = False
+    # 4) spawn_child.sh --pre-registered を background で起動。
+    # Preregistration already committed the durable owner token; Dashboard
+    # owns only the one-shot handoff path.
+    token_created = True
     log_fh = None
 
     token_key = re.sub(r"[^A-Za-z0-9_.-]", "_", child_name)
@@ -5492,11 +5671,8 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
         paths = []
         if token_created and token_file:
             paths.append(token_file)
-        if not keep_owner_credential:
-            paths.extend([
-                owner_credential,
-                os.path.join(RUNTIME_DIR, "child-agents", f"{child_name}.json"),
-            ])
+        # Never delete the durable strong-owner token/state here.  They are
+        # recovery authority for a registration that already exists.
         for path in paths:
             try:
                 os.unlink(path)
@@ -5568,26 +5744,6 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
         except OSError:
             pass
 
-    token_dir = os.path.join(RUNTIME_DIR, "spawn-tokens")
-    try:
-        os.makedirs(token_dir, mode=0o700, exist_ok=True)
-        os.chmod(token_dir, 0o700)
-        token_file = os.path.join(
-            token_dir, f"{child_name}.{secrets.token_hex(8)}.token")
-        open_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            open_flags |= os.O_NOFOLLOW
-        fd = os.open(token_file, open_flags, 0o600)
-        token_created = True
-        with os.fdopen(fd, "w") as f:
-            f.write(effective_child_token)
-            f.flush()
-            os.fsync(f.fileno())
-        os.chmod(token_file, 0o600)
-    except Exception as e:  # noqa: BLE001
-        remove_spawn_credentials()
-        return retained_registration_error(f"spawn token write failed: {e}")
-
     args = [spec.script, "--pre-registered", child_name, "--child-token-file", token_file]
     if standalone:
         args.append("--standalone")
@@ -5601,13 +5757,15 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
             args.extend(["--worktree-base", worktree_base])
     args.extend([task[:4000] if standalone else task_short, work_dir])
     env = os.environ.copy()
-    # Provider values first: the identity/context keys below always win.
+    # Provider values first: the validated project tuple always wins.
     env.update(dict(spec.launcher_env))
+    env.update(project_env)
+    for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+        env.pop(key, None)
     if standalone:
         env.pop("PARENT_AGENT", None)
     else:
         env["PARENT_AGENT"] = parent
-    env["PROJECT_KEY"] = project_key
     # launchd の最小 PATH には ~/.local/bin が無く、spawn_child.sh が tmux 内で
     # 起動する `zsh -lc` は非対話シェルのため ~/.zshrc を source せず claude が
     # PATH に乗らない (cold start で claude 即落ち → tmux session が cleanup-
@@ -5903,6 +6061,8 @@ def do_exit(session: str) -> dict:
                 "category": target.get("category")}
     if not _has_session(session):
         return {"ok": False, "error": f"tmux session '{session}' not found"}
+    if not _live_session_matches_dashboard_project(session):
+        return {"ok": False, "error": "tmux session belongs to another project"}
 
     actions = []
     if target.get("attached"):
@@ -6643,6 +6803,8 @@ def do_reactivate(session: str) -> dict:
         return {"ok": False,
                 "error": f"agent '{session}' has no live tmux session; "
                          "use resume to restore a finished one"}
+    if not _live_session_matches_dashboard_project(session):
+        return {"ok": False, "error": "tmux session belongs to another project"}
     con = None
     try:
         con = _db()

@@ -22,6 +22,74 @@ import dashboard.server as server
 ANNOTATION_PROJECT = "annotation-fixture"
 
 
+@pytest.fixture(autouse=True)
+def _current_control_spawn_contract(monkeypatch):
+    """Keep legacy spawn assertions focused on launch behavior.
+
+    Control-isolation has moved registration/ownership into the preregistration
+    helper.  These tests historically mocked the Mail calls directly, so adapt
+    that boundary without weakening the dedicated control-isolation coverage.
+    """
+    monkeypatch.setattr(server, "PREREGISTER_CHILD", __file__)
+    monkeypatch.setattr(server, "_project_has_agent", lambda *_args: True)
+    monkeypatch.setattr(server, "_runtime_agent_token_project", lambda _name: None)
+
+    def context(work_dir, project_key="", require_dashboard=False):
+        launch_dir = str(pathlib.Path(work_dir).resolve())
+        selected = project_key or server._project_key()
+        ctx = {
+            "project_key": selected,
+            "repository": launch_dir,
+            "work_dir": launch_dir,
+            "launch_dir": launch_dir,
+            "protected_roots": launch_dir,
+        }
+        env = {
+            "AGENTSTACK_PROJECT_KEY": selected,
+            "PROJECT_KEY": selected,
+            "AGENTSTACK_PROJECT_REPOSITORY": launch_dir,
+            "AGENTSTACK_PROJECT_WORK_DIR": launch_dir,
+            "AGENTSTACK_PROJECT_WORKTREE_ROOT": launch_dir,
+            "AGENTSTACK_PROTECTED_ROOTS": launch_dir,
+            "AGENTSTACK_PROJECT_CONTEXT_JSON": "{}",
+            "AGENTSTACK_PROJECT_CONTEXT": "1",
+        }
+        return ctx, env, ""
+
+    def preregister(*, project_key, requested_name, parent, program, model,
+                    task_description, work_dir, token_file):
+        requested_token = "dashboard-test-registration-token"
+        reg = server._mcp_call("register_agent", {
+            "project_key": project_key,
+            "program": program,
+            "model": model,
+            "task_description": task_description,
+            "registration_token": requested_token,
+            "name": requested_name,
+        })
+        if not reg.get("ok"):
+            return {"ok": False, "error": f"register_agent failed: {reg.get('error')}"}
+        data = reg.get("data") or {}
+        child_name = data.get("name") or requested_name
+        token = data.get("registration_token") or requested_token
+        contact = server._mcp_call("set_contact_policy", {
+            "project_key": project_key,
+            "agent_name": child_name,
+            "policy": "open",
+            "registration_token": token,
+        })
+        if not contact.get("ok"):
+            return {"ok": False, "error": f"set_contact_policy failed: {contact.get('error')}"}
+        token_path = pathlib.Path(token_file)
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(token, encoding="utf-8")
+        return {"ok": True, "child_name": child_name, "token": token,
+                "token_file": str(token_path)}
+
+    monkeypatch.setattr(server, "_runtime_context_for_work_dir", context)
+    monkeypatch.setattr(server, "_preregister_dashboard_child", preregister)
+
+
 def _set_annotation_paths(monkeypatch, tmp_path):
     path = tmp_path / "runtime" / "annotations.json"
     legacy = tmp_path / "dashboard" / "annotations.json"
@@ -650,7 +718,7 @@ def test_cleanup_killed_past_its_grace_is_reported_and_keeps_owner_credential(mo
     assert list((runtime / "spawn-tokens").iterdir()) == []
 
 
-def test_canonical_launcher_timeout_keeps_5s_grace_and_removes_credentials(monkeypatch, tmp_path):
+def test_canonical_launcher_timeout_keeps_5s_grace_and_preserves_owner_credential(monkeypatch, tmp_path):
     import subprocess as _subprocess
     launcher = tmp_path / "spawn_child.sh"
     launcher.write_text("#!/bin/bash\n")
@@ -696,7 +764,8 @@ def test_canonical_launcher_timeout_keeps_5s_grace_and_removes_credentials(monke
                               ("wait", server._SPAWN_TERMINATE_GRACE_SECONDS)]
         assert events[3] == ("kill", None)
         assert not any(name == "killpg" for name, _ in events)
-        assert not (runtime / "agent_token_QuietCurie").exists()
+        assert (runtime / "agent_token_QuietCurie").read_text() == "child-owner-token"
+        assert list((runtime / "spawn-tokens").iterdir()) == []
     assert server._SPAWN_TERMINATE_GRACE_SECONDS == 5.0
 
 
@@ -865,7 +934,7 @@ def test_async_killed_cleanup_reports_recovery_credential_via_spawn_status(monke
 
 
 @pytest.mark.parametrize("provider", ["claude", "codex"])
-def test_canonical_real_launcher_timeout_still_deletes_credentials_after_5s(monkeypatch, tmp_path, provider):
+def test_canonical_real_launcher_timeout_preserves_committed_owner_after_5s(monkeypatch, tmp_path, provider):
     launcher, runtime = _prepare_real_spawn(monkeypatch, tmp_path, _KILLED_CLEANUP_LAUNCHER)
     monkeypatch.setattr(server, "SPAWN_SCRIPT", str(launcher))
     monkeypatch.setenv("TEST_RUNTIME", str(runtime))
@@ -887,7 +956,7 @@ def test_canonical_real_launcher_timeout_still_deletes_credentials_after_5s(monk
     for key in ("cleanup_incomplete", "recovery_credential", "cleanup_child_agent_can_recover"):
         assert key not in result
     assert "may remain" not in result["error"]
-    assert not (runtime / "agent_token_QuietCurie").exists()
+    assert (runtime / "agent_token_QuietCurie").read_text() == "child-owner-token"
     assert list((runtime / "spawn-tokens").iterdir()) == []
 
 

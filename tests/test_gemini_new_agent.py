@@ -152,9 +152,67 @@ def gemini_env(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "SPAWN_SCRIPT", str(claude_launcher))
     monkeypatch.setattr(server, "RUNTIME_DIR", str(runtime))
     monkeypatch.setattr(server, "HERE", str(tmp_path))
+    monkeypatch.setattr(server, "PREREGISTER_CHILD", __file__)
     monkeypatch.setattr(server, "_project_key", lambda: "/project")
-    monkeypatch.setattr(server, "_spawn_name_status", lambda _: "available")
+    monkeypatch.setattr(server, "_spawn_name_status", lambda *_args: "available")
+    monkeypatch.setattr(server, "_project_has_agent", lambda *_args: True)
+    monkeypatch.setattr(server, "_runtime_agent_token_project", lambda _name: None)
     monkeypatch.setattr(server, "_mcp_call", launches.mcp)
+
+    def context(work_dir, project_key="", require_dashboard=False):
+        launch_dir = str(pathlib.Path(work_dir).resolve())
+        selected = project_key or "/project"
+        ctx = {
+            "project_key": selected,
+            "repository": launch_dir,
+            "work_dir": launch_dir,
+            "launch_dir": launch_dir,
+            "protected_roots": launch_dir,
+        }
+        env = {
+            "AGENTSTACK_PROJECT_KEY": selected,
+            "PROJECT_KEY": selected,
+            "AGENTSTACK_PROJECT_REPOSITORY": launch_dir,
+            "AGENTSTACK_PROJECT_WORK_DIR": launch_dir,
+            "AGENTSTACK_PROJECT_WORKTREE_ROOT": launch_dir,
+            "AGENTSTACK_PROTECTED_ROOTS": launch_dir,
+            "AGENTSTACK_PROJECT_CONTEXT_JSON": "{}",
+            "AGENTSTACK_PROJECT_CONTEXT": "1",
+        }
+        return ctx, env, ""
+
+    def preregister(*, project_key, requested_name, parent, program, model,
+                    task_description, work_dir, token_file):
+        requested_token = "dashboard-test-registration-token"
+        reg = launches.mcp("register_agent", {
+            "project_key": project_key,
+            "program": program,
+            "model": model,
+            "task_description": task_description,
+            "registration_token": requested_token,
+            "name": requested_name,
+        })
+        if not reg.get("ok"):
+            return {"ok": False, "error": f"register_agent failed: {reg.get('error')}"}
+        data = reg.get("data") or {}
+        child_name = data.get("name") or requested_name
+        token = data.get("registration_token") or requested_token
+        contact = launches.mcp("set_contact_policy", {
+            "project_key": project_key,
+            "agent_name": child_name,
+            "policy": "open",
+            "registration_token": token,
+        })
+        if not contact.get("ok"):
+            return {"ok": False, "error": f"set_contact_policy failed: {contact.get('error')}"}
+        token_path = pathlib.Path(token_file)
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(token, encoding="utf-8")
+        return {"ok": True, "child_name": child_name, "token": token,
+                "token_file": str(token_path)}
+
+    monkeypatch.setattr(server, "_runtime_context_for_work_dir", context)
+    monkeypatch.setattr(server, "_preregister_dashboard_child", preregister)
     monkeypatch.setattr(server.time, "sleep", lambda _: None)
     monkeypatch.setattr(server.subprocess, "Popen", launches.popen)
     monkeypatch.setattr(server.subprocess, "run", launches.run)

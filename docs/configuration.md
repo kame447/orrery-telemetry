@@ -54,23 +54,15 @@ Murmur switch でも on / off を切り替えられ、その選択は browser �
 
 ## Project key がない場合
 
-`AGENTSTACK_PROJECT_KEY` と `AGENTSTACK_VAULT` の両方が未設定でも次は動きます。
+`AGENTSTACK_PROJECT_KEY` と `AGENTSTACK_VAULT` の両方が未設定の場合、Dashboard は
+project を選択していません。通常の agent session の表示・annotation の読み書き・
+capture・操作は行いません。Mail、history、Graph、NEW AGENT も project 設定が必要です。
+未知の project から別の Mail project へ fallback することはありません。
 
-- DECK の tmux state
-- terminal open / local capture
-- local annotation
-- bundled portrait
-- Output / deliverables（cwd または git root の `logs/` へ fallback）
-
-次は動きません。
-
-- launcher の shell-side agent registration
-- NETWORK の mail edge / drawer
-- mail history / DIGEST REPLAY
-- dashboard spawn
-- project-scoped retire
-
-mail 系だけを `NOT CONFIGURED` にし、local telemetry を診断に残す設計です。
+ページ、bundled portrait、infrastructure / warmup の状態表示は診断用に利用できます。
+agent を表示・操作するには、対象 project を Dashboard に設定してください。
+別途起動する top-level launcher は Dashboard の key が未設定でも、自身の起動先 Git
+repository から project context を解決します。
 
 ## Output / deliverables
 
@@ -102,7 +94,7 @@ export AGENTSTACK_DELIVERABLE_ROOTS="$HOME/project-a/logs:$HOME/shared logs"
 | `AGENTSTACK_MAIL_SERVICE_VENV` | candidate ID から導出 | 検証済み candidate venv を明示的に再利用する場合の path |
 | `AGENTSTACK_MAIL_HTTP_BEARER_MODE` | `disabled` | legacy HTTP bearer を使用しない |
 | `AGENTSTACK_PROJECT_KEY` | 再 install 時は既存 `env.sh`、初回は必須 | project human key。`--project-key` が最優先 |
-| `AGENTSTACK_PROTECTED_ROOTS` | live project key、次に既存 `env.sh`、最後に resolved project key | reservation hook の保護 root |
+| `AGENTSTACK_PROTECTED_ROOTS` | install-time fallback | reservation hook の保護 root。新規 Git invocation では実 worktree から解決した context を使い、別 repository の stale roots を継承しない |
 | `AGENTSTACK_RELEASE_GRACE_SECONDS` | `90` | 成功した Edit / Write 後、reservation を解放するまでの debounce 秒数。旧 `FILE_RESERVATION_RELEASE_GRACE_SECONDS` も fallback として利用可 |
 | `AGENTSTACK_DELIVERABLE_ROOTS` | 未設定 | Output index の `:` 区切り走査 root。env / service / manifest へ保存 |
 | `AGENTSTACK_LANG` | 未設定 | murmur の `ja` / `en` override。未設定時は browser 判定 |
@@ -121,12 +113,18 @@ installer の project key 解決順は `--project-key` / process の
 初回 install でどれも無い場合は repo checkout を project と推測せず、変更前に
 exit 2 で停止します。永続設定には `AGENTSTACK_PROJECT_KEY` を推奨します。
 
-hook と helper の実行時は `AGENTSTACK_PROJECT_KEY` → `PROJECT_KEY` →
-`${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh` → 現在の cwd の順です。installed
-`env.sh` は source せず、`AGENTSTACK_PROJECT_KEY`（protected root の fallback では
-`AGENTSTACK_PROTECTED_ROOTS` も）だけを literal として読み取ります。このため install
-済みの editor を別 directory から起動しても reservation と registration は同じ project
-key を使い、同時に `env.sh` 内の任意 shell code は実行されません。
+top-level runtime の project context は `hooks/project-context.sh` が起動先 directory から
+解決します。明示した `--project-key KEY` があればその namespace を使い、未指定なら Git
+repository identity を優先します。同じ repository の linked worktree は共通 identity、別 clone /
+別 repository は別 project です。parent shell、installed `env.sh`、古い tmux server に残った
+別 repository の `AGENTSTACK_PROJECT_KEY` や `AGENTSTACK_PROTECTED_ROOTS` は、新規 Git
+invocation の正本にはなりません。delegated / resumed identity は durable owner metadata と
+workspace の一致を検証できた場合だけ既存 context を維持します。
+
+installed `env.sh` は install-time / non-Git fallback として必要な export 値だけを literal に
+読み、任意 shell code を実行しません。runtime の確認だけが必要なら
+`bash ~/.agentstack/hooks/project-context.sh resolve-invocation-project-key "$PWD"` を使い、
+linked worktree path から独自 key を推測しないでください。
 
 installer は `AGENTSTACK_MAIL_DB`、`AGENTSTACK_MAIL_ENV`、`AGENTSTACK_SIGNALS_DIR`
 を state / render から導出し、`env.sh` へ state root と
