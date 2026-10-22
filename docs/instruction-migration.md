@@ -51,6 +51,8 @@ agentstack-claude-setup --remove-legacy-block --path /work/repo/CLAUDE.md
 
 祖先の AGENTS.md は検出だけで、通常の移行で自動削除しません。明示 `--path` だけがその source を選択できます。symlink は固定した chain と解決先を再照合します。hardlink は全 alias の内容を自分で退避し、用途を確認して、希望する target を独立した regular copy にしてから再 plan してください。engine は alias の探索や link の切断をしません。
 
+macOS が新規の一時ファイルに `com.apple.provenance` を自動付与する場合、旧ファイルにこの属性が存在しなくても、その属性の**追加だけ**を許容します。その他の拡張属性、ACL、所有者、権限、内容の照合は従来どおり必須です。
+
 同じ install の協調 engine は固定した解決先 path の mutex で直列化します。同 UID の非協調な書込みには最終照合と rename の間の競合窓があります。照合で変更を見つけた場合は停止し、backup を保持します。
 
 <a id="interrupted-migration"></a>

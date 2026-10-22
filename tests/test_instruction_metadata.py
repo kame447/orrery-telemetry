@@ -21,6 +21,51 @@ def test_acl_survives_managed_block_replacement(env):
     assert m.acl(e.target)==before and e.target.read_text()=='outside\n'
 
 
+@pytest.mark.skipif(sys.platform != 'darwin', reason='macOS synthetic provenance')
+def test_new_file_provenance_does_not_block_legacy_user_instructions(env, monkeypatch):
+    e = engine(env)
+    e.home.mkdir()
+    e.target.write_text('Personal notes before ORRERY\n')
+    original_inode = e.target.stat().st_ino
+    original_attrs = m.attrs
+    if 'com.apple.provenance' not in original_attrs(e.target):
+        pytest.skip('This macOS host does not synthesize provenance on new files')
+
+    # Simulate an older real user file that predates automatic provenance.
+    # New, atomically created files retain the macOS attribute.
+    def attrs(path):
+        result = original_attrs(path)
+        if Path(path) == e.target and e.target.stat().st_ino == original_inode:
+            return {key: value for key, value in result.items() if key != 'com.apple.provenance'}
+        return result
+
+    monkeypatch.setattr(m, 'attrs', attrs)
+    assert apply(e)['stage'] == 'complete'
+    assert e.target.read_text().startswith('Personal notes before ORRERY\n')
+    assert 'com.apple.provenance' in original_attrs(e.target)
+    assert e.receipt()['target_backup']
+
+
+@pytest.mark.skipif(sys.platform != 'darwin', reason='macOS synthetic provenance')
+def test_unrelated_new_xattr_still_refuses_atomic_instruction_update(env, monkeypatch):
+    e = engine(env)
+    e.home.mkdir()
+    e.target.write_text('Keep this user text\n')
+    before = e.target.read_bytes()
+    original_attrs = m.attrs
+
+    def attrs(path):
+        found = original_attrs(path)
+        if Path(path).name.startswith('.orrery-instructions-'):
+            return {**found, 'com.example.unexpected': 'YQ=='}
+        return found
+
+    monkeypatch.setattr(m, 'attrs', attrs)
+    with pytest.raises(m.Refused, match='INSTRUCTION_PATH_UNSAFE'):
+        apply(e)
+    assert e.target.read_bytes() == before
+
+
 def test_symlink_aliases_share_resolved_target_mutex_and_compare_inputs(env):
     e=engine(env);e.home.mkdir();e.target.write_text('outside\n')
     alias=e.home/'alias';alias.symlink_to(e.target.name)

@@ -51,6 +51,8 @@ agentstack-claude-setup --remove-legacy-block --path /work/repo/CLAUDE.md
 
 Ancestor AGENTS.md files are detect-only unless selected explicitly by `--path`. Symlink chain and referent are rechecked. For hardlinks, back up all aliases yourself, review their uses, replace the chosen target with an independent regular copy, then re-plan. The engine neither discovers aliases nor severs links.
 
+On macOS, an atomic temporary file can acquire the OS-generated `com.apple.provenance` attribute even when the existing file lacks it. Only that addition is allowed; all other extended attributes, ACLs, ownership, permissions, and file contents must still match.
+
 Cooperative engines in one installation serialize on the pinned referent path mutex. Non-cooperative writes under the same UID can race between the last comparison and rename. Detected changes stop the operation and retain backups.
 
 <a id="interrupted-migration"></a>
