@@ -2,7 +2,7 @@
 
 [English](README.en.md) · [README](../README.md)
 
-操作の入口は画面内の **Your first flight → help map → Full tour**。cockpit の `Settings → Getting started` から開けます。ここは install・update・困ったときと、必要に応じて読む詳しい参照の目次です。
+Claude Code・Codex・DeepSeek・Local LLMのどれからでも始められます。まず[単独導入](getting-started.md#telemetry-単独の導入と確認)か[cockpitと共通導入](https://github.com/gyroid-eth/orrery/blob/master/README.md#クイックスタート)を選び、Claude/Codexは使うCLIへのログイン、DeepSeek/Localは[APIの初期設定](native-setup.md)へ進みます。準備後の画面操作は **Your first flight → help map → Full tour**。cockpitの`Settings → Getting started`から開けます。ここは導入・更新・困ったときに読む参照の目次です。
 
 Telemetry 自体の操作は、header の `HELP MAP`（NETWORK では `SETTINGS` の隣）から見回せます。単独の画面でも cockpit 内の埋め込みでも、DECK / NETWORK の操作に注記します。agent の詳細パネルでは、パネル内の `HELP MAP` からパネルの操作を説明できます。
 
@@ -12,7 +12,8 @@ Telemetry 自体の操作は、header の `HELP MAP`（NETWORK では `SETTINGS`
 
 ## はじめる
 
-- [既存利用者がDeepSeek・Localを追加する](native-setup.md) — dsh/Hermesの追加、APIキーの発行・保存、設定例の準備、画面からの起動を順番に進める。
+- [DeepSeek・Local LLMの初期設定](native-setup.md) — 共通導入後、dsh/Hermes・APIキー・接続設定・画面からの起動へ。新規・既存利用者とも使え、Claude/Codexのログインは不要。
+- [Ubuntu WSLにAPIキーを保存する](wsl-keyring.md) — 標準GUIで鍵束を準備し、APIキーを非表示入力で保存する初回手順。
 
 - [目的と provider・model・harness を選ぶ](getting-started.md#provider-model-harness) — 観測、API の model で作成、agent 同士の連携の3導線。[対応組合せと現在の制限](managed-catalog.md)で準備・OS・画面の範囲を確認する。
 - [ORRERY cockpit](https://github.com/gyroid-eth/orrery/blob/master/README.md#クイックスタート) — 1行で両方を入れ、画面の初回ガイドから始める。
@@ -21,6 +22,7 @@ Telemetry 自体の操作は、header の `HELP MAP`（NETWORK では `SETTINGS`
 ## 使い方
 
 - [Dashboard](dashboard.md) — DECK/NETWORK、履歴、RESUME/EXIT、REPLAY と詳細の参照。
+- [指定スマホで状況を見る](mobile.md) — 既定オフの閲覧画面、本人認証と端末制限、手動有効化と停止。
 - [委任と child agent](delegation.md) — ORRERY /delegate、組み込み子との違いと渡す道具の選択。
 - [Launcher と identity](launchers.md) — agent-start、名前、resume、/delegate と /log、通知の流れ。
 - [Obsidian と一緒に使う](obsidian.md) — ログ・論文ノート・タスクを vault と Daily Note に置く。
@@ -48,6 +50,7 @@ Telemetry 自体の操作は、header の `HELP MAP`（NETWORK では `SETTINGS`
 ## 困ったとき
 
 - [トラブルシューティング](troubleshooting.md) — service、通知、spawn、認証、WSL の止まり方を切り分ける。
+- [ローカル HTTP の信頼境界](local-http-security.md) — Dashboard と Mail が受け付ける要求元と、信頼する前提。
 
 ## 設計・開発者向け
 
@@ -59,6 +62,7 @@ Telemetry 自体の操作は、header の `HELP MAP`（NETWORK では `SETTINGS`
 - [project 廃止の契約と移行計画](project-removal-plan.md) — PR1 の candidate API と gate。既定の動作は変えず、切替は後続 PR。
 - [絶対 path の予約候補](absolute-reservations.md) — PR2 の normalizer、認証付き隔離 store、client adapter と予約ごとの activity/GC。既定は旧 mode。
 - [Mail と配送の記録の移行候補](namespace-state-migration.md) — PR3 の隔離 snapshot、永続 store と phase ごとの復旧。activation false。
+- [保存元を保つ B1 の内部 kernel](storage-origin-b1.md) — S′ の候補解決・本人操作・pure peek。未公開で、既定の起動経路は変更しない。
 - [global server の S1 準備](global-server.md) — 隔離 HTTP の登録・再接続・inbox・enrollment と authority epoch。既定は旧 mode。
 - [隔離 global 予約・welcome](global-reservations.md) — S2c の唯一 SQL engine、TTL、管理復旧、試験移設。既定は旧 mode。
 - [隔離 global message と通知（S2b）](global-messages.md) — 8 tool・DB 添付・純粋 inbox・signal の再照合。既定は旧 mode。

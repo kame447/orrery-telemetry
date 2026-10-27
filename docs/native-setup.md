@@ -1,10 +1,27 @@
-# すでにORRERYを使っている人が、DeepSeek・Localを追加する
+# DeepSeek・Local LLMの初期設定
+
+<a id="すでにorreryを使っている人がdeepseeklocalを追加する"></a>
 
 > English: [native-setup.en.md](native-setup.en.md)
 
-これまでClaude CodeやCodexだけを使っていた人向けの初期設定です。**ORRERYを更新しただけでは、dsh・Hermesの導入やAPIキーの登録は完了しません。** このガイドはORRERY cockpitとORRERY Telemetryのどちらから使う場合も共通です。
+ORRERYの共通部分を入れたあと、DeepSeekまたはLocal LLMを使うための初期設定です。Claude CodeやCodexの導入・ログインは前提ではありません。**通常の導入・更新だけでは、dsh・Hermesの追加やAPIキーの登録は完了しません。** ORRERYがまだ入っていなければ、先に[cockpitと共通導入](https://github.com/gyroid-eth/orrery/blob/master/docs/install.md)か[Telemetry単独の導入](getting-started.md#telemetry-単独の導入と確認)を済ませてから戻ってください。ここからの準備は、どちらの画面を使う場合も共通です。
 
 cockpitはターミナルを並べて操作する画面、Telemetryはagentの状態を表示し、起動を受け付ける側です。API接続の準備はTelemetry側で行い、準備が終わればどちらのNEW AGENTからも選べます。現在、NEW AGENTにAPIキーを入力する欄や、接続設定を一括で済ませるウィザードはありません。
+
+### Local serverはURLを一度設定する
+
+動的Local接続は、既存agentへ[一度の移行手順](../examples/native-harnesses/README.md#dynamic-local-connections)を読ませて設定します。接続ごとに任意の表示名、1本以上のAPI URL、任意のcontext fallbackを持ちます。両NEW AGENTはserverが返すmodel IDを接続見出しの下へ列挙します。同じURLに新しいmodelが現れたとき、modelごとのORRERY設定・再installは不要です。従来の固定model接続は、移行するまで引き続き使えます。
+
+この節はTelemetry API33以降と対応するcockpit picker更新が必要です。接続の移行前に両方を更新します。以下の従来の固定model手順は互換を維持します。
+
+| 担当 | 手順 |
+| --- | --- |
+| 利用者のagent | 手順を読み、別の私有copyを準備。既存OS資格参照・runtime pathを保持し、対象Localをそれぞれ `model_source: server` へ変更して非秘密diffを提示。鍵取得・server通信なしの静的検査を実行する |
+| 本人 | URLとdiffを確認。必要な鍵登録・unlockはOSの画面だけで行い、新manifestの利用を承認する |
+| agent／本人 | 既存のplan/dry-run・install手順へ新manifestを渡す。両画面をreloadし、接続名・URL番号・modelを選択。実機の短い1課題は別途調整する |
+| agent／本人 | 復旧時は保存した旧manifestを同じ通常install手順へ渡す。保持sessionのURLやmodelを別のものへ書き換えない |
+
+製品は既存の保護された資格参照でmodel一覧を取得し、起動・再開のcommand生成直前に選択URLだけをもう1回照合します。serverのmodel起動・停止は行いません。`Available` は、返却IDに明示的unloadedがないという意味で、ロード済みの証明ではありません。最終照合後の変更、同名IDのrun交換、指定IDを無視するserverはこの観測の保証外です。以下のdsh protocolとHermes HTTPSの条件は維持します。
 
 **古い版を使っている場合は、先に通常の更新を済ませます。** このガイドはTelemetry 2026.10.22以降が対象です。インストール先の版は、ターミナルで `cat "${AGENTSTACK_HOME:-$HOME/.agentstack}/VERSION"` を実行して確認できます。それより古い場合や版を確認できない場合は、[Telemetryの更新手順](install.md#upgrade)を確認してください。cockpitも使う場合は、[cockpitの更新手順](https://github.com/gyroid-eth/orrery/blob/master/docs/install.md#1-行で入れる更新する)で両方を更新できます。古いinstallerでは、この後の追加オプションを受け付けない場合があります。通常の更新が終わってから、以下のdsh・Hermesの追加とキーの保存へ進みます。更新は準備の前提で、初回のAPI設定とは別の工程です。
 
@@ -13,11 +30,17 @@ cockpitはターミナルを並べて操作する画面、Telemetryはagentの�
 | 選ぶもの | 意味 | 自分で用意するもの |
 | --- | --- | --- |
 | DeepSeek | DeepSeekが運営するAPIを使う | DeepSeekのAPIキーとAPI利用残高 |
-| Local（Strataなど） | 自分や管理者が動かしているLLMサーバーを使う | サーバーのURL・model ID・必要な場合はそのサーバー専用のキー |
+| Local models（Strataなど） | 自分や管理者が動かしている対応LLMサーバーを使う | 対応するAPIのURL・model ID・サーバー専用のキー。現在の経路は資格参照が必須 |
 | dsh | モデルとの会話や道具の実行を担当するアプリ。DeepSeek Harnessの略称 | ORRERYのinstallerから追加する。Node.js 24.2以上が必要 |
 | Hermes | dshとは別の、会話や道具を動かすアプリ | ORRERYのinstallerから追加する |
 
 「DeepSeek＋dsh」「DeepSeek＋Hermes」のように、接続先と動かすアプリを1つずつ選びます。dshとHermesを両方入れても、接続先が同じならAPIキーを2本発行する必要はありません。Localを使うためにDeepSeekのアカウントを作る必要もありません。
+
+**Localは接続先の仕様を先に確認します。** dshは固定DeepSeek adapterと互換のAPIを使い、HTTP/HTTPSのURLを受け付けます。HermesはHTTPSが必須で、API形式は`chat_completions`か`anthropic_messages`です。HTTPだけのサーバーをHermesへそのまま指定できません。従来のLocal設定例の接続IDは`strata`ですが、Strataのホストに限定するものではありません。任意の「OpenAI互換」サーバーが動くという保証でもありません。
+
+**キーを保存・参照せずに使うLocal構成は、現在のORRERYでは非対応です。** 両harnessともOSに保存したキーへの参照が必要です。キー不要のサーバーへ仮のキーを設定して済ませず、対応する認証付きの接続先を用意してから、このガイドへ進んでください。
+
+**動作確認の範囲：** API起動はmacOSとLinux/Ubuntu WSLのlegacy modeに実装されています。WindowsネイティブのAPI起動は対象外です。全DeepSeek/Local×dsh/Hermesの組合せを、標準設定例から新規導入して通し確認したものではありません。とくにWSLでは鍵束・表示・サービスの同ユーザー接続をOS側で準備する必要があります。候補が表示されることと、キー保存・実接続・Mail・終了/再開が成功することは別です。
 
 Claude Code/Codexの既存ログインとは別の設定です。API起動は現在、ORRERY Mailの接続方式がlegacy modeの[対応組合せ](managed-catalog.md)に限られます。global modeは別のMail接続方式で、このガイドの対象外です。どちらか不明ならagentに確認し、設定を無断で切り替えないでください。
 
@@ -74,7 +97,7 @@ DeepSeekの同梱例には、dsh用の`https://api.deepseek.com/anthropic`とHer
 
 ### Local / Strataを使う場合
 
-サーバー管理者から、接続URL、正式なmodel ID、API形式、必要なら接続キーを受け取ります。DeepSeekのAPIキーとは別物です。キーが同じか、URLに`/v1`などを付けるかを推測しないでください。Localの設定項目は[設定例の変更表](../examples/native-harnesses/README.md#local--strataへ変更する場合)を使います。
+サーバー管理者から、接続URL、正式なmodel ID、API形式、サーバー専用の接続キーを受け取ります。DeepSeekのAPIキーとは別物です。キーが同じか、URLに`/v1`などを付けるかを推測しないでください。上のharnessごとの対応条件を確認し、[設定例の変更表](../examples/native-harnesses/README.md#local--strataへ変更する場合)を使います。
 
 ## 4. APIキーをOSの安全な保存先へ登録する
 
@@ -91,7 +114,9 @@ DeepSeekの同梱例には、dsh用の`https://api.deepseek.com/anthropic`とHer
 
 ### Windows / Ubuntu WSL：Secret Service
 
-Windowsの資格情報マネージャーではなく、Ubuntu側の保存先を使います。Secret Service、同じユーザーのD-Bus session、暗号化された鍵束とそのロック解除、`/usr/bin/secret-tool`が必要です。`libsecret-tools`や`gnome-keyring`のインストールだけで、鍵束作成やGUI表示まで済むわけではありません。未準備なら、この段階で既存agentへOS側の準備を相談してください。別のdaemonを重ねて起動する手順ではありません。
+**初めてUbuntuへキーを保存する場合は、[WSLの鍵束準備・非表示登録ガイド](wsl-keyring.md)へ進みます。** OSアプリの導入、標準GUIでの鍵束作成、保存先の確認まで掲載しています。登録後は、このページの[「5. 設定例をコピーして、接続先をつなぐ」](#5-設定例をコピーして接続先をつなぐ)へ戻り、以下の保存を重ねて実行しません。新規WSLでこのGUI手順を最後まで通した実機確認はまだ完了していません。
+
+以下は、すでに使える既定の鍵束がある人向けです。Windowsの資格情報マネージャーではなく、Ubuntu側の保存先を使います。Secret Service、同じユーザーのD-Bus session、暗号化された鍵束とそのロック解除、`/usr/bin/secret-tool`が必要です。`libsecret-tools`や`gnome-keyring`のインストールだけでは鍵束作成やGUI表示は完了しません。未準備なら上のガイドでOS側を準備し、別のdaemonを重ねて起動しないでください。
 
 鍵束が使えるUbuntuの**対話画面**で、次を実行します。パイプやファイルからキーを渡さず、標準の非表示入力を使います。
 
@@ -109,9 +134,9 @@ OSが鍵束の作成・unlock画面を出した場合、そこで求められる
 
 ## 5. 設定例をコピーして、接続先をつなぐ
 
-APIキーを保存しても、ORRERYには「どのアプリ・model・保存先を使うか」を渡す必要があります。ここは既存agentに、**秘密を含まない設定だけ**準備させられます。手作業で設定する人は[同梱設定例の手順](../examples/native-harnesses/README.md)を参照してください。
+APIキーを保存しても、ORRERYには「どのアプリ・model・保存先を使うか」を渡す必要があります。**agentを使わない人は、[設定例をコピーして検査する手順](../examples/native-harnesses/README.md#agentを使わずにdeepseekの設定例を準備する)へ進みます。** コピー先の3参照を合わせるコマンド、有効化、検査、最後のinstallまで掲載しています。既存agentを使う場合は、以下の依頼文で秘密を含まない設定だけを準備させられます。
 
-設定ファイル（manifest）は、使うmodelとアプリ、各設定ファイルの場所をまとめたJSONです。この手順ではagentが設定の準備と検査を行い、最後のinstallコマンドは利用者がターミナルで1回実行します。
+設定ファイル（manifest）は、使うmodelとアプリ、各設定ファイルの場所をまとめたJSONです。以下はagentに準備と検査を手伝わせる例です。利用できるagentがなくても、同梱設定例の手順に従って自分でコピー・編集・有効化・検査を行えます。どちらの場合も、最後のinstallコマンドは利用者がターミナルで1回実行します。
 
 agentへ渡す依頼文の例です。角括弧の部分は自分の選択に置き換え、キー自体は書きません。
 
@@ -149,9 +174,14 @@ agentが合わせるのは、manifestからdsh/Hermesの設定を指す2箇所�
 
 1. cockpitなら[画面内の＋NEW AGENT](https://github.com/gyroid-eth/orrery/blob/master/docs/usage.md#new-agent)、Telemetry単体なら[NEW AGENT](dashboard.md#native-models-and-harnesses)を開きます。
 2. 科学者、DeepSeekまたはLocal models、設定済みmodel、dshまたはHermesを選びます。
+   Localを複数残す場合は、[複数接続の設定](configuration.md#native-connections)で別IDとserver名を付け、workstation / EPYCなどの表示を見て選びます。同じmodel IDでも接続先は別です。
 3. 新しい作業フォルダーを指定し、まず短い依頼を1つ送ります。modelの応答を確認してから、[Mailの通し確認](getting-started.md#5-しりとりで通しの確認をする)へ進みます。
 
-![TelemetryのNEW AGENTでmodelとharnessを選ぶ](img/native-harness-picker.png)
+![WSLの実TelemetryでLocal modelsとHermesを選択した画面](img/wsl-native-harness-picker.png)
+
+[選択の流れをGIFで見る](img/wsl-native-harness-selection.gif)（10.8秒）：Claude、Codex、DeepSeek、Local modelsと、dsh/Hermesの選択を示します。Ubuntu WSLの実backendをMacのChromeから表示した画面です。科学者の肖像や候補は実画面のもので、起動ボタンは押していません。キー保存やAPI応答の成功を示す録画ではありません。
+
+画像のLocalはStrata上のQwenモデルを設定した例です。内部IDの`strata`は接続先ホストの制限ではありません。別のサーバーには、手順1のAPI・HTTPS・キー参照の条件を確認してから接続します。
 
 候補が見えること、応答が返ること、道具・Mail・終了・会話再開が使えることは、それぞれ別の確認です。[対応範囲](managed-catalog.md#現在の制限)も参照してください。
 
