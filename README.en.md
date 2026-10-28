@@ -106,6 +106,7 @@ Japanese documents are the source of truth. The English entry point is the [Engl
 | Start Telemetry on its own or look up a term | [Getting started](docs/getting-started.en.md) |
 | Check installation, updates, and requirements | [Installation](docs/install.en.md) |
 | Read from one designated phone | [Mobile view-only setup](docs/mobile.en.md) (off by default) |
+| Read status from ChatGPT and start agents with approval | [MCP connection for ChatGPT](docs/chatgpt-mcp.en.md) (local to your Mac, off by default) |
 | Diagnose a problem | [Troubleshooting](docs/troubleshooting.en.md) |
 | Develop a local deterministic daemon helper | [Dedicated bindings and notifications](docs/daemon-agents.en.md) (deployment requires separate approval) |
 | Validate candidate absolute reservations | [Candidate contract and tests](docs/absolute-reservations.en.md) (legacy mode remains the default) |
