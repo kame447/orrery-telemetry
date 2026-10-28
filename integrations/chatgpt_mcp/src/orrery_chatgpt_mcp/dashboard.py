@@ -58,16 +58,21 @@ class DashboardClient:
             headers["Content-Type"] = "application/json"
         is_write = method != "GET"
         conn = http.client.HTTPConnection(self._host, self._port, timeout=self._write_timeout if is_write else self._read_timeout)
-        sent = False
         try:
+            conn.connect()
+        except OSError as exc:
+            conn.close()
+            # Nothing can have reached the dashboard before the connection exists.
+            raise DashboardError(f"dashboard unreachable: {type(exc).__name__}") from None
+        try:
+            # From here a write may have been received even if sending fails part way.
             conn.request(method, target, body=data, headers=headers)
-            sent = True
             resp = conn.getresponse()
             raw = resp.read(MAX_RESPONSE_BYTES + 1)
             status = resp.status
         except (OSError, http.client.HTTPException) as exc:
             # Once the request bytes are out, a spawn may have happened.
-            raise DashboardError(f"dashboard unreachable: {type(exc).__name__}", outcome_unknown=is_write and sent) from None
+            raise DashboardError(f"dashboard connection failed: {type(exc).__name__}", outcome_unknown=is_write) from None
         finally:
             conn.close()
         if len(raw) > MAX_RESPONSE_BYTES:

@@ -26,14 +26,15 @@ ChatGPT ──(OpenAI)── Secure MCP Tunnel ◀── tunnel-client (Mac, out
 
 | Control | What it does |
 | --- | --- |
-| Pairing secret | The only MCP entrance is `/mcp/<43-character secret>`. `orrery-chatgpt-mcp pair` writes it to `~/.agentstack/runtime/chatgpt-mcp/pairing.json` (0600, never overwritten); give it only to the tunnel-client configuration. Other paths return 404 and guesses are rate limited |
+| Pairing secret | The only MCP entrance is `/mcp/<43-character secret>`. `orrery-chatgpt-mcp pair` writes it to `~/.agentstack/runtime/chatgpt-mcp/pairing.json` (0600, never overwritten); give it only to the tunnel-client configuration. Other paths return 404 and guesses are rate limited. `pair --rotate` revokes the old URL immediately, even in a running gateway |
 | Host / Origin | Host must be `127.0.0.1` / `localhost` / `[::1]` with the real port. Any request with an Origin (a browser) is refused, which blocks DNS rebinding and browser CSRF |
-| Approval on the Mac | Launch is "preview → `orrery-chatgpt-mcp approve <code>` on the Mac → commit". An approval is bound to one preview and nothing over MCP can create one |
+| Approval on the Mac | Launch is "preview → `orrery-chatgpt-mcp approve <code>` on the Mac → commit". `approve` shows the full task, directory and model (control characters escaped); the approval is bound to that preview and to the hash of the task text shown. The model resolved at preview is pinned for the launch. Nothing over MCP can create an approval. Tasks containing control or bidi-override characters are refused at preview |
 | Launch scope | Off by default. When enabled: only operator-registered directory aliases, only `claude` / `codex`, standalone (no parent), worktree isolation by default. `tools`, `base`, `parent` and similar fields are refused |
 | Duplicate prevention | Commit requires a caller `idempotency_key`. A repeat returns the recorded outcome and never starts a second agent. Records live in `spawn-ledger.json` (0600) and survive restarts |
 | Unknown outcome | If the answer is lost after sending, the gateway records `unknown`, never success, and reconciles through `orrery_spawn_status` instead of resending |
 | Data minimisation | Agent rows carry a fixed field list. Pane titles, commands, paths, transcripts, Mail internals and launcher log tails are dropped. Text is clipped to 300 characters and labelled untrusted data |
-| Logs | One line per request (subject, tool, outcome). No arguments, secrets or tokens |
+| Logs | One line per request (subject, registered tool name, outcome). No arguments, secrets or tokens. Dashboard error text can contain paths and diagnostics, so ChatGPT gets only `has_error` or a code |
+| Connection handling | Connections close after any refusal. Duplicate Content-Length and any Transfer-Encoding are refused. 15-second read deadline and at most 32 concurrent requests. One gateway per state directory |
 | Never borrowed | ORRERY Mail owner tokens, parent/child credentials and the dashboard operator capability |
 
 Programs running as the same macOS user are inside this boundary ([local HTTP trust boundary](local-http-security.md)). A local program that can read the pairing file, or a local agent that can run `approve`, is not kept out.
@@ -113,7 +114,8 @@ If Secure MCP Tunnel is not available to your account, do not expose the gateway
 | Dashboard down or malformed answer | Tool result `isError: true`, `dashboard_unavailable`; `orrery_status` shows `reachable: false` |
 | Launch disabled or out-of-policy arguments | `unknown_tool` / `invalid_arguments` |
 | Commit before approval | `approval_required` (the preview is not consumed) |
-| No answer after sending | `outcome_unknown`; a repeat with the same key reconciles and does not resend |
+| No answer during or after sending | `outcome_unknown`; a repeat with the same key reconciles and does not resend ("not sent" only when no connection was made) |
+| Invalid JSON-RPC, a response message, or a batch | HTTP 400 |
 
 ## Settings
 

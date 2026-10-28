@@ -22,12 +22,14 @@ from typing import Any
 
 from . import __version__
 from .auth import AuthError, Principal, TokenVerifier, challenge
-from .config import AUTH_PAIRING, KNOWN_SCOPES, LOCAL_SUBJECT, SCOPE_READ, SCOPE_SPAWN, GatewayConfig
+from .config import AUTH_PAIRING, KNOWN_SCOPES, ConfigError, LOCAL_SUBJECT, SCOPE_READ, SCOPE_SPAWN, GatewayConfig
 from .dashboard import DashboardClient
 from .tools import ToolError, ToolRegistry
 
 SUPPORTED_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
 MAX_BODY_BYTES = 64 * 1024
+MAX_CONCURRENT_REQUESTS = 32
+SOCKET_TIMEOUT = 15
 INSTRUCTIONS = (
     "Tools for one operator's local ORRERY agent coordination. Read tools show agents and launch state. "
     "Starting an agent is two steps: orrery_spawn_preview, show the preview to the user, then orrery_spawn_commit "
@@ -46,6 +48,12 @@ class RateLimiter:
         self._clock = clock
         self._buckets: dict[str, tuple[float, float]] = {}
         self._lock = threading.Lock()
+
+    def exhausted(self, key: str) -> bool:
+        now = self._clock()
+        with self._lock:
+            tokens, last = self._buckets.get(key, (self._burst, now))
+            return min(self._burst, tokens + (now - last) * self._rate) < 1.0
 
     def allow(self, key: str) -> bool:
         now = self._clock()
@@ -75,8 +83,32 @@ class Gateway:
         if config.resource_host:
             self.allowed_hosts.add(config.resource_host)
 
+        self._secret_lock = threading.Lock()
+        self._secret_stat: tuple | None = None
+        self._secret_path: str | None = None
+
+    def current_mcp_path(self) -> str | None:
+        """In pairing mode, follow pairing.json so `pair --rotate` revokes the old URL at once."""
+        if not self.pairing:
+            return self.config.mcp_path
+        from . import pairing
+
+        path = pairing.secret_path(self.config.state_dir)
+        with self._secret_lock:
+            try:
+                st = path.stat()
+                key = (st.st_ino, st.st_mtime_ns, st.st_size)
+                if key != self._secret_stat:
+                    self._secret_path = f"/mcp/{pairing.read_secret(self.config.state_dir)}"
+                    self._secret_stat = key
+            except (OSError, ConfigError):
+                self._secret_path, self._secret_stat = None, None  # fail closed
+            return self._secret_path
+
     def is_mcp_path(self, path: str) -> bool:
-        return hmac.compare_digest(path.encode(), self.config.mcp_path.encode())
+        expected = self.current_mcp_path()
+        # compare_digest on equal-length inputs only; length of the secret path is not secret.
+        return expected is not None and hmac.compare_digest(path.encode(), expected.encode())
 
     def protected_resource_metadata(self) -> dict:
         return {
@@ -89,16 +121,22 @@ class Gateway:
 
     # -- JSON-RPC ------------------------------------------------------------
     def handle_rpc(self, principal: Principal, message: Any) -> tuple[int, dict | None]:
+        # Streamable HTTP: rejected input gets an HTTP error status, not a 200 envelope.
         if isinstance(message, list):
-            return 200, _rpc_error(None, -32600, "batch requests are not supported")
-        if not isinstance(message, dict) or message.get("jsonrpc") != "2.0" or not isinstance(message.get("method"), str):
-            return 200, _rpc_error(message.get("id") if isinstance(message, dict) else None, -32600, "invalid JSON-RPC request")
+            return 400, _rpc_error(None, -32600, "batch requests are not supported")
+        if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
+            return 400, _rpc_error(None, -32600, "invalid JSON-RPC message")
+        if "method" not in message:
+            # A JSON-RPC response; this server never sends requests to the client.
+            return 400, _rpc_error(None, -32600, "unexpected JSON-RPC response")
+        if not isinstance(message.get("method"), str):
+            return 400, _rpc_error(None, -32600, "method must be a string")
         method = message["method"]
         if "id" not in message:
             return 202, None  # notifications (e.g. notifications/initialized) need no answer
         req_id = message["id"]
         if not isinstance(req_id, (str, int)) or isinstance(req_id, bool):
-            return 200, _rpc_error(None, -32600, "id must be a string or integer")
+            return 400, _rpc_error(None, -32600, "id must be a string or integer")
         params = message.get("params") or {}
         if not isinstance(params, dict):
             return 200, _rpc_error(req_id, -32602, "params must be an object")
@@ -119,15 +157,18 @@ class Gateway:
             name = params.get("name")
             if not isinstance(name, str):
                 return 200, _rpc_error(req_id, -32602, "tools/call needs a tool name")
+            # Log only registered names and an escaped subject: no caller text reaches the log raw.
+            label = name if self.tools.known(name) else "<unknown>"
+            who = ascii(principal.subject[:80])
             try:
                 payload = self.tools.call(principal, name, params.get("arguments"))
             except ToolError as exc:
-                log.info("tool sub=%s tool=%s outcome=%s", principal.subject, name, exc.code)
+                log.info("tool sub=%s tool=%s outcome=%s", who, label, exc.code)
                 return 200, _rpc_result(req_id, self._tool_error(exc))
-            except Exception:  # never leak internals to the client
-                log.exception("tool sub=%s tool=%s outcome=internal_error", principal.subject, name)
+            except Exception as exc:  # never leak internals to the client
+                log.error("tool sub=%s tool=%s outcome=internal_error type=%s", who, label, type(exc).__name__)
                 return 200, _rpc_result(req_id, self._tool_error(ToolError("internal_error", "the gateway failed while running this tool")))
-            log.info("tool sub=%s tool=%s outcome=ok", principal.subject, name)
+            log.info("tool sub=%s tool=%s outcome=ok", who, label)
             return 200, _rpc_result(req_id, {
                 "content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}],
                 "structuredContent": payload,
@@ -162,6 +203,7 @@ def make_handler(gateway: Gateway):
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "orrery-chatgpt-mcp"
+        timeout = SOCKET_TIMEOUT  # bounds idle and slow header/body senders
         sys_version = ""
         protocol_version = "HTTP/1.1"
 
@@ -170,6 +212,9 @@ def make_handler(gateway: Gateway):
 
         def _send(self, status: int, body: dict | None = None, headers: dict[str, str] | None = None) -> None:
             data = b"" if body is None else json.dumps(body, ensure_ascii=False).encode("utf-8")
+            if status >= 400:
+                # The request body may be unread: never reuse this connection after a refusal.
+                self.close_connection = True
             self.send_response(status)
             if body is not None:
                 self.send_header("Content-Type", "application/json")
@@ -178,11 +223,19 @@ def make_handler(gateway: Gateway):
             self.send_header("X-Content-Type-Options", "nosniff")
             for key, value in (headers or {}).items():
                 self.send_header(key, value)
+            if self.close_connection:
+                self.send_header("Connection", "close")
             self.end_headers()
             if data and self.command != "HEAD":
                 self.wfile.write(data)
 
         def _admit(self) -> bool:
+            if self.headers.get_all("Transfer-Encoding") or len(self.headers.get_all("Content-Length") or []) > 1:
+                self._send(400, {"error": "ambiguous_framing"})
+                return False
+            if self.command != "POST" and (self.headers.get("Content-Length") or "0").strip() not in ("", "0"):
+                self._send(400, {"error": "unexpected_body"})
+                return False
             hosts = self.headers.get_all("Host") or []
             if len(hosts) != 1 or hosts[0].strip().lower() not in gateway.allowed_hosts:
                 self._send(403, {"error": "untrusted_host"})
@@ -251,29 +304,31 @@ def make_handler(gateway: Gateway):
             if not gateway.is_mcp_path(self._path()):
                 self._not_found()
                 return
-            if self.headers.get("Transfer-Encoding"):
+            raw_length = (self.headers.get("Content-Length") or "").strip()
+            if not raw_length.isdigit():
                 self._send(411, {"error": "length_required"})
-                self.close_connection = True
                 return
-            try:
-                length = int(self.headers.get("Content-Length", ""))
-            except ValueError:
-                self._send(411, {"error": "length_required"})
-                self.close_connection = True
-                return
-            if length < 0 or length > MAX_BODY_BYTES:
+            length = int(raw_length)
+            if length > MAX_BODY_BYTES:
                 self._send(413, {"error": "payload_too_large"})
-                self.close_connection = True
                 return
-            body = self.rfile.read(length)
             if gateway.pairing:
                 principal = gateway.local_principal
             else:
+                # Authenticate from headers before reading any body; refuse early once
+                # failures are rate limited so key lookups cannot be driven without bound.
+                if gateway.anon_limiter.exhausted("auth-failures"):
+                    self._send(429, {"error": "rate_limited"}, {"Retry-After": "10"})
+                    return
                 try:
                     principal = gateway.verifier.verify_header(self.headers.get("Authorization"))
                 except AuthError as exc:
                     self._auth_fail(exc)
                     return
+            body = self.rfile.read(length)
+            if len(body) != length:
+                self._send(400, {"error": "short_body"})
+                return
             if not gateway.subject_limiter.allow(principal.subject):
                 self._send(429, {"error": "rate_limited"}, {"Retry-After": "5"})
                 return
@@ -303,6 +358,23 @@ def make_handler(gateway: Gateway):
 class GatewayServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    _slots = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)  # over capacity: drop instead of queueing threads
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
     def handle_error(self, request, client_address):
         # One line, no traceback: a traceback can echo request bytes into logs.
@@ -314,7 +386,23 @@ def build_server(config: GatewayConfig, **kwargs) -> GatewayServer:
     return GatewayServer((config.bind_host, config.port), make_handler(gateway))
 
 
+def _instance_lock(config: GatewayConfig):
+    """One gateway per state directory, so ledger and approvals have one writer process."""
+    import fcntl
+    import os
+
+    config.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(config.state_dir / "gateway.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        raise ConfigError(f"another orrery-chatgpt-mcp is already running for {config.state_dir}") from None
+    return fd
+
+
 def serve(config: GatewayConfig) -> int:
+    lock_fd = _instance_lock(config)  # held for the life of the process
     server = build_server(config)
     host, port = server.server_address[:2]
     print(
@@ -329,6 +417,9 @@ def serve(config: GatewayConfig) -> int:
         pass
     finally:
         server.server_close()
+        import os
+
+        os.close(lock_fd)
     return 0
 
 
@@ -361,9 +452,12 @@ def main(argv: list[str] | None = None) -> int:
         if command == "serve" and len(argv) <= 1:
             return serve(GatewayConfig.from_env())
         if command == "pair" and argv[1:] in ([], ["--rotate"]):
-            secret = pairing.create_secret(state_dir, rotate=argv[1:] == ["--rotate"])
+            rotate = argv[1:] == ["--rotate"]
+            secret = pairing.create_secret(state_dir, rotate=rotate)
             port = os.environ.get("ORRERY_MCP_PORT", "8790")
             print(f"paired. Loopback MCP URL for tunnel-client (keep private):\nhttp://127.0.0.1:{port}/mcp/{secret}")
+            if rotate:
+                print("The old URL stopped working immediately, including in a running gateway. Update tunnel-client with the new URL.")
             return 0
         if command == "url" and len(argv) == 1:
             port = os.environ.get("ORRERY_MCP_PORT", "8790")
@@ -380,7 +474,7 @@ def main(argv: list[str] | None = None) -> int:
             record = pairing.read_pending(state_dir, argv[1])
             if record is None:
                 raise ConfigError(f"no pending launch with code {argv[1]}")
-            print(_describe(record))
+            print(_describe(record, full=True))
             answer = input("Start this agent on this Mac? Type yes to approve: ").strip().lower()
             if answer != "yes":
                 print("not approved")
@@ -398,11 +492,34 @@ def main(argv: list[str] | None = None) -> int:
     return 64
 
 
-def _describe(record: dict) -> str:
+def _safe(value: object) -> str:
+    """Render untrusted text for a terminal: control, format and bidi characters become escapes."""
+    import unicodedata
+
+    out = []
+    for ch in str(value):
+        if ch in "\n\t":
+            out.append(ch)
+        elif unicodedata.category(ch)[0] == "C" or unicodedata.bidirectional(ch) in ("LRE", "RLE", "LRO", "RLO", "PDF", "LRI", "RLI", "FSI", "PDI"):
+            out.append(f"\\u{ord(ch):04x}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _describe(record: dict, *, full: bool = False) -> str:
     summary = record.get("summary") or {}
     left = int(record.get("expires_at", 0) - time.time())
+    head = (
+        f"[{_safe(record.get('code'))}] {_safe(summary.get('name'))} in '{_safe(summary.get('directory'))}' "
+        f"({_safe(summary.get('provider'))} {_safe(summary.get('model') or '')}, worktree={summary.get('worktree')}, expires in {max(left, 0)}s"
+        f"{', APPROVED' if record.get('approved') else ''})"
+    )
+    if not full:
+        return f"{head}\n    task ({summary.get('task_chars')} chars): {_safe(summary.get('task_preview'))}"
+    task = summary.get("task", "")
+    body = "\n".join("    | " + line for line in _safe(task).split("\n"))
     return (
-        f"[{record.get('code')}] {summary.get('name')} in '{summary.get('directory')}' "
-        f"({summary.get('provider')} {summary.get('model') or ''}, worktree={summary.get('worktree')}, expires in {max(left, 0)}s"
-        f"{', APPROVED' if record.get('approved') else ''})\n    task ({summary.get('task_chars')} chars): {summary.get('task_preview')}"
+        f"{head}\n    directory: {_safe(summary.get('directory_path'))}\n    standalone agent, sha256 {_safe(summary.get('task_sha256'))}\n"
+        f"    full task ({len(task)} chars, shown exactly; \\uXXXX marks escaped characters):\n{body}\n    | <end of task>"
     )

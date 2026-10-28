@@ -26,14 +26,15 @@ ChatGPT ──(OpenAI)── Secure MCP Tunnel ◀── tunnel-client（Mac、�
 
 | 仕組み | 内容 |
 | --- | --- |
-| ペアリング秘密 | MCP の入口は `/mcp/<43文字の秘密>` だけです。秘密は `orrery-chatgpt-mcp pair` が `~/.agentstack/runtime/chatgpt-mcp/pairing.json`（0600、上書き不可）に作り、tunnel-client の設定にだけ渡します。違う経路は 404 で、推測は回数制限されます |
+| ペアリング秘密 | MCP の入口は `/mcp/<43文字の秘密>` だけです。秘密は `orrery-chatgpt-mcp pair` が `~/.agentstack/runtime/chatgpt-mcp/pairing.json`（0600、上書き不可）に作り、tunnel-client の設定にだけ渡します。違う経路は 404 で、推測は回数制限されます。`pair --rotate` は起動中のゲートウェイでも古い URL を即時に無効にします |
 | Host / Origin | Host は `127.0.0.1` / `localhost` / `[::1]` と実ポートだけ。Origin 付きの要求（ブラウザ）は全部拒否します。DNS rebinding とブラウザ経由の CSRF を防ぎます |
-| Mac 上での承認 | 起動は「プレビュー → Mac で `orrery-chatgpt-mcp approve <コード>` → コミット」です。承認はプレビュー 1 件に結び付き、MCP 側から作る手段はありません |
+| Mac 上での承認 | 起動は「プレビュー → Mac で `orrery-chatgpt-mcp approve <コード>` → コミット」です。`approve` はタスク全文・フォルダー・モデルを表示し（制御文字はエスケープ）、承認はそのプレビューと表示したタスク本文のハッシュに結び付きます。プレビューで決まったモデルを固定して起動します。MCP 側から承認を作る手段はありません。タスクに制御文字や双方向上書き文字があるとプレビューで拒否します |
 | 起動範囲 | 起動は既定で無効です。有効にしても、作業フォルダーは運用者が登録した別名だけ、provider は `claude` / `codex` だけ、親なし（standalone）、既定は worktree 隔離。`tools`・`base`・`parent` などは受け付けません |
 | 重複防止 | コミットには呼び出し側の `idempotency_key` が必須です。同じキーの再送は記録済みの結果を返し、二度目の起動はしません。記録は `spawn-ledger.json`（0600）に残り、再起動後も有効です |
 | 結果不明 | 送信後に応答が失われた場合は「unknown」と記録し、成功とは言いません。再送せず `orrery_spawn_status` で照合します |
 | 情報の絞り込み | エージェント行は固定の項目だけを返します。ペイン名、コマンド、パス、transcript、Mail 内部、起動ログ末尾は返しません。タスク等の文字列は 300 文字で切り、「信頼しないデータ」と明示します |
-| ログ | 1 要求 1 行（主体・ツール・結果）。引数、秘密、トークンは書きません |
+| ログ | 1 要求 1 行（主体・登録済みツール名・結果）。引数、秘密、トークンは書きません。dashboard のエラー文はパスや診断を含みうるので ChatGPT へは返さず、`has_error` やコードだけを返します |
+| 通信の扱い | 拒否した要求の後は接続を閉じます。重複した Content-Length と Transfer-Encoding は拒否。15 秒の読み取り期限と同時 32 要求の上限があります。同じ state ディレクトリで動くゲートウェイは 1 つだけです |
 | 流用しないもの | ORRERY Mail の owner token、親子の credential、dashboard の operator capability は使いません |
 
 同じ macOS ユーザーで動くプログラムはこの境界の内側です（[ローカル HTTP の信頼境界](local-http-security.md)）。ペアリングファイルを読める手元のプログラムや、`approve` を実行できる手元のエージェントからは守れません。
@@ -113,7 +114,8 @@ Secure MCP Tunnel がアカウントで使えない場合、代わりに公開�
 | dashboard が止まっている・壊れた応答 | ツール結果 `isError: true`、`dashboard_unavailable`。`orrery_status` は `reachable: false` |
 | 起動が無効・範囲外の引数 | `unknown_tool` / `invalid_arguments` |
 | 未承認でコミット | `approval_required`（プレビューは消費しない） |
-| 送信後に応答なし | `outcome_unknown`。同じキーの再送は送り直さず照合結果を返す |
+| 送信中・送信後に応答なし | `outcome_unknown`。同じキーの再送は送り直さず照合結果を返す（接続できなかったときだけ「未送信」） |
+| JSON-RPC として不正・応答メッセージ・batch | HTTP 400 |
 
 ## 設定
 

@@ -107,7 +107,7 @@ def read_pending(state_dir: Path, code: str) -> dict | None:
         return None
     try:
         return json.loads(_read_private(approvals_dir(state_dir) / f"pending-{code}.json"))
-    except FileNotFoundError:
+    except (FileNotFoundError, ValueError):
         return None
 
 
@@ -135,8 +135,9 @@ def approve(state_dir: Path, code: str, now: float | None = None) -> dict:
         raise ConfigError(f"no pending launch with code {code}")
     if record.get("expires_at", 0) <= now:
         raise ConfigError(f"launch {code} expired; ask ChatGPT for a new preview")
+    task_sha = (record.get("summary") or {}).get("task_sha256")
     _write_private(approvals_dir(state_dir) / f"approved-{code}.json",
-                   {"code": code, "preview": record["preview"], "approved_at": int(now)}, exclusive=False)
+                   {"code": code, "preview": record["preview"], "task_sha256": task_sha, "approved_at": int(now)}, exclusive=False)
     return record
 
 
@@ -152,14 +153,17 @@ def deny(state_dir: Path, code: str) -> bool:
     return removed
 
 
-def is_approved(state_dir: Path, code: str, preview_digest: str) -> bool:
+def is_approved(state_dir: Path, code: str, preview_digest: str, task_sha256: str | None = None) -> bool:
+    """True only for an approval of this preview, and (when given) of exactly this task text."""
     if not CODE_RE.fullmatch(code):
         return False
     try:
         record = json.loads(_read_private(approvals_dir(state_dir) / f"approved-{code}.json"))
     except (FileNotFoundError, ValueError, ConfigError):
         return False
-    return isinstance(record, dict) and record.get("preview") == preview_digest
+    if not isinstance(record, dict) or record.get("preview") != preview_digest:
+        return False
+    return task_sha256 is None or record.get("task_sha256") == task_sha256
 
 
 def consume(state_dir: Path, code: str) -> None:

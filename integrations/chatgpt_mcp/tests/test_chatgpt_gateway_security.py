@@ -228,7 +228,7 @@ def test_get_agent_validates_name(make_gateway, keys, dashboard):
     config, _ = make_gateway()
     token = keys.mint()
     assert call(config, token, "orrery_get_agent", {"name": "WindyFermi"})["structuredContent"]["agent"]["model"] == "gpt-5.6-sol"
-    for bad in ("../etc", "Windy;rm -rf /", "a", "WindyFermi&name=x"):
+    for bad in ("../etc", "Windy;rm -rf /", "-a", "WindyFermi&name=x", "a" * 65):
         r = call(config, token, "orrery_get_agent", {"name": bad})
         assert r["isError"] and r["structuredContent"]["error"]["code"] == "invalid_arguments"
     r = call(config, token, "orrery_get_agent", {"name": "WindyFermi", "path": "/api/kill"})

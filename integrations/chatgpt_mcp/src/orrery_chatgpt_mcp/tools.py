@@ -8,8 +8,10 @@ blindly and never reported as success.
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -25,7 +27,14 @@ from . import pairing
 from .config import APPROVAL_LOCAL, AUTH_PAIRING, SCOPE_READ, SCOPE_SPAWN, SPAWN_PROVIDERS, GatewayConfig
 from .dashboard import DashboardClient, DashboardError
 
-NAME_RE = re.compile(r"[A-Z][A-Za-z0-9]{2,39}")
+log = logging.getLogger("orrery_chatgpt_mcp")
+
+# New names follow the dashboard's spawn rule (letters only, no hyphen after normalisation).
+NAME_RE = re.compile(r"[A-Z][A-Za-z]{2,39}")
+# Lookups accept any existing session name the dashboard can hold.
+LOOKUP_NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}")
+# Task text: no C0/C1 controls except tab and newline, no bidi overrides (they hide text on review).
+_UNSAFE_TASK_CHARS = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 MODEL_RE = re.compile(r"[a-z0-9][a-z0-9._-]{1,63}")
 IDEMPOTENCY_RE = re.compile(r"[A-Za-z0-9_-]{8,128}")
 PREVIEW_RE = re.compile(r"[A-Za-z0-9_-]{20,64}")
@@ -90,14 +99,13 @@ def project_agent(row: dict) -> dict:
 
 def project_spawn_status(body: dict) -> dict:
     result = body.get("result") if isinstance(body.get("result"), dict) else {}
-    error = body.get("error")
-    first_line = str(error).splitlines()[0] if error else None
     state = body.get("state")
     return {
         "name": _clip(body.get("name"), 64),
         "state": state if state in ("launching", "ready", "failed") else "unknown",
         "age_seconds": body.get("age") if isinstance(body.get("age"), (int, float)) else None,
-        "error": _clip(first_line),
+        # Dashboard error text can carry paths and launcher diagnostics: keep it on the Mac.
+        "has_error": bool(body.get("error")),
         "child_name": _clip(result.get("child_name"), 64),
         "provider": _clip(result.get("provider"), 32),
         "model": _clip(result.get("model"), 64),
@@ -117,7 +125,8 @@ def _schema(props: dict, required: list[str]) -> dict:
     return {"type": "object", "properties": props, "required": required, "additionalProperties": False}
 
 
-_NAME_PROP = {"type": "string", "pattern": f"^{NAME_RE.pattern}$", "description": "ORRERY agent name, e.g. WindyFermi"}
+_NAME_PROP = {"type": "string", "pattern": f"^{NAME_RE.pattern}$", "description": "New agent name, letters only, e.g. WindyFermi"}
+_LOOKUP_PROP = {"type": "string", "pattern": f"^{LOOKUP_NAME_RE.pattern}$", "description": "Existing ORRERY agent name, e.g. WindyFermi"}
 
 
 @dataclass
@@ -138,10 +147,36 @@ class SpawnLedger:
         self._path = state_dir / "spawn-ledger.json"
         self._lock = threading.Lock()
 
+    def _transaction(self):
+        """Thread lock plus an OS lock so gateways sharing a state dir serialise."""
+        ledger = self
+
+        class _Txn:
+            def __enter__(self_inner):
+                ledger._lock.acquire()
+                try:
+                    ledger._dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    self_inner.fd = os.open(ledger._dir / "spawn-ledger.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+                    fcntl.flock(self_inner.fd, fcntl.LOCK_EX)
+                except BaseException:
+                    ledger._lock.release()
+                    raise
+
+            def __exit__(self_inner, *exc):
+                try:
+                    fcntl.flock(self_inner.fd, fcntl.LOCK_UN)
+                    os.close(self_inner.fd)
+                finally:
+                    ledger._lock.release()
+
+        return _Txn()
+
     def _load(self) -> dict:
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
+            if not isinstance(data, dict):
+                raise ValueError("ledger is not an object")
+            return data
         except FileNotFoundError:
             return {}
         except (OSError, ValueError):
@@ -163,12 +198,12 @@ class SpawnLedger:
         return hashlib.sha256(f"{subject}\x00{idempotency_key}".encode()).hexdigest()
 
     def get(self, key: str) -> dict | None:
-        with self._lock:
+        with self._transaction():
             return self._load().get(key)
 
     def put_if_absent(self, key: str, record: dict) -> dict | None:
         """Store ``record`` unless a record exists; return the existing one."""
-        with self._lock:
+        with self._transaction():
             data = self._load()
             now = time.time()
             data = {k: v for k, v in data.items() if isinstance(v, dict) and now - v.get("ts", 0) < LEDGER_TTL}
@@ -179,7 +214,7 @@ class SpawnLedger:
             return None
 
     def update(self, key: str, **fields: Any) -> dict:
-        with self._lock:
+        with self._transaction():
             data = self._load()
             record = dict(data.get(key) or {})
             record.update(fields)
@@ -234,7 +269,7 @@ class ToolRegistry:
                 "name": "orrery_get_agent",
                 "title": "Get one ORRERY agent",
                 "description": "Status of one named agent. " + UNTRUSTED_NOTE,
-                "inputSchema": _schema({"name": _NAME_PROP}, ["name"]),
+                "inputSchema": _schema({"name": _LOOKUP_PROP}, ["name"]),
                 "annotations": read_ann,
                 "securitySchemes": _security(self._config, SCOPE_READ),
             },
@@ -242,7 +277,7 @@ class ToolRegistry:
                 "name": "orrery_spawn_status",
                 "title": "ORRERY launch status",
                 "description": "Launch state (launching/ready/failed) of a recently spawned agent. Use it to confirm a spawn, including one whose result was unknown. " + UNTRUSTED_NOTE,
-                "inputSchema": _schema({"name": _NAME_PROP}, ["name"]),
+                "inputSchema": _schema({"name": _LOOKUP_PROP}, ["name"]),
                 "annotations": read_ann,
                 "securitySchemes": _security(self._config, SCOPE_READ),
             },
@@ -265,7 +300,8 @@ class ToolRegistry:
                         },
                         ["task", "directory"],
                     ),
-                    "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False, "idempotentHint": False},
+                    # Writes a pending approval record on the Mac, so not read-only.
+                    "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False, "idempotentHint": False},
                     "securitySchemes": _security(self._config, SCOPE_SPAWN),
                 },
                 {
@@ -279,16 +315,20 @@ class ToolRegistry:
                         },
                         ["preview_id", "idempotency_key"],
                     ),
-                    "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False, "idempotentHint": True},
+                    # The started agent runs an arbitrary task with normal local permissions.
+                    "annotations": {"readOnlyHint": False, "destructiveHint": True, "openWorldHint": True, "idempotentHint": True},
                     "securitySchemes": _security(self._config, SCOPE_SPAWN),
                 },
             ]
         return tools
 
+    def known(self, name: str) -> bool:
+        return name in self._handlers
+
     def call(self, principal: Principal, name: str, arguments: Any) -> dict:
         entry = self._handlers.get(name)
         if entry is None:
-            raise ToolError("unknown_tool", f"tool {name!r} is not available on this connection")
+            raise ToolError("unknown_tool", "this tool is not available on this connection")
         scope, handler = entry
         if scope not in principal.scopes:
             raise ToolError("insufficient_scope", f"this tool needs the {scope} scope", scope=scope)
@@ -306,10 +346,10 @@ class ToolRegistry:
             raise ToolError("invalid_arguments", f"unexpected arguments: {', '.join(extra)}")
 
     @staticmethod
-    def _name(args: dict) -> str:
+    def _name(args: dict, pattern: re.Pattern = LOOKUP_NAME_RE) -> str:
         name = args.get("name")
-        if not isinstance(name, str) or not NAME_RE.fullmatch(name):
-            raise ToolError("invalid_arguments", "name must look like WindyFermi (letters and digits, starting uppercase)")
+        if not isinstance(name, str) or not pattern.fullmatch(name):
+            raise ToolError("invalid_arguments", "name must look like WindyFermi")
         return name
 
     def _dash(self, fn: Callable[[], Any]) -> Any:
@@ -374,8 +414,10 @@ class ToolRegistry:
     def _spawn_preview(self, principal: Principal, args: dict) -> dict:
         self._only(args, {"task", "directory", "provider", "model", "name", "worktree"})
         task = args.get("task")
-        if not isinstance(task, str) or not task.strip() or len(task) > MAX_TASK_CHARS or "\x00" in task:
+        if not isinstance(task, str) or not task.strip() or len(task) > MAX_TASK_CHARS:
             raise ToolError("invalid_arguments", f"task must be 1..{MAX_TASK_CHARS} characters")
+        if _UNSAFE_TASK_CHARS.search(task):
+            raise ToolError("invalid_arguments", "task contains control or bidirectional-override characters")
         alias = args.get("directory")
         if not isinstance(alias, str) or alias not in self._config.spawn_dirs:
             raise ToolError("invalid_arguments", "directory must be one of the operator-approved aliases", data={"allowed": sorted(self._config.spawn_dirs)})
@@ -389,11 +431,11 @@ class ToolRegistry:
         if not isinstance(worktree, bool):
             raise ToolError("invalid_arguments", "worktree must be boolean")
         if "name" in args:
-            name = self._name(args)
+            name = self._name(args, NAME_RE)
         else:
-            name = self._dashboard.suggest_name() or ("Chat" + secrets.token_hex(3).upper())
+            name = self._dashboard.suggest_name() or ""
             if not NAME_RE.fullmatch(name):
-                name = "Chat" + secrets.token_hex(3).upper()
+                name = "Chat" + "".join(secrets.choice("abcdefghijkmnopqrstuvwxyz") for _ in range(8))
         availability = self._dash(lambda: self._dashboard.name_status(name))
         if availability != "available":
             raise ToolError("name_unavailable", f"agent name {name} is {availability}; choose another name")
@@ -410,7 +452,11 @@ class ToolRegistry:
             payload["model"] = model
         status, body = self._dash(lambda: self._dashboard.spawn({**payload, "dry_run": True}))
         if status != 200 or body.get("ok") is not True or body.get("dry_run") is not True:
-            raise ToolError("preview_rejected", f"dashboard rejected the launch: {_clip(body.get('error')) or 'HTTP ' + str(status)}")
+            log.info("preview rejected by dashboard status=%s error=%r", status, _clip(body.get("error"), 200))
+            raise ToolError("preview_rejected", "the dashboard rejected this launch; details are in the local dashboard log", data={"http_status": status})
+        resolved_model = body.get("model")
+        if isinstance(resolved_model, str) and MODEL_RE.fullmatch(resolved_model):
+            payload["model"] = resolved_model  # approve exactly what was previewed, even if the default changes later
         summary = {
             "name": name,
             "directory": alias,
@@ -423,6 +469,7 @@ class ToolRegistry:
             "task_sha256": hashlib.sha256(task.encode()).hexdigest(),
             "task_preview": _clip(task, 200),
         }
+        approval_record = {**summary, "directory_path": payload["dir"], "task": task}
         preview_id = secrets.token_urlsafe(24)
         now = self._clock()
         code = pairing.new_code() if self._local_approval else None
@@ -438,7 +485,7 @@ class ToolRegistry:
             "next": "Show this preview to the user. Only after they confirm, call orrery_spawn_commit with preview_id and a new idempotency_key.",
         }
         if code:
-            pairing.write_pending(self._config.state_dir, code, {**summary, "task_preview": summary["task_preview"]}, _digest(preview_id), now + PREVIEW_TTL)
+            pairing.write_pending(self._config.state_dir, code, approval_record, _digest(preview_id), now + PREVIEW_TTL)
             out["approval"] = {
                 "required": True,
                 "code": code,
@@ -481,43 +528,43 @@ class ToolRegistry:
                 raise ToolError("idempotency_conflict", "this idempotency_key was already used for a different preview")
             return self._replay(existing)
         now = self._clock()
+        # Check, bind the key and consume under one lock so a racing commit can
+        # neither take another preview's approval nor replay a different launch.
         with self._preview_lock:
             preview = self._previews.get(preview_id)
             if preview is None or preview.subject != principal.subject or preview.expires_at <= now:
                 raise ToolError("preview_not_found", "preview is unknown or expired; run orrery_spawn_preview again")
             if preview.consumed:
                 raise ToolError("preview_consumed", "this preview was already committed with another idempotency_key")
-            if preview.approval_code and not pairing.is_approved(self._config.state_dir, preview.approval_code, _digest(preview_id)):
+            if preview.approval_code and not pairing.is_approved(
+                self._config.state_dir, preview.approval_code, _digest(preview_id), preview.summary["task_sha256"]
+            ):
                 raise ToolError(
                     "approval_required",
                     f"not approved on the Mac yet; the operator must run `orrery-chatgpt-mcp approve {preview.approval_code}`, then commit again",
                     data={"approval_code": preview.approval_code},
                 )
+            record = {"ts": now, "preview_id": _digest(preview_id), "name": preview.payload["name"], "state": "dispatching", "result": None}
+            raced = self._ledger.put_if_absent(ledger_key, record)
+            if raced is not None:
+                if raced.get("preview_id") != _digest(preview_id):
+                    raise ToolError("idempotency_conflict", "this idempotency_key was already used for a different preview")
+                return self._replay(raced)
             preview.consumed = True
-        if preview.approval_code:
-            pairing.consume(self._config.state_dir, preview.approval_code)
-        record = {
-            "ts": now,
-            "preview_id": _digest(preview_id),
-            "name": preview.payload["name"],
-            "state": "dispatching",
-            "result": None,
-        }
-        raced = self._ledger.put_if_absent(ledger_key, record)
-        if raced is not None:
-            return self._replay(raced)
+            if preview.approval_code:
+                pairing.consume(self._config.state_dir, preview.approval_code)
         try:
             status, body = self._dashboard.spawn(preview.payload)
         except DashboardError as exc:
             if exc.outcome_unknown:
-                self._ledger.update(ledger_key, state="unknown", result={"error": str(exc)})
+                self._ledger.update(ledger_key, state="unknown", result={"error": "no answer after sending"})
                 raise ToolError(
                     "outcome_unknown",
                     "the dashboard may or may not have started the agent; call orrery_spawn_status with this name before doing anything else",
                     data={"name": preview.payload["name"]},
                 ) from None
-            self._ledger.update(ledger_key, state="rejected", result={"error": str(exc)})
-            raise ToolError("dashboard_unavailable", f"spawn was not sent: {exc}") from None
+            self._ledger.update(ledger_key, state="rejected", result={"error": "not sent"})
+            raise ToolError("dashboard_unavailable", "spawn was not sent: the dashboard could not be reached") from None
         if status == 200 and body.get("ok") is True:
             result = {
                 "child_name": _clip(body.get("child_name"), 64),
@@ -533,8 +580,8 @@ class ToolRegistry:
                 "launch": result,
                 "next": "The launch continues in the background; check orrery_spawn_status with child_name.",
             }
+        log.info("spawn failed name=%s status=%s error=%r", preview.payload["name"], status, _clip(body.get("error"), 200))
         failure = {
-            "error": _clip(body.get("error")),
             "registration_retained": body.get("registration_retained") is True,
             "cleanup_incomplete": body.get("cleanup_incomplete") is True,
             "http_status": status,

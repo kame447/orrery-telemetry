@@ -37,41 +37,96 @@ class Principal:
     expires_at: int
 
 
-class _JwksSource:
-    """JWKS from a fixed file or the fixed configured URL; never from a token."""
+JWKS_TTL = 300.0
+JWKS_MIN_REFRESH = 30.0
+MAX_JWKS_BYTES = 256 * 1024
 
-    def __init__(self, config: GatewayConfig):
+
+class _JwksSource:
+    """JWKS from the fixed configured file or URL, never from a token.
+
+    Keys are looked up only in the current key set, so a key removed by the
+    issuer stops verifying once the set is refreshed (at most ``JWKS_TTL``).
+    An unknown ``kid`` forces at most one refresh per ``JWKS_MIN_REFRESH``.
+    Only signing keys (``use`` absent or ``sig``) are usable.
+    """
+
+    def __init__(self, config: GatewayConfig, *, clock=time.monotonic, fetch=None):
         import jwt  # oauth mode only; pairing mode runs on the standard library
 
         self._jwt = jwt
         self._config = config
+        self._clock = clock
+        self._fetch = fetch or self._fetch_url
         self._lock = threading.Lock()
-        self._client = jwt.PyJWKClient(config.jwks_url, cache_keys=True, lifespan=300, timeout=5) if config.jwks_url else None
-        self._file_set = None
+        self._keys: dict[str, tuple] | None = None
+        self._loaded_at = float("-inf")
         self._file_mtime: float | None = None
 
-    def key_for(self, kid: str):
-        jwt = self._jwt
-        if self._client is not None:
+    def _fetch_url(self) -> bytes:
+        import urllib.request
+
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args, **kwargs):
+                return None
+
+        opener = urllib.request.build_opener(_NoRedirect)
+        with opener.open(urllib.request.Request(self._config.jwks_url, headers={"Accept": "application/json"}), timeout=5) as resp:
+            if resp.status != 200:
+                raise OSError(f"JWKS HTTP {resp.status}")
+            return resp.read(MAX_JWKS_BYTES + 1)
+
+    def _parse(self, raw: bytes) -> dict[str, object]:
+        if len(raw) > MAX_JWKS_BYTES:
+            raise ValueError("JWKS too large")
+        doc = json.loads(raw)
+        keys: dict[str, tuple] = {}
+        for jwk in doc.get("keys", []) if isinstance(doc, dict) else []:
+            if not isinstance(jwk, dict) or not isinstance(jwk.get("kid"), str):
+                continue
+            if jwk.get("use") not in (None, "sig"):
+                continue
+            ops = jwk.get("key_ops")
+            if ops is not None and "verify" not in ops:
+                continue
             try:
-                return self._client.get_signing_key(kid).key
-            except jwt.PyJWKClientConnectionError:
-                raise AuthError("invalid_token", "signing keys are unavailable", status=503) from None
-            except jwt.PyJWKClientError:
-                raise AuthError("invalid_token", "unknown signing key") from None
+                keys[jwk["kid"]] = (self._jwt.PyJWK.from_dict(jwk), jwk.get("alg"))
+            except (self._jwt.PyJWKError, self._jwt.InvalidKeyError, ValueError, TypeError):
+                continue
+        return keys
+
+    def _load(self, *, force: bool) -> None:
+        now = self._clock()
         path = self._config.jwks_file
+        if path is not None:
+            mtime = path.stat().st_mtime
+            if self._keys is not None and mtime == self._file_mtime and not force:
+                return
+            self._keys = self._parse(path.read_bytes())
+            self._file_mtime = mtime
+            self._loaded_at = now
+            return
+        stale = now - self._loaded_at >= JWKS_TTL
+        if self._keys is not None and not stale and not (force and now - self._loaded_at >= JWKS_MIN_REFRESH):
+            return
+        self._keys = self._parse(self._fetch())
+        self._loaded_at = now
+
+    def key_for(self, kid: str, alg: str):
         with self._lock:
             try:
-                mtime = path.stat().st_mtime
-                if self._file_set is None or mtime != self._file_mtime:
-                    self._file_set = jwt.PyJWKSet.from_dict(json.loads(path.read_text(encoding="utf-8")))
-                    self._file_mtime = mtime
-            except (OSError, ValueError, jwt.PyJWKSetError):
+                self._load(force=False)
+                if self._keys is None or kid not in self._keys:
+                    self._load(force=True)
+            except (OSError, ValueError):
                 raise AuthError("invalid_token", "signing keys are unavailable", status=503) from None
-            for key in self._file_set.keys:
-                if key.key_id == kid:
-                    return key.key
-        raise AuthError("invalid_token", "unknown signing key")
+            entry = (self._keys or {}).get(kid)
+        if entry is None:
+            raise AuthError("invalid_token", "unknown signing key")
+        jwk, declared_alg = entry
+        if declared_alg is not None and declared_alg != alg:
+            raise AuthError("invalid_token", "token algorithm does not match its key")
+        return jwk.key
 
 
 def parse_scopes(claims: dict) -> frozenset[str]:
@@ -86,9 +141,9 @@ def parse_scopes(claims: dict) -> frozenset[str]:
 
 
 class TokenVerifier:
-    def __init__(self, config: GatewayConfig):
+    def __init__(self, config: GatewayConfig, *, jwks_source: _JwksSource | None = None):
         self._config = config
-        self._keys = _JwksSource(config)
+        self._keys = jwks_source or _JwksSource(config)
         self._jwt = self._keys._jwt
 
     def verify_header(self, header_value: str | None) -> Principal:
@@ -116,7 +171,7 @@ class TokenVerifier:
             raise AuthError("invalid_token", "token has no key id")
         if header.get("typ") not in (None, "JWT", "at+jwt", "application/at+jwt"):
             raise AuthError("invalid_token", "token type is not an access token")
-        key = self._keys.key_for(kid)
+        key = self._keys.key_for(kid, alg)
         try:
             claims = jwt.decode(
                 token,
