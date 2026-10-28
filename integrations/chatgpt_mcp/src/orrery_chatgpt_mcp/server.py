@@ -30,6 +30,9 @@ SUPPORTED_PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
 MAX_BODY_BYTES = 64 * 1024
 MAX_CONCURRENT_REQUESTS = 32
 SOCKET_TIMEOUT = 15
+# Absolute budget for receiving one request's headers and body (and for an idle
+# keep-alive connection to send its next request); drip-feeding cannot extend it.
+REQUEST_DEADLINE = 10.0
 INSTRUCTIONS = (
     "Tools for one operator's local ORRERY agent coordination. Read tools show agents and launch state. "
     "Starting an agent is two steps: orrery_spawn_preview, show the preview to the user, then orrery_spawn_commit "
@@ -97,7 +100,7 @@ class Gateway:
         with self._secret_lock:
             try:
                 st = path.stat()
-                key = (st.st_ino, st.st_mtime_ns, st.st_size)
+                key = (st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_mode, st.st_uid)
                 if key != self._secret_stat:
                     self._secret_path = f"/mcp/{pairing.read_secret(self.config.state_dir)}"
                     self._secret_stat = key
@@ -203,7 +206,30 @@ def make_handler(gateway: Gateway):
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "orrery-chatgpt-mcp"
-        timeout = SOCKET_TIMEOUT  # bounds idle and slow header/body senders
+        timeout = SOCKET_TIMEOUT  # per-receive inactivity; REQUEST_DEADLINE bounds the total
+
+        def handle_one_request(self):
+            timer = threading.Timer(REQUEST_DEADLINE, self._expire)
+            timer.daemon = True
+            self._deadline = timer
+            timer.start()
+            try:
+                super().handle_one_request()
+            finally:
+                timer.cancel()
+
+        def _expire(self):
+            import socket
+
+            self.close_connection = True
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+        def _received(self):
+            """The whole request is in: stop the receive deadline before slow work starts."""
+            self._deadline.cancel()
         sys_version = ""
         protocol_version = "HTTP/1.1"
 
@@ -257,6 +283,7 @@ def make_handler(gateway: Gateway):
             self._send(exc.status, {"error": exc.error, "error_description": exc.description}, {"WWW-Authenticate": challenge(config, exc)})
 
         def do_GET(self):
+            self._received()
             if not self._admit():
                 return
             path = self._path()
@@ -279,6 +306,7 @@ def make_handler(gateway: Gateway):
             self._send(404, {"error": "not_found"})
 
         def do_DELETE(self):
+            self._received()
             if not self._admit():
                 return
             if not gateway.is_mcp_path(self._path()):
@@ -294,6 +322,7 @@ def make_handler(gateway: Gateway):
 
         def do_OPTIONS(self):
             # No CORS: browsers are not clients of this gateway.
+            self._received()
             if not self._admit():
                 return
             self._send(405, {"error": "method_not_allowed"}, {"Allow": "POST"})
@@ -315,17 +344,15 @@ def make_handler(gateway: Gateway):
             if gateway.pairing:
                 principal = gateway.local_principal
             else:
-                # Authenticate from headers before reading any body; refuse early once
-                # failures are rate limited so key lookups cannot be driven without bound.
-                if gateway.anon_limiter.exhausted("auth-failures"):
-                    self._send(429, {"error": "rate_limited"}, {"Retry-After": "10"})
-                    return
+                # Authenticate from headers before reading any body. Key fetching has its
+                # own cooldown, so failed callers cannot lock out a valid token here.
                 try:
                     principal = gateway.verifier.verify_header(self.headers.get("Authorization"))
                 except AuthError as exc:
                     self._auth_fail(exc)
                     return
             body = self.rfile.read(length)
+            self._received()
             if len(body) != length:
                 self._send(400, {"error": "short_body"})
                 return
@@ -479,7 +506,7 @@ def main(argv: list[str] | None = None) -> int:
             if answer != "yes":
                 print("not approved")
                 return 1
-            pairing.approve(state_dir, argv[1])
+            pairing.approve(state_dir, argv[1], shown=record)
             print("approved; ChatGPT can now commit this launch")
             return 0
         if command == "deny" and len(argv) == 2:

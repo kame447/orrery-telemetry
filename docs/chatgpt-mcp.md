@@ -33,8 +33,8 @@ ChatGPT ──(OpenAI)── Secure MCP Tunnel ◀── tunnel-client（Mac、�
 | 重複防止 | コミットには呼び出し側の `idempotency_key` が必須です。同じキーの再送は記録済みの結果を返し、二度目の起動はしません。記録は `spawn-ledger.json`（0600）に残り、再起動後も有効です |
 | 結果不明 | 送信後に応答が失われた場合は「unknown」と記録し、成功とは言いません。再送せず `orrery_spawn_status` で照合します |
 | 情報の絞り込み | エージェント行は固定の項目だけを返します。ペイン名、コマンド、パス、transcript、Mail 内部、起動ログ末尾は返しません。タスク等の文字列は 300 文字で切り、「信頼しないデータ」と明示します |
-| ログ | 1 要求 1 行（主体・登録済みツール名・結果）。引数、秘密、トークンは書きません。dashboard のエラー文はパスや診断を含みうるので ChatGPT へは返さず、`has_error` やコードだけを返します |
-| 通信の扱い | 拒否した要求の後は接続を閉じます。重複した Content-Length と Transfer-Encoding は拒否。15 秒の読み取り期限と同時 32 要求の上限があります。同じ state ディレクトリで動くゲートウェイは 1 つだけです |
+| ログ | 1 要求 1 行（主体・登録済みツール名・結果）。引数、秘密、トークンは書きません。dashboard のエラー文はパスや診断を含みうるので ChatGPT へもゲートウェイのログへも出さず、`has_error` やコードだけを返します（詳細は dashboard 自身のログ） |
+| 通信の扱い | 拒否した要求の後は接続を閉じます。重複した Content-Length と Transfer-Encoding は拒否。要求の受信（ヘッダーと本文）には 10 秒の絶対期限、同時 32 要求の上限があります。同じ state ディレクトリで動くゲートウェイは 1 つだけです |
 | 流用しないもの | ORRERY Mail の owner token、親子の credential、dashboard の operator capability は使いません |
 
 同じ macOS ユーザーで動くプログラムはこの境界の内側です（[ローカル HTTP の信頼境界](local-http-security.md)）。ペアリングファイルを読める手元のプログラムや、`approve` を実行できる手元のエージェントからは守れません。

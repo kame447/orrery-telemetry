@@ -452,11 +452,12 @@ class ToolRegistry:
             payload["model"] = model
         status, body = self._dash(lambda: self._dashboard.spawn({**payload, "dry_run": True}))
         if status != 200 or body.get("ok") is not True or body.get("dry_run") is not True:
-            log.info("preview rejected by dashboard status=%s error=%r", status, _clip(body.get("error"), 200))
+            log.info("preview rejected by dashboard status=%s", status)  # error text stays in the dashboard's own log
             raise ToolError("preview_rejected", "the dashboard rejected this launch; details are in the local dashboard log", data={"http_status": status})
         resolved_model = body.get("model")
-        if isinstance(resolved_model, str) and MODEL_RE.fullmatch(resolved_model):
-            payload["model"] = resolved_model  # approve exactly what was previewed, even if the default changes later
+        if not isinstance(resolved_model, str) or not MODEL_RE.fullmatch(resolved_model):
+            raise ToolError("preview_rejected", "the dashboard dry run did not name the model it would use")
+        payload["model"] = resolved_model  # approve exactly what was previewed, even if the default changes later
         summary = {
             "name": name,
             "directory": alias,
@@ -507,8 +508,27 @@ class ToolRegistry:
             return {"state": "unknown", "reason": "no launch record; check orrery_get_agent before any new attempt"}
         return {"state": "observed", "launch": project_spawn_status(body)}
 
+    @staticmethod
+    def _safe_result(result: Any) -> dict | None:
+        """Re-project stored results, so records written by older versions cannot carry raw dashboard text."""
+        if not isinstance(result, dict):
+            return None
+        out = {}
+        for key in ("child_name", "provider", "model"):
+            if key in result:
+                out[key] = _clip(result[key], 64)
+        for key in ("pending", "worktree", "registration_retained", "cleanup_incomplete"):
+            if isinstance(result.get(key), bool):
+                out[key] = result[key]
+        if _int_or_none(result.get("http_status")) is not None:
+            out["http_status"] = result["http_status"]
+        return out
+
     def _replay(self, record: dict) -> dict:
-        out = {"replayed": True, "name": record.get("name"), "outcome": record.get("state"), "result": record.get("result")}
+        state = record.get("state")
+        out = {"replayed": True, "name": _clip(record.get("name"), 64),
+               "outcome": state if state in ("dispatching", "accepted", "rejected", "unknown") else "unknown",
+               "result": self._safe_result(record.get("result"))}
         if record.get("state") in ("dispatching", "unknown"):
             out["reconciliation"] = self._reconcile(record)
         return out
@@ -535,6 +555,9 @@ class ToolRegistry:
             if preview is None or preview.subject != principal.subject or preview.expires_at <= now:
                 raise ToolError("preview_not_found", "preview is unknown or expired; run orrery_spawn_preview again")
             if preview.consumed:
+                same = self._ledger.get(ledger_key)
+                if same is not None and same.get("preview_id") == _digest(preview_id):
+                    return self._replay(same)  # a simultaneous retry with the same key
                 raise ToolError("preview_consumed", "this preview was already committed with another idempotency_key")
             if preview.approval_code and not pairing.is_approved(
                 self._config.state_dir, preview.approval_code, _digest(preview_id), preview.summary["task_sha256"]
@@ -580,7 +603,7 @@ class ToolRegistry:
                 "launch": result,
                 "next": "The launch continues in the background; check orrery_spawn_status with child_name.",
             }
-        log.info("spawn failed name=%s status=%s error=%r", preview.payload["name"], status, _clip(body.get("error"), 200))
+        log.info("spawn failed name=%s status=%s", preview.payload["name"], status)
         failure = {
             "registration_retained": body.get("registration_retained") is True,
             "cleanup_incomplete": body.get("cleanup_incomplete") is True,

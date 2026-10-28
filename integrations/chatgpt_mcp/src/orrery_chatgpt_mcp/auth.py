@@ -61,6 +61,7 @@ class _JwksSource:
         self._lock = threading.Lock()
         self._keys: dict[str, tuple] | None = None
         self._loaded_at = float("-inf")
+        self._attempted_at = float("-inf")  # successful or failed: the refresh cooldown counts both
         self._file_mtime: float | None = None
 
     def _fetch_url(self) -> bytes:
@@ -80,14 +81,16 @@ class _JwksSource:
         if len(raw) > MAX_JWKS_BYTES:
             raise ValueError("JWKS too large")
         doc = json.loads(raw)
+        if not isinstance(doc, dict) or not isinstance(doc.get("keys"), list):
+            raise ValueError("JWKS has no keys array")
         keys: dict[str, tuple] = {}
-        for jwk in doc.get("keys", []) if isinstance(doc, dict) else []:
+        for jwk in doc["keys"]:
             if not isinstance(jwk, dict) or not isinstance(jwk.get("kid"), str):
                 continue
             if jwk.get("use") not in (None, "sig"):
                 continue
             ops = jwk.get("key_ops")
-            if ops is not None and "verify" not in ops:
+            if ops is not None and not (isinstance(ops, list) and "verify" in ops):
                 continue
             try:
                 keys[jwk["kid"]] = (self._jwt.PyJWK.from_dict(jwk), jwk.get("alg"))
@@ -106,17 +109,30 @@ class _JwksSource:
             self._file_mtime = mtime
             self._loaded_at = now
             return
-        stale = now - self._loaded_at >= JWKS_TTL
-        if self._keys is not None and not stale and not (force and now - self._loaded_at >= JWKS_MIN_REFRESH):
+        stale = self._keys is None or now - self._loaded_at >= JWKS_TTL
+        if not stale and not force:
             return
-        self._keys = self._parse(self._fetch())
+        if now - self._attempted_at < JWKS_MIN_REFRESH:
+            if stale:
+                # A refresh is due but one was tried moments ago: fail closed without
+                # fetching, so an outage or unknown kids cannot drive refetches.
+                raise OSError("JWKS refresh cooling down")
+            return
+        self._attempted_at = now
+        try:
+            keys = self._parse(self._fetch())
+        except (OSError, ValueError):
+            if stale:
+                self._keys = None  # never keep serving keys past their TTL
+            raise
+        self._keys = keys
         self._loaded_at = now
 
     def key_for(self, kid: str, alg: str):
         with self._lock:
             try:
                 self._load(force=False)
-                if self._keys is None or kid not in self._keys:
+                if kid not in (self._keys or {}):
                     self._load(force=True)
             except (OSError, ValueError):
                 raise AuthError("invalid_token", "signing keys are unavailable", status=503) from None

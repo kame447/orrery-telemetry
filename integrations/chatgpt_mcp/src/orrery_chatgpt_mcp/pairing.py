@@ -128,14 +128,23 @@ def list_pending(state_dir: Path, now: float | None = None) -> list[dict]:
     return out
 
 
-def approve(state_dir: Path, code: str, now: float | None = None) -> dict:
+def approve(state_dir: Path, code: str, now: float | None = None, *, shown: dict | None = None) -> dict:
+    """Approve ``code``. ``shown`` is the record the operator read; the approval
+    names the hash of that task text, computed here, not copied from the file."""
+    import hashlib
+
     now = time.time() if now is None else now
     record = read_pending(state_dir, code)
     if record is None:
         raise ConfigError(f"no pending launch with code {code}")
+    if shown is not None and shown != record:
+        raise ConfigError(f"launch {code} changed while it was displayed; run approve again")
     if record.get("expires_at", 0) <= now:
         raise ConfigError(f"launch {code} expired; ask ChatGPT for a new preview")
-    task_sha = (record.get("summary") or {}).get("task_sha256")
+    task = (record.get("summary") or {}).get("task")
+    if not isinstance(task, str):
+        raise ConfigError(f"launch {code} has no task text to approve")
+    task_sha = hashlib.sha256(task.encode()).hexdigest()
     _write_private(approvals_dir(state_dir) / f"approved-{code}.json",
                    {"code": code, "preview": record["preview"], "task_sha256": task_sha, "approved_at": int(now)}, exclusive=False)
     return record

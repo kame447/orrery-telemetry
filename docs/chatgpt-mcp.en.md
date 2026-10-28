@@ -33,8 +33,8 @@ ChatGPT ──(OpenAI)── Secure MCP Tunnel ◀── tunnel-client (Mac, out
 | Duplicate prevention | Commit requires a caller `idempotency_key`. A repeat returns the recorded outcome and never starts a second agent. Records live in `spawn-ledger.json` (0600) and survive restarts |
 | Unknown outcome | If the answer is lost after sending, the gateway records `unknown`, never success, and reconciles through `orrery_spawn_status` instead of resending |
 | Data minimisation | Agent rows carry a fixed field list. Pane titles, commands, paths, transcripts, Mail internals and launcher log tails are dropped. Text is clipped to 300 characters and labelled untrusted data |
-| Logs | One line per request (subject, registered tool name, outcome). No arguments, secrets or tokens. Dashboard error text can contain paths and diagnostics, so ChatGPT gets only `has_error` or a code |
-| Connection handling | Connections close after any refusal. Duplicate Content-Length and any Transfer-Encoding are refused. 15-second read deadline and at most 32 concurrent requests. One gateway per state directory |
+| Logs | One line per request (subject, registered tool name, outcome). No arguments, secrets or tokens. Dashboard error text can contain paths and diagnostics, so neither ChatGPT nor the gateway log gets it; ChatGPT sees only `has_error` or a code (details stay in the dashboard's own log) |
+| Connection handling | Connections close after any refusal. Duplicate Content-Length and any Transfer-Encoding are refused. A 10-second absolute deadline for receiving each request (headers and body) and at most 32 concurrent requests. One gateway per state directory |
 | Never borrowed | ORRERY Mail owner tokens, parent/child credentials and the dashboard operator capability |
 
 Programs running as the same macOS user are inside this boundary ([local HTTP trust boundary](local-http-security.md)). A local program that can read the pairing file, or a local agent that can run `approve`, is not kept out.
