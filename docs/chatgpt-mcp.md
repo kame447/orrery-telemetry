@@ -96,6 +96,20 @@ ChatGPT のプランによって書き込み系 MCP ツールの扱いが違い�
    ~/orrery-telemetry/bin/orrery-chatgpt-mcp deny K7P2QX9M      # 取り消す
    ```
 
+### Mac だけでの動作確認（トンネル前）
+
+ChatGPT につなぐ前に、Mac の中だけで MCP として答えるかを確かめます。外部には何も出ません。
+
+```sh
+URL="$(~/orrery-telemetry/bin/orrery-chatgpt-mcp url)"
+curl -s -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"orrery_status","arguments":{}}}' "$URL"
+# → "dashboard": {"reachable": true, ...} が返れば、ゲートウェイと dashboard の連携は動いています
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8790/mcp   # → 404（秘密なしでは入れない）
+```
+
+トンネル越しの確認は、ChatGPT の接続画面でツール一覧に `orrery_status` などが表示され、`orrery_status` を呼ぶと `reachable: true` が返ることです。ここまで来て初めて「ChatGPT から接続できた」と言えます。
+
 ### ユーザーが行う必要があること
 
 - OpenAI Platform の組織で Tunnels の権限（作成者は Read + Manage、tunnel-client 実行者と接続作成者は Read + Use）を得る。組織の owner か RBAC 管理者が付与します。

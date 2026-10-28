@@ -96,6 +96,20 @@ ChatGPT plans differ for write MCP tools (OpenAI help as of 2026-10: Pro has rea
    ~/orrery-telemetry/bin/orrery-chatgpt-mcp deny K7P2QX9M      # discard it
    ```
 
+### Checking on the Mac alone (before the tunnel)
+
+Before connecting ChatGPT, confirm on the Mac that the gateway answers as MCP. Nothing is exposed.
+
+```sh
+URL="$(~/orrery-telemetry/bin/orrery-chatgpt-mcp url)"
+curl -s -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"orrery_status","arguments":{}}}' "$URL"
+# → "dashboard": {"reachable": true, ...} means the gateway reaches the dashboard
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8790/mcp   # → 404 (no entry without the secret)
+```
+
+Through the tunnel, the check is that ChatGPT's connection screen lists tools such as `orrery_status` and calling it returns `reachable: true`. Only then has ChatGPT actually connected.
+
 ### What the user has to do
 
 - Get Tunnels permissions in the OpenAI Platform organization (creators need Read + Manage; whoever runs tunnel-client or creates the connection needs Read + Use), granted by an org owner or RBAC admin.
