@@ -231,6 +231,27 @@ def test_source_changed_during_copy_is_never_published(tmp_path, monkeypatch):
 
 # -- plist and startup ----------------------------------------------------------------------
 
+def test_startup_does_not_wait_on_reverse_dns(monkeypatch, tmp_path, dashboard):
+    """HTTPServer.server_bind's getfqdn() stalled startup on CI; launchd at login can lack DNS too."""
+    import socket as socket_module
+
+    from orrery_chatgpt_mcp.config import GatewayConfig
+    from orrery_chatgpt_mcp.server import build_server
+
+    def no_dns(*a, **k):
+        raise AssertionError("reverse DNS lookup during startup")
+
+    monkeypatch.setattr(socket_module, "getfqdn", no_dns)
+    config = GatewayConfig(auth_mode="pairing", pairing_secret="s" * 43, port=free_port(),
+                           dashboard_url=dashboard.url, state_dir=tmp_path / "state")
+    server = build_server(config)
+    try:
+        assert server.server_address[0] == "127.0.0.1"
+        assert server.server_port == config.port
+    finally:
+        server.server_close()
+
+
 def test_plist_has_no_secret_no_spawn_and_isolated_startup(release, paired):
     from orrery_chatgpt_mcp import service
 

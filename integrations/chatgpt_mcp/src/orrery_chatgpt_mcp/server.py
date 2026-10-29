@@ -14,6 +14,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import socketserver
 import sys
 import threading
 import time
@@ -386,6 +387,13 @@ class GatewayServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
     _slots = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
+
+    def server_bind(self):
+        # HTTPServer.server_bind resolves socket.getfqdn(host): a reverse DNS lookup that can
+        # stall startup for tens of seconds (seen on CI and possible at login before the
+        # network is up). The name is never used, so skip the lookup.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
     def process_request(self, request, client_address):
         if not self._slots.acquire(blocking=False):
