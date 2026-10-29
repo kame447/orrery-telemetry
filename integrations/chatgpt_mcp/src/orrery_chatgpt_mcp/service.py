@@ -497,7 +497,15 @@ def install_service(plan: ServicePlan, *, runner: Runner = subprocess.run, launc
     if not verify:
         return {}
     status = wait_until_answering(plan, secret, runner)
-    if status["capabilities"]["message_enabled_on_server"] is not bool(plan.message_profile):
+    capabilities = status.get("capabilities")
+    if not isinstance(capabilities, dict):
+        raise VerifyError("service message capability does not match explicit installation")
+    message_enabled = capabilities.get("message_enabled_on_server")
+    legacy_off = ("message_enabled_on_server" not in capabilities
+                  and capabilities.get("message_existing_agent") is False)
+    if legacy_off and not plan.message_profile:
+        message_enabled = False  # pre-message gateway releases explicitly advertised no write tool
+    if message_enabled is not bool(plan.message_profile):
         raise VerifyError("service message capability does not match explicit installation")
     return status
 
