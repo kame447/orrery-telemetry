@@ -19,14 +19,15 @@ ChatGPT ─ Secure MCP Tunnel ─ orrery-chatgpt-mcp（127.0.0.1）
 - **送信者は専用の Mail identity です。** 運用者が `agentstack-daemon create --operator` で作る `program=orrery-daemon` の登録を使います（[決定的 daemon](daemon-agents.md)）。既存エージェントの owner token を借りること、送信者名を偽ること、tmux への打鍵、Mail DB の直接操作は一切しません。
 - **宛先の許可リストは daemon のプロファイル（`orrery-daemon-binding-v2`）の `peers` です。** 名前と数値 Mail ID の組を 1〜16 件、運用者が書きます。ChatGPT から許可リストを変える手段はありません。
 - **確認すること。** 送信の直前ごとに、Mail の管理ソケットと HTTP の両方で Mail インスタンスの UUID、送信者自身の行・credential の指紋と世代・`program`、宛先の数値 ID・プロジェクト・退役状態を照合します（`DaemonRuntime`）。ゲートウェイはさらに、プレビュー時に見た宛先の ID・program・プロジェクト ID・登録時刻と、送信者・インスタンスが変わっていないことを確かめます。名前の再利用、同名の別プロジェクト、退役、存在しない宛先は送らずに拒否します。
-- **本文の検査。** 制御文字（C0/C1）、双方向上書き、ゼロ幅・不可視の書式文字、タグ文字、私用領域、行/段落区切り文字を含む本文や件名はプレビューで拒否します。ChatGPT に見せた本文と送る本文は 1 文字も違いません。
+- **照合の限界。** これらは送信要求の直前の照合で、Mail の配送トランザクションと一体ではありません。最後の照合と送信のあいだに、宛先が自分の owner token で再登録して program などを変えることは防げません（数値 ID が変わる置き換えは、送信直前の数値 ID の照合で拒否します）。
+- **本文の検査。** 制御文字（C0/C1）、双方向上書き、ゼロ幅・不可視の書式文字、タグ文字、私用領域、行/段落区切り文字を含む本文や件名はプレビューで拒否します。Mail は Markdown の画像参照 `![..](..)` を書き換え（参照先のファイルも読みます）、重要度も送信者の経路では指定できないため、画像参照は拒否し、重要度は常に `normal` です。ChatGPT に見せた件名・本文と受信箱に届く件名・本文は一致します（E2E で確認）。
 
 ## ツール
 
 | ツール | 種別 | 内容 |
 | --- | --- | --- |
 | `orrery_message_preview` | 準備 | 宛先・件名・本文全文・送信者・Mail ID・`content_sha256` を返します。送信はしません |
-| `orrery_message_commit` | 書き込み | `preview_id`・`idempotency_key`・`content_sha256` が揃ったときだけ 1 回送ります |
+| `orrery_message_commit` | 書き込み | `preview_id`・`idempotency_key`・`content_sha256` が揃ったときだけ 1 回送ります。Mail の受領記録（メッセージ ID、送信者、宛先、プロジェクト、スレッド、件名）が一致したときだけ accepted です |
 | `orrery_message_status` | 読み取り | 記録した結果（accepted / rejected / unknown）と、Mail 上の既読・ACK |
 
 `orrery_status` の `capabilities.message_recipients` に許可された宛先名が出ます。
@@ -56,10 +57,12 @@ Sent by the operator from ChatGPT through orrery-chatgpt-mcp as <送信者名>. 
 
 ## 重複送信を防ぐ
 
-- 同じ `idempotency_key` の再コミットは、記録済みの結果を返すだけで再送しません。別のメッセージに同じキーは使えず、1 つのプレビューは 1 つのキーでしか送れません。
+- 同じ `idempotency_key` の再コミットは、記録済みの結果を返すだけで再送しません。別のメッセージに同じキーは使えず、1 つのプレビューは 1 つのキーでしか送れません。キーの記録は期限で消しません（state ディレクトリがある限り残ります）。
 - 記録 `message-ledger.json`（0600、本文なし）は再起動後も有効で、同じ state ディレクトリを使う別プロセスともファイルロックで直列化します。送信者プロファイルのロックは排他なので、同時に 2 つ送ることもありません。
 - プレビューはメモリだけに置きます。ゲートウェイが再起動したら、プレビューからやり直してください（安全側の失敗です）。
-- 送信要求を出した後に応答が失われた場合は **unknown** と記録し、成功とは言わず、自動で再送もしません。`orrery_message_status` が dashboard の Mail 表示（`/api/edge-messages`）で送信者・宛先・参照番号を照合し、見つかれば accepted に更新します。見つからなければ unknown のままです。
+- 送信要求を出した後に応答が失われた場合、Mail の受領記録が想定と違う場合は **unknown** と記録し、成功とは言わず、自動で再送もしません。Mail が保存前に拒否したと明示した場合（ファイル予約の衝突）だけ rejected です。
+- `orrery_message_status` は dashboard の Mail 表示（`/api/edge-messages`）で、送信者・宛先の名前に加えて、このメッセージのスレッドと本文全体（ランダムな参照番号を含む）が完全に一致する行を探し、見つかれば accepted に更新します。引用や別インスタンスの同名・同 ID の行は一致しません。見つからなければ unknown のままです。
+- 送信後に記録の書き込みだけが失敗した場合は `outcome_unrecorded`（再送しないこと）を返します。2 分を過ぎても終わらない送信記録は unknown（`dispatch-unfinished`）として表示します。
 
 ## 状態の意味
 
@@ -95,6 +98,12 @@ Sent by the operator from ChatGPT through orrery-chatgpt-mcp as <送信者名>. 
 | `ORRERY_MCP_MESSAGE_HELPER_ROOT` | 実行中のチェックアウト | `DaemonRuntime` を読む ORRERY のチェックアウト（本人所有で group/other 書き込み不可） |
 
 ゲートウェイの Python に SQLAlchemy は要りません（管理ソケットの定数を `agentstack_mail.enrollment_protocol` に分けました）。
+
+`ORRERY_MCP_MESSAGE_HELPER_ROOT` は、読み込む前に次をすべて確かめます。チェックアウトの上位ディレクトリが他人に書き込めないこと（root 所有の sticky ディレクトリは可）、`integrations/codex_app/src` と `packages/agentstack_mail/src` の中のすべてのディレクトリ・ファイルが本人か root の所有で group/other 書き込み不可、シンボリックリンクなし。2 つのパッケージがその場所から読まれること、別の場所の同名パッケージが読み込み済みでないこと。満たさなければ何も実行せずに拒否します。
+
+### ログについて
+
+ゲートウェイの記録（ledger、監査、ログ）に本文は入りません。ただし ORRERY Mail 自身のツールログ（既定で有効）は、この機能に限らずすべての `send_message` の引数と結果を記録し、本文も含みます。本文を Mail のログにも残したくない場合は、Mail 側で `AGENTSTACK_MAIL_TOOLS_LOG_ENABLED=false` にしてください。Mail のログで本文を伏せる変更は別の課題です。
 
 ### launchd 常駐版との関係
 

@@ -232,3 +232,34 @@ def test_gateway_without_message_settings_offers_no_message_tools(mail, gateway)
     out = call(config, "orrery_message_preview", {"recipient": "ExampleWorker", "instruction": "x"})
     assert out["isError"] is True
     assert inbox(mail) == []
+
+
+def test_mail_reservation_conflict_is_reported_as_not_sent(mail, gateway):
+    """Audit F2: Mail's structured pre-delivery refusal is not an accepted message."""
+    config = gateway()
+    mail["client"].reserve_files(project_key=mail["project"], agent_name="ExampleOther", paths=["messages/**"],
+                                 ttl_seconds=600, registration_token=OTHER_TOKEN)
+    preview = call(config, "orrery_message_preview", {"recipient": "ExampleWorker", "instruction": "blocked"})["structuredContent"]
+    out = call(config, "orrery_message_commit", {"preview_id": preview["preview_id"], "idempotency_key": "e2e-key-0005",
+                                                 "content_sha256": preview["content_sha256"]})
+    assert out["isError"] is True
+    assert out["structuredContent"]["error"] == {**out["structuredContent"]["error"], "code": "not_sent",
+                                                 "reason": "mail-file-reservation-conflict"}
+    assert inbox(mail) == []
+    status = call(config, "orrery_message_status", {"idempotency_key": "e2e-key-0005"})["structuredContent"]
+    assert status["message"]["state"] == "rejected"
+
+
+def test_received_message_matches_the_preview_exactly(mail, gateway):
+    """Audit F3: what arrives is byte-for-byte what was confirmed, with Mail's default image handling on."""
+    config = gateway()
+    text = "1. `pytest -q` を実行\n2. 結果を [PR](https://example.test/pr) に書く\n\tインデント付き"
+    preview = call(config, "orrery_message_preview", {"recipient": "ExampleWorker", "instruction": text})["structuredContent"]
+    out = call(config, "orrery_message_commit", {"preview_id": preview["preview_id"], "idempotency_key": "e2e-key-0006",
+                                                 "content_sha256": preview["content_sha256"]})["structuredContent"]
+    assert out["message"]["body_verified"] is None  # Mail's receipt carries no body; the inbox check below is the proof
+    (got,) = inbox(mail)
+    assert got["body_md"] == preview["message"]["body"] and got["subject"] == preview["message"]["subject"]
+    assert got["importance"] == "normal"
+    refused = call(config, "orrery_message_preview", {"recipient": "ExampleWorker", "instruction": "![x](example.png)"})
+    assert refused["isError"] is True

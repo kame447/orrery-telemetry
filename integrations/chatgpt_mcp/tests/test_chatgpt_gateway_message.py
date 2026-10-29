@@ -38,7 +38,16 @@ class FakeSession:
         if self.s.send_error:
             code, sent = self.s.send_error
             raise SenderError(code, sent=sent)
-        return {"deliveries": [{"project": "p", "payload": {"id": 100 + len(self.s.sent)}}], "count": 1}
+        if self.s.receipt is not None:
+            return self.s.receipt(kw)
+        return receipt(self.s, kw)
+
+
+def receipt(sender, kw, **payload):
+    base = {"id": 100 + len(sender.sent), "from": sender.identity["name"], "to": [kw["to"]], "cc": [], "bcc": [],
+            "thread_id": kw["thread_id"], "subject": kw["subject"], "body_md": kw["body_md"]}
+    base.update(payload)
+    return {"deliveries": [{"project": sender.identity["project_key"], "payload": base}], "count": 1}
 
 
 class FakeSender:
@@ -50,6 +59,7 @@ class FakeSender:
         self.send_error = None
         self.lookup_error = None
         self.unavailable = None
+        self.receipt = None
 
     def allowed(self):
         if self.unavailable:
@@ -310,15 +320,20 @@ def test_unknown_outcome_is_never_resent_and_reconciles_from_mail(env):
     env["dash"].down = True
     assert t.status(ME, {"idempotency_key": "key-00000001"})["observation"]["mail_record"] == "unavailable"
     env["dash"].down = False
-    ref = p["message"]["body"].rsplit("orrery-mcp-ref: ", 1)[1]
+    body = p["message"]["body"]
+    thread = env["sender"].sent[0]["thread_id"]
     env["dash"].rows = [
-        {"id": 55, "sender": "Imposter", "recipient": "ExampleWorker", "body": f"orrery-mcp-ref: {ref}"},
-        {"id": 56, "sender": "ChatRelay", "recipient": "ExampleWorker", "body": f"x\norrery-mcp-ref: {ref}", "read_ts": "t", "ack_ts": None},
+        {"id": 55, "sender": "Imposter", "recipient": "ExampleWorker", "thread_id": thread, "body": body},
+        # A later message that quotes the reference is not this message.
+        {"id": 57, "sender": "ChatRelay", "recipient": "ExampleWorker", "thread_id": "other", "body": "quoted:\n" + body},
+        {"id": 58, "sender": "ChatRelay", "recipient": "ExampleWorker", "thread_id": thread, "body": body + " edited"},
+        {"id": 56, "sender": "ChatRelay", "recipient": "ExampleWorker", "thread_id": thread, "body": body, "read_ts": "t", "ack_ts": None},
     ]
     status = t.status(ME, {"idempotency_key": "key-00000001"})
     assert status["message"]["state"] == "accepted" and status["message"]["reconciled"] is True
     assert status["message"]["mail_message_id"] == 56
-    assert status["observation"] == {"mail_record": "found", "read": True, "acknowledged": False}
+    assert status["observation"]["mail_record"] == "found"
+    assert (status["observation"]["read"], status["observation"]["acknowledged"]) == (True, False)
     assert "not observable" in status["note"]
     assert commit(t, p)["outcome"] == "accepted"
     assert len(env["sender"].sent) == 1
@@ -328,9 +343,16 @@ def test_status_reports_read_and_ack_by_message_id(env):
     t = env["tools"]()
     p = preview(t)
     commit(t, p)
-    env["dash"].rows = [{"id": 101, "sender": "ChatRelay", "recipient": "ExampleWorker", "read_ts": "t", "ack_ts": "t2"}]
+    sent = env["sender"].sent[0]
+    row = {"id": 101, "sender": "ChatRelay", "recipient": "ExampleWorker", "thread_id": sent["thread_id"], "body": sent["body_md"],
+           "read_ts": "t", "ack_ts": "t2"}
+    # Same names and message ID but other content (another Mail instance behind the dashboard): not trusted.
+    env["dash"].rows = [{**row, "body": "other", "thread_id": "x"}]
+    assert t.status(ME, {"idempotency_key": "key-00000001"})["observation"]["mail_record"] == "not_found"
+    env["dash"].rows = [row]
     out = t.status(ME, {"idempotency_key": "key-00000001"})
-    assert out["observation"] == {"mail_record": "found", "read": True, "acknowledged": True}
+    assert out["observation"]["mail_record"] == "found"
+    assert (out["observation"]["read"], out["observation"]["acknowledged"]) == (True, True)
     with pytest.raises(ToolError) as exc:
         t.status(ME, {"idempotency_key": "never-used-key"})
     assert exc.value.code == "not_found"
@@ -424,3 +446,171 @@ def test_cli_describes_a_pending_message_with_escapes(env):
     text = _describe(pairing.read_pending(env["state"], p["approval"]["code"]), full=True)
     assert "message to ExampleWorker (Mail ID 7) from ChatRelay" in text
     assert "<end of message>" in text and "テストを追加" in text
+
+
+# -- regressions for the independent audit (REVIEW-astra.md F1–F8) --------------------
+
+def test_f2_structured_mail_refusal_is_not_reported_as_accepted(env):
+    t = env["tools"]()
+    p = preview(t)
+    env["sender"].receipt = lambda kw: {"error": {"type": "FILE_RESERVATION_CONFLICT", "message": "x", "conflicts": []}}
+    with pytest.raises(ToolError) as exc:
+        commit(t, p)
+    assert exc.value.code == "not_sent" and exc.value.data["reason"] == "mail-file-reservation-conflict"
+    assert t.status(ME, {"idempotency_key": "key-00000001"})["message"]["state"] == "rejected"
+
+
+@pytest.mark.parametrize("bad", [
+    lambda s, kw: {"error": {"type": "SOMETHING_NEW"}},
+    lambda s, kw: {"deliveries": [], "count": 0},
+    lambda s, kw: receipt(s, kw, id=None),
+    lambda s, kw: receipt(s, kw, to=["Someone"]),
+    lambda s, kw: receipt(s, kw, thread_id="other"),
+    lambda s, kw: receipt(s, kw, subject="other"),
+    lambda s, kw: {**receipt(s, kw), "count": 2},
+    lambda s, kw: {"ok": True},
+])
+def test_f2_unrecognised_or_mismatched_receipt_is_unknown(env, bad):
+    t = env["tools"]()
+    p = preview(t)
+    env["sender"].receipt = lambda kw: bad(env["sender"], kw)
+    with pytest.raises(ToolError) as exc:
+        commit(t, p)
+    assert exc.value.code == "outcome_unknown"
+    env["sender"].receipt = None
+    assert commit(t, p)["outcome"] == "unknown"  # replay, never a second send
+    assert len(env["sender"].sent) == 1
+
+
+def test_f2_receipt_records_whether_the_stored_body_matches(env):
+    t = env["tools"]()
+    p = preview(t)
+    env["sender"].receipt = lambda kw: receipt(env["sender"], kw, body_md="rewritten")
+    out = commit(t, p)
+    assert out["outcome"] == "accepted" and out["message"]["body_verified"] is False
+
+
+def test_f3_image_references_and_importance_are_refused(env):
+    t = env["tools"]()
+    for text in ("see ![x](example.png)", "![](data:image/png;base64,AAAA)"):
+        with pytest.raises(ToolError) as exc:
+            preview(t, instruction=text)
+        assert "image" in exc.value.message
+    with pytest.raises(ToolError):
+        preview(t, importance="high")
+    assert preview(t, instruction="a [link](https://example.test) is fine")["message"]["importance"] == "normal"
+
+
+def test_f5_a_key_is_never_reusable_even_after_a_week(env):
+    now = [1_000_000.0]
+    t = env["tools"](clock=lambda: now[0])
+    first = preview(t)
+    commit(t, first, key="key-forever-1")
+    now[0] += 30 * 24 * 3600
+    commit(t, preview(t, instruction="other"), key="key-forever-2")
+    again = preview(t, instruction="third")
+    with pytest.raises(ToolError) as exc:
+        commit(t, again, key="key-forever-1")
+    assert exc.value.code == "idempotency_conflict"
+    assert len(env["sender"].sent) == 2
+
+
+def test_f7_ledger_failure_after_send_never_invites_a_resend(env):
+    t = env["tools"]()
+    p = preview(t)
+    real = t._ledger.update
+
+    def failing(key, **fields):
+        if fields.get("state") == "accepted":
+            raise OSError("disk full")
+        return real(key, **fields)
+
+    t._ledger.update = failing
+    with pytest.raises(ToolError) as exc:
+        commit(t, p)
+    assert exc.value.code == "outcome_unrecorded" and exc.value.data["mail_message_id"] == 101
+    t._ledger.update = real
+    out = commit(t, p)  # the key is still taken: replay, no second send
+    assert out["replayed"] is True and len(env["sender"].sent) == 1
+
+
+def test_f7_unfinished_dispatch_is_reported_as_unknown(env):
+    now = [1_000_000.0]
+    t = env["tools"](clock=lambda: now[0])
+    p = preview(t)
+    real = t._ledger.update
+    t._ledger.update = lambda key, **f: (_ for _ in ()).throw(OSError("disk full"))
+    env["sender"].send_error = ("daemon-operation-failed", None)
+    with pytest.raises(ToolError) as exc:
+        commit(t, p)
+    assert exc.value.code == "outcome_unknown"  # not masked by the failed record write
+    t._ledger.update = real
+    env["dash"].down = True
+    status = t.status(ME, {"idempotency_key": "key-00000001"})
+    assert status["message"]["state"] == "dispatching"  # still in its first two minutes
+    now[0] += 600
+    status = t.status(ME, {"idempotency_key": "key-00000001"})
+    assert status["message"]["state"] == "unknown" and status["message"]["reason"] == "dispatch-unfinished"
+    assert len(env["sender"].sent) == 1
+
+
+# -- F1: the helper import trusts nothing writable by others ---------------------------------
+
+_LOADER = r"""
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from orrery_chatgpt_mcp.messaging import SenderError, load_daemon_module
+try:
+    load_daemon_module(Path(sys.argv[2]))
+    print("loaded")
+except SenderError as exc:
+    print(exc.code)
+"""
+
+
+def _fake_checkout(root):
+    pkg = root / "integrations/codex_app/src/agentstack_codex_app"
+    mail = root / "packages/agentstack_mail/src/agentstack_mail"
+    pkg.mkdir(parents=True)
+    mail.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    marker = root.parent / "executed"
+    (pkg / "daemon_runtime.py").write_text(f"open({str(marker)!r}, 'w').write('x')\n")
+    (mail / "__init__.py").write_text("")
+    for path in [root, *root.rglob("*")]:
+        path.chmod(0o755 if path.is_dir() else 0o644)
+    return pkg, mail, marker
+
+
+def _load(root):
+    import subprocess
+    import sys as _sys
+    from chatgpt_gateway_support import SRC
+
+    out = subprocess.run([_sys.executable, "-I", "-B", "-c", _LOADER, str(SRC), str(root)], capture_output=True, text=True, timeout=60)
+    return out.stdout.strip() or out.stderr
+
+
+@pytest.mark.parametrize("damage", ["none", "package_dir", "module_file", "symlink", "ancestor", "src_dir"])
+def test_f1_unsafe_helper_code_is_refused_before_it_runs(tmp_path, damage):
+    base = tmp_path / "base"
+    base.mkdir(mode=0o755)
+    root = base / "checkout"
+    pkg, mail, marker = _fake_checkout(root)
+    if damage == "package_dir":
+        pkg.chmod(0o777)
+    elif damage == "module_file":
+        (pkg / "daemon_runtime.py").chmod(0o666)
+    elif damage == "symlink":
+        (mail / "linked.py").symlink_to(pkg / "__init__.py")
+    elif damage == "ancestor":
+        base.chmod(0o777)
+    elif damage == "src_dir":
+        pkg.parent.chmod(0o775)
+    result = _load(root)
+    if damage == "none":
+        assert result == "loaded" and marker.exists()
+    else:
+        assert result == "helper-root-unsafe", result
+        assert not marker.exists()

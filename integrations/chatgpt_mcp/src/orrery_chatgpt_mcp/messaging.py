@@ -17,9 +17,11 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import importlib
+import importlib.util
 import json
 import logging
 import os
+import re
 import secrets
 import stat
 import sys
@@ -34,7 +36,7 @@ from .auth import Principal
 from . import pairing
 from .config import APPROVAL_LOCAL, SCOPE_MESSAGE, SCOPE_READ, GatewayConfig
 from .dashboard import DashboardClient, DashboardError
-from .tools import IDEMPOTENCY_RE, LEDGER_TTL, PREVIEW_RE, PREVIEW_TTL, SpawnLedger, ToolError, _clip, _digest, _schema, _security
+from .tools import IDEMPOTENCY_RE, PREVIEW_RE, PREVIEW_TTL, SpawnLedger, ToolError, _clip, _digest, _schema, _security
 
 log = logging.getLogger("orrery_chatgpt_mcp")
 
@@ -42,7 +44,13 @@ log = logging.getLogger("orrery_chatgpt_mcp")
 RECIPIENT_RE_TEXT = r"[A-Za-z][A-Za-z0-9]{0,127}"
 MAX_INSTRUCTION_CHARS = 4000
 MAX_SUBJECT_CHARS = 120
-IMPORTANCE = ("normal", "high")
+# Mail rewrites Markdown image references (and reads the files they name) before
+# storing a body, so the delivered text would differ from the confirmed preview.
+MARKDOWN_IMAGE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
+# A dispatch record that has not finished after this long is reported as unknown.
+DISPATCH_STALE_SECONDS = 120
+# Structured Mail refusals that are returned before anything is stored.
+PRE_DELIVERY_REFUSALS = frozenset({"FILE_RESERVATION_CONFLICT"})
 REF_MARK = "orrery-mcp-ref:"
 OPEN_RETRY_SECONDS = 5.0
 # Daemon codes raised before any send_message request leaves the helper.
@@ -76,35 +84,87 @@ class SenderError(Exception):
         self.sent = sent
 
 
-def _private_dir(path: Path) -> None:
+_PACKAGES = ("agentstack_codex_app", "agentstack_mail")
+
+
+def _safe_owner_mode(info: os.stat_result) -> bool:
+    return info.st_uid in (os.getuid(), 0) and not info.st_mode & 0o022
+
+
+def _verify_ancestors(path: Path) -> None:
+    """Every directory above the checkout must be unwritable by others (a root-owned sticky /tmp-like dir is fine)."""
+    for parent in path.parents:
+        info = parent.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            raise SenderError("helper-root-unsafe", sent=False)
+        sticky_root = info.st_uid == 0 and info.st_mode & stat.S_ISVTX
+        if info.st_uid not in (os.getuid(), 0) or (info.st_mode & 0o022 and not sticky_root):
+            raise SenderError("helper-root-unsafe", sent=False)
+
+
+def _verify_tree(path: Path) -> None:
+    """No symlink, no foreign owner and no group/other write anywhere in a source tree, before any of it runs."""
     info = path.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+    if not stat.S_ISDIR(info.st_mode) or not _safe_owner_mode(info):
         raise SenderError("helper-root-unsafe", sent=False)
+    for dirpath, dirnames, filenames in os.walk(path, followlinks=False):
+        for name in [*dirnames, *filenames]:
+            entry = os.lstat(os.path.join(dirpath, name))
+            if stat.S_ISLNK(entry.st_mode) or not (stat.S_ISDIR(entry.st_mode) or stat.S_ISREG(entry.st_mode)):
+                raise SenderError("helper-root-unsafe", sent=False)
+            if not _safe_owner_mode(entry):
+                raise SenderError("helper-root-unsafe", sent=False)
 
 
 _import_lock = threading.Lock()
+_loaded: dict[Path, Any] = {}
 
 
 def load_daemon_module(root: Path):
-    """Import the canonical daemon helper from an owner-controlled ORRERY checkout."""
-    sources = [root / "integrations/codex_app/src", root / "packages/agentstack_mail/src"]
+    """Import the canonical daemon helper from an owner-controlled ORRERY checkout.
+
+    The whole chain is checked before anything executes: the checkout's
+    ancestors, both source trees (every package, module and cache file), that
+    the two packages resolve to those trees, and that no other copy is loaded.
+    """
     with _import_lock:
-        for path in [root, *sources]:
-            try:
-                _private_dir(path)
-            except OSError:
-                raise SenderError("helper-root-missing", sent=False) from None
+        try:
+            root = root.resolve(strict=True)
+        except OSError:
+            raise SenderError("helper-root-missing", sent=False) from None
+        if root in _loaded:
+            return _loaded[root]
+        sources = [root / "integrations/codex_app/src", root / "packages/agentstack_mail/src"]
+        try:
+            _private_dir(root)
+            _verify_ancestors(root)
+            for path in sources:
+                _verify_tree(path)
+        except OSError:
+            raise SenderError("helper-root-missing", sent=False) from None
+        for package, source in zip(_PACKAGES, sources):
+            current = sys.modules.get(package)
+            if current is not None and not Path(getattr(current, "__file__", "") or "/").resolve().is_relative_to(source):
+                raise SenderError("helper-root-mismatch", sent=False)  # another copy already runs here
         for path in reversed(sources):
             if str(path) not in sys.path:
                 sys.path.insert(0, str(path))
+        for package, source in zip(_PACKAGES, sources):
+            spec = importlib.util.find_spec(package)  # top-level lookup only; executes nothing
+            if spec is None or spec.origin is None or not Path(spec.origin).resolve().is_relative_to(source):
+                raise SenderError("helper-root-mismatch", sent=False)
         try:
             module = importlib.import_module("agentstack_codex_app.daemon_runtime")
         except Exception:
             raise SenderError("helper-import-failed", sent=False) from None
-        loaded = Path(module.__file__).resolve()
-        if not loaded.is_relative_to(sources[0].resolve()):
-            raise SenderError("helper-root-mismatch", sent=False)  # another copy was already imported
+        _loaded[root] = module
         return module
+
+
+def _private_dir(path: Path) -> None:
+    info = path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or not _safe_owner_mode(info):
+        raise SenderError("helper-root-unsafe", sent=False)
 
 
 def project_peer(row: dict) -> dict:
@@ -203,11 +263,12 @@ class MessageLedger(SpawnLedger):
     def reserve(self, key: str, record: dict, *, max_per_hour: int, now: float) -> dict | None:
         """Store ``record`` unless the key exists (returned) or the hourly cap is reached."""
         with self._transaction():
+            # Never pruned: a key, its content binding and its outcome stay for as
+            # long as the state directory does, so an old key can never send again.
             data = self._load()
-            data = {k: v for k, v in data.items() if isinstance(v, dict) and now - v.get("ts", 0) < LEDGER_TTL}
             if key in data:
                 return data[key]
-            recent = sum(1 for v in data.values() if v.get("state") != "rejected" and now - v.get("ts", 0) < 3600)
+            recent = sum(1 for v in data.values() if isinstance(v, dict) and v.get("state") != "rejected" and now - v.get("ts", 0) < 3600)
             if recent >= max_per_hour:
                 raise ToolError("rate_limited", f"at most {max_per_hour} messages per hour are allowed; nothing was sent")
             data[key] = record
@@ -275,7 +336,6 @@ class MessageTools:
                         "recipient": {"type": "string", "pattern": f"^{RECIPIENT_RE_TEXT}$", "description": "Allowed ORRERY agent name"},
                         "instruction": {"type": "string", "minLength": 1, "maxLength": MAX_INSTRUCTION_CHARS, "description": "The additional instruction, plain text"},
                         "subject": {"type": "string", "minLength": 1, "maxLength": MAX_SUBJECT_CHARS, "description": "Short subject; defaults to the first line"},
-                        "importance": {"type": "string", "enum": list(IMPORTANCE), "default": "normal"},
                     },
                     ["recipient", "instruction"],
                 ),
@@ -335,24 +395,21 @@ class MessageTools:
 
     # -- preview -----------------------------------------------------------------
     def preview(self, principal: Principal, args: dict) -> dict:
-        self._only(args, {"recipient", "instruction", "subject", "importance"})
+        self._only(args, {"recipient", "instruction", "subject"})
         recipient, text = args.get("recipient"), args.get("instruction")
-        import re
-
         if not isinstance(recipient, str) or not re.fullmatch(RECIPIENT_RE_TEXT, recipient):
             raise ToolError("invalid_arguments", "recipient must be an ORRERY agent name")
         if not isinstance(text, str) or not text.strip() or len(text) > MAX_INSTRUCTION_CHARS:
             raise ToolError("invalid_arguments", f"instruction must be 1..{MAX_INSTRUCTION_CHARS} characters")
         if unsafe_text(text, multiline=True):
             raise ToolError("invalid_arguments", "instruction contains control, invisible, bidirectional or separator characters")
+        if MARKDOWN_IMAGE.search(text):
+            raise ToolError("invalid_arguments", "instruction contains a Markdown image reference ![..](..); Mail would rewrite it, so describe the image path in words instead")
         subject = args.get("subject")
         if subject is None:
             subject = text.strip().split("\n", 1)[0].strip()[:60] or "instruction"
         if not isinstance(subject, str) or not subject.strip() or len(subject) > MAX_SUBJECT_CHARS or unsafe_text(subject, multiline=False) or "\t" in subject:
             raise ToolError("invalid_arguments", f"subject must be one line of 1..{MAX_SUBJECT_CHARS} visible characters")
-        importance = args.get("importance", "normal")
-        if importance not in IMPORTANCE:
-            raise ToolError("invalid_arguments", f"importance must be one of {list(IMPORTANCE)}")
         try:
             allowed = self._sender.allowed()
         except SenderError as exc:
@@ -385,7 +442,6 @@ class MessageTools:
             "recipient_registered_at": peer["registered_at"],
             "subject": f"[ChatGPT] {subject.strip()}",
             "body_md": body,
-            "importance": importance,
             "thread_id": f"orrery-mcp-{ref}",
             "ref": ref,
         }
@@ -408,7 +464,7 @@ class MessageTools:
                 "project": Path(sender["project_key"]).name,
                 "mail_instance": sender["instance"],
                 "subject": envelope["subject"],
-                "importance": importance,
+                "importance": "normal",
                 "body": body,
                 "body_chars": len(body),
             },
@@ -460,7 +516,9 @@ class MessageTools:
             env = preview.envelope
             record = {"ts": now, "preview_id": _digest(preview_id), "content_sha256": digest, "state": "dispatching",
                       "recipient": env["recipient"], "recipient_id": env["recipient_id"], "sender": env["sender"],
-                      "ref": env["ref"], "message_id": None}
+                      "ref": env["ref"], "message_id": None, "mail_instance": env["mail_instance"], "sender_id": env["sender_id"],
+                      "project": env["project"], "thread_id": env["thread_id"], "subject_sha256": _digest(env["subject"]),
+                      "body_sha256": body_sha}
             raced = self._ledger.reserve(ledger_key, record, max_per_hour=self._config.message_max_per_hour, now=now)
             if raced is not None:
                 if raced.get("preview_id") != _digest(preview_id):
@@ -490,27 +548,81 @@ class MessageTools:
                 result = session.send(to=env["recipient"], subject=env["subject"], body_md=env["body_md"], thread_id=env["thread_id"])
         except SenderError as exc:
             if exc.sent is False:
-                self._finish(ledger_key, record, "rejected", reason=exc.code)
+                self._finish_quietly(ledger_key, record, "rejected", reason=exc.code)
                 code = "recipient_changed" if exc.code in ("recipient-changed", "daemon-peer-changed", "daemon-peer-missing") else "not_sent"
                 raise ToolError(code, f"the message was not sent ({exc.code}); preview again after checking the agent", data={"reason": exc.code}) from None
-            self._finish(ledger_key, record, "unknown", reason=exc.code)
-            raise ToolError("outcome_unknown",
-                            "Mail may or may not have accepted the message; call orrery_message_status with this idempotency_key. Do not commit again.",
-                            data={"recipient": env["recipient"]}) from None
-        message_id = None
-        deliveries = result.get("deliveries") if isinstance(result, dict) else None
-        if isinstance(deliveries, list) and deliveries and isinstance(deliveries[0], dict):
-            payload = deliveries[0].get("payload")
-            if isinstance(payload, dict) and type(payload.get("id")) is int:
-                message_id = payload["id"]
-        done = self._finish(ledger_key, record, "accepted", message_id=message_id)
-        return {"replayed": False, "outcome": "accepted", "message": self._public(done),
+            self._finish_quietly(ledger_key, record, "unknown", reason=exc.code)
+            raise self._unknown(env) from None
+        state, fields = self._receipt(result, env)
+        if state == "rejected":
+            self._finish_quietly(ledger_key, record, "rejected", **fields)
+            raise ToolError("not_sent", f"Mail refused the message before storing it ({fields['reason']}); nothing was delivered",
+                            data={"reason": fields["reason"]})
+        if state == "unknown":
+            self._finish_quietly(ledger_key, record, "unknown", **fields)
+            raise self._unknown(env)
+        try:
+            done = self._finish(ledger_key, record, "accepted", **fields)
+        except Exception:
+            # Mail has the message; only the local record failed. Never invite a resend.
+            log.warning("message accepted but the ledger update failed ref=%s", env["ref"])
+            raise ToolError("outcome_unrecorded",
+                            "Mail accepted the message, but this gateway could not record it; do not commit again. orrery_message_status may show it as unknown.",
+                            data={"recipient": env["recipient"], "mail_message_id": fields.get("message_id")}) from None
+        return {"replayed": False, "outcome": "accepted", "message": self._public(done, self._clock()),
                 "next": "Mail accepted the message for the recipient. Use orrery_message_status to see whether it was read or acknowledged.",
                 "note": TURN_NOTE}
 
     @staticmethod
-    def _public(record: dict) -> dict:
+    def _unknown(env: dict) -> ToolError:
+        return ToolError("outcome_unknown",
+                         "Mail may or may not have accepted the message; call orrery_message_status with this idempotency_key. Do not commit again.",
+                         data={"recipient": env["recipient"]})
+
+    def _finish_quietly(self, ledger_key: str, record: dict, state: str, **fields: Any) -> None:
+        """Record an outcome without letting a ledger failure replace the answer the caller must get."""
+        try:
+            self._finish(ledger_key, record, state, **fields)
+        except Exception:
+            log.warning("message ledger update failed state=%s ref=%s", state, record.get("ref"))
+
+    @staticmethod
+    def _receipt(result: Any, env: dict) -> tuple[str, dict]:
+        """Accept only Mail's own receipt for exactly this message; never infer success from a missing exception."""
+        if isinstance(result, dict) and set(result) == {"error"} and isinstance(result["error"], dict):
+            kind = result["error"].get("type")
+            if kind in PRE_DELIVERY_REFUSALS:
+                return "rejected", {"reason": f"mail-{kind.lower().replace('_', '-')}"}
+            return "unknown", {"reason": "mail-error-unrecognised"}
+        deliveries = result.get("deliveries") if isinstance(result, dict) else None
+        if not isinstance(deliveries, list) or len(deliveries) != 1 or not isinstance(deliveries[0], dict) or result.get("count") != 1:
+            return "unknown", {"reason": "mail-receipt-malformed"}
+        payload = deliveries[0].get("payload")
+        if (
+            not isinstance(payload, dict)
+            or type(payload.get("id")) is not int
+            or payload["id"] <= 0
+            or deliveries[0].get("project") != env["project"]
+            or payload.get("from") != env["sender"]
+            or payload.get("to") != [env["recipient"]]
+            or payload.get("cc") not in (None, [])
+            or payload.get("bcc") not in (None, [])
+            or payload.get("thread_id") != env["thread_id"]
+            or payload.get("subject") != env["subject"]
+        ):
+            return "unknown", {"reason": "mail-receipt-mismatch"}
+        fields: dict = {"message_id": payload["id"]}
+        if "body_md" in payload:
+            fields["body_verified"] = payload["body_md"] == env["body_md"]
+        return "accepted", fields
+
+    @staticmethod
+    def _public(record: dict, now: float) -> dict:
         state = record.get("state")
+        reason = record.get("reason")
+        if state == "dispatching" and now - record.get("ts", 0) > DISPATCH_STALE_SECONDS:
+            # The commit that owned it stopped (crash, restart, record write failure): treat as unknown.
+            state, reason = "unknown", "dispatch-unfinished"
         return {
             "state": state if state in _STATES else "unknown",
             "recipient": _clip(record.get("recipient"), 128),
@@ -519,8 +631,9 @@ class MessageTools:
             "mail_message_id": record.get("message_id") if type(record.get("message_id")) is int else None,
             "content_sha256": _clip(record.get("content_sha256"), 64),
             "committed_at": int(record["ts"]) if isinstance(record.get("ts"), (int, float)) else None,
-            "reason": _clip(record.get("reason"), 64),
+            "reason": _clip(reason, 64),
             "reconciled": record.get("reconciled") is True,
+            "body_verified": record.get("body_verified") if isinstance(record.get("body_verified"), bool) else None,
         }
 
     def _observe(self, ledger_key: str, record: dict) -> tuple[dict, dict]:
@@ -532,20 +645,34 @@ class MessageTools:
             rows = self._dashboard.edge_messages(sender, recipient)
         except DashboardError:
             return record, {"mail_record": "unavailable", "reason": "dashboard did not answer"}
-        message_id, ref = record.get("message_id"), record.get("ref")
+        message_id, thread, body_sha = record.get("message_id"), record.get("thread_id"), record.get("body_sha256")
+        if not isinstance(thread, str) or not isinstance(body_sha, str):
+            return record, {"mail_record": "unverifiable", "reason": "this record predates content evidence"}
         match = None
         for row in rows:
-            if row.get("sender") != sender or row.get("recipient") != recipient:
+            # Names alone are not identity: require this message's own thread and the exact
+            # body, which carries a random reference, so a quote or another instance cannot match.
+            if (
+                row.get("sender") != sender
+                or row.get("recipient") != recipient
+                or row.get("thread_id") != thread
+                or not isinstance(row.get("body"), str)
+                or _digest(row["body"]) != body_sha
+                or type(row.get("id")) is not int
+                or (type(message_id) is int and row["id"] != message_id)
+            ):
                 continue
-            if (type(message_id) is int and row.get("id") == message_id) or (
-                    message_id is None and isinstance(ref, str) and f"{REF_MARK} {ref}" in str(row.get("body") or "")):
-                match = row
-                break
+            match = row
+            break
         if match is None:
-            return record, {"mail_record": "not_found", "reason": "not among the latest messages between these agents in the dashboard's project"}
-        if record.get("state") in ("dispatching", "unknown") and type(match.get("id")) is int:
-            record = self._finish(ledger_key, record, "accepted", message_id=match["id"], reconciled=True)
-        return record, {"mail_record": "found", "read": bool(match.get("read_ts")), "acknowledged": bool(match.get("ack_ts"))}
+            return record, {"mail_record": "not_found", "reason": "no exact copy among the latest messages between these agents in the dashboard's project"}
+        if record.get("state") in ("dispatching", "unknown"):
+            try:
+                record = self._finish(ledger_key, record, "accepted", message_id=match["id"], reconciled=True, body_verified=True)
+            except Exception:
+                log.warning("message reconciliation could not update the ledger ref=%s", record.get("ref"))
+        return record, {"mail_record": "found", "evidence": "exact body and thread in the dashboard Mail view",
+                        "read": bool(match.get("read_ts")), "acknowledged": bool(match.get("ack_ts"))}
 
     def _replay(self, ledger_key: str, record: dict) -> dict:
         out = {"replayed": True, "outcome": record.get("state") if record.get("state") in _STATES else "unknown"}
@@ -553,7 +680,9 @@ class MessageTools:
             record, observed = self._observe(ledger_key, record)
             out["outcome"] = record.get("state")
             out["observation"] = observed
-        out["message"] = self._public(record)
+        out["message"] = self._public(record, self._clock())
+        if out["message"]["state"] == "unknown":
+            out["outcome"] = "unknown"
         out["note"] = TURN_NOTE
         return out
 
@@ -567,4 +696,4 @@ class MessageTools:
         observed: dict = {"mail_record": "not_checked"}
         if record.get("state") in ("dispatching", "unknown", "accepted"):
             record, observed = self._observe(ledger_key, record)
-        return {"message": self._public(record), "observation": observed, "note": TURN_NOTE + " " + UNTRUSTED}
+        return {"message": self._public(record, self._clock()), "observation": observed, "note": TURN_NOTE + " " + UNTRUSTED}
