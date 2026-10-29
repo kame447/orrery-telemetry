@@ -108,9 +108,26 @@ Sent by the operator from ChatGPT through orrery-chatgpt-mcp as <送信者名>. 
 
 **本文を Mail のログにも残さないことは、次の 2 つが揃ったときだけ成り立ちます。** (1) Mail がこの変更を含む版であること（以前の版は、ツールログを切っても Git コミット用のパネルを stderr に出し、そこに本文が入っていました。この PR で出力しないよう直しました）。(2) Mail 側で `AGENTSTACK_MAIL_TOOLS_LOG_ENABLED=false` にしていること。この組み合わせは隔離した Mail での E2E で確認しています。稼働中の Mail は、Mail を更新するまで以前の版のままです。
 
-### launchd 常駐版との関係
+### launchd 常駐版での明示的な有効化
 
-`orrery-chatgpt-mcp service install`（PR #42）が固定する読み取り専用リリースはゲートウェイのソースだけを持ち、送信を有効にする環境変数も渡しません。**常駐版では送信は無効のままです。** 常駐版で送信を使えるようにするのは別の変更です。それまでは手動起動のゲートウェイで試してください。
+`orrery-chatgpt-mcp service install` は今までどおり送信を無効にします。利用者が Mac 上で専用 sender identity と宛先許可リスト（daemon v2 プロファイル）を作成し、内容を確認した場合だけ、次のオプションで明示的に有効化できます。このオプションを指定せず再インストールすると送信は再び無効になります。spawn は常に無効です。
+
+実行前に、更新済みのORRERY Mailが稼働し、Mail本体に `AGENTSTACK_MAIL_TOOLS_LOG_ENABLED=false` が実際に適用されていることを運用者が確認してください。Mailのログ設定はこのコマンドでは変更しません。送信が受理されても既存Claude/Codexのターン開始は保証されません。
+
+```bash
+<ORRERY>/bin/orrery-chatgpt-mcp service install \
+  --source-commit "$(git -C <ORRERY> rev-parse HEAD)" \
+  --message-profile <Macで作成・確認した0600のsenderプロファイル> \
+  --message-helper-from <ORRERYの絶対パス> \
+  --message-approval chat --message-max-per-hour 20
+<ORRERY>/bin/orrery-chatgpt-mcp service status
+```
+
+サービスは helper に必要な `agentstack_codex_app` / `agentstack_mail` のPythonソースと正規の `agentstack-await-reply` のみを別の内容アドレス付き・読み取り専用リリースへ複製します。起動時に全ファイルのハッシュ・所有者・書込権限・階層を検証し、変更があれば起動を拒否します。チェックアウトの変更を常駐中に読みません。ゲートウェイ本体も従来どおり独立した固定リリースです。
+
+本人が指定した sender プロファイル（0600）のみ外部参照し、トークンや本文をplistに保存しません。プロファイルの宛先・IDの再検査は実際のプレビューと送信直前にも行います。送信有効化前に接続と宛先の安全確認ができなければ、本番で送信しないでください。セキュリティ上の制約（送信直前の照合とMailへの登録が非原子的であること）は従来どおり残ります。
+
+Macからの毎回承認を省略するのは `--message-approval chat` の場合だけで、ChatGPT側の送信確認を前提とします。ChatGPTアカウントが書き込みMCPツールに対応し、Secure MCP Tunnelが接続済みでなければ送れません。両方とも本コマンドでは設定されません。
 
 ## 試験
 

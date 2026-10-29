@@ -108,9 +108,24 @@ The gateway's records (ledger, audit, log) contain no bodies. ORRERY Mail's own 
 
 **Bodies stay out of Mail's log only when both of these hold:** (1) Mail runs a version with this change (earlier versions printed the Git commit panel, which contains the body, to stderr even with tool logging off; this PR stops that output), and (2) Mail runs with `AGENTSTACK_MAIL_TOOLS_LOG_ENABLED=false`. That combination is checked end to end against an isolated Mail. The live Mail keeps the earlier version until Mail is updated.
 
-### The launchd service
+### Explicit opt-in for the launchd service
 
-The read-only release pinned by `orrery-chatgpt-mcp service install` (PR #42) contains only the gateway source and passes no messaging settings. **Messaging stays off in the service.** Enabling it there is a separate change; until then, try it with a manually started gateway.
+`orrery-chatgpt-mcp service install` still leaves messaging OFF by default. The operator must personally create the sender identity and its private v2 daemon profile with explicitly authorized recipients. Only then can the operator opt in on the Mac with:
+
+```bash
+<ORRERY>/bin/orrery-chatgpt-mcp service install \
+  --source-commit "$(git -C <ORRERY> rev-parse HEAD)" \
+  --message-profile <absolute-path-to-operator-approved-0600-profile> \
+  --message-helper-from <absolute-path-to-ORRERY-checkout> \
+  --message-approval chat --message-max-per-hour 20
+<ORRERY>/bin/orrery-chatgpt-mcp service status
+```
+
+Before opting in, verify the updated ORRERY Mail is running with `AGENTSTACK_MAIL_TOOLS_LOG_ENABLED=false` actually applied. This command does not change Mail logging. Reinstalling without the message options disables messaging again; spawning always stays off.
+
+The service pins a separately content-addressed, immutable copy of the canonical helper's two Python packages and the canonical wait primitive. It checks the exact layout, digest, owner and read-only permissions before importing anything from the helper, and never executes the changing checkout. The gateway itself remains pinned independently. The external owner-approved profile is 0600; no credentials or message bodies enter the launchd plist.
+
+`--message-approval chat` avoids returning to the Mac per message, but relies on ChatGPT's confirmation. Secure MCP Tunnel and a ChatGPT account that supports write MCP tools are still necessary and are NOT configured here. Mail acceptance is not evidence that the receiving TUI started a turn. The recipient verification/send race documented above remains.
 
 ## Tests
 

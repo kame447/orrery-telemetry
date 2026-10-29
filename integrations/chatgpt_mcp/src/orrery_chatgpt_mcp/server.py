@@ -469,6 +469,8 @@ USAGE = """usage: orrery-chatgpt-mcp [serve | pair [--rotate] [--quiet] | url | 
   deny CODE      discard one pending launch
 
   service install [--from SRC] [--source-commit SHA] [--python PATH]
+                  [--message-profile ABS --message-helper-from ORRERY_ROOT]
+                  [--message-approval chat|local] [--message-max-per-hour N]
                  macOS: pin a read-only copy of the gateway and keep it running with launchd
                  (127.0.0.1 only, launches disabled, restarts after login)
   service status show whether the service is loaded and answering (never prints the secret)
@@ -550,16 +552,40 @@ def _service_cli(argv: list[str], state_dir) -> int:
 
     action, rest = argv[0], argv[1:]
     if action == "install":
-        opts = {"--from": str(Path(__file__).resolve().parents[1]), "--source-commit": None, "--python": service.default_python()}
-        if len(rest) % 2 or any(k not in opts for k in rest[::2]):
-            raise ConfigError("usage: service install [--from SRC] [--source-commit SHA] [--python PATH]")
+        opts = {
+            "--from": str(Path(__file__).resolve().parents[1]),
+            "--source-commit": None,
+            "--python": service.default_python(),
+            "--message-profile": None,
+            "--message-helper-from": None,
+            "--message-approval": "chat",
+            "--message-max-per-hour": "20",
+        }
+        if len(rest) % 2 or any(k not in opts for k in rest[::2]) or len(set(rest[::2])) != len(rest[::2]):
+            raise ConfigError("usage: service install [--from SRC] [--source-commit SHA] [--python PATH] [--message-profile ABS --message-helper-from ORRERY_ROOT]")
         opts.update(zip(rest[::2], rest[1::2]))
+        if bool(opts["--message-profile"]) != bool(opts["--message-helper-from"]):
+            raise ConfigError("message service requires both --message-profile and --message-helper-from")
+        if opts["--message-profile"] is None and (opts["--message-approval"] != "chat" or opts["--message-max-per-hour"] != "20"):
+            raise ConfigError("message controls require --message-profile")
         pairing.read_secret(state_dir)  # refuse before writing anything when unpaired
         release, digest = service.install_release(Path(opts["--from"]), state_dir / "releases",
                                                   source_commit=opts["--source-commit"])
+        helper_root = helper_digest = None
+        if opts["--message-profile"]:
+            from .helper_release import install_helper_release
+            helper_root, helper_digest = install_helper_release(
+                Path(opts["--message-helper-from"]), state_dir / "helpers", source_commit=opts["--source-commit"])
+        try:
+            message_rate = int(opts["--message-max-per-hour"])
+        except ValueError:
+            raise ConfigError("message max per hour must be an integer") from None
         plan = service.ServicePlan(python=opts["--python"], release_dir=release, digest=digest, state_dir=state_dir,
                                    port=int(os.environ.get("ORRERY_MCP_PORT", "8790")),
-                                   dashboard_url=os.environ.get("ORRERY_MCP_DASHBOARD_URL", "http://127.0.0.1:8770").strip().rstrip("/"))
+                                   dashboard_url=os.environ.get("ORRERY_MCP_DASHBOARD_URL", "http://127.0.0.1:8770").strip().rstrip("/"),
+                                   message_profile=Path(opts["--message-profile"]) if opts["--message-profile"] else None,
+                                   message_helper_root=helper_root, message_helper_digest=helper_digest,
+                                   message_approval=opts["--message-approval"], message_max_per_hour=message_rate)
         try:
             status = service.install_service(plan)
         except service.VerifyError as exc:
@@ -567,7 +593,7 @@ def _service_cli(argv: list[str], state_dir) -> int:
                   f"See {plan.log_path} and `service status`", file=sys.stderr)
             return 1
         reachable = bool(status.get("dashboard", {}).get("reachable"))
-        print(f"installed {plan.label}: release {release.name}, 127.0.0.1:{plan.port}, launches disabled")
+        print(f"installed {plan.label}: release {release.name}, 127.0.0.1:{plan.port}, launches disabled, messages {'enabled for operator profile' if plan.message_profile else 'disabled'}")
         print(f"orrery_status over loopback: answering, dashboard reachable: {str(reachable).lower()}")
         return 0
     if action == "status" and not rest:
