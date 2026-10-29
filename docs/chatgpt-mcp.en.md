@@ -50,7 +50,7 @@ Programs running as the same macOS user are inside this boundary ([local HTTP tr
 | `orrery_spawn_preview` | launch (dry run) | Validates through the dashboard `dry_run`; returns `preview_id` and an approval code. Starts nothing |
 | `orrery_spawn_commit` | write | Starts an approved preview |
 
-Instructing or messaging an existing agent is **not in this version**: ORRERY has no operator API that sends Mail without borrowing an agent's owner token, and tmux keystrokes are not used. `orrery_status` reports this as `message_existing_agent: false`. There is no stopping of working agents (EXIT / kill), no arbitrary command execution and no transparent dashboard proxy.
+Sending an additional instruction to an existing agent is a separate set of tools that works only after the operator configures a dedicated sender and recipients (off by default). It never borrows an agent's owner token and never types into tmux; see [Sending instructions from ChatGPT to an existing agent](chatgpt-mcp-message.en.md). When it is off, `orrery_status` reports `message_existing_agent: false`. There is no stopping of working agents (EXIT / kill), no arbitrary command execution and no transparent dashboard proxy.
 
 ChatGPT plans differ for write MCP tools (OpenAI help as of 2026-10: Pro has read/fetch; full write is a Business / Enterprise / Edu beta). The gateway never guesses your plan. The operator decides with `ORRERY_MCP_ENABLE_SPAWN`; if your plan cannot use write tools, use the read tools only.
 

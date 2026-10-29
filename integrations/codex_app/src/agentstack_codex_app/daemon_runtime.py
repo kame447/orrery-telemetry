@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 import uuid
 
 from agentstack_mail import enrollment_cli as enroll
-from agentstack_mail.enrollment import credential_fingerprint, PROTOCOL_VERSION
+from agentstack_mail.enrollment_protocol import credential_fingerprint, PROTOCOL_VERSION
 from .agent_mail_client import AgentMailClient, AgentNotFoundError, HttpJsonRpcTransport
 from .mcp_server import AgentStackProxy
 

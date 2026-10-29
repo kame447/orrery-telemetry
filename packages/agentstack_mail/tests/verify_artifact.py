@@ -1157,6 +1157,7 @@ REQUIRED_RUNTIME_MODULES = {
     "db.py",
     "enrollment.py",
     "enrollment_cli.py",
+    "enrollment_protocol.py",
     "evidence.py",
     "guard.py",
     "llm.py",

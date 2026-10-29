@@ -9,6 +9,7 @@ agent tool calls and system operations.
 
 from __future__ import annotations
 
+import io
 import json
 import time
 from collections.abc import Generator
@@ -430,8 +431,19 @@ def _build_tool_call_end_panel(ctx: ToolCallContext) -> Panel:
 
 
 def _render_panel_to_text(panel: Panel) -> str:
-    """Render a Rich panel to plain text (no ANSI color codes)."""
-    capture_console = Console(stderr=True, force_terminal=True, record=True, color_system=None)
+    """Render a Rich panel to plain text (no ANSI color codes).
+
+    The capture console writes to memory: a recording console still prints, and
+    the panel carries full tool results (message bodies), which must not reach
+    stderr when tool logging is off. The width matches the stderr console.
+    """
+    capture_console = Console(
+        file=io.StringIO(),
+        width=Console(stderr=True).width,
+        force_terminal=True,
+        record=True,
+        color_system=None,
+    )
     capture_console.print(panel)
     capture_console.print()
     return capture_console.export_text(clear=True)
