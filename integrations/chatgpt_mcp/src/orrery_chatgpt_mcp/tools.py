@@ -24,7 +24,7 @@ from typing import Any, Callable
 from . import __version__
 from .auth import Principal
 from . import pairing
-from .config import APPROVAL_LOCAL, AUTH_PAIRING, SCOPE_READ, SCOPE_SPAWN, SPAWN_PROVIDERS, GatewayConfig
+from .config import APPROVAL_LOCAL, AUTH_PAIRING, SCOPE_MESSAGE, SCOPE_READ, SCOPE_SPAWN, SPAWN_PROVIDERS, GatewayConfig
 from .dashboard import DashboardClient, DashboardError
 
 log = logging.getLogger("orrery_chatgpt_mcp")
@@ -142,9 +142,10 @@ class _Preview:
 class SpawnLedger:
     """Durable idempotency records, private to the gateway (0700 dir, 0600 file)."""
 
-    def __init__(self, state_dir: Path):
+    def __init__(self, state_dir: Path, name: str = "spawn-ledger"):
         self._dir = state_dir
-        self._path = state_dir / "spawn-ledger.json"
+        self._name = name
+        self._path = state_dir / f"{name}.json"
         self._lock = threading.Lock()
 
     def _transaction(self):
@@ -156,7 +157,7 @@ class SpawnLedger:
                 ledger._lock.acquire()
                 try:
                     ledger._dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-                    self_inner.fd = os.open(ledger._dir / "spawn-ledger.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+                    self_inner.fd = os.open(ledger._dir / f"{ledger._name}.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
                     fcntl.flock(self_inner.fd, fcntl.LOCK_EX)
                 except BaseException:
                     ledger._lock.release()
@@ -180,12 +181,12 @@ class SpawnLedger:
         except FileNotFoundError:
             return {}
         except (OSError, ValueError):
-            raise ToolError("ledger_unavailable", "spawn ledger is unreadable; refusing to spawn without idempotency records") from None
+            raise ToolError("ledger_unavailable", f"{self._name} is unreadable; refusing to write without idempotency records") from None
 
     def _save(self, data: dict) -> None:
         self._dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self._dir, 0o700)
-        tmp = self._dir / f".spawn-ledger.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+        tmp = self._dir / f".{self._name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(data, fh, sort_keys=True)
@@ -228,7 +229,7 @@ def _digest(value: str) -> str:
 
 
 class ToolRegistry:
-    def __init__(self, config: GatewayConfig, dashboard: DashboardClient, *, clock: Callable[[], float] = time.time):
+    def __init__(self, config: GatewayConfig, dashboard: DashboardClient, *, clock: Callable[[], float] = time.time, message_tools=None):
         self._config = config
         self._dashboard = dashboard
         self._clock = clock
@@ -244,6 +245,12 @@ class ToolRegistry:
         if config.spawn_enabled:
             self._handlers["orrery_spawn_preview"] = (SCOPE_SPAWN, self._spawn_preview)
             self._handlers["orrery_spawn_commit"] = (SCOPE_SPAWN, self._spawn_commit)
+        self._messages = None
+        if config.message_enabled:
+            from .messaging import MessageTools
+
+            self._messages = message_tools or MessageTools(config, dashboard, clock=clock)
+            self._handlers.update(self._messages.handlers())
 
     # -- discovery ---------------------------------------------------------
     def definitions(self) -> list[dict]:
@@ -320,6 +327,8 @@ class ToolRegistry:
                     "securitySchemes": _security(self._config, SCOPE_SPAWN),
                 },
             ]
+        if self._messages is not None:
+            tools += self._messages.definitions()
         return tools
 
     def known(self, name: str) -> bool:
@@ -375,8 +384,11 @@ class ToolRegistry:
                 "spawn": self._config.spawn_enabled and SCOPE_SPAWN in principal.scopes,
                 "spawn_enabled_on_server": self._config.spawn_enabled,
                 "spawn_approval": self._config.spawn_approval if self._config.spawn_enabled else None,
-                "message_existing_agent": False,
-                "message_existing_agent_reason": "ORRERY has no operator API for sending Mail without an agent owner token; this gateway does not borrow one.",
+                "message_existing_agent": self._messages is not None and SCOPE_MESSAGE in principal.scopes,
+                "message_enabled_on_server": self._messages is not None,
+                "message_approval": self._config.message_approval if self._messages is not None else None,
+                "message_recipients": self._messages.recipients() if self._messages is not None else [],
+                "message_sender": "a dedicated orrery-daemon Mail identity configured by the operator; agent owner tokens are never used",
             },
             "spawn_directories": sorted(self._config.spawn_dirs) if self._config.spawn_enabled else [],
         }

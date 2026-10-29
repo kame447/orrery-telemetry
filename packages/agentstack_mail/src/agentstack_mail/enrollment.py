@@ -8,7 +8,6 @@ credential material.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
 import socket
@@ -30,17 +29,9 @@ from .models import (
     Project,
 )
 
-PROTOCOL_VERSION = 1
-MAX_REQUEST_BYTES = 16 * 1024
+from .enrollment_protocol import MAX_REQUEST_BYTES, PROTOCOL_VERSION, credential_fingerprint
+
 _OPERATIONS = frozenset({"claim", "recover"})
-
-
-def credential_fingerprint(value: str | None) -> str | None:
-    """Return a non-secret, stable diagnostic fingerprint."""
-
-    if value is None:
-        return None
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
 
 def _receipt(record: EnrollmentRequest) -> dict[str, Any]:

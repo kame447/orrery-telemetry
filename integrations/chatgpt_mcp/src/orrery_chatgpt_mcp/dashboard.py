@@ -18,6 +18,7 @@ _ROUTES = {
     ("GET", "/api/spawn-status"),
     ("GET", "/api/name-status"),
     ("GET", "/api/suggest-name"),
+    ("GET", "/api/edge-messages"),
     ("POST", "/api/spawn"),
 }
 
@@ -122,6 +123,13 @@ class DashboardClient:
         if status == 200 and isinstance(body, dict) and isinstance(body.get("name"), str):
             return body["name"]
         return None
+
+    def edge_messages(self, a: str, b: str, limit: int = 200) -> list[dict]:
+        """Recent Mail between two agents in the dashboard's project (for reconciliation only)."""
+        status, body = self._request("GET", "/api/edge-messages", {"a": a, "b": b, "limit": str(limit)})
+        if status != 200 or not isinstance(body, dict) or not isinstance(body.get("messages"), list):
+            raise DashboardError("unexpected /api/edge-messages answer", status=status)
+        return [row for row in body["messages"] if isinstance(row, dict)]
 
     def spawn(self, payload: dict) -> tuple[int, dict]:
         status, body = self._request("POST", "/api/spawn", body=payload)

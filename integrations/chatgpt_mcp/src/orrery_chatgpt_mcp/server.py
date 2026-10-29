@@ -22,7 +22,7 @@ from typing import Any
 
 from . import __version__
 from .auth import AuthError, Principal, TokenVerifier, challenge
-from .config import AUTH_PAIRING, KNOWN_SCOPES, ConfigError, LOCAL_SUBJECT, SCOPE_READ, SCOPE_SPAWN, GatewayConfig
+from .config import AUTH_PAIRING, KNOWN_SCOPES, ConfigError, LOCAL_SUBJECT, SCOPE_MESSAGE, SCOPE_READ, SCOPE_SPAWN, GatewayConfig
 from .dashboard import DashboardClient
 from .tools import ToolError, ToolRegistry
 
@@ -77,7 +77,7 @@ class Gateway:
         self.config = config
         self.pairing = config.auth_mode == AUTH_PAIRING
         self.verifier = None if self.pairing else (verifier or TokenVerifier(config))
-        scopes = {SCOPE_READ} | ({SCOPE_SPAWN} if config.spawn_enabled else set())
+        scopes = {SCOPE_READ} | ({SCOPE_SPAWN} if config.spawn_enabled else set()) | ({SCOPE_MESSAGE} if config.message_enabled else set())
         self.local_principal = Principal(LOCAL_SUBJECT, frozenset(scopes), None, 0)
         self.tools = ToolRegistry(config, dashboard or DashboardClient(config.dashboard_url))
         self.subject_limiter = RateLimiter(config.rate_per_minute)
@@ -502,12 +502,13 @@ def main(argv: list[str] | None = None) -> int:
             if record is None:
                 raise ConfigError(f"no pending launch with code {argv[1]}")
             print(_describe(record, full=True))
-            answer = input("Start this agent on this Mac? Type yes to approve: ").strip().lower()
+            is_message = (record.get("summary") or {}).get("kind") == "message"
+            answer = input(("Send this message from this Mac?" if is_message else "Start this agent on this Mac?") + " Type yes to approve: ").strip().lower()
             if answer != "yes":
                 print("not approved")
                 return 1
             pairing.approve(state_dir, argv[1], shown=record)
-            print("approved; ChatGPT can now commit this launch")
+            print("approved; ChatGPT can now commit it")
             return 0
         if command == "deny" and len(argv) == 2:
             print("discarded" if pairing.deny(state_dir, argv[1]) else "no such launch")
@@ -537,6 +538,15 @@ def _safe(value: object) -> str:
 def _describe(record: dict, *, full: bool = False) -> str:
     summary = record.get("summary") or {}
     left = int(record.get("expires_at", 0) - time.time())
+    if summary.get("kind") == "message":
+        head = (f"[{_safe(record.get('code'))}] message to {_safe(summary.get('name'))} (Mail ID {_safe(summary.get('recipient_id'))}) "
+                f"from {_safe(summary.get('sender'))}, expires in {max(left, 0)}s{', APPROVED' if record.get('approved') else ''}\n"
+                f"    subject: {_safe(summary.get('subject'))}")
+        if not full:
+            return f"{head}\n    body ({summary.get('task_chars')} chars): {_safe(summary.get('task_preview'))}"
+        body = "\n".join("    | " + line for line in _safe(summary.get("task", "")).split("\n"))
+        return (f"{head}\n    sha256 {_safe(summary.get('task_sha256'))}\n"
+                f"    full body (shown exactly; \\uXXXX marks escaped characters):\n{body}\n    | <end of message>")
     head = (
         f"[{_safe(record.get('code'))}] {_safe(summary.get('name'))} in '{_safe(summary.get('directory'))}' "
         f"({_safe(summary.get('provider'))} {_safe(summary.get('model') or '')}, worktree={summary.get('worktree')}, expires in {max(left, 0)}s"

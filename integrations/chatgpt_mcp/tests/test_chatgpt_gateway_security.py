@@ -69,7 +69,7 @@ def test_protected_resource_metadata_is_public_and_exact(make_gateway):
         assert status == 200
         assert body["resource"] == RESOURCE
         assert body["authorization_servers"] == [ISSUER]
-        assert set(body["scopes_supported"]) == {"orrery.read", "orrery.spawn"}
+        assert set(body["scopes_supported"]) == {"orrery.read", "orrery.spawn", "orrery.message"}
 
 
 @pytest.mark.parametrize("case", ["forged", "wrong_aud", "wrong_iss", "expired", "too_long", "future_iat", "unknown_kid", "malformed", "basic"])

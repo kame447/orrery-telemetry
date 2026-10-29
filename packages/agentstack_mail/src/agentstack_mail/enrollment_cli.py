@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
-from .enrollment import MAX_REQUEST_BYTES, PROTOCOL_VERSION, credential_fingerprint
+from .enrollment_protocol import MAX_REQUEST_BYTES, PROTOCOL_VERSION, credential_fingerprint
 
 
 class EnrollmentCliError(RuntimeError):

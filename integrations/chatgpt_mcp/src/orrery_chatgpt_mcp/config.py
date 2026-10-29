@@ -19,7 +19,8 @@ APPROVAL_LOCAL = "local"
 APPROVAL_CHAT = "chat"
 SCOPE_READ = "orrery.read"
 SCOPE_SPAWN = "orrery.spawn"
-KNOWN_SCOPES = (SCOPE_READ, SCOPE_SPAWN)
+SCOPE_MESSAGE = "orrery.message"
+KNOWN_SCOPES = (SCOPE_READ, SCOPE_SPAWN, SCOPE_MESSAGE)
 ALLOWED_ALGORITHMS = frozenset({"RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "EdDSA"})
 SPAWN_PROVIDERS = ("claude", "codex")
 _ALIAS_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}")
@@ -70,6 +71,13 @@ class GatewayConfig:
     leeway: int = 60
     rate_per_minute: int = 60
     unauth_rate_per_minute: int = 30
+    # Messages to existing agents: off unless the operator names a dedicated
+    # orrery-daemon sender profile (its peer list is the recipient allowlist).
+    message_enabled: bool = False
+    message_profile: Path | None = None
+    message_approval: str = APPROVAL_CHAT
+    message_helper_root: Path | None = None
+    message_max_per_hour: int = 20
 
     @property
     def expected_audience(self) -> str:
@@ -138,6 +146,19 @@ class GatewayConfig:
             raise ConfigError("spawn is enabled but ORRERY_MCP_SPAWN_DIRS lists no directory")
         if self.spawn_enabled and self.state_dir is None:
             raise ConfigError("spawn needs a state directory for idempotency records")
+        if self.message_approval not in (APPROVAL_LOCAL, APPROVAL_CHAT):
+            raise ConfigError("ORRERY_MCP_MESSAGE_APPROVAL must be chat or local")
+        if not (1 <= self.message_max_per_hour <= 200):
+            raise ConfigError("ORRERY_MCP_MESSAGE_MAX_PER_HOUR must be 1..200")
+        if self.message_enabled:
+            if self.message_profile is None or not self.message_profile.is_absolute():
+                raise ConfigError("messages are enabled but ORRERY_MCP_MESSAGE_PROFILE is not an absolute path to the sender profile")
+            if self.message_helper_root is None or not self.message_helper_root.is_absolute():
+                raise ConfigError("messages need ORRERY_MCP_MESSAGE_HELPER_ROOT, the absolute ORRERY checkout that holds the daemon helper")
+            if self.state_dir is None:
+                raise ConfigError("messages need a state directory for idempotency records")
+        elif self.message_profile is not None:
+            raise ConfigError("ORRERY_MCP_MESSAGE_PROFILE is set but ORRERY_MCP_ENABLE_MESSAGE is not 1; refusing an ambiguous setup")
         return self
 
     @classmethod
@@ -166,10 +187,16 @@ class GatewayConfig:
         enabled = env.get("ORRERY_MCP_ENABLE_SPAWN", "").strip()
         if enabled not in ("", "0", "1"):
             raise ConfigError("ORRERY_MCP_ENABLE_SPAWN must be 0 or 1")
+        message_enabled = env.get("ORRERY_MCP_ENABLE_MESSAGE", "").strip()
+        if message_enabled not in ("", "0", "1"):
+            raise ConfigError("ORRERY_MCP_ENABLE_MESSAGE must be 0 or 1")
+        message_profile = env.get("ORRERY_MCP_MESSAGE_PROFILE", "").strip()
+        helper_root = env.get("ORRERY_MCP_MESSAGE_HELPER_ROOT", "").strip()
         try:
             port = int(env.get("ORRERY_MCP_PORT", "8790"))
             max_life = int(env.get("ORRERY_MCP_MAX_TOKEN_LIFETIME", str(24 * 3600)))
             rate = int(env.get("ORRERY_MCP_RATE_PER_MINUTE", "60"))
+            message_rate = int(env.get("ORRERY_MCP_MESSAGE_MAX_PER_HOUR", "20"))
         except ValueError as exc:
             raise ConfigError(f"numeric setting is not an integer: {exc}") from None
         common = dict(
@@ -182,6 +209,11 @@ class GatewayConfig:
             spawn_approval=env.get("ORRERY_MCP_SPAWN_APPROVAL", APPROVAL_LOCAL).strip(),
             state_dir=state_dir,
             rate_per_minute=rate,
+            message_enabled=message_enabled == "1",
+            message_profile=Path(message_profile) if message_profile else None,
+            message_approval=env.get("ORRERY_MCP_MESSAGE_APPROVAL", APPROVAL_CHAT).strip(),
+            message_helper_root=Path(helper_root) if helper_root else default_helper_root(),
+            message_max_per_hour=message_rate,
         )
         if mode != AUTH_OAUTH:
             for name in ("ORRERY_MCP_RESOURCE", "ORRERY_MCP_ISSUER", "ORRERY_MCP_JWKS_URL", "ORRERY_MCP_JWKS_FILE", "ORRERY_MCP_ALLOWED_SUBJECTS", "ORRERY_MCP_ALLOWED_ORIGINS"):
@@ -213,6 +245,13 @@ class GatewayConfig:
             max_token_lifetime=max_life,
             **common,
         ).validate()
+
+
+def default_helper_root() -> Path | None:
+    """The ORRERY checkout this package runs from, when it is one (a pinned
+    gateway-only release is not: it must name the checkout explicitly)."""
+    root = Path(__file__).resolve().parents[4]
+    return root if (root / "integrations/codex_app/src/agentstack_codex_app/daemon_runtime.py").is_file() else None
 
 
 def default_state_dir(home: Path) -> Path:

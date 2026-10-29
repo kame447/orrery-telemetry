@@ -24,6 +24,7 @@ Telemetry 自体の操作は、header の `HELP MAP`（NETWORK では `SETTINGS`
 - [Dashboard](dashboard.md) — DECK/NETWORK、履歴、RESUME/EXIT、REPLAY と詳細の参照。
 - [指定スマホで状況を見る](mobile.md) — 既定オフの閲覧画面、本人認証と端末制限、手動有効化と停止。
 - [ChatGPT から使う MCP 接続](chatgpt-mcp.md) — loopback 限定のゲートウェイ、Secure MCP Tunnel、ペアリングと Mac 上の承認、ユーザーが行う設定。
+- [ChatGPT から既存エージェントへ追加指示を送る](chatgpt-mcp-message.md) — 専用の Mail 送信者、宛先の許可リスト、プレビューと重複防止、配送状態の照合（既定無効）。
 - [委任と child agent](delegation.md) — ORRERY /delegate、組み込み子との違いと渡す道具の選択。
 - [Launcher と identity](launchers.md) — agent-start、名前、resume、/delegate と /log、通知の流れ。
 - [Obsidian と一緒に使う](obsidian.md) — ログ・論文ノート・タスクを vault と Daily Note に置く。

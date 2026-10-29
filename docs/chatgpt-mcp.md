@@ -50,7 +50,7 @@ ChatGPT ──(OpenAI)── Secure MCP Tunnel ◀── tunnel-client（Mac、�
 | `orrery_spawn_preview` | 起動（dry run） | dashboard の `dry_run` で検証し、`preview_id` と承認コードを返す。何も起動しません |
 | `orrery_spawn_commit` | 書き込み | 承認済みプレビューを起動する |
 
-既存エージェントへの指示・メッセージ送信は**この版にはありません**。ORRERY には、エージェントの owner token を借りずに Mail を送る運用者向け API がないためです。tmux への打鍵も使いません。`orrery_status` はこの理由を `message_existing_agent: false` として返します。作業中のエージェントを止める操作（EXIT / kill）、任意コマンド実行、dashboard API の透過プロキシもありません。
+既存エージェントへの追加指示は、運用者が専用の送信者と宛先を設定したときだけ使える別のツールです（既定無効）。エージェントの owner token は借りず、tmux への打鍵も使いません。[ChatGPT から既存エージェントへ追加指示を送る](chatgpt-mcp-message.md)を参照してください。無効のときは `orrery_status` が `message_existing_agent: false` を返します。作業中のエージェントを止める操作（EXIT / kill）、任意コマンド実行、dashboard API の透過プロキシもありません。
 
 ChatGPT のプランによって書き込み系 MCP ツールの扱いが違います（2026-10 時点の OpenAI ヘルプでは Pro は読み取り/fetch、完全な書き込みは Business / Enterprise / Edu のベータ）。ゲートウェイはプランを推測しません。起動を使うかどうかは `ORRERY_MCP_ENABLE_SPAWN` で運用者が決め、ChatGPT 側で使えない場合は読み取りだけで使ってください。
 
