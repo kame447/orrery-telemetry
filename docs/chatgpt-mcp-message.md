@@ -19,7 +19,7 @@ ChatGPT ─ Secure MCP Tunnel ─ orrery-chatgpt-mcp（127.0.0.1）
 - **送信者は専用の Mail identity です。** 運用者が `agentstack-daemon create --operator` で作る `program=orrery-daemon` の登録を使います（[決定的 daemon](daemon-agents.md)）。既存エージェントの owner token を借りること、送信者名を偽ること、tmux への打鍵、Mail DB の直接操作は一切しません。
 - **宛先の許可リストは daemon のプロファイル（`orrery-daemon-binding-v2`）の `peers` です。** 名前と数値 Mail ID の組を 1〜16 件、運用者が書きます。ChatGPT から許可リストを変える手段はありません。
 - **確認すること。** 送信の直前ごとに、Mail の管理ソケットと HTTP の両方で Mail インスタンスの UUID、送信者自身の行・credential の指紋と世代・`program`、宛先の数値 ID・プロジェクト・退役状態を照合します（`DaemonRuntime`）。ゲートウェイはさらに、プレビュー時に見た宛先の ID・program・プロジェクト ID・登録時刻と、送信者・インスタンスが変わっていないことを確かめます。名前の再利用、同名の別プロジェクト、退役、存在しない宛先は送らずに拒否します。
-- **照合の限界。** これらは送信要求の直前の照合で、Mail の配送トランザクションと一体ではありません。最後の照合と送信のあいだに、宛先が自分の owner token で再登録して program などを変えることは防げません（数値 ID が変わる置き換えは、送信直前の数値 ID の照合で拒否します）。
+- **照合の限界。** これらは送信要求の直前の照合で、Mail の配送トランザクションと一体ではありません。見つけられるのは、最後の照合の時点で既に起きている変更だけです（数値 ID・プロジェクト・退役・program・登録時刻のすべてについて）。最後の照合と送信のあいだに起きた変更は、宛先が自分の owner token で program を変える再登録も含めて防げません。送信と一体の照合が必要なら、Mail サーバー側の配送処理での照合が別途必要です。
 - **本文の検査。** 制御文字（C0/C1）、双方向上書き、ゼロ幅・不可視の書式文字、タグ文字、私用領域、行/段落区切り文字を含む本文や件名はプレビューで拒否します。Mail は Markdown の画像参照 `![..](..)` を書き換え（参照先のファイルも読みます）、重要度も送信者の経路では指定できないため、画像参照は拒否し、重要度は常に `normal` です。ChatGPT に見せた件名・本文と受信箱に届く件名・本文は一致します（E2E で確認）。
 
 ## ツール
@@ -61,7 +61,8 @@ Sent by the operator from ChatGPT through orrery-chatgpt-mcp as <送信者名>. 
 - 記録 `message-ledger.json`（0600、本文なし）は再起動後も有効で、同じ state ディレクトリを使う別プロセスともファイルロックで直列化します。送信者プロファイルのロックは排他なので、同時に 2 つ送ることもありません。
 - プレビューはメモリだけに置きます。ゲートウェイが再起動したら、プレビューからやり直してください（安全側の失敗です）。
 - 送信要求を出した後に応答が失われた場合、Mail の受領記録が想定と違う場合は **unknown** と記録し、成功とは言わず、自動で再送もしません。Mail が保存前に拒否したと明示した場合（ファイル予約の衝突）だけ rejected です。
-- `orrery_message_status` は dashboard の Mail 表示（`/api/edge-messages`）で、送信者・宛先の名前に加えて、このメッセージのスレッドと本文全体（ランダムな参照番号を含む）が完全に一致する行を探し、見つかれば accepted に更新します。引用や別インスタンスの同名・同 ID の行は一致しません。見つからなければ unknown のままです。
+- `orrery_message_status` は dashboard の Mail 表示（`/api/edge-messages`）で、送信者・宛先の名前に加えて、このメッセージのスレッド・件名・本文全体（ランダムな参照番号を含む）が完全に一致する行を探します。引用は一致しません。ただし完全な複製は別の Mail ストア（復元や複製）にもありえるため、行がこの送信者プロファイルの Mail インスタンス UUID と送信者・宛先の数値 ID を示すときだけ accepted に更新します。現在の dashboard はこれらを返さないので、見つかっても `copy_seen_identity_unverified`（既読・ACK も未確認扱い）と表示し、unknown のままにします。
+- Mail が保存した本文が確認済みの本文と違うと受領記録が示した場合は `delivered_with_changes`（再送しないこと）を返します。
 - 送信後に記録の書き込みだけが失敗した場合は `outcome_unrecorded`（再送しないこと）を返します。2 分を過ぎても終わらない送信記録は unknown（`dispatch-unfinished`）として表示します。
 
 ## 状態の意味
@@ -103,7 +104,9 @@ Sent by the operator from ChatGPT through orrery-chatgpt-mcp as <送信者名>. 
 
 ### ログについて
 
-ゲートウェイの記録（ledger、監査、ログ）に本文は入りません。ただし ORRERY Mail 自身のツールログ（既定で有効）は、この機能に限らずすべての `send_message` の引数と結果を記録し、本文も含みます。本文を Mail のログにも残したくない場合は、Mail 側で `AGENTSTACK_MAIL_TOOLS_LOG_ENABLED=false` にしてください。Mail のログで本文を伏せる変更は別の課題です。
+ゲートウェイの記録（ledger、監査、ログ）に本文は入りません。ORRERY Mail 自身のツールログ（既定で有効）は、この機能に限らずすべての `send_message` の引数と結果を記録し、本文も含みます。
+
+**本文を Mail のログにも残さないことは、次の 2 つが揃ったときだけ成り立ちます。** (1) Mail がこの変更を含む版であること（以前の版は、ツールログを切っても Git コミット用のパネルを stderr に出し、そこに本文が入っていました。この PR で出力しないよう直しました）。(2) Mail 側で `AGENTSTACK_MAIL_TOOLS_LOG_ENABLED=false` にしていること。この組み合わせは隔離した Mail での E2E で確認しています。稼働中の Mail は、Mail を更新するまで以前の版のままです。
 
 ### launchd 常駐版との関係
 

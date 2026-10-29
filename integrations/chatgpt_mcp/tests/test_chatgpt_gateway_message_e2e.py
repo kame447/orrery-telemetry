@@ -39,7 +39,7 @@ def _write(path: Path, value: dict) -> Path:
 
 
 @pytest.fixture
-def mail(tmp_path):
+def mail(tmp_path, request):
     tmp_path.chmod(0o700)
     scratch = tempfile.TemporaryDirectory(prefix="mcpmsg-", dir="/tmp")  # short Unix socket path
     control = Path(scratch.name) / "m.sock"
@@ -63,6 +63,7 @@ def mail(tmp_path):
         "AGENTSTACK_MAIL_NOTIFICATIONS_ENABLED": "false",
         "AGENTSTACK_MAIL_LOG_LEVEL": "WARNING",
         "AGENTSTACK_MAIL_HTTP_REQUEST_LOG_ENABLED": "false",
+        **getattr(request, "param", {}),
     }
     log = open(tmp_path / "mail.log", "w")
     proc = subprocess.Popen([sys.executable, "-m", "agentstack_mail.cli"], env=env, cwd=tmp_path,
@@ -104,7 +105,7 @@ def mail(tmp_path):
             "pause_path": str(tmp_path / "paused"), "lock_path": str(tmp_path / "daemon.lock"),
         })
         yield {"client": client, "project": project, "profile": profile, "receipt": receipt, "worker": worker,
-               "proc": proc, "root": tmp_path, "instance": health["server_instance_id"]}
+               "proc": proc, "root": tmp_path, "log": tmp_path / "mail.log", "instance": health["server_instance_id"]}
     finally:
         if proc.poll() is None:
             os.killpg(proc.pid, signal.SIGTERM)
@@ -263,3 +264,17 @@ def test_received_message_matches_the_preview_exactly(mail, gateway):
     assert got["importance"] == "normal"
     refused = call(config, "orrery_message_preview", {"recipient": "ExampleWorker", "instruction": "![x](example.png)"})
     assert refused["isError"] is True
+
+
+@pytest.mark.parametrize("mail", [{"AGENTSTACK_MAIL_TOOLS_LOG_ENABLED": "false"}], indirect=True)
+def test_no_body_in_mail_log_when_tool_logging_is_off(mail, gateway):
+    """Audit R3: with Mail's tool log off, the instruction body reaches the inbox and no log."""
+    config = gateway()
+    marker = "BODY-MARKER-" + "q7w3e9r1"
+    preview = call(config, "orrery_message_preview", {"recipient": "ExampleWorker", "instruction": f"do {marker}", "subject": "plain"})["structuredContent"]
+    out = call(config, "orrery_message_commit", {"preview_id": preview["preview_id"], "idempotency_key": "e2e-key-0007",
+                                                 "content_sha256": preview["content_sha256"]})
+    assert out["isError"] is False, out
+    log_text = mail["log"].read_text(errors="replace")
+    assert marker not in log_text
+    assert marker in inbox(mail)[0]["body_md"]

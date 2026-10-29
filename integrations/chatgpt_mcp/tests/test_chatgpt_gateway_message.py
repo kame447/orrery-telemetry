@@ -329,6 +329,16 @@ def test_unknown_outcome_is_never_resent_and_reconciles_from_mail(env):
         {"id": 58, "sender": "ChatRelay", "recipient": "ExampleWorker", "thread_id": thread, "body": body + " edited"},
         {"id": 56, "sender": "ChatRelay", "recipient": "ExampleWorker", "thread_id": thread, "body": body, "read_ts": "t", "ack_ts": None},
     ]
+    # Exact copy, but the dashboard cannot say which Mail instance holds it: not promoted.
+    status = t.status(ME, {"idempotency_key": "key-00000001"})
+    assert status["message"]["state"] == "unknown"
+    assert status["observation"]["mail_record"] == "copy_seen_identity_unverified"
+    ident = {"mail_instance_id": INSTANCE, "sender_agent_id": 9, "recipient_agent_id": 7}
+    env["dash"].rows = [{**r, **ident} for r in env["dash"].rows[:3]] + [
+        {**env["dash"].rows[3], **ident, "mail_instance_id": "00000000-0000-4000-8000-000000000000"},  # restored clone
+        {**env["dash"].rows[3], **ident, "subject": "changed"},
+        {**env["dash"].rows[3], **ident, "subject": p["message"]["subject"]},
+    ]
     status = t.status(ME, {"idempotency_key": "key-00000001"})
     assert status["message"]["state"] == "accepted" and status["message"]["reconciled"] is True
     assert status["message"]["mail_message_id"] == 56
@@ -350,6 +360,10 @@ def test_status_reports_read_and_ack_by_message_id(env):
     env["dash"].rows = [{**row, "body": "other", "thread_id": "x"}]
     assert t.status(ME, {"idempotency_key": "key-00000001"})["observation"]["mail_record"] == "not_found"
     env["dash"].rows = [row]
+    out = t.status(ME, {"idempotency_key": "key-00000001"})
+    assert out["observation"]["mail_record"] == "copy_seen_identity_unverified"
+    assert out["observation"]["read_unverified"] is True
+    env["dash"].rows = [{**row, "mail_instance_id": INSTANCE, "sender_agent_id": 9, "recipient_agent_id": 7}]
     out = t.status(ME, {"idempotency_key": "key-00000001"})
     assert out["observation"]["mail_record"] == "found"
     assert (out["observation"]["read"], out["observation"]["acknowledged"]) == (True, True)
@@ -462,6 +476,8 @@ def test_f2_structured_mail_refusal_is_not_reported_as_accepted(env):
 
 @pytest.mark.parametrize("bad", [
     lambda s, kw: {"error": {"type": "SOMETHING_NEW"}},
+    lambda s, kw: {"error": {"type": []}},
+    lambda s, kw: {"error": {"type": {}}},
     lambda s, kw: {"deliveries": [], "count": 0},
     lambda s, kw: receipt(s, kw, id=None),
     lambda s, kw: receipt(s, kw, to=["Someone"]),
@@ -482,12 +498,17 @@ def test_f2_unrecognised_or_mismatched_receipt_is_unknown(env, bad):
     assert len(env["sender"].sent) == 1
 
 
-def test_f2_receipt_records_whether_the_stored_body_matches(env):
+def test_f2_a_changed_stored_body_is_not_ordinary_success(env):
     t = env["tools"]()
     p = preview(t)
     env["sender"].receipt = lambda kw: receipt(env["sender"], kw, body_md="rewritten")
-    out = commit(t, p)
-    assert out["outcome"] == "accepted" and out["message"]["body_verified"] is False
+    with pytest.raises(ToolError) as exc:
+        commit(t, p)
+    assert exc.value.code == "delivered_with_changes"
+    env["sender"].receipt = None
+    again = commit(t, p)
+    assert again["replayed"] is True and again["message"]["body_verified"] is False
+    assert len(env["sender"].sent) == 1
 
 
 def test_f3_image_references_and_importance_are_refused(env):
@@ -592,7 +613,8 @@ def _load(root):
     return out.stdout.strip() or out.stderr
 
 
-@pytest.mark.parametrize("damage", ["none", "package_dir", "module_file", "symlink", "ancestor", "src_dir"])
+@pytest.mark.parametrize("damage", ["none", "package_dir", "module_file", "symlink", "ancestor", "src_dir",
+                                    "integrations", "codex_app", "packages", "agentstack_mail"])
 def test_f1_unsafe_helper_code_is_refused_before_it_runs(tmp_path, damage):
     base = tmp_path / "base"
     base.mkdir(mode=0o755)
@@ -608,6 +630,10 @@ def test_f1_unsafe_helper_code_is_refused_before_it_runs(tmp_path, damage):
         base.chmod(0o777)
     elif damage == "src_dir":
         pkg.parent.chmod(0o775)
+    elif damage in ("integrations", "codex_app"):
+        (root / "integrations" / ("codex_app" if damage == "codex_app" else "")).chmod(0o777)
+    elif damage in ("packages", "agentstack_mail"):
+        (root / "packages" / ("agentstack_mail" if damage == "agentstack_mail" else "")).chmod(0o777)
     result = _load(root)
     if damage == "none":
         assert result == "loaded" and marker.exists()

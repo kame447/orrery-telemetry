@@ -139,6 +139,10 @@ def load_daemon_module(root: Path):
             _private_dir(root)
             _verify_ancestors(root)
             for path in sources:
+                # Every directory between the checkout and the tree: a writable one
+                # would let someone swap the verified tree for another after the walk.
+                for middle in reversed(path.relative_to(root).parents[:-1]):
+                    _private_dir(root / middle)
                 _verify_tree(path)
         except OSError:
             raise SenderError("helper-root-missing", sent=False) from None
@@ -561,6 +565,11 @@ class MessageTools:
         if state == "unknown":
             self._finish_quietly(ledger_key, record, "unknown", **fields)
             raise self._unknown(env)
+        if fields.get("body_verified") is False:
+            self._finish_quietly(ledger_key, record, "accepted", **fields)
+            raise ToolError("delivered_with_changes",
+                            "Mail stored the message, but with a body that differs from the confirmed preview; do not commit again. Check the recipient's copy.",
+                            data={"recipient": env["recipient"], "mail_message_id": fields.get("message_id")})
         try:
             done = self._finish(ledger_key, record, "accepted", **fields)
         except Exception:
@@ -591,7 +600,7 @@ class MessageTools:
         """Accept only Mail's own receipt for exactly this message; never infer success from a missing exception."""
         if isinstance(result, dict) and set(result) == {"error"} and isinstance(result["error"], dict):
             kind = result["error"].get("type")
-            if kind in PRE_DELIVERY_REFUSALS:
+            if isinstance(kind, str) and kind in PRE_DELIVERY_REFUSALS:
                 return "rejected", {"reason": f"mail-{kind.lower().replace('_', '-')}"}
             return "unknown", {"reason": "mail-error-unrecognised"}
         deliveries = result.get("deliveries") if isinstance(result, dict) else None
@@ -648,30 +657,43 @@ class MessageTools:
         message_id, thread, body_sha = record.get("message_id"), record.get("thread_id"), record.get("body_sha256")
         if not isinstance(thread, str) or not isinstance(body_sha, str):
             return record, {"mail_record": "unverifiable", "reason": "this record predates content evidence"}
-        match = None
+        expected = {"mail_instance_id": record.get("mail_instance"), "sender_agent_id": record.get("sender_id"),
+                    "recipient_agent_id": record.get("recipient_id")}
+        match = unverified = None
         for row in rows:
-            # Names alone are not identity: require this message's own thread and the exact
-            # body, which carries a random reference, so a quote or another instance cannot match.
+            # Names alone are not identity: require this message's own thread, subject and
+            # exact body, which carries a random reference, so a quotation cannot match.
             if (
                 row.get("sender") != sender
                 or row.get("recipient") != recipient
                 or row.get("thread_id") != thread
                 or not isinstance(row.get("body"), str)
                 or _digest(row["body"]) != body_sha
+                or ("subject" in row and _digest(str(row["subject"])) != record.get("subject_sha256"))
                 or type(row.get("id")) is not int
                 or (type(message_id) is int and row["id"] != message_id)
             ):
                 continue
-            match = row
-            break
+            # An exact copy can also live in another Mail store (a restore or clone). Only a row
+            # naming this sender profile's Mail instance and numeric identities proves which one.
+            if any(key in row and row[key] != value for key, value in expected.items()):
+                continue
+            if all(key in row for key in expected):
+                match = row
+                break
+            unverified = unverified or row
+        if match is None and unverified is not None:
+            return record, {"mail_record": "copy_seen_identity_unverified",
+                            "reason": "the dashboard shows an exact copy but does not say which Mail instance and agent rows hold it",
+                            "read_unverified": bool(unverified.get("read_ts")), "acknowledged_unverified": bool(unverified.get("ack_ts"))}
         if match is None:
-            return record, {"mail_record": "not_found", "reason": "no exact copy among the latest messages between these agents in the dashboard's project"}
+            return record, {"mail_record": "not_found", "reason": "no exact copy of this message in this Mail instance among the latest messages the dashboard shows"}
         if record.get("state") in ("dispatching", "unknown"):
             try:
                 record = self._finish(ledger_key, record, "accepted", message_id=match["id"], reconciled=True, body_verified=True)
             except Exception:
                 log.warning("message reconciliation could not update the ledger ref=%s", record.get("ref"))
-        return record, {"mail_record": "found", "evidence": "exact body and thread in the dashboard Mail view",
+        return record, {"mail_record": "found", "evidence": "exact subject, body and thread with this Mail instance and agent IDs",
                         "read": bool(match.get("read_ts")), "acknowledged": bool(match.get("ack_ts"))}
 
     def _replay(self, ledger_key: str, record: dict) -> dict:

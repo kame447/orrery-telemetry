@@ -19,7 +19,7 @@ ChatGPT ─ Secure MCP Tunnel ─ orrery-chatgpt-mcp (127.0.0.1)
 - **The sender is a dedicated Mail identity.** It is the `program=orrery-daemon` registration the operator creates with `agentstack-daemon create --operator` ([deterministic daemons](daemon-agents.en.md)). The gateway never borrows an existing agent's owner token, never claims another sender name, never types into tmux and never touches the Mail database.
 - **The recipient allowlist is the `peers` list of the daemon profile (`orrery-daemon-binding-v2`)**: 1–16 name / numeric Mail ID pairs written by the operator. ChatGPT cannot change it.
 - **What is checked.** Right before every send, `DaemonRuntime` checks the Mail instance UUID over both the management socket and HTTP, the sender's own row, credential fingerprint and generation and `program`, and the recipient's numeric ID, project and retirement. The gateway also checks that the recipient's ID, program, project ID and registration time, and the sender and instance, are what the preview showed. A recycled name, the same name in another project, a retired agent or a missing agent is refused without sending.
-- **Limits of those checks.** They run just before the send request and are not part of Mail's delivery transaction. Between the last check and the send, the recipient can re-register with its own owner token and change, for example, its program; that is not prevented. A replacement that changes the numeric ID is refused by the numeric-ID check right before the send.
+- **Limits of those checks.** They run just before the send request and are not part of Mail's delivery transaction. They detect only changes already present at the last check, for every field (numeric ID, project, retirement, program, registration time). A change between the last check and the send, including the recipient re-registering with its own owner token under another program, is not prevented. Binding that is atomic with delivery would need a check inside Mail's own delivery transaction.
 - **Body checks.** A body or subject with control characters (C0/C1), bidirectional overrides, zero-width or other invisible format characters, tag characters, private-use characters or line/paragraph separators is refused at preview. Mail rewrites Markdown image references `![..](..)` (and reads the files they name), and the sender path cannot set importance, so image references are refused and importance is always `normal`. The subject and body ChatGPT shows are the subject and body that reach the inbox (checked end to end).
 
 ## Tools
@@ -61,7 +61,8 @@ To approve every message on the Mac, set `ORRERY_MCP_MESSAGE_APPROVAL=local`. Th
 - The record, `message-ledger.json` (0600, no bodies), survives restarts and is serialised by a file lock across processes sharing the state directory. The sender profile lock is exclusive, so two sends never run at once.
 - Previews live in memory only. After a gateway restart, preview again (a safe failure).
 - If the answer is lost after the send request went out, or Mail's receipt is not the expected one, the outcome is recorded as **unknown**: it is not reported as success and it is never resent automatically. Only an explicit Mail refusal before storing (a file reservation conflict) is `rejected`.
-- `orrery_message_status` looks in the dashboard's Mail view (`/api/edge-messages`) for a row with the sender and recipient names and exactly this message's thread and whole body (which contains a random reference), and records `accepted` if it finds one. A quotation, or a row with the same names and ID from another instance, does not match. Otherwise it stays unknown.
+- `orrery_message_status` looks in the dashboard's Mail view (`/api/edge-messages`) for a row with the sender and recipient names and exactly this message's thread, subject and whole body (which contains a random reference). A quotation does not match. An exact copy can, however, exist in another Mail store (a restore or clone), so the record becomes `accepted` only when the row also names this sender profile's Mail instance UUID and the sender's and recipient's numeric IDs. The current dashboard does not return those, so a copy it finds is shown as `copy_seen_identity_unverified` (read / ACK unverified as well) and the outcome stays unknown.
+- If Mail's receipt shows a stored body that differs from the confirmed one, the answer is `delivered_with_changes` (do not send again).
 - If only the local record write fails after a send, the answer is `outcome_unrecorded` (do not send again). A send record that has not finished after 2 minutes is shown as unknown (`dispatch-unfinished`).
 
 ## What the states mean
@@ -103,7 +104,9 @@ Before importing from `ORRERY_MCP_MESSAGE_HELPER_ROOT`, the gateway checks all o
 
 ### Logs
 
-The gateway's records (ledger, audit, log) contain no bodies. ORRERY Mail's own tool log (on by default), however, records the arguments and results of every `send_message`, not only these, including the body. To keep bodies out of Mail's log as well, set `AGENTSTACK_MAIL_TOOLS_LOG_ENABLED=false` for Mail. Redacting bodies in Mail's log is a separate change.
+The gateway's records (ledger, audit, log) contain no bodies. ORRERY Mail's own tool log (on by default) records the arguments and results of every `send_message`, not only these, including the body.
+
+**Bodies stay out of Mail's log only when both of these hold:** (1) Mail runs a version with this change (earlier versions printed the Git commit panel, which contains the body, to stderr even with tool logging off; this PR stops that output), and (2) Mail runs with `AGENTSTACK_MAIL_TOOLS_LOG_ENABLED=false`. That combination is checked end to end against an isolated Mail. The live Mail keeps the earlier version until Mail is updated.
 
 ### The launchd service
 
