@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ChatGPT-facing ORRERY MCP gateway. Loopback only; refuses to start without
-# OAuth resource-server settings. See docs/chatgpt-mcp.md.
+# a pairing secret (or explicit OAuth settings). See docs/chatgpt-mcp.md.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 py="${AGENTSTACK_PYTHON:-python3}"

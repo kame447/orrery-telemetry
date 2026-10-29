@@ -14,6 +14,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import socketserver
 import sys
 import threading
 import time
@@ -387,6 +388,13 @@ class GatewayServer(ThreadingHTTPServer):
     allow_reuse_address = True
     _slots = threading.BoundedSemaphore(MAX_CONCURRENT_REQUESTS)
 
+    def server_bind(self):
+        # HTTPServer.server_bind resolves socket.getfqdn(host): a reverse DNS lookup that can
+        # stall startup for tens of seconds (seen on CI and possible at login before the
+        # network is up). The name is never used, so skip the lookup.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
     def process_request(self, request, client_address):
         if not self._slots.acquire(blocking=False):
             self.shutdown_request(request)  # over capacity: drop instead of queueing threads
@@ -450,14 +458,22 @@ def serve(config: GatewayConfig) -> int:
     return 0
 
 
-USAGE = """usage: orrery-chatgpt-mcp [serve | pair [--rotate] | url | pending | approve CODE | deny CODE]
+USAGE = """usage: orrery-chatgpt-mcp [serve | pair [--rotate] [--quiet] | url | pending | approve CODE | deny CODE | service ...]
 
   serve          run the loopback MCP gateway (default)
   pair           create the pairing secret once; prints the loopback MCP URL for tunnel-client
+                 (--quiet does not print the URL; show it later with `url`)
   url            print the loopback MCP URL again (contains the secret: keep it private)
   pending        list launches from ChatGPT waiting for approval on this Mac
   approve CODE   approve one pending launch after reading it
   deny CODE      discard one pending launch
+
+  service install [--from SRC] [--source-commit SHA] [--python PATH]
+                 macOS: pin a read-only copy of the gateway and keep it running with launchd
+                 (127.0.0.1 only, launches disabled, restarts after login)
+  service status show whether the service is loaded and answering (never prints the secret)
+  service uninstall
+                 stop and remove the service; keeps the pairing and records
 """
 
 
@@ -478,11 +494,14 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if command == "serve" and len(argv) <= 1:
             return serve(GatewayConfig.from_env())
-        if command == "pair" and argv[1:] in ([], ["--rotate"]):
-            rotate = argv[1:] == ["--rotate"]
+        if command == "pair" and set(argv[1:]) <= {"--rotate", "--quiet"} and len(set(argv[1:])) == len(argv[1:]):
+            rotate = "--rotate" in argv
             secret = pairing.create_secret(state_dir, rotate=rotate)
             port = os.environ.get("ORRERY_MCP_PORT", "8790")
-            print(f"paired. Loopback MCP URL for tunnel-client (keep private):\nhttp://127.0.0.1:{port}/mcp/{secret}")
+            if "--quiet" in argv:
+                print("paired. Show the loopback MCP URL with `orrery-chatgpt-mcp url` when configuring tunnel-client.")
+            else:
+                print(f"paired. Loopback MCP URL for tunnel-client (keep private):\nhttp://127.0.0.1:{port}/mcp/{secret}")
             if rotate:
                 print("The old URL stopped working immediately, including in a running gateway. Update tunnel-client with the new URL.")
             return 0
@@ -513,11 +532,51 @@ def main(argv: list[str] | None = None) -> int:
         if command == "deny" and len(argv) == 2:
             print("discarded" if pairing.deny(state_dir, argv[1]) else "no such launch")
             return 0
+        if command == "service" and len(argv) >= 2:
+            return _service_cli(argv[1:], state_dir)
     except ConfigError as exc:
         print(f"orrery-chatgpt-mcp: refusing to start: {exc}" if command == "serve" else f"orrery-chatgpt-mcp: {exc}", file=sys.stderr)
         return 2
     print(USAGE, file=sys.stderr)
     return 64
+
+
+def _service_cli(argv: list[str], state_dir) -> int:
+    import os
+    from pathlib import Path
+
+    from . import pairing, service
+    from .config import ConfigError
+
+    action, rest = argv[0], argv[1:]
+    if action == "install":
+        opts = {"--from": str(Path(__file__).resolve().parents[1]), "--source-commit": None, "--python": service.default_python()}
+        if len(rest) % 2 or any(k not in opts for k in rest[::2]):
+            raise ConfigError("usage: service install [--from SRC] [--source-commit SHA] [--python PATH]")
+        opts.update(zip(rest[::2], rest[1::2]))
+        pairing.read_secret(state_dir)  # refuse before writing anything when unpaired
+        release, digest = service.install_release(Path(opts["--from"]), state_dir / "releases",
+                                                  source_commit=opts["--source-commit"])
+        plan = service.ServicePlan(python=opts["--python"], release_dir=release, digest=digest, state_dir=state_dir,
+                                   port=int(os.environ.get("ORRERY_MCP_PORT", "8790")),
+                                   dashboard_url=os.environ.get("ORRERY_MCP_DASHBOARD_URL", "http://127.0.0.1:8770").strip().rstrip("/"))
+        try:
+            status = service.install_service(plan)
+        except service.VerifyError as exc:
+            print(f"orrery-chatgpt-mcp: {plan.label} was loaded, but could not be verified: {exc}. "
+                  f"See {plan.log_path} and `service status`", file=sys.stderr)
+            return 1
+        reachable = bool(status.get("dashboard", {}).get("reachable"))
+        print(f"installed {plan.label}: release {release.name}, 127.0.0.1:{plan.port}, launches disabled")
+        print(f"orrery_status over loopback: answering, dashboard reachable: {str(reachable).lower()}")
+        return 0
+    if action == "status" and not rest:
+        print(json.dumps(service.service_status(), indent=2))
+        return 0
+    if action == "uninstall" and not rest:
+        print("removed" if service.uninstall_service() else "not installed")
+        return 0
+    raise ConfigError("usage: service install [...] | service status | service uninstall")
 
 
 def _safe(value: object) -> str:
