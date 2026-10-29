@@ -96,6 +96,24 @@ ChatGPT のプランによって書き込み系 MCP ツールの扱いが違い�
    ~/orrery-telemetry/bin/orrery-chatgpt-mcp deny K7P2QX9M      # 取り消す
    ```
 
+### 常駐させる（launchd、任意）
+
+ログインのたびに手で `serve` しなくて済むよう、ユーザーの LaunchAgent として常駐させられます。
+
+```sh
+~/orrery-telemetry/bin/orrery-chatgpt-mcp pair --quiet   # まだなら。秘密は表示しない
+~/orrery-telemetry/bin/orrery-chatgpt-mcp service install --source-commit "$(git -C ~/orrery-telemetry rev-parse HEAD)"
+~/orrery-telemetry/bin/orrery-chatgpt-mcp service status
+```
+
+- `service install` はゲートウェイのパッケージを `~/.agentstack/runtime/chatgpt-mcp/releases/<内容のハッシュ>/` に読み取り専用で複製し、そのコピーを動かします。チェックアウトのブランチを切り替えても常駐中のコードは変わりません。更新するときは目的のコミットで `service install` をやり直します。`--from <src>` で別のチェックアウト（例: `git worktree` で固定したコミット）の `integrations/chatgpt_mcp/src` を指定できます。
+- LaunchAgent（`~/Library/LaunchAgents/org.agentstack.chatgpt-mcp.plist`）に秘密は入りません。秘密は従来どおり 0600 の `pairing.json` から起動時に読みます。
+- 常駐版は **127.0.0.1 だけ・起動ツールなし（読み取り専用）** に固定します（`ORRERY_MCP_ENABLE_SPAWN=0`）。起動を使うときは常駐を止めて（`service uninstall`）、手順 2 の `serve` を設定付きで実行します。
+- ログイン後に自動で起動し、落ちたら 30 秒間隔で再起動します。ログは `~/.agentstack/runtime/chatgpt-mcp/gateway.log`（umask 077）。
+- インストールはペアリング前、loopback 以外の dashboard、Python 3.11 未満、ポート使用中、改変されたリリースを拒否し、最後に loopback から `orrery_status` を呼んで応答を確かめます。
+- `service uninstall` は常駐を止めて plist を消します。ペアリング・承認・台帳は残します。
+- tunnel-client、API key、ChatGPT 側の設定には触れません。
+
 ### Mac だけでの動作確認（トンネル前）
 
 ChatGPT につなぐ前に、Mac の中だけで MCP として答えるかを確かめます。外部には何も出ません。
