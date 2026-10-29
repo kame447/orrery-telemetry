@@ -9696,11 +9696,6 @@ class Handler(BaseHTTPRequestHandler):
                 status, payload = mobile_mail_payload(q.get("window", ["day"])[0])
             self._send(status, json.dumps(payload).encode(), "application/json; charset=utf-8")
         elif path == "/api/spawn-names":
-            # This read can launch the authenticated Antigravity model-list CLI.
-            if not _same_origin_request(self):
-                self._send(403, b'{"error":"cross_origin_spawn_names_request"}',
-                           "application/json; charset=utf-8")
-                return
             try:
                 self._send(200, json.dumps(spawn_names_payload()).encode(), "application/json; charset=utf-8")
             except ValueError as e:
