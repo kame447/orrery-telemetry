@@ -109,7 +109,7 @@ So that you do not have to start `serve` by hand after every login, the gateway 
 - `service install` copies the gateway package read-only into `~/.agentstack/runtime/chatgpt-mcp/releases/<content hash>/` and runs that copy. Switching branches in the checkout does not change the running code; to update, run `service install` again at the commit you want. `--from <src>` takes another checkout's `integrations/chatgpt_mcp/src` (for example a `git worktree` pinned to a commit).
 - The LaunchAgent (`~/Library/LaunchAgents/org.agentstack.chatgpt-mcp.plist`) holds no secret. The gateway reads it at start from the 0600 `pairing.json`, as before.
 - The service is fixed to **127.0.0.1 and no launch tools (read only)** (`ORRERY_MCP_ENABLE_SPAWN=0`). To use launches, stop the service (`service uninstall`) and run `serve` with settings as in step 2.
-- It starts after login and is restarted at most every 30 seconds if it exits. Log: `~/.agentstack/runtime/chatgpt-mcp/gateway.log` (umask 077).
+- It starts after login and is restarted at most every 30 seconds if it exits. Log: `~/.agentstack/runtime/chatgpt-mcp/gateway.log` (0600).
 - Installation refuses when not paired, a non-loopback dashboard, Python older than 3.11, a port in use, or a modified release, and ends by calling `orrery_status` over loopback to confirm it answers.
 - `service uninstall` stops the service and removes the plist. Pairing, approvals and the ledger stay.
 - It does not touch tunnel-client, API keys or ChatGPT settings.

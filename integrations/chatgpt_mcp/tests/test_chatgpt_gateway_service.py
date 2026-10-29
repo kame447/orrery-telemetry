@@ -182,6 +182,19 @@ def test_install_writes_plist_and_bootstraps(tmp_path, release, paired):
     assert secret.encode() not in target.read_bytes()
     assert fake.verbs() == ["print", "bootstrap"]
     assert fake.calls[-1] == ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(target)]
+    assert stat.S_IMODE(plan.log_path.stat().st_mode) == 0o600
+
+
+def test_install_tightens_an_existing_world_readable_log(tmp_path, release, paired):
+    from orrery_chatgpt_mcp import service
+
+    state, _ = paired
+    plan = plan_for(release, state)
+    plan.log_path.write_text("old line\n")
+    os.chmod(plan.log_path, 0o644)
+    service.install_service(plan, runner=FakeLaunchctl(), launch_agents=tmp_path / "LA", verify=False)
+    assert stat.S_IMODE(plan.log_path.stat().st_mode) == 0o600
+    assert plan.log_path.read_text() == "old line\n"
 
 
 def test_reinstall_boots_out_the_old_service_first(tmp_path, release, paired):

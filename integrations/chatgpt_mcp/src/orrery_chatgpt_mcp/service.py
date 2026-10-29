@@ -221,6 +221,9 @@ def install_service(plan: ServicePlan, *, runner: Runner = subprocess.run, launc
             time.sleep(0.2)
     if _port_in_use(plan.port):
         raise ConfigError(f"127.0.0.1:{plan.port} is already in use by another program")
+    # launchd opens StandardErrorPath before applying Umask; create the log 0600 first.
+    os.close(os.open(plan.log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600))
+    os.chmod(plan.log_path, 0o600)
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f".{target.name}.tmp")
     tmp.write_bytes(render_plist(plan))
