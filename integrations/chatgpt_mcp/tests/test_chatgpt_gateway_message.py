@@ -327,7 +327,8 @@ def test_unknown_outcome_is_never_resent_and_reconciles_from_mail(env):
         # A later message that quotes the reference is not this message.
         {"id": 57, "sender": "ChatRelay", "recipient": "ExampleWorker", "thread_id": "other", "body": "quoted:\n" + body},
         {"id": 58, "sender": "ChatRelay", "recipient": "ExampleWorker", "thread_id": thread, "body": body + " edited"},
-        {"id": 56, "sender": "ChatRelay", "recipient": "ExampleWorker", "thread_id": thread, "body": body, "read_ts": "t", "ack_ts": None},
+        {"id": 56, "sender": "ChatRelay", "recipient": "ExampleWorker", "thread_id": thread, "body": body, "read_ts": "t", "ack_ts": None,
+         "subject": p["message"]["subject"]},
     ]
     # Exact copy, but the dashboard cannot say which Mail instance holds it: not promoted.
     status = t.status(ME, {"idempotency_key": "key-00000001"})
@@ -355,7 +356,7 @@ def test_status_reports_read_and_ack_by_message_id(env):
     commit(t, p)
     sent = env["sender"].sent[0]
     row = {"id": 101, "sender": "ChatRelay", "recipient": "ExampleWorker", "thread_id": sent["thread_id"], "body": sent["body_md"],
-           "read_ts": "t", "ack_ts": "t2"}
+           "subject": sent["subject"], "read_ts": "t", "ack_ts": "t2"}
     # Same names and message ID but other content (another Mail instance behind the dashboard): not trusted.
     env["dash"].rows = [{**row, "body": "other", "thread_id": "x"}]
     assert t.status(ME, {"idempotency_key": "key-00000001"})["observation"]["mail_record"] == "not_found"
@@ -363,7 +364,11 @@ def test_status_reports_read_and_ack_by_message_id(env):
     out = t.status(ME, {"idempotency_key": "key-00000001"})
     assert out["observation"]["mail_record"] == "copy_seen_identity_unverified"
     assert out["observation"]["read_unverified"] is True
-    env["dash"].rows = [{**row, "mail_instance_id": INSTANCE, "sender_agent_id": 9, "recipient_agent_id": 7}]
+    ident = {"mail_instance_id": INSTANCE, "sender_agent_id": 9, "recipient_agent_id": 7}
+    # Without subject evidence there is no exact match, even with the right identities.
+    env["dash"].rows = [{k: v for k, v in {**row, **ident}.items() if k != "subject"}]
+    assert t.status(ME, {"idempotency_key": "key-00000001"})["observation"]["mail_record"] == "not_found"
+    env["dash"].rows = [{**row, **ident}]
     out = t.status(ME, {"idempotency_key": "key-00000001"})
     assert out["observation"]["mail_record"] == "found"
     assert (out["observation"]["read"], out["observation"]["acknowledged"]) == (True, True)
@@ -508,6 +513,7 @@ def test_f2_a_changed_stored_body_is_not_ordinary_success(env):
     env["sender"].receipt = None
     again = commit(t, p)
     assert again["replayed"] is True and again["message"]["body_verified"] is False
+    assert again["message"]["reason"] == "body-changed-by-mail"
     assert len(env["sender"].sent) == 1
 
 

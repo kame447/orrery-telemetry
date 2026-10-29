@@ -566,7 +566,7 @@ class MessageTools:
             self._finish_quietly(ledger_key, record, "unknown", **fields)
             raise self._unknown(env)
         if fields.get("body_verified") is False:
-            self._finish_quietly(ledger_key, record, "accepted", **fields)
+            self._finish_quietly(ledger_key, record, "accepted", reason="body-changed-by-mail", **fields)
             raise ToolError("delivered_with_changes",
                             "Mail stored the message, but with a body that differs from the confirmed preview; do not commit again. Check the recipient's copy.",
                             data={"recipient": env["recipient"], "mail_message_id": fields.get("message_id")})
@@ -669,7 +669,9 @@ class MessageTools:
                 or row.get("thread_id") != thread
                 or not isinstance(row.get("body"), str)
                 or _digest(row["body"]) != body_sha
-                or ("subject" in row and _digest(str(row["subject"])) != record.get("subject_sha256"))
+                or not isinstance(row.get("subject"), str)
+                or not isinstance(record.get("subject_sha256"), str)
+                or _digest(row["subject"]) != record["subject_sha256"]
                 or type(row.get("id")) is not int
                 or (type(message_id) is int and row["id"] != message_id)
             ):
