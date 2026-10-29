@@ -328,10 +328,13 @@ def probe_status(port: int, secret: str, pid: int, runner: Runner = subprocess.r
     reaches the message.
     """
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    stage = "connect"
     try:
         conn.connect()
+        stage = "peer check"
         if not _accepted_by(conn.sock, port, pid, runner):
             raise VerifyError("the listener is not the service process")
+        stage = "orrery_status"
         body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                            "params": {"name": "orrery_status", "arguments": {}}})
         conn.request("POST", f"/mcp/{secret}", body=body,
@@ -347,7 +350,7 @@ def probe_status(port: int, secret: str, pid: int, runner: Runner = subprocess.r
     except VerifyError:
         raise
     except Exception as exc:  # noqa: BLE001 - anything else becomes a fixed label
-        raise VerifyError(f"probe failed ({type(exc).__name__})") from None
+        raise VerifyError(f"probe failed during {stage} ({type(exc).__name__})") from None
     finally:
         conn.close()
     if not ok:

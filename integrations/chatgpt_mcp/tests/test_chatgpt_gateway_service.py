@@ -118,6 +118,18 @@ def start_like_launchd(plan, home, extra_env=None, python=None):
     return proc
 
 
+def answering(plan, secret, proc, dashboard=None):
+    """wait_until_answering, with the process state and its (secret-free) log on failure."""
+    from orrery_chatgpt_mcp import service
+
+    try:
+        return service.wait_until_answering(plan, secret, FakeLaunchctl(loaded=True, pid=proc.pid), deadline=20)
+    except service.VerifyError as exc:
+        log = plan.log_path.read_text(errors="replace").replace(secret, "<secret>")[-4000:]
+        seen = [r[:2] for r in dashboard.requests] if dashboard else None
+        pytest.fail(f"{exc}; returncode={proc.poll()}; dashboard requests={seen}; log:\n{log}")
+
+
 def stop(proc):
     proc.terminate()
     proc.wait(10)
@@ -253,7 +265,7 @@ def test_l01_plist_startup_ignores_hostile_python_environment(tmp_path, release,
     plan = plan_for(release, state, dashboard_url=dashboard.url)
     proc = start_like_launchd(plan, tmp_path, hostile)
     try:
-        status = service.wait_until_answering(plan, secret, FakeLaunchctl(loaded=True, pid=proc.pid), deadline=20)
+        status = answering(plan, secret, proc, dashboard)
         assert status["dashboard"]["reachable"] is True
         assert status["capabilities"]["spawn_enabled_on_server"] is False
         assert "orrery_spawn_commit" not in _list_tools(plan.port, secret)
@@ -280,7 +292,7 @@ def test_l01_interpreter_pth_and_sitecustomize_are_not_loaded(tmp_path, release,
     plan = plan_for(release, state, dashboard_url=dashboard.url, python=str(venv / "bin" / "python"))
     proc = start_like_launchd(plan, tmp_path)
     try:
-        service.wait_until_answering(plan, secret, FakeLaunchctl(loaded=True, pid=proc.pid), deadline=20)
+        answering(plan, secret, proc, dashboard)
     finally:
         stop(proc)
     assert not marker.exists()
