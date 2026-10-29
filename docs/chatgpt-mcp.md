@@ -114,7 +114,7 @@ ChatGPT のプランによって書き込み系 MCP ツールの扱いが違い�
 - Python は指定したパス（既定は `AGENTSTACK_PYTHON`、例: Homebrew の `/opt/homebrew/opt/python@3.13/libexec/bin/python3`）をそのまま使います。標準ライブラリだけで動くので Homebrew のパッチ更新には追従します。そのパスが無くなったら（マイナー版の削除など）起動できなくなるので、`--python` を指定して入れ直してください。
 - インストールは、ペアリング前、loopback 以外の dashboard、Python 3.11 未満、ポート使用中、改変・不審なリリース、このコマンドが書いたものではない既存 plist、別の場所から読み込まれた同名ジョブを拒否します。最後に loopback から `orrery_status` を呼んで応答と設定（pairing・起動なし）を確かめます。秘密を含む要求は、`lsof` でその接続を受けたのが launchd のジョブのプロセスだと確かめてから送ります（ポートを横取りした別のプログラムには送りません）。
 - `service status` は秘密を表示しません。ジョブが動いていなければ問い合わせません。
-- `service uninstall` は plist を確かめてから常駐を止め、launchd から消えたのを確認してから plist を消します。止められなければ失敗として報告し、plist は残します。ペアリング・承認・台帳は残します。
+- `service uninstall` は、plist と「launchd がそのジョブをこの plist から読み込んだこと」を確かめてから常駐を止め、launchd が「存在しない」と答えたのを確認してから plist を消します。止められないときや launchd の状態を確認できないときは失敗として報告し、plist は残します。ペアリング・承認・台帳は残します。
 - tunnel-client、API key、ChatGPT 側の設定には触れません。
 
 ### Mac だけでの動作確認（トンネル前）

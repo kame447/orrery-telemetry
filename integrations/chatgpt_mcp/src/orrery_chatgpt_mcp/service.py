@@ -240,7 +240,9 @@ def _load_own_plist(target: Path, label: str) -> dict | None:
             spec = plistlib.load(fh)
     except (OSError, ValueError, plistlib.InvalidFileException):
         raise ConfigError(f"{target} is not a plist this command wrote; left in place") from None
-    args = spec.get("ProgramArguments") if isinstance(spec, dict) else None
+    if not isinstance(spec, dict):
+        raise ConfigError(f"{target} is not a plist this command wrote; left in place")
+    args = spec.get("ProgramArguments")
     legacy = isinstance(args, list) and args[1:] == ["-s", "-m", PACKAGE, "serve"]
     current = isinstance(args, list) and len(args) == 8 and args[1:5] == [*PYTHON_FLAGS, "-c"] and args[5] == BOOTSTRAP
     if spec.get("Label") != label or not (legacy or current):
@@ -263,20 +265,44 @@ def _port_in_use(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+LAUNCHCTL_NO_SUCH_SERVICE = 113
+
+
+def job_info(label: str = LABEL, runner: Runner = subprocess.run) -> dict | None:
+    """What launchd reports for the job: None only when launchd says it does not exist.
+
+    Any other failure to inspect launchd raises ConfigError, so that an error is
+    never mistaken for "not loaded".
+    """
+    done = runner(["launchctl", "print", f"{_domain()}/{label}"], capture_output=True, text=True)
+    if done.returncode == LAUNCHCTL_NO_SUCH_SERVICE and "Could not find service" in (done.stderr or ""):
+        return None
+    if done.returncode != 0:
+        raise ConfigError(f"launchctl print failed ({done.returncode}); cannot tell whether {label} is loaded")
+    path = re.search(r"^\tpath = (.+)$", done.stdout or "", re.M)
+    pid = re.search(r"^\tpid = (\d+)$", done.stdout or "", re.M)
+    return {"path": path.group(1) if path else None, "pid": int(pid.group(1)) if pid else None}
+
+
 def is_loaded(label: str = LABEL, runner: Runner = subprocess.run) -> bool:
-    return runner(["launchctl", "print", f"{_domain()}/{label}"], capture_output=True, text=True).returncode == 0
+    return job_info(label, runner) is not None
 
 
 def job_pid(label: str = LABEL, runner: Runner = subprocess.run) -> int | None:
-    done = runner(["launchctl", "print", f"{_domain()}/{label}"], capture_output=True, text=True)
-    m = re.search(r"^\s*pid = (\d+)\s*$", done.stdout or "", re.M) if done.returncode == 0 else None
-    return int(m.group(1)) if m else None
+    info = job_info(label, runner)
+    return info["pid"] if info else None
+
+
+def _require_loaded_from(info: dict, target: Path, label: str) -> None:
+    """Refuse to stop a job that launchd did not load from our plist."""
+    if info.get("path") != str(target):
+        raise ConfigError(f"{label} is loaded from {info.get('path') or 'an unknown place'}, not {target}; not touching it")
 
 
 def _bootout(label: str, runner: Runner) -> None:
     done = runner(["launchctl", "bootout", f"{_domain()}/{label}"], capture_output=True, text=True)
     for _ in range(BOOTOUT_POLLS):
-        if not is_loaded(label, runner):
+        if job_info(label, runner) is None:  # inspection errors propagate
             return
         time.sleep(0.1)
     raise ConfigError(f"launchctl bootout {label} failed ({done.returncode}); the service is still loaded")
@@ -347,9 +373,10 @@ def install_service(plan: ServicePlan, *, runner: Runner = subprocess.run, launc
                     verify: bool = True) -> dict:
     """Write the LaunchAgent and (re)load it. Refuses instead of repairing a bad setup.
 
-    Raises ConfigError before launchd is changed (or when unloading the old
-    job fails), and VerifyError when the new job was loaded but could not be
-    shown to answer as the expected gateway.
+    Raises ConfigError when it refuses or a step fails (the message says
+    whether the previous job had already been stopped), and VerifyError when
+    the new job was loaded but could not be shown to answer as the expected
+    gateway.
     """
     secret = pairing.read_secret(plan.state_dir)  # no pairing yet → refuse
     GatewayConfig(pairing_secret=secret, port=plan.port, dashboard_url=plan.dashboard_url,
@@ -359,16 +386,20 @@ def install_service(plan: ServicePlan, *, runner: Runner = subprocess.run, launc
         raise ConfigError(f"{plan.release_dir} is not an intact release")
     target = plist_path(plan.label, launch_agents)
     existing = _load_own_plist(target, plan.label)
-    if is_loaded(plan.label, runner):
+    info = job_info(plan.label, runner)
+    stopped = ""
+    if info is not None:
+        _require_loaded_from(info, target, plan.label)
         if existing is None:
-            raise ConfigError(f"{plan.label} is loaded from somewhere other than {target}; not replacing it")
+            raise ConfigError(f"{plan.label} is loaded but {target} is gone; run `service uninstall` first")
         _bootout(plan.label, runner)
+        stopped = " (the previous service was already stopped)"
         for _ in range(50):
             if not _port_in_use(plan.port):
                 break
             time.sleep(0.2)
     if _port_in_use(plan.port):
-        raise ConfigError(f"127.0.0.1:{plan.port} is already in use by another program")
+        raise ConfigError(f"127.0.0.1:{plan.port} is already in use by another program{stopped}")
     try:
         # launchd opens StandardErrorPath before applying Umask; create the log 0600 first.
         os.close(os.open(plan.log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600))
@@ -379,10 +410,10 @@ def install_service(plan: ServicePlan, *, runner: Runner = subprocess.run, launc
         os.chmod(tmp, 0o644)
         os.replace(tmp, target)
     except OSError as exc:
-        raise ConfigError(f"could not write {exc.filename or 'the service files'}: {exc.strerror}") from None
+        raise ConfigError(f"could not write {exc.filename or 'the service files'}: {exc.strerror}{stopped}") from None
     done = runner(["launchctl", "bootstrap", _domain(), str(target)], capture_output=True, text=True)
     if done.returncode != 0:
-        raise ConfigError(f"launchctl bootstrap failed ({done.returncode}): {done.stderr.strip()[:300]}")
+        raise ConfigError(f"launchctl bootstrap failed ({done.returncode}): {done.stderr.strip()[:300]}{stopped}")
     return wait_until_answering(plan, secret, runner) if verify else {}
 
 
@@ -394,8 +425,10 @@ def uninstall_service(label: str = LABEL, *, runner: Runner = subprocess.run, la
     """
     target = plist_path(label, launch_agents)
     existing = _load_own_plist(target, label)
-    loaded = is_loaded(label, runner)
+    info = job_info(label, runner)
+    loaded = info is not None
     if loaded:
+        _require_loaded_from(info, target, label)
         _bootout(label, runner)
     if existing is not None:
         target.unlink()
@@ -405,12 +438,17 @@ def uninstall_service(label: str = LABEL, *, runner: Runner = subprocess.run, la
 
 def service_status(label: str = LABEL, *, runner: Runner = subprocess.run, launch_agents: Path | None = None) -> dict:
     target = plist_path(label, launch_agents)
-    pid = job_pid(label, runner)
-    out: dict = {"label": label, "plist": os.path.lexists(target), "loaded": is_loaded(label, runner), "running": bool(pid)}
+    out: dict = {"label": label, "plist": os.path.lexists(target)}
     try:
+        info = job_info(label, runner)
         spec = _load_own_plist(target, label)
-    except ConfigError:
-        out["error"] = "foreign or unreadable plist"
+    except ConfigError as exc:
+        out["error"] = str(exc)
+        return out
+    pid = info["pid"] if info else None
+    out.update(loaded=info is not None, running=bool(pid))
+    if info is not None and info.get("path") != str(target):
+        out["error"] = f"the loaded job comes from {info.get('path')}"
         return out
     if spec is None:
         return out

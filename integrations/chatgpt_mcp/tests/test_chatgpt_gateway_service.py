@@ -26,26 +26,33 @@ needs_lsof = pytest.mark.skipif(sys.platform != "darwin" or not os.path.exists("
 class FakeLaunchctl:
     """Records launchctl calls and passes anything else (python, lsof) through.
 
-    ``pid`` is what `launchctl print` reports for the running job.
+    ``pid`` is what `launchctl print` reports for the running job and ``path``
+    the plist it was loaded from (set by bootstrap). ``print_errors`` makes
+    the next `print` calls fail the way an inspection error would.
     """
 
-    def __init__(self, *, loaded=False, pid=None, bootstrap_rc=0, bootout_rc=0):
+    def __init__(self, *, loaded=False, pid=None, path=None, bootstrap_rc=0, bootout_rc=0, print_errors=()):
         self.calls: list[list[str]] = []
         self.loaded = loaded
         self.pid = pid
+        self.path = path
         self.bootstrap_rc = bootstrap_rc
         self.bootout_rc = bootout_rc
+        self.print_errors = list(print_errors)
 
     def __call__(self, args, **kwargs):
         self.calls.append(list(args))
         if args[0] != "launchctl":
             return subprocess.run(args, **kwargs)
         verb = args[1]
-        rc, out = 0, ""
+        rc, out, err = 0, "", ""
         if verb == "print":
-            rc = 0 if self.loaded else 113
-            if self.loaded and self.pid:
-                out = f"gui/501/org.agentstack.chatgpt-mcp = {{\n\tstate = running\n\tpid = {self.pid}\n}}\n"
+            if self.print_errors and self.print_errors.pop(0):
+                return subprocess.CompletedProcess(args, 5, "", "Input/output error")
+            if not self.loaded:
+                return subprocess.CompletedProcess(args, 113, "", f'Bad request.\nCould not find service "{args[2]}"')
+            out = f"{args[2]} = {{\n\tpath = {self.path}\n\tstate = running\n"
+            out += f"\tpid = {self.pid}\n}}\n" if self.pid else "}\n"
         elif verb == "bootout":
             rc = self.bootout_rc
             if rc == 0:
@@ -53,10 +60,17 @@ class FakeLaunchctl:
         elif verb == "bootstrap":
             rc = self.bootstrap_rc
             self.loaded = rc == 0
-        return subprocess.CompletedProcess(args, rc, out, "boom" if rc else "")
+            if rc == 0:
+                self.path = args[3]
+            else:
+                err = "boom"
+        return subprocess.CompletedProcess(args, rc, out, err)
 
     def verbs(self):
         return [c[1] for c in self.calls if c[0] == "launchctl"]
+
+
+TARGET = "org.agentstack.chatgpt-mcp.plist"
 
 
 @pytest.fixture
@@ -434,7 +448,7 @@ def test_reinstall_boots_out_its_own_service_first(tmp_path, release, paired):
     state, _ = paired
     agents = tmp_path / "LA"
     service.install_service(plan_for(release, state), runner=FakeLaunchctl(), launch_agents=agents, verify=False)
-    fake = FakeLaunchctl(loaded=True)
+    fake = FakeLaunchctl(loaded=True, path=str(agents / TARGET))
     service.install_service(plan_for(release, state), runner=fake, launch_agents=agents, verify=False)
     assert fake.verbs() == ["print", "bootout", "print", "bootstrap"]
 
@@ -447,7 +461,7 @@ def test_reinstall_accepts_the_first_version_plist(tmp_path, release, paired):
     agents.mkdir()
     (agents / "org.agentstack.chatgpt-mcp.plist").write_bytes(plistlib.dumps({
         "Label": "org.agentstack.chatgpt-mcp", "ProgramArguments": ["/usr/bin/python3", "-s", "-m", "orrery_chatgpt_mcp", "serve"]}))
-    fake = FakeLaunchctl(loaded=True)
+    fake = FakeLaunchctl(loaded=True, path=str(agents / TARGET))
     service.install_service(plan_for(release, state), runner=fake, launch_agents=agents, verify=False)
     assert "bootstrap" in fake.verbs()
 
@@ -461,7 +475,7 @@ def test_l04_failed_bootout_is_reported_and_keeps_the_plist(tmp_path, release, p
     state, _ = paired
     agents = tmp_path / "LA"
     service.install_service(plan_for(release, state), runner=FakeLaunchctl(), launch_agents=agents, verify=False)
-    stuck = FakeLaunchctl(loaded=True, bootout_rc=5)
+    stuck = FakeLaunchctl(loaded=True, path=str(agents / TARGET), bootout_rc=5)
     with pytest.raises(ConfigError, match="still loaded"):
         service.uninstall_service(runner=stuck, launch_agents=agents)
     assert (agents / "org.agentstack.chatgpt-mcp.plist").exists()
@@ -499,7 +513,7 @@ def test_l06_foreign_plist_is_refused_before_anything_is_stopped(tmp_path, relea
         target.write_bytes(plistlib.dumps({"Label": label, "ProgramArguments": ["/bin/false"]}))
     before = target.read_bytes()
     for action in ("install", "uninstall"):
-        fake = FakeLaunchctl(loaded=True)
+        fake = FakeLaunchctl(loaded=True, path=str(target))
         with pytest.raises(ConfigError, match="not a plist this command wrote"):
             if action == "install":
                 service.install_service(plan_for(release, state), runner=fake, launch_agents=agents, verify=False)
@@ -509,15 +523,96 @@ def test_l06_foreign_plist_is_refused_before_anything_is_stopped(tmp_path, relea
         assert target.read_bytes() == before
 
 
-def test_install_refuses_a_job_loaded_from_elsewhere(tmp_path, release, paired):
+def test_install_refuses_a_job_loaded_but_without_its_plist(tmp_path, release, paired):
     from orrery_chatgpt_mcp import service
     from orrery_chatgpt_mcp.config import ConfigError
 
     state, _ = paired
-    fake = FakeLaunchctl(loaded=True)
-    with pytest.raises(ConfigError, match="loaded from somewhere other"):
+    fake = FakeLaunchctl(loaded=True, path=str(tmp_path / "LA" / TARGET))
+    with pytest.raises(ConfigError, match="is gone"):
         service.install_service(plan_for(release, state), runner=fake, launch_agents=tmp_path / "LA", verify=False)
     assert fake.verbs() == ["print"]
+
+
+@pytest.mark.parametrize("own_plist_on_disk", [True, False])
+def test_rr02_job_loaded_from_another_plist_is_never_stopped(tmp_path, release, paired, own_plist_on_disk):
+    """RR02: the default plist on disk is not proof of what launchd loaded."""
+    from orrery_chatgpt_mcp import service
+    from orrery_chatgpt_mcp.config import ConfigError
+
+    state, _ = paired
+    agents = tmp_path / "LA"
+    if own_plist_on_disk:
+        service.install_service(plan_for(release, state), runner=FakeLaunchctl(), launch_agents=agents, verify=False)
+    for action in ("install", "uninstall"):
+        fake = FakeLaunchctl(loaded=True, path="/private/tmp/unrelated-job.plist", pid=1)
+        with pytest.raises(ConfigError, match="unrelated-job.plist"):
+            if action == "install":
+                service.install_service(plan_for(release, state), runner=fake, launch_agents=agents, verify=False)
+            else:
+                service.uninstall_service(runner=fake, launch_agents=agents)
+        assert fake.verbs() == ["print"]
+        assert (agents / TARGET).exists() == own_plist_on_disk
+    out = service.service_status(runner=FakeLaunchctl(loaded=True, path="/private/tmp/unrelated-job.plist", pid=1),
+                                 launch_agents=agents)
+    assert "unrelated-job.plist" in out["error"] and "answering" not in out
+
+
+@pytest.mark.parametrize("failing", ["first", "confirmation"])
+@pytest.mark.parametrize("bootout_rc", [0, 5])
+def test_rr01_launchctl_inspection_error_is_never_taken_as_absence(tmp_path, release, paired, failing, bootout_rc, monkeypatch):
+    """RR01: only launchd's explicit "no such service" counts as not loaded."""
+    from orrery_chatgpt_mcp import service
+    from orrery_chatgpt_mcp.config import ConfigError
+
+    monkeypatch.setattr(service, "BOOTOUT_POLLS", 3)
+    state, _ = paired
+    agents = tmp_path / "LA"
+    service.install_service(plan_for(release, state), runner=FakeLaunchctl(), launch_agents=agents, verify=False)
+    errors = [True] if failing == "first" else [False, True, True, True]
+    fake = FakeLaunchctl(loaded=True, path=str(agents / TARGET), bootout_rc=bootout_rc, print_errors=errors)
+    with pytest.raises(ConfigError, match="cannot tell whether"):
+        service.uninstall_service(runner=fake, launch_agents=agents)
+    assert (agents / TARGET).exists()
+    if failing == "first":
+        assert fake.verbs() == ["print"]
+    fake = FakeLaunchctl(loaded=True, path=str(agents / TARGET), bootout_rc=bootout_rc, print_errors=list(errors))
+    with pytest.raises(ConfigError, match="cannot tell whether"):
+        service.install_service(plan_for(release, state), runner=fake, launch_agents=agents, verify=False)
+    assert "bootstrap" not in fake.verbs()
+    out = service.service_status(runner=FakeLaunchctl(print_errors=[True]), launch_agents=agents)
+    assert "cannot tell whether" in out["error"] and "loaded" not in out
+
+
+def test_install_names_an_interrupted_replacement(tmp_path, release, paired):
+    from orrery_chatgpt_mcp import service
+    from orrery_chatgpt_mcp.config import ConfigError
+
+    state, _ = paired
+    agents = tmp_path / "LA"
+    plan = plan_for(release, state)
+    service.install_service(plan, runner=FakeLaunchctl(), launch_agents=agents, verify=False)
+    fake = FakeLaunchctl(loaded=True, path=str(agents / TARGET), bootstrap_rc=5)
+    with pytest.raises(ConfigError, match="previous service was already stopped"):
+        service.install_service(plan, runner=fake, launch_agents=agents, verify=False)
+
+
+@pytest.mark.parametrize("body", [plistlib.dumps(["not", "a", "dict"]), plistlib.dumps("text")])
+def test_non_dict_plist_is_a_controlled_refusal(tmp_path, body):
+    from orrery_chatgpt_mcp import service
+    from orrery_chatgpt_mcp.config import ConfigError
+
+    agents = tmp_path / "LA"
+    agents.mkdir()
+    (agents / TARGET).write_bytes(body)
+    with pytest.raises(ConfigError, match="not a plist this command wrote"):
+        service.uninstall_service(runner=FakeLaunchctl(), launch_agents=agents)
+
+
+def test_bootstrap_has_no_tabs_so_launchctl_print_parsing_stays_unambiguous():
+    from orrery_chatgpt_mcp import service
+
+    assert "\t" not in service.BOOTSTRAP
 
 
 @pytest.mark.parametrize("problem", ["unpaired", "dashboard", "python", "port", "release", "bootstrap"])

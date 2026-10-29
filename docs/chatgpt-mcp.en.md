@@ -114,7 +114,7 @@ So that you do not have to start `serve` by hand after every login, the gateway 
 - It uses the Python path you give (default `AGENTSTACK_PYTHON`, for example Homebrew's `/opt/homebrew/opt/python@3.13/libexec/bin/python3`) as is. The gateway needs only the standard library, so it follows Homebrew patch updates. If that path disappears (a minor version removed), the service cannot start; install again with `--python`.
 - Installation refuses when not paired, a non-loopback dashboard, Python older than 3.11, a port in use, a modified or unsafe release, an existing plist this command did not write, or a job with the same label loaded from elsewhere. It ends by calling `orrery_status` over loopback and checking the answer and its settings (pairing, no launches). A request carrying the secret is sent only after `lsof` shows that the launchd job's process accepted that very connection, so a program that grabbed the port never receives it.
 - `service status` never prints the secret and does not probe when the job is not running.
-- `service uninstall` checks the plist before stopping anything, and removes it only after launchd confirms the job is gone. If the job cannot be stopped it reports a failure and keeps the plist. Pairing, approvals and the ledger stay.
+- `service uninstall` checks the plist, and that launchd loaded the job from that plist, before stopping anything. It removes the plist only after launchd answers that the job no longer exists. If the job cannot be stopped, or launchd cannot be inspected, it reports a failure and keeps the plist. Pairing, approvals and the ledger stay.
 - It does not touch tunnel-client, API keys or ChatGPT settings.
 
 ### Checking on the Mac alone (before the tunnel)
