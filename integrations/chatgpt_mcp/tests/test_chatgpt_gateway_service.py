@@ -1,42 +1,59 @@
-"""launchd service: pinned read-only release, secret-free plist, no spawn, loopback only."""
+"""launchd service: pinned read-only release, secret-free plist, no spawn, loopback only.
+
+Review findings L01–L06 (REVIEW-astra-launchd) each have a regression test here.
+"""
 from __future__ import annotations
 
+import json
 import os
 import plistlib
 import socket
 import stat
 import subprocess
 import sys
-import time
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
 from chatgpt_gateway_support import SRC, free_port
 
+needs_lsof = pytest.mark.skipif(sys.platform != "darwin" or not os.path.exists("/usr/sbin/lsof"),
+                                reason="launchd service and its lsof peer check are macOS only")
+
 
 class FakeLaunchctl:
-    """Records launchctl calls; ``loaded`` mimics `launchctl print` for the label."""
+    """Records launchctl calls and passes anything else (python, lsof) through.
 
-    def __init__(self, *, loaded=False, bootstrap_rc=0):
+    ``pid`` is what `launchctl print` reports for the running job.
+    """
+
+    def __init__(self, *, loaded=False, pid=None, bootstrap_rc=0, bootout_rc=0):
         self.calls: list[list[str]] = []
         self.loaded = loaded
+        self.pid = pid
         self.bootstrap_rc = bootstrap_rc
+        self.bootout_rc = bootout_rc
 
     def __call__(self, args, **kwargs):
         self.calls.append(list(args))
         if args[0] != "launchctl":
             return subprocess.run(args, **kwargs)
         verb = args[1]
-        rc = 0
+        rc, out = 0, ""
         if verb == "print":
             rc = 0 if self.loaded else 113
+            if self.loaded and self.pid:
+                out = f"gui/501/org.agentstack.chatgpt-mcp = {{\n\tstate = running\n\tpid = {self.pid}\n}}\n"
         elif verb == "bootout":
-            self.loaded = False
+            rc = self.bootout_rc
+            if rc == 0:
+                self.loaded = False
         elif verb == "bootstrap":
             rc = self.bootstrap_rc
             self.loaded = rc == 0
-        return subprocess.CompletedProcess(args, rc, "", "boom" if rc else "")
+        return subprocess.CompletedProcess(args, rc, out, "boom" if rc else "")
 
     def verbs(self):
         return [c[1] for c in self.calls if c[0] == "launchctl"]
@@ -61,8 +78,35 @@ def release(tmp_path):
 def plan_for(release, state, **kw):
     from orrery_chatgpt_mcp import service
 
-    return service.ServicePlan(python=sys.executable, release_dir=release, state_dir=state,
-                               port=kw.pop("port", free_port()), **kw)
+    path, digest = release
+    return service.ServicePlan(python=kw.pop("python", sys.executable), release_dir=path, digest=digest,
+                               state_dir=state, port=kw.pop("port", free_port()), **kw)
+
+
+def writable(path):
+    for p in [path, *path.rglob("*")]:
+        if not p.is_symlink():
+            os.chmod(p, 0o755 if p.is_dir() else 0o644)
+
+
+def start_like_launchd(plan, home, extra_env=None, python=None):
+    """Start the plist's exact program and environment, plus hostile inherited variables."""
+    from orrery_chatgpt_mcp import service
+
+    spec = plistlib.loads(service.render_plist(plan))
+    args = list(spec["ProgramArguments"])
+    if python:
+        args[0] = python
+    env = {**(extra_env or {}), **spec["EnvironmentVariables"], "HOME": str(home)}
+    log = open(plan.log_path, "ab")
+    proc = subprocess.Popen(args, cwd=spec["WorkingDirectory"], env=env, stdout=log, stderr=log)
+    log.close()
+    return proc
+
+
+def stop(proc):
+    proc.terminate()
+    proc.wait(10)
 
 
 # -- release ------------------------------------------------------------------------
@@ -70,26 +114,56 @@ def plan_for(release, state, **kw):
 def test_release_is_read_only_pinned_copy(tmp_path, release):
     from orrery_chatgpt_mcp import service
 
-    info = service.read_release(release)
-    assert info["intact"] and info["source_commit"] == "f" * 40
-    assert info["digest"] == service.release_digest(SRC / "orrery_chatgpt_mcp")
-    for path in [release, *release.rglob("*")]:
-        mode = stat.S_IMODE(path.stat().st_mode)
-        assert not mode & 0o222, f"{path} is writable ({oct(mode)})"
-    assert not list(release.rglob("__pycache__"))
+    path, digest = release
+    assert service.verify_release(path, digest)
+    info = service.read_release(path)
+    assert info["digest"] == digest == service.release_digest(SRC / "orrery_chatgpt_mcp")
+    assert info["source_commit"] == "f" * 40
+    for p in [path, *path.rglob("*")]:
+        assert not stat.S_IMODE(p.stat().st_mode) & 0o222, p
+    assert sorted(os.listdir(path)) == ["RELEASE.json", "orrery_chatgpt_mcp"]
     assert stat.S_IMODE((tmp_path / "releases").stat().st_mode) == 0o700
 
 
-def test_same_package_reuses_release_and_modified_release_is_refused(tmp_path, release):
+def test_same_package_reuses_release_and_modified_source_is_refused(tmp_path, release):
     from orrery_chatgpt_mcp import service
     from orrery_chatgpt_mcp.config import ConfigError
 
+    path, digest = release
     assert service.install_release(SRC, tmp_path / "releases") == release
-    victim = release / "orrery_chatgpt_mcp" / "tools.py"
-    os.chmod(victim, 0o644)
+    writable(path)
+    victim = path / "orrery_chatgpt_mcp" / "tools.py"
     victim.write_text(victim.read_text() + "\n# tampered\n")
-    assert service.read_release(release)["intact"] is False
-    with pytest.raises(ConfigError, match="modified"):
+    assert not service.verify_release(path, digest)
+    with pytest.raises(ConfigError, match="modified or unsafe"):
+        service.install_release(SRC, tmp_path / "releases")
+
+
+@pytest.mark.parametrize("extra", ["pycache", "sitecustomize", "root_symlink", "writable_file", "non_py"])
+def test_l02_unverified_bytes_make_a_release_unusable(tmp_path, release, extra):
+    """L02: caches, root extras, symlinked or writable releases fail the full check."""
+    from orrery_chatgpt_mcp import service
+    from orrery_chatgpt_mcp.config import ConfigError
+
+    path, digest = release
+    writable(path)
+    if extra == "pycache":
+        (path / "orrery_chatgpt_mcp" / "__pycache__").mkdir()
+        (path / "orrery_chatgpt_mcp" / "__pycache__" / "server.cpython-313.pyc").write_bytes(b"x")
+    if extra == "sitecustomize":
+        (path / "sitecustomize.py").write_text("print('UNHASHED')\n")
+    if extra == "non_py":
+        (path / "orrery_chatgpt_mcp" / "evil.so").write_bytes(b"x")
+    if extra == "root_symlink":
+        real = tmp_path / "elsewhere"
+        os.rename(path, real)
+        path.symlink_to(real)
+    if extra != "writable_file":
+        for p in [path, *path.rglob("*")]:
+            if not p.is_symlink():
+                os.chmod(p, 0o555 if p.is_dir() else 0o444)
+    assert not service.verify_release(path, digest)
+    with pytest.raises(ConfigError, match="modified or unsafe"):
         service.install_release(SRC, tmp_path / "releases")
 
 
@@ -104,60 +178,121 @@ def test_release_refuses_symlinks_and_non_package(tmp_path):
         service.install_release(src, tmp_path / "rel")
     (pkg / "__main__.py").write_text("")
     (pkg / "evil.py").symlink_to("/etc/hosts")
-    with pytest.raises(ConfigError, match="symlink"):
+    with pytest.raises(ConfigError, match="unexpected"):
         service.install_release(src, tmp_path / "rel")
 
 
-# -- plist ----------------------------------------------------------------------------
+def test_source_changed_during_copy_is_never_published(tmp_path, monkeypatch):
+    from orrery_chatgpt_mcp import service
+    from orrery_chatgpt_mcp.config import ConfigError
 
-def test_plist_has_no_secret_no_spawn_and_loopback_only(release, paired):
+    src = tmp_path / "src"
+    import shutil
+
+    shutil.copytree(SRC / "orrery_chatgpt_mcp", src / "orrery_chatgpt_mcp", ignore=shutil.ignore_patterns("__pycache__"))
+    real_copy = shutil.copyfile
+
+    def racing_copy(a, b, **kw):
+        real_copy(a, b, **kw)
+        if Path(b).name == "tools.py":
+            Path(b).write_text("# swapped while copying\n")
+
+    monkeypatch.setattr(service.shutil, "copyfile", racing_copy)
+    with pytest.raises(ConfigError, match="changed while it was copied"):
+        service.install_release(src, tmp_path / "rel")
+    assert not [p for p in (tmp_path / "rel").iterdir() if not p.name.startswith(".")]
+
+
+# -- plist and startup ----------------------------------------------------------------------
+
+def test_plist_has_no_secret_no_spawn_and_isolated_startup(release, paired):
     from orrery_chatgpt_mcp import service
 
     state, secret = paired
-    raw = service.render_plist(plan_for(release, state, port=8790))
+    plan = plan_for(release, state, port=8790)
+    raw = service.render_plist(plan)
     assert secret.encode() not in raw
     spec = plistlib.loads(raw)
     env = spec["EnvironmentVariables"]
     assert spec["Label"] == "org.agentstack.chatgpt-mcp"
-    assert spec["ProgramArguments"] == [sys.executable, "-s", "-m", "orrery_chatgpt_mcp", "serve"]
+    assert spec["ProgramArguments"] == [sys.executable, "-I", "-S", "-B", "-c", service.BOOTSTRAP, str(plan.release_dir), plan.digest]
     assert env["ORRERY_MCP_ENABLE_SPAWN"] == "0" and "ORRERY_MCP_SPAWN_DIRS" not in env
     assert env["ORRERY_MCP_BIND_HOST"] == "127.0.0.1" and env["ORRERY_MCP_AUTH"] == "pairing"
-    assert env["PYTHONPATH"] == str(release) and env["PYTHONSAFEPATH"] == "1"
+    assert not any(k.startswith("PYTHON") for k in env)
     assert spec["Umask"] == 0o077 and spec["RunAtLoad"] and spec["KeepAlive"]
     assert spec["StandardErrorPath"] == str(state / "gateway.log")
-    assert not any(k.startswith(("CONTROL_PLANE", "OPENAI")) for k in env)
 
 
-def test_plist_environment_actually_serves_the_pinned_release(tmp_path, release, paired, dashboard):
-    """Run the plist's exact program and environment (as launchd would) and probe it."""
+@needs_lsof
+def test_l01_plist_startup_ignores_hostile_python_environment(tmp_path, release, paired, dashboard):
+    """L01: PYTHONPATH / PYTHONHOME / PYTHONPYCACHEPREFIX / PYTHONSTARTUP cannot replace the pinned code."""
     from orrery_chatgpt_mcp import service
 
     state, secret = paired
+    fake = tmp_path / "fake" / "orrery_chatgpt_mcp"
+    fake.mkdir(parents=True)
+    (fake / "__init__.py").write_text("raise SystemExit('REPLACEMENT_EXECUTED')\n")
+    (tmp_path / "fake" / "sitecustomize.py").write_text("raise SystemExit('SITECUSTOMIZE_EXECUTED')\n")
+    hostile = {"PYTHONPATH": str(tmp_path / "fake"), "PYTHONHOME": str(tmp_path / "nohome"),
+               "PYTHONPYCACHEPREFIX": str(tmp_path / "cache"), "PYTHONSTARTUP": str(tmp_path / "fake" / "sitecustomize.py"),
+               "PYTHONINSPECT": "1"}
     plan = plan_for(release, state, dashboard_url=dashboard.url)
-    spec = plistlib.loads(service.render_plist(plan))
-    env = dict(spec["EnvironmentVariables"], HOME=str(tmp_path))
-    log = open(plan.log_path, "ab")
-    proc = subprocess.Popen(spec["ProgramArguments"], cwd=spec["WorkingDirectory"], env=env, stdout=log, stderr=log)
+    proc = start_like_launchd(plan, tmp_path, hostile)
     try:
-        status = service.wait_until_answering(plan.port, secret, deadline=20)
+        status = service.wait_until_answering(plan, secret, FakeLaunchctl(loaded=True, pid=proc.pid), deadline=20)
         assert status["dashboard"]["reachable"] is True
         assert status["capabilities"]["spawn_enabled_on_server"] is False
-        assert status["connection"]["auth_mode"] == "pairing"
-        tools = _list_tools(plan.port, secret)
-        assert "orrery_spawn_commit" not in tools and "orrery_status" in tools
-        with pytest.raises(ConnectionError, match="404"):
-            service.probe_status(plan.port, "x" * 43)
+        assert "orrery_spawn_commit" not in _list_tools(plan.port, secret)
     finally:
-        proc.terminate()
-        proc.wait(10)
-        log.close()
+        stop(proc)
     text = plan.log_path.read_text()
-    assert secret not in text and "listening on http://127.0.0.1:" in text and "spawn disabled" in text
+    assert "EXECUTED" not in text and secret not in text and "spawn disabled" in text
+    assert not (tmp_path / "cache").exists()
+
+
+@needs_lsof
+def test_l01_interpreter_pth_and_sitecustomize_are_not_loaded(tmp_path, release, paired, dashboard):
+    """L01: .pth files and sitecustomize in the interpreter's own site-packages do not run (-S)."""
+    from orrery_chatgpt_mcp import service
+
+    venv = tmp_path / "venv"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True, timeout=120)
+    site = Path(subprocess.run([str(venv / "bin" / "python"), "-c", "import site; print(site.getsitepackages()[0])"],
+                               capture_output=True, text=True, check=True).stdout.strip())
+    marker = tmp_path / "marker"
+    (site / "evil.pth").write_text(f"import pathlib; pathlib.Path({str(marker)!r}).write_text('PTH')\n")
+    (site / "sitecustomize.py").write_text(f"import pathlib; pathlib.Path({str(marker)!r}).write_text('SITE')\n")
+    state, secret = paired
+    plan = plan_for(release, state, dashboard_url=dashboard.url, python=str(venv / "bin" / "python"))
+    proc = start_like_launchd(plan, tmp_path)
+    try:
+        service.wait_until_answering(plan, secret, FakeLaunchctl(loaded=True, pid=proc.pid), deadline=20)
+    finally:
+        stop(proc)
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("extra", ["pycache", "sitecustomize"])
+def test_l02_tampered_release_never_starts(tmp_path, release, paired, extra):
+    """L02 at runtime: BOOTSTRAP refuses before importing anything from the release."""
+    path, _ = release
+    writable(path)
+    if extra == "pycache":
+        (path / "orrery_chatgpt_mcp" / "__pycache__").mkdir()
+    else:
+        (path / "sitecustomize.py").write_text("print('UNHASHED_SITECUSTOMIZE')\n")
+    for p in [path, *path.rglob("*")]:
+        os.chmod(p, 0o555 if p.is_dir() else 0o444)
+    state, _ = paired
+    plan = plan_for(release, state)
+    proc = start_like_launchd(plan, tmp_path)
+    assert proc.wait(20) == 78
+    text = plan.log_path.read_text()
+    assert "release check failed" in text and "UNHASHED" not in text
 
 
 def _list_tools(port, secret):
     import http.client
-    import json
 
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     conn.request("POST", f"/mcp/{secret}", body=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
@@ -167,7 +302,103 @@ def _list_tools(port, secret):
     return {t["name"] for t in data["result"]["tools"]}
 
 
-# -- install / uninstall ---------------------------------------------------------------
+# -- who answers (L03, L05) ------------------------------------------------------------------
+
+class Impostor:
+    """A loopback listener in this test process that records request paths."""
+
+    def __init__(self, mode):
+        self.paths: list[str] = []
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                outer.paths.append(self.path)
+                if mode == "reflect":
+                    self.wfile.write(f"HTTP/1.1 {self.requestline}\r\n\r\n".encode())
+                    return
+                body = json.dumps({"result": {"structuredContent": {
+                    "gateway": {"name": "orrery-chatgpt-mcp"}, "connection": {"auth_mode": "pairing"},
+                    "capabilities": {"spawn_enabled_on_server": True}, "dashboard": {"reachable": True}}}}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@needs_lsof
+def test_l03_secret_is_not_sent_to_a_listener_that_is_not_the_job(tmp_path, paired):
+    from orrery_chatgpt_mcp import service
+
+    _, secret = paired
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    imp = Impostor("forged")
+    try:
+        with pytest.raises(service.VerifyError, match="not the service process") as err:
+            service.probe_status(imp.port, secret, other.pid)
+        assert imp.paths == [] and secret not in str(err.value)
+    finally:
+        imp.close()
+        stop(other)
+
+
+@needs_lsof
+def test_l03_forged_configuration_is_not_accepted(paired):
+    from orrery_chatgpt_mcp import service
+
+    _, secret = paired
+    imp = Impostor("forged")  # owned by this process, so the peer check passes
+    try:
+        with pytest.raises(service.VerifyError, match="service configuration"):
+            service.probe_status(imp.port, secret, os.getpid())
+    finally:
+        imp.close()
+
+
+@needs_lsof
+def test_l05_reflected_status_line_never_carries_the_secret(paired):
+    from orrery_chatgpt_mcp import service
+
+    _, secret = paired
+    imp = Impostor("reflect")
+    try:
+        with pytest.raises(service.VerifyError) as err:
+            service.probe_status(imp.port, secret, os.getpid())
+        import traceback
+
+        assert secret not in "".join(traceback.format_exception(err.value))
+        assert err.value.__cause__ is None and err.value.__suppress_context__
+    finally:
+        imp.close()
+
+
+def test_l03_status_does_not_probe_when_the_job_is_not_running(tmp_path, release, paired):
+    from orrery_chatgpt_mcp import service
+
+    state, secret = paired
+    agents = tmp_path / "LA"
+    fake = FakeLaunchctl()
+    service.install_service(plan_for(release, state), runner=fake, launch_agents=agents, verify=False)
+    fake.pid = None
+    out = service.service_status(runner=fake, launch_agents=agents)
+    assert out["loaded"] and not out["running"] and out["answering"] is False
+    assert out["release_intact"] is True and out["source_commit"] == "f" * 40 and out["spawn"] is False
+    assert not any(c[0].endswith("lsof") for c in fake.calls)
+    assert secret not in repr(out)
+
+
+# -- install / uninstall (L04, L06) ------------------------------------------------------------
 
 def test_install_writes_plist_and_bootstraps(tmp_path, release, paired):
     from orrery_chatgpt_mcp import service
@@ -197,13 +428,96 @@ def test_install_tightens_an_existing_world_readable_log(tmp_path, release, pair
     assert plan.log_path.read_text() == "old line\n"
 
 
-def test_reinstall_boots_out_the_old_service_first(tmp_path, release, paired):
+def test_reinstall_boots_out_its_own_service_first(tmp_path, release, paired):
     from orrery_chatgpt_mcp import service
 
     state, _ = paired
+    agents = tmp_path / "LA"
+    service.install_service(plan_for(release, state), runner=FakeLaunchctl(), launch_agents=agents, verify=False)
     fake = FakeLaunchctl(loaded=True)
-    service.install_service(plan_for(release, state), runner=fake, launch_agents=tmp_path / "LA", verify=False)
-    assert fake.verbs() == ["print", "bootout", "bootstrap"]
+    service.install_service(plan_for(release, state), runner=fake, launch_agents=agents, verify=False)
+    assert fake.verbs() == ["print", "bootout", "print", "bootstrap"]
+
+
+def test_reinstall_accepts_the_first_version_plist(tmp_path, release, paired):
+    from orrery_chatgpt_mcp import service
+
+    state, _ = paired
+    agents = tmp_path / "LA"
+    agents.mkdir()
+    (agents / "org.agentstack.chatgpt-mcp.plist").write_bytes(plistlib.dumps({
+        "Label": "org.agentstack.chatgpt-mcp", "ProgramArguments": ["/usr/bin/python3", "-s", "-m", "orrery_chatgpt_mcp", "serve"]}))
+    fake = FakeLaunchctl(loaded=True)
+    service.install_service(plan_for(release, state), runner=fake, launch_agents=agents, verify=False)
+    assert "bootstrap" in fake.verbs()
+
+
+def test_l04_failed_bootout_is_reported_and_keeps_the_plist(tmp_path, release, paired, monkeypatch):
+    from orrery_chatgpt_mcp import service
+    from orrery_chatgpt_mcp.config import ConfigError
+
+    monkeypatch.setattr(service, "BOOTOUT_POLLS", 3)
+
+    state, _ = paired
+    agents = tmp_path / "LA"
+    service.install_service(plan_for(release, state), runner=FakeLaunchctl(), launch_agents=agents, verify=False)
+    stuck = FakeLaunchctl(loaded=True, bootout_rc=5)
+    with pytest.raises(ConfigError, match="still loaded"):
+        service.uninstall_service(runner=stuck, launch_agents=agents)
+    assert (agents / "org.agentstack.chatgpt-mcp.plist").exists()
+    with pytest.raises(ConfigError, match="still loaded"):
+        service.install_service(plan_for(release, state), runner=stuck, launch_agents=agents, verify=False)
+    assert "bootstrap" not in stuck.verbs()
+
+
+def test_l04_pre_bootstrap_write_failure_is_a_config_error(tmp_path, release, paired):
+    from orrery_chatgpt_mcp import service
+    from orrery_chatgpt_mcp.config import ConfigError
+
+    state, _ = paired
+    plan = plan_for(release, state)
+    plan.log_path.symlink_to(tmp_path / "elsewhere.log")
+    fake = FakeLaunchctl()
+    with pytest.raises(ConfigError, match="could not write"):
+        service.install_service(plan, runner=fake, launch_agents=tmp_path / "LA", verify=False)
+    assert "bootstrap" not in fake.verbs()
+
+
+@pytest.mark.parametrize("kind", ["other_label", "same_label_other_program", "garbage"])
+def test_l06_foreign_plist_is_refused_before_anything_is_stopped(tmp_path, release, paired, kind):
+    from orrery_chatgpt_mcp import service
+    from orrery_chatgpt_mcp.config import ConfigError
+
+    state, _ = paired
+    agents = tmp_path / "LA"
+    agents.mkdir()
+    target = agents / "org.agentstack.chatgpt-mcp.plist"
+    if kind == "garbage":
+        target.write_bytes(b"not a plist")
+    else:
+        label = "com.example.other" if kind == "other_label" else "org.agentstack.chatgpt-mcp"
+        target.write_bytes(plistlib.dumps({"Label": label, "ProgramArguments": ["/bin/false"]}))
+    before = target.read_bytes()
+    for action in ("install", "uninstall"):
+        fake = FakeLaunchctl(loaded=True)
+        with pytest.raises(ConfigError, match="not a plist this command wrote"):
+            if action == "install":
+                service.install_service(plan_for(release, state), runner=fake, launch_agents=agents, verify=False)
+            else:
+                service.uninstall_service(runner=fake, launch_agents=agents)
+        assert "bootout" not in fake.verbs() and "bootstrap" not in fake.verbs()
+        assert target.read_bytes() == before
+
+
+def test_install_refuses_a_job_loaded_from_elsewhere(tmp_path, release, paired):
+    from orrery_chatgpt_mcp import service
+    from orrery_chatgpt_mcp.config import ConfigError
+
+    state, _ = paired
+    fake = FakeLaunchctl(loaded=True)
+    with pytest.raises(ConfigError, match="loaded from somewhere other"):
+        service.install_service(plan_for(release, state), runner=fake, launch_agents=tmp_path / "LA", verify=False)
+    assert fake.verbs() == ["print"]
 
 
 @pytest.mark.parametrize("problem", ["unpaired", "dashboard", "python", "port", "release", "bootstrap"])
@@ -227,14 +541,11 @@ def test_install_refuses_bad_setups(tmp_path, release, paired, problem):
         holder.listen()
         kw["port"] = holder.getsockname()[1]
     if problem == "release":
-        release = tmp_path / "missing-release"
-    plan = plan_for(release, state, **{k: v for k, v in kw.items() if k != "python"})
-    if "python" in kw:
-        plan = service.ServicePlan(python=kw["python"], release_dir=release, state_dir=state, port=plan.port)
+        release = (tmp_path / "missing-release", release[1])
     agents = tmp_path / "LA"
     try:
         with pytest.raises(ConfigError):
-            service.install_service(plan, runner=fake, launch_agents=agents, verify=False)
+            service.install_service(plan_for(release, state, **kw), runner=fake, launch_agents=agents, verify=False)
     finally:
         if holder:
             holder.close()
@@ -243,37 +554,18 @@ def test_install_refuses_bad_setups(tmp_path, release, paired, problem):
         assert not (agents / "org.agentstack.chatgpt-mcp.plist").exists()
 
 
-def test_uninstall_keeps_pairing_and_refuses_foreign_plist(tmp_path, release, paired):
+def test_uninstall_keeps_pairing(tmp_path, release, paired):
     from orrery_chatgpt_mcp import service
-    from orrery_chatgpt_mcp.config import ConfigError
 
-    state, secret = paired
+    state, _ = paired
     agents = tmp_path / "LA"
     fake = FakeLaunchctl()
     service.install_service(plan_for(release, state), runner=fake, launch_agents=agents, verify=False)
     assert service.uninstall_service(runner=fake, launch_agents=agents) is True
-    assert fake.verbs()[-1] == "bootout"
+    assert fake.verbs()[-2:] == ["bootout", "print"]
     assert not (agents / "org.agentstack.chatgpt-mcp.plist").exists()
     assert (state / "pairing.json").exists()
     assert service.uninstall_service(runner=fake, launch_agents=agents) is False
-    (agents / "org.agentstack.chatgpt-mcp.plist").write_bytes(plistlib.dumps({"Label": "com.example.other"}))
-    with pytest.raises(ConfigError):
-        service.uninstall_service(runner=fake, launch_agents=agents)
-    assert (agents / "org.agentstack.chatgpt-mcp.plist").exists()
-
-
-def test_status_reports_release_and_never_the_secret(tmp_path, release, paired, capsys):
-    from orrery_chatgpt_mcp import service
-
-    state, secret = paired
-    agents = tmp_path / "LA"
-    fake = FakeLaunchctl()
-    service.install_service(plan_for(release, state), runner=fake, launch_agents=agents, verify=False)
-    out = service.service_status(runner=fake, launch_agents=agents)
-    assert out["loaded"] and out["plist"] and out["spawn"] is False
-    assert out["release_intact"] and out["source_commit"] == "f" * 40
-    assert out["answering"] is False  # nothing is listening in this test
-    assert secret not in repr(out)
 
 
 # -- CLI ----------------------------------------------------------------------------------
@@ -302,5 +594,6 @@ def test_service_cli_refuses_unpaired_install_without_touching_launchd(tmp_path)
                 {"ORRERY_MCP_STATE_DIR": str(tmp_path / "state"), "ORRERY_MCP_PORT": str(free_port())}, tmp_path)
     assert done.returncode == 2 and "pair" in done.stderr
     assert not (tmp_path / "Library" / "LaunchAgents").exists()
+    assert not (tmp_path / "state" / "releases").exists()
     assert _cli(["service", "install", "--bogus", "x"], {"ORRERY_MCP_STATE_DIR": str(tmp_path / "s")}, tmp_path).returncode == 2
     assert _cli(["service", "frobnicate"], {"ORRERY_MCP_STATE_DIR": str(tmp_path / "s")}, tmp_path).returncode == 2

@@ -454,7 +454,7 @@ USAGE = """usage: orrery-chatgpt-mcp [serve | pair [--rotate] [--quiet] | url | 
 
   serve          run the loopback MCP gateway (default)
   pair           create the pairing secret once; prints the loopback MCP URL for tunnel-client
-                 (--quiet prints nothing; read it later with `url`)
+                 (--quiet does not print the URL; show it later with `url`)
   url            print the loopback MCP URL again (contains the secret: keep it private)
   pending        list launches from ChatGPT waiting for approval on this Mac
   approve CODE   approve one pending launch after reading it
@@ -546,18 +546,16 @@ def _service_cli(argv: list[str], state_dir) -> int:
             raise ConfigError("usage: service install [--from SRC] [--source-commit SHA] [--python PATH]")
         opts.update(zip(rest[::2], rest[1::2]))
         pairing.read_secret(state_dir)  # refuse before writing anything when unpaired
-        release = service.install_release(Path(opts["--from"]), state_dir / "releases",
-                                          source_commit=opts["--source-commit"])
-        plan = service.ServicePlan(python=opts["--python"], release_dir=release, state_dir=state_dir,
+        release, digest = service.install_release(Path(opts["--from"]), state_dir / "releases",
+                                                  source_commit=opts["--source-commit"])
+        plan = service.ServicePlan(python=opts["--python"], release_dir=release, digest=digest, state_dir=state_dir,
                                    port=int(os.environ.get("ORRERY_MCP_PORT", "8790")),
                                    dashboard_url=os.environ.get("ORRERY_MCP_DASHBOARD_URL", "http://127.0.0.1:8770").strip().rstrip("/"))
         try:
             status = service.install_service(plan)
-        except ConfigError:
-            raise
-        except (OSError, ValueError, KeyError) as exc:
-            print(f"orrery-chatgpt-mcp: {plan.label} was loaded but did not answer over loopback ({type(exc).__name__}); "
-                  f"see {plan.log_path} and `service status`", file=sys.stderr)
+        except service.VerifyError as exc:
+            print(f"orrery-chatgpt-mcp: {plan.label} was loaded, but could not be verified: {exc}. "
+                  f"See {plan.log_path} and `service status`", file=sys.stderr)
             return 1
         reachable = bool(status.get("dashboard", {}).get("reachable"))
         print(f"installed {plan.label}: release {release.name}, 127.0.0.1:{plan.port}, launches disabled")
