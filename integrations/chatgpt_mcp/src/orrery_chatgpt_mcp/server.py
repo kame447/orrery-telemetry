@@ -558,15 +558,15 @@ def _service_cli(argv: list[str], state_dir) -> int:
             "--python": service.default_python(),
             "--message-profile": None,
             "--message-helper-from": None,
-            "--message-approval": "chat",
-            "--message-max-per-hour": "20",
+            "--message-approval": None,
+            "--message-max-per-hour": None,
         }
         if len(rest) % 2 or any(k not in opts for k in rest[::2]) or len(set(rest[::2])) != len(rest[::2]):
             raise ConfigError("usage: service install [--from SRC] [--source-commit SHA] [--python PATH] [--message-profile ABS --message-helper-from ORRERY_ROOT]")
         opts.update(zip(rest[::2], rest[1::2]))
         if bool(opts["--message-profile"]) != bool(opts["--message-helper-from"]):
             raise ConfigError("message service requires both --message-profile and --message-helper-from")
-        if opts["--message-profile"] is None and (opts["--message-approval"] != "chat" or opts["--message-max-per-hour"] != "20"):
+        if opts["--message-profile"] is None and (opts["--message-approval"] is not None or opts["--message-max-per-hour"] is not None):
             raise ConfigError("message controls require --message-profile")
         pairing.read_secret(state_dir)  # refuse before writing anything when unpaired
         release, digest = service.install_release(Path(opts["--from"]), state_dir / "releases",
@@ -577,7 +577,7 @@ def _service_cli(argv: list[str], state_dir) -> int:
             helper_root, helper_digest = install_helper_release(
                 Path(opts["--message-helper-from"]), state_dir / "helpers", source_commit=opts["--source-commit"])
         try:
-            message_rate = int(opts["--message-max-per-hour"])
+            message_rate = int(opts["--message-max-per-hour"]) if opts["--message-max-per-hour"] is not None else None
         except ValueError:
             raise ConfigError("message max per hour must be an integer") from None
         plan = service.ServicePlan(python=opts["--python"], release_dir=release, digest=digest, state_dir=state_dir,

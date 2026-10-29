@@ -37,7 +37,7 @@ import socket
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -51,6 +51,8 @@ MIN_PYTHON = (3, 11)
 PYTHON_FLAGS = ["-I", "-S", "-B"]
 LSOF = "/usr/sbin/lsof"
 BOOTOUT_POLLS = 50  # x 0.1 s for launchd to drop the job
+# SHA-256 of the exact BOOTSTRAP written by the preceding release (PR #42).
+PREVIOUS_BOOTSTRAP_SHA256 = "18c3da518e4c2ab6938b2e2d261683766df62750bac7a4270e969d956923fdda"
 
 Runner = Callable[..., subprocess.CompletedProcess]
 
@@ -93,8 +95,8 @@ if sys.argv[3:] == ["--check"]:
     print("ok")
     sys.exit(0)
 sys.path.insert(0, root)
-from orrery_chatgpt_mcp.helper_release import verify_helper_release
 if os.environ.get("ORRERY_MCP_ENABLE_MESSAGE") == "1":
+    from orrery_chatgpt_mcp.helper_release import verify_helper_release
     from pathlib import Path
     helper = os.environ.get("ORRERY_MCP_MESSAGE_HELPER_ROOT", "")
     helper_digest = os.environ.get("ORRERY_MCP_MESSAGE_HELPER_DIGEST", "")
@@ -121,8 +123,8 @@ class ServicePlan:
     message_profile: Path | None = None
     message_helper_root: Path | None = None
     message_helper_digest: str | None = None
-    message_approval: str = "chat"
-    message_max_per_hour: int = 20
+    message_approval: str | None = None
+    message_max_per_hour: int | None = None
 
     @property
     def log_path(self) -> Path:
@@ -228,8 +230,8 @@ def render_plist(plan: ServicePlan) -> bytes:
             "ORRERY_MCP_MESSAGE_PROFILE": str(plan.message_profile),
             "ORRERY_MCP_MESSAGE_HELPER_ROOT": str(plan.message_helper_root),
             "ORRERY_MCP_MESSAGE_HELPER_DIGEST": str(plan.message_helper_digest),
-            "ORRERY_MCP_MESSAGE_APPROVAL": plan.message_approval,
-            "ORRERY_MCP_MESSAGE_MAX_PER_HOUR": str(plan.message_max_per_hour),
+            "ORRERY_MCP_MESSAGE_APPROVAL": plan.message_approval or "chat",
+            "ORRERY_MCP_MESSAGE_MAX_PER_HOUR": str(plan.message_max_per_hour if plan.message_max_per_hour is not None else 20),
         })
     return plistlib.dumps({
         "Label": plan.label,
@@ -269,7 +271,9 @@ def _load_own_plist(target: Path, label: str) -> dict | None:
         raise ConfigError(f"{target} is not a plist this command wrote; left in place")
     args = spec.get("ProgramArguments")
     legacy = isinstance(args, list) and args[1:] == ["-s", "-m", PACKAGE, "serve"]
-    current = isinstance(args, list) and len(args) == 8 and args[1:5] == [*PYTHON_FLAGS, "-c"] and args[5] == BOOTSTRAP
+    pinned = isinstance(args, list) and len(args) == 8 and args[1:5] == [*PYTHON_FLAGS, "-c"] and isinstance(args[5], str)
+    current = pinned and (args[5] == BOOTSTRAP or
+                          hashlib.sha256(args[5].encode("utf-8")).hexdigest() == PREVIOUS_BOOTSTRAP_SHA256)
     if spec.get("Label") != label or not (legacy or current):
         raise ConfigError(f"{target} is not a plist this command wrote; left in place")
     return spec
@@ -413,6 +417,24 @@ def _preflight_message_sender(plan: ServicePlan) -> None:
         raise ConfigError(f"message sender cannot be verified ({exc.code}); old service left running") from None
 
 
+def _resolve_message_controls(plan: ServicePlan, existing: dict | None) -> ServicePlan:
+    """Preserve stricter existing operator controls unless explicitly overridden."""
+    if plan.message_profile is None:
+        return plan
+    env = (existing or {}).get("EnvironmentVariables", {})
+    if not isinstance(env, dict) or env.get("ORRERY_MCP_ENABLE_MESSAGE") != "1":
+        env = {}
+    approval = (plan.message_approval if plan.message_approval is not None else
+                env.get("ORRERY_MCP_MESSAGE_APPROVAL", "chat"))
+    value = (plan.message_max_per_hour if plan.message_max_per_hour is not None else
+             env.get("ORRERY_MCP_MESSAGE_MAX_PER_HOUR", 20))
+    try:
+        rate = int(value)
+    except (ValueError, TypeError):
+        raise ConfigError("existing message max per hour is not an integer") from None
+    return replace(plan, message_approval=approval, message_max_per_hour=rate)
+
+
 def install_service(plan: ServicePlan, *, runner: Runner = subprocess.run, launch_agents: Path | None = None,
                     verify: bool = True) -> dict:
     """Write the LaunchAgent and (re)load it. Refuses instead of repairing a bad setup.
@@ -428,7 +450,12 @@ def install_service(plan: ServicePlan, *, runner: Runner = subprocess.run, launc
     _check_python(plan.python, runner)
     if not verify_release(plan.release_dir, plan.digest, plan.python, runner):
         raise ConfigError(f"{plan.release_dir} is not an intact release")
+    target = plist_path(plan.label, launch_agents)
+    existing = _load_own_plist(target, plan.label)
+    plan = _resolve_message_controls(plan, existing)
     if plan.message_profile is not None:
+        if not (plan.release_dir / PACKAGE / "helper_release.py").is_file():
+            raise ConfigError("message opt-in requires a gateway release with helper support")
         if not plan.message_helper_root or not plan.message_helper_digest:
             raise ConfigError("message service needs a pinned helper release")
         if plan.message_approval not in ("chat", "local") or not 1 <= plan.message_max_per_hour <= 200:
@@ -439,8 +466,6 @@ def install_service(plan: ServicePlan, *, runner: Runner = subprocess.run, launc
         _preflight_message_sender(plan)
     elif plan.message_helper_root or plan.message_helper_digest:
         raise ConfigError("message helper is set without an approved profile")
-    target = plist_path(plan.label, launch_agents)
-    existing = _load_own_plist(target, plan.label)
     info = job_info(plan.label, runner)
     stopped = ""
     if info is not None:

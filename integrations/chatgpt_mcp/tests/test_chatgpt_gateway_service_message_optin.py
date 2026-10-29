@@ -1,6 +1,7 @@
 """Operator-only launchd message opt-in: immutable helper, default off, no live sends."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import plistlib
@@ -11,7 +12,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from chatgpt_gateway_support import SRC
+from chatgpt_gateway_support import SRC, free_port
 
 from orrery_chatgpt_mcp import pairing, service
 from orrery_chatgpt_mcp.config import ConfigError
@@ -175,3 +176,135 @@ def test_optin_refuses_bad_profile_before_launchctl_changes(tmp_path, helper):
     with pytest.raises(ConfigError, match="owner-only"):
         service.install_service(plan, runner=fake, launch_agents=tmp_path / "LA", verify=False)
     assert not any(action in ("bootout", "bootstrap") for action in fake.verbs())
+
+
+@pytest.mark.parametrize("operation", ["status", "upgrade", "uninstall"])
+def test_previous_release_service_plist_is_recognized(tmp_path, operation):
+    from test_chatgpt_gateway_service import FakeLaunchctl
+
+    previous = (Path(__file__).parent / "fixtures/service_bootstrap_previous.txt").read_text()
+    assert hashlib.sha256(previous.encode()).hexdigest() == service.PREVIOUS_BOOTSTRAP_SHA256
+    state = tmp_path / "state"
+    pairing.create_secret(state)
+    release, digest = service.install_release(SRC, state / "releases")
+    plan = service.ServicePlan(python=sys.executable, release_dir=release, digest=digest, state_dir=state, port=free_port())
+    agents = tmp_path / "LaunchAgents"
+    agents.mkdir()
+    target = agents / "org.agentstack.chatgpt-mcp.plist"
+    spec = plistlib.loads(service.render_plist(plan))
+    spec["ProgramArguments"][5] = previous
+    target.write_bytes(plistlib.dumps(spec))
+    fake = FakeLaunchctl(loaded=operation != "status", path=str(target))
+
+    if operation == "status":
+        result = service.service_status(runner=fake, launch_agents=agents)
+        assert result["plist"] and "error" not in result and result["release_intact"]
+    elif operation == "upgrade":
+        service.install_service(plan, runner=fake, launch_agents=agents, verify=False)
+        assert "bootout" in fake.verbs() and "bootstrap" in fake.verbs()
+        assert plistlib.loads(target.read_bytes())["ProgramArguments"][5] == service.BOOTSTRAP
+    else:
+        assert service.uninstall_service(runner=fake, launch_agents=agents)
+        assert "bootout" in fake.verbs() and not target.exists()
+
+
+def test_changed_previous_bootstrap_is_not_trusted(tmp_path):
+    from test_chatgpt_gateway_service import FakeLaunchctl
+
+    previous = (Path(__file__).parent / "fixtures/service_bootstrap_previous.txt").read_text()
+    agents = tmp_path / "LA"
+    agents.mkdir()
+    target = agents / "org.agentstack.chatgpt-mcp.plist"
+    target.write_bytes(plistlib.dumps({
+        "Label": service.LABEL,
+        "ProgramArguments": [sys.executable, *service.PYTHON_FLAGS, "-c", previous + "# changed", "/release", "0" * 64],
+    }))
+    with pytest.raises(ConfigError, match="not a plist this command wrote"):
+        service.uninstall_service(runner=FakeLaunchctl(loaded=True, path=str(target)), launch_agents=agents)
+    assert target.exists()
+
+
+def test_readonly_earlier_release_without_helper_module_starts_when_message_off(tmp_path):
+    src = tmp_path / "old-src" / service.PACKAGE
+    src.mkdir(parents=True)
+    (src / "__init__.py").write_text("")
+    (src / "__main__.py").write_text("")
+    (src / "server.py").write_text("def main(argv):\n    return 0\n")
+    release, digest = service.install_release(src.parent, tmp_path / "releases")
+    assert not (release / service.PACKAGE / "helper_release.py").exists()
+    plan = service.ServicePlan(python=sys.executable, release_dir=release, digest=digest, state_dir=tmp_path)
+    done = subprocess.run(service.program_arguments(plan), capture_output=True, text=True,
+                          env={"ORRERY_MCP_ENABLE_MESSAGE": "0"}, timeout=20)
+    assert done.returncode == 0, done.stderr
+    assert "helper_release" not in done.stderr
+
+
+def test_optin_reinstall_keeps_stricter_approval_and_rate(tmp_path, helper, monkeypatch):
+    from test_chatgpt_gateway_service import FakeLaunchctl
+    from dataclasses import replace
+
+    root, helper_digest = helper
+    state = tmp_path / "state"
+    pairing.create_secret(state)
+    release, digest = service.install_release(SRC, state / "releases")
+    profile = profile_file(tmp_path)
+    plan = service.ServicePlan(python=sys.executable, release_dir=release, digest=digest,
+                               state_dir=state, port=free_port(), message_profile=profile,
+                               message_helper_root=root, message_helper_digest=helper_digest,
+                               message_approval="local", message_max_per_hour=3)
+    agents = tmp_path / "LA"
+    agents.mkdir()
+    target = agents / "org.agentstack.chatgpt-mcp.plist"
+    target.write_bytes(service.render_plist(plan))
+    fake = FakeLaunchctl(loaded=True, path=str(target))
+    monkeypatch.setattr(service, "_preflight_message_sender", lambda _: None)
+
+    # The operator did not ask to relax the approval policy or rate limit.
+    service.install_service(replace(plan, message_approval=None, message_max_per_hour=None),
+                            runner=fake, launch_agents=agents, verify=False)
+    env = plistlib.loads(target.read_bytes())["EnvironmentVariables"]
+    assert env["ORRERY_MCP_MESSAGE_APPROVAL"] == "local"
+    assert env["ORRERY_MCP_MESSAGE_MAX_PER_HOUR"] == "3"
+    assert "bootout" in fake.verbs()
+
+    # Explicitly supplied parameters may change the policy.
+    service.install_service(replace(plan, message_approval="chat", message_max_per_hour=20),
+                            runner=fake, launch_agents=agents, verify=False)
+    env = plistlib.loads(target.read_bytes())["EnvironmentVariables"]
+    assert env["ORRERY_MCP_MESSAGE_APPROVAL"] == "chat"
+    assert env["ORRERY_MCP_MESSAGE_MAX_PER_HOUR"] == "20"
+
+
+def test_old_release_cannot_optin_message_before_stopping_service(tmp_path, helper):
+    from test_chatgpt_gateway_service import FakeLaunchctl
+
+    src = tmp_path / "old-src" / service.PACKAGE
+    src.mkdir(parents=True)
+    (src / "__init__.py").write_text("")
+    (src / "__main__.py").write_text("")
+    (src / "server.py").write_text("def main(argv):\n    return 0\n")
+    release, digest = service.install_release(src.parent, tmp_path / "releases")
+    state = tmp_path / "state"
+    pairing.create_secret(state)
+    root, helper_digest = helper
+    plan = service.ServicePlan(python=sys.executable, release_dir=release, digest=digest,
+                               state_dir=state, port=free_port(), message_profile=profile_file(tmp_path),
+                               message_helper_root=root, message_helper_digest=helper_digest)
+    fake = FakeLaunchctl(loaded=True, path=str(tmp_path / "LA" / "org.agentstack.chatgpt-mcp.plist"))
+    with pytest.raises(ConfigError, match="helper support"):
+        service.install_service(plan, runner=fake, launch_agents=tmp_path / "LA", verify=False)
+    assert "bootout" not in fake.verbs()
+
+
+def test_cli_omitted_controls_are_not_implicit_downgrade(tmp_path, helper, monkeypatch):
+    from orrery_chatgpt_mcp import server
+
+    profile = profile_file(tmp_path)
+    state = tmp_path / "state"
+    pairing.create_secret(state)
+    seen = []
+    monkeypatch.setattr(service, "install_service", lambda plan: seen.append(plan) or {"dashboard": {"reachable": True}})
+    assert server._service_cli(["install", "--from", str(SRC), "--python", sys.executable,
+                                "--message-profile", str(profile), "--message-helper-from", str(ROOT)], state) == 0
+    assert len(seen) == 1
+    assert seen[0].message_approval is None and seen[0].message_max_per_hour is None

@@ -123,6 +123,8 @@ The gateway's records (ledger, audit, log) contain no bodies. ORRERY Mail's own 
 
 Before opting in, verify the updated ORRERY Mail is running with `AGENTSTACK_MAIL_TOOLS_LOG_ENABLED=false` actually applied. This command does not change Mail logging. Reinstalling without the message options disables messaging again; spawning always stays off.
 
+When reinstalling with both message opt-in flags, omitted `--message-approval` and `--message-max-per-hour` values retain the currently enabled service's approval mode and rate limit. Relaxing `local` to `chat` or raising the cap requires an explicit new value. First-time opt-in still defaults to `chat` and 20/hour; omitting all message flags still turns messaging off. A previous gateway release may be started with messaging disabled, but it cannot be enabled for messaging unless it supports the verified helper.
+
 The service pins a separately content-addressed, immutable copy of the canonical helper's two Python packages and the canonical wait primitive. It checks the exact layout, digest, owner and read-only permissions before importing anything from the helper, and never executes the changing checkout. The gateway itself remains pinned independently. The external owner-approved profile is 0600; no credentials or message bodies enter the launchd plist.
 
 `--message-approval chat` avoids returning to the Mac per message, but relies on ChatGPT's confirmation. Secure MCP Tunnel and a ChatGPT account that supports write MCP tools are still necessary and are NOT configured here. Mail acceptance is not evidence that the receiving TUI started a turn. The recipient verification/send race documented above remains.
