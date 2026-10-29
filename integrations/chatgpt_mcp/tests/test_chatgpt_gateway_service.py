@@ -463,6 +463,32 @@ def test_install_writes_plist_and_bootstraps(tmp_path, release, paired):
     assert stat.S_IMODE(plan.log_path.stat().st_mode) == 0o600
 
 
+@pytest.mark.parametrize("capabilities,accepted", [
+    ({"message_existing_agent": False}, True),
+    ({"message_existing_agent": True}, False),
+    ({}, False),
+    ({"message_existing_agent": False, "message_enabled_on_server": True}, False),
+    ({"message_existing_agent": False, "message_enabled_on_server": None}, False),
+    ({"message_existing_agent": False, "message_enabled_on_server": 0}, False),
+    ({"message_existing_agent": False, "message_enabled_on_server": False}, True),
+])
+def test_legacy_gateway_status_allows_only_explicit_message_off(tmp_path, release, paired, monkeypatch,
+                                                                 capabilities, accepted):
+    from orrery_chatgpt_mcp import service
+
+    state, _ = paired
+    plan = plan_for(release, state)
+    status = {"capabilities": capabilities}
+    monkeypatch.setattr(service, "wait_until_answering", lambda *_a, **_kw: status)
+    fake = FakeLaunchctl()
+    if accepted:
+        assert service.install_service(plan, runner=fake, launch_agents=tmp_path / "LA") == status
+    else:
+        with pytest.raises(service.VerifyError, match="message capability"):
+            service.install_service(plan, runner=fake, launch_agents=tmp_path / "LA")
+    assert "bootstrap" in fake.verbs()
+
+
 def test_install_tightens_an_existing_world_readable_log(tmp_path, release, paired):
     from orrery_chatgpt_mcp import service
 

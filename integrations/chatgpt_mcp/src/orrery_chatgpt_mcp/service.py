@@ -13,8 +13,10 @@ part of the plist, so the job names the exact code it may run. The pairing
 service needs only the standard library.
 
 The plist holds no secret: the gateway reads the pairing secret from the 0600
-state file at start, exactly as an interactive ``serve`` does. The service is
-read-only: it always sets ``ORRERY_MCP_ENABLE_SPAWN=0``.
+state file at start, exactly as an interactive ``serve`` does. The service never enables spawning: it always sets ``ORRERY_MCP_ENABLE_SPAWN=0``.
+Message sending is independently disabled by default. An operator may enable
+only a previously authorized sender/allowlist with a pinned, verified helper
+release; no Mail identity or recipient permissions are created by install.
 
 Readiness and status probes send the pairing path only after ``lsof`` shows
 that the probe's own TCP connection was accepted by the launchd job's process,
@@ -35,12 +37,13 @@ import socket
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
 from . import pairing
 from .config import ConfigError, GatewayConfig
+from .helper_release import check_profile, verify_helper_release
 
 LABEL = "org.agentstack.chatgpt-mcp"
 PACKAGE = "orrery_chatgpt_mcp"
@@ -48,6 +51,8 @@ MIN_PYTHON = (3, 11)
 PYTHON_FLAGS = ["-I", "-S", "-B"]
 LSOF = "/usr/sbin/lsof"
 BOOTOUT_POLLS = 50  # x 0.1 s for launchd to drop the job
+# SHA-256 of the exact BOOTSTRAP written by the preceding release (PR #42).
+PREVIOUS_BOOTSTRAP_SHA256 = "18c3da518e4c2ab6938b2e2d261683766df62750bac7a4270e969d956923fdda"
 
 Runner = Callable[..., subprocess.CompletedProcess]
 
@@ -90,6 +95,13 @@ if sys.argv[3:] == ["--check"]:
     print("ok")
     sys.exit(0)
 sys.path.insert(0, root)
+if os.environ.get("ORRERY_MCP_ENABLE_MESSAGE") == "1":
+    from orrery_chatgpt_mcp.helper_release import verify_helper_release
+    from pathlib import Path
+    helper = os.environ.get("ORRERY_MCP_MESSAGE_HELPER_ROOT", "")
+    helper_digest = os.environ.get("ORRERY_MCP_MESSAGE_HELPER_DIGEST", "")
+    if not helper or not verify_helper_release(Path(helper), helper_digest):
+        bad("message helper release integrity check failed")
 from orrery_chatgpt_mcp.server import main
 sys.exit(main(["serve"]))
 """
@@ -108,6 +120,11 @@ class ServicePlan:
     port: int = 8790
     dashboard_url: str = "http://127.0.0.1:8770"
     label: str = LABEL
+    message_profile: Path | None = None
+    message_helper_root: Path | None = None
+    message_helper_digest: str | None = None
+    message_approval: str | None = None
+    message_max_per_hour: int | None = None
 
     @property
     def log_path(self) -> Path:
@@ -197,7 +214,7 @@ def program_arguments(plan: ServicePlan) -> list[str]:
 
 
 def render_plist(plan: ServicePlan) -> bytes:
-    """The LaunchAgent. No secret and no spawn: see the module docstring."""
+    """The LaunchAgent: no secrets, no spawn, explicit operator-only message opt-in."""
     env = {
         "ORRERY_MCP_AUTH": "pairing",
         "ORRERY_MCP_BIND_HOST": "127.0.0.1",
@@ -206,6 +223,16 @@ def render_plist(plan: ServicePlan) -> bytes:
         "ORRERY_MCP_STATE_DIR": str(plan.state_dir),
         "ORRERY_MCP_ENABLE_SPAWN": "0",
     }
+    env["ORRERY_MCP_ENABLE_MESSAGE"] = "0"
+    if plan.message_profile is not None:
+        env.update({
+            "ORRERY_MCP_ENABLE_MESSAGE": "1",
+            "ORRERY_MCP_MESSAGE_PROFILE": str(plan.message_profile),
+            "ORRERY_MCP_MESSAGE_HELPER_ROOT": str(plan.message_helper_root),
+            "ORRERY_MCP_MESSAGE_HELPER_DIGEST": str(plan.message_helper_digest),
+            "ORRERY_MCP_MESSAGE_APPROVAL": plan.message_approval or "chat",
+            "ORRERY_MCP_MESSAGE_MAX_PER_HOUR": str(plan.message_max_per_hour if plan.message_max_per_hour is not None else 20),
+        })
     return plistlib.dumps({
         "Label": plan.label,
         "ProgramArguments": program_arguments(plan),
@@ -244,7 +271,9 @@ def _load_own_plist(target: Path, label: str) -> dict | None:
         raise ConfigError(f"{target} is not a plist this command wrote; left in place")
     args = spec.get("ProgramArguments")
     legacy = isinstance(args, list) and args[1:] == ["-s", "-m", PACKAGE, "serve"]
-    current = isinstance(args, list) and len(args) == 8 and args[1:5] == [*PYTHON_FLAGS, "-c"] and args[5] == BOOTSTRAP
+    pinned = isinstance(args, list) and len(args) == 8 and args[1:5] == [*PYTHON_FLAGS, "-c"] and isinstance(args[5], str)
+    current = pinned and (args[5] == BOOTSTRAP or
+                          hashlib.sha256(args[5].encode("utf-8")).hexdigest() == PREVIOUS_BOOTSTRAP_SHA256)
     if spec.get("Label") != label or not (legacy or current):
         raise ConfigError(f"{target} is not a plist this command wrote; left in place")
     return spec
@@ -372,6 +401,40 @@ def wait_until_answering(plan: ServicePlan, secret: str, runner: Runner = subpro
     raise last
 
 
+def _preflight_message_sender(plan: ServicePlan) -> None:
+    """Read-only canonical identity/recipient verification before replacing a working service."""
+    from .messaging import DaemonSender, SenderError
+    sender = DaemonSender(plan.message_profile, plan.message_helper_root)
+    try:
+        allowed = sender.allowed()
+        with sender.session() as runtime:
+            runtime.identity()
+            for name, mail_id in allowed.items():
+                recipient = runtime.lookup(name)
+                if recipient["id"] != mail_id or recipient["retired"]:
+                    raise ConfigError("sender allowlist includes a changed or retired recipient")
+    except SenderError as exc:
+        raise ConfigError(f"message sender cannot be verified ({exc.code}); old service left running") from None
+
+
+def _resolve_message_controls(plan: ServicePlan, existing: dict | None) -> ServicePlan:
+    """Preserve stricter existing operator controls unless explicitly overridden."""
+    if plan.message_profile is None:
+        return plan
+    env = (existing or {}).get("EnvironmentVariables", {})
+    if not isinstance(env, dict) or env.get("ORRERY_MCP_ENABLE_MESSAGE") != "1":
+        env = {}
+    approval = (plan.message_approval if plan.message_approval is not None else
+                env.get("ORRERY_MCP_MESSAGE_APPROVAL", "chat"))
+    value = (plan.message_max_per_hour if plan.message_max_per_hour is not None else
+             env.get("ORRERY_MCP_MESSAGE_MAX_PER_HOUR", 20))
+    try:
+        rate = int(value)
+    except (ValueError, TypeError):
+        raise ConfigError("existing message max per hour is not an integer") from None
+    return replace(plan, message_approval=approval, message_max_per_hour=rate)
+
+
 def install_service(plan: ServicePlan, *, runner: Runner = subprocess.run, launch_agents: Path | None = None,
                     verify: bool = True) -> dict:
     """Write the LaunchAgent and (re)load it. Refuses instead of repairing a bad setup.
@@ -389,6 +452,20 @@ def install_service(plan: ServicePlan, *, runner: Runner = subprocess.run, launc
         raise ConfigError(f"{plan.release_dir} is not an intact release")
     target = plist_path(plan.label, launch_agents)
     existing = _load_own_plist(target, plan.label)
+    plan = _resolve_message_controls(plan, existing)
+    if plan.message_profile is not None:
+        if not (plan.release_dir / PACKAGE / "helper_release.py").is_file():
+            raise ConfigError("message opt-in requires a gateway release with helper support")
+        if not plan.message_helper_root or not plan.message_helper_digest:
+            raise ConfigError("message service needs a pinned helper release")
+        if plan.message_approval not in ("chat", "local") or not 1 <= plan.message_max_per_hour <= 200:
+            raise ConfigError("invalid message service approval or hourly rate")
+        if not verify_helper_release(plan.message_helper_root, plan.message_helper_digest):
+            raise ConfigError("message helper release is not intact")
+        check_profile(plan.message_profile)
+        _preflight_message_sender(plan)
+    elif plan.message_helper_root or plan.message_helper_digest:
+        raise ConfigError("message helper is set without an approved profile")
     info = job_info(plan.label, runner)
     stopped = ""
     if info is not None:
@@ -417,7 +494,20 @@ def install_service(plan: ServicePlan, *, runner: Runner = subprocess.run, launc
     done = runner(["launchctl", "bootstrap", _domain(), str(target)], capture_output=True, text=True)
     if done.returncode != 0:
         raise ConfigError(f"launchctl bootstrap failed ({done.returncode}): {done.stderr.strip()[:300]}{stopped}")
-    return wait_until_answering(plan, secret, runner) if verify else {}
+    if not verify:
+        return {}
+    status = wait_until_answering(plan, secret, runner)
+    capabilities = status.get("capabilities")
+    if not isinstance(capabilities, dict):
+        raise VerifyError("service message capability does not match explicit installation")
+    message_enabled = capabilities.get("message_enabled_on_server")
+    legacy_off = ("message_enabled_on_server" not in capabilities
+                  and capabilities.get("message_existing_agent") is False)
+    if legacy_off and not plan.message_profile:
+        message_enabled = False  # pre-message gateway releases explicitly advertised no write tool
+    if message_enabled is not bool(plan.message_profile):
+        raise VerifyError("service message capability does not match explicit installation")
+    return status
 
 
 def uninstall_service(label: str = LABEL, *, runner: Runner = subprocess.run, launch_agents: Path | None = None) -> bool:
@@ -462,6 +552,11 @@ def service_status(label: str = LABEL, *, runner: Runner = subprocess.run, launc
     else:  # plist from the first version of this command
         release = Path(env.get("PYTHONPATH", ""))
         digest = str(read_release(release).get("digest", ""))
+    enabled = env.get("ORRERY_MCP_ENABLE_MESSAGE") == "1"
+    out.update(message=enabled)
+    if enabled:
+        out["message_helper_intact"] = verify_helper_release(Path(env.get("ORRERY_MCP_MESSAGE_HELPER_ROOT", "")),
+                                                               env.get("ORRERY_MCP_MESSAGE_HELPER_DIGEST", ""))
     out.update(port=int(env.get("ORRERY_MCP_PORT", "8790")), spawn=env.get("ORRERY_MCP_ENABLE_SPAWN") == "1",
                python=args[0], release=str(release), source_commit=read_release(release).get("source_commit"),
                release_intact=bool(digest) and verify_release(release, digest, args[0], runner))

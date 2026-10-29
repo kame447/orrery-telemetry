@@ -278,3 +278,109 @@ def test_no_body_in_mail_log_when_tool_logging_is_off(mail, gateway):
     log_text = mail["log"].read_text(errors="replace")
     assert marker not in log_text
     assert marker in inbox(mail)[0]["body_md"]
+
+
+@pytest.mark.parametrize("mail", [{"AGENTSTACK_MAIL_TOOLS_LOG_ENABLED": "false"}], indirect=True)
+def test_launchd_pinned_release_optin_connects_to_isolated_mail(mail, tmp_path):
+    """Exact launchd argv/env + pinned helper + full delivery to a fictional agent."""
+    import plistlib
+    import urllib.request
+    from orrery_chatgpt_mcp import pairing, service
+    from orrery_chatgpt_mcp.helper_release import install_helper_release
+
+    dashboard = FakeDashboard()
+    state = tmp_path / "service-state"
+    secret = pairing.create_secret(state)
+    release, digest = service.install_release(ROOT / "integrations/chatgpt_mcp/src", state / "releases")
+    helper, helper_digest = install_helper_release(ROOT, state / "helpers")
+    port = free_port()
+    assert port not in LIVE_PORTS
+    plan = service.ServicePlan(
+        python=sys.executable, release_dir=release, digest=digest, state_dir=state,
+        port=port, dashboard_url=dashboard.url,
+        message_profile=mail["profile"], message_helper_root=helper,
+        message_helper_digest=helper_digest,
+    )
+    preflight = subprocess.run([
+        sys.executable, "-I", "-S", "-B", "-c",
+        "import sys; from pathlib import Path;sys.path.insert(0,sys.argv[1]);"
+        "from orrery_chatgpt_mcp import service;"
+        "p=service.ServicePlan(python=sys.executable,release_dir=Path(sys.argv[2]),"
+        "digest='f'*64,state_dir=Path(sys.argv[3]),message_profile=Path(sys.argv[4]),"
+        "message_helper_root=Path(sys.argv[5]));"
+        "service._preflight_message_sender(p);print('ok')",
+        str(ROOT / "integrations/chatgpt_mcp/src"), str(release), str(state),
+        str(mail["profile"]), str(helper),
+    ], capture_output=True, text=True, timeout=16, env={"HOME": str(tmp_path)})
+    assert preflight.returncode == 0 and preflight.stdout.strip() == "ok", preflight.stderr
+
+    spec = plistlib.loads(service.render_plist(plan))
+    env = {**spec["EnvironmentVariables"], "HOME": str(tmp_path), "PATH": "/usr/bin:/bin"}
+    output = open(tmp_path / "service.log", "wb")
+    proc = subprocess.Popen(spec["ProgramArguments"], cwd=spec["WorkingDirectory"],
+                            env=env, stdout=output, stderr=output)
+    try:
+        url = f"http://127.0.0.1:{port}/mcp/{secret}"
+        payload = json.dumps({"jsonrpc": "2.0", "id": 20, "method": "tools/call",
+                              "params": {"name": "orrery_status", "arguments": {}}}).encode()
+        deadline = time.monotonic() + 18
+        while True:
+            assert proc.poll() is None, "pinned service exited before connecting to synthetic Mail"
+            try:
+                request = urllib.request.Request(url, data=payload, headers={
+                    "Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+                })
+                with urllib.request.urlopen(request, timeout=2) as response:
+                    result = json.load(response)["result"]["structuredContent"]
+                break
+            except (OSError, ValueError):
+                assert time.monotonic() < deadline, "isolated pinned gateway did not answer"
+                time.sleep(0.2)
+        assert result["capabilities"]["spawn_enabled_on_server"] is False
+        assert result["capabilities"]["message_existing_agent"] is True
+        assert result["capabilities"]["message_recipients"] == ["ExampleWorker"]
+        assert mail["client"].fetch_inbox(project_key=mail["project"], agent_name="ExampleWorker",
+                                          registration_token=WORKER_TOKEN, include_bodies=True, limit=10) == []
+
+        def call_mcp(name, arguments):
+            request = urllib.request.Request(url, data=json.dumps({
+                "jsonrpc": "2.0", "id": 21, "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            }).encode(), headers={
+                "Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+            })
+            with urllib.request.urlopen(request, timeout=6) as response:
+                return json.load(response)["result"]
+
+        preview_result = call_mcp("orrery_message_preview", {
+            "recipient": "ExampleWorker",
+            "subject": "service integration",
+            "instruction": "isolated opt-in service E2E",
+        })
+        assert preview_result["isError"] is False, preview_result
+        preview = preview_result["structuredContent"]
+        receipt = call_mcp("orrery_message_commit", {
+            "preview_id": preview["preview_id"],
+            "idempotency_key": "optin-e2e-0001",
+            "content_sha256": preview["content_sha256"],
+        })
+        assert receipt["isError"] is False, receipt
+        assert receipt["structuredContent"]["outcome"] == "accepted"
+        inbox = mail["client"].fetch_inbox(
+            project_key=mail["project"], agent_name="ExampleWorker",
+            registration_token=WORKER_TOKEN, include_bodies=True, limit=10)
+        assert len(inbox) == 1 and inbox[0]["from"] == "ChatRelay"
+        assert "isolated opt-in service E2E" in inbox[0]["body_md"]
+        replay = call_mcp("orrery_message_commit", {
+            "preview_id": preview["preview_id"], "idempotency_key": "optin-e2e-0001",
+            "content_sha256": preview["content_sha256"],
+        })
+        assert replay["structuredContent"]["replayed"] is True
+        assert len(mail["client"].fetch_inbox(
+            project_key=mail["project"], agent_name="ExampleWorker",
+            registration_token=WORKER_TOKEN, include_bodies=True, limit=10)) == 1
+    finally:
+        proc.terminate()
+        proc.wait(timeout=12)
+        output.close()
+        dashboard.close()
