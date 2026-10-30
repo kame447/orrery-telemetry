@@ -122,3 +122,67 @@ def test_installed_reader_minimal_environment_with_synthetic_store(tmp_path):
         cwd='/', env={'HOME': str(tmp_path), 'PATH': os.defpath}, stdin=subprocess.DEVNULL,
         text=True, capture_output=True, timeout=10)
     assert done.returncode == 0 and done.stdout == 'synthetic-e1-value\n' and done.stderr == ''
+
+
+OP_REF = {'store': '1password', 'reference': 'op://Development/DeepSeek API/credential'}
+
+
+@pytest.fixture
+def prepared_onepassword(tmp_path, monkeypatch):
+    tool = tmp_path / 'op'
+    tool.write_text('synthetic executable, never invoked')
+    tool.chmod(0o700)
+    monkeypatch.setattr(reader, 'OP_CLI_CANDIDATES', (str(tool),))
+    monkeypatch.setattr(reader.sys, 'platform', 'darwin')
+    return tool
+
+
+@pytest.mark.parametrize('ref', [
+    {'store': '1password', 'reference': 'op://vault/item'},
+    {'store': '1password', 'reference': 'op://vault//field'},
+    {'store': '1password', 'reference': 'op://vault/../field'},
+    {'store': '1password', 'reference': 'op://vault/item/field\nother'},
+    {'store': '1password', 'reference': 'op://vault/item/field?attribute=value'},
+    {'store': '1password', 'reference': 'https://vault/item/field'},
+    {'store': '1password', 'reference': 'op://vault/item/field', 'api_key': 'private'},
+    {'store': '1password', 'reference': None},
+])
+def test_onepassword_rejects_invalid_or_value_shaped_refs(ref):
+    with pytest.raises(ValueError, match='^invalid_credential_ref$'):
+        reader.validate_ref(ref)
+
+
+def test_onepassword_reads_only_selected_ref_with_whitelisted_environment(prepared_onepassword, monkeypatch):
+    monkeypatch.setenv('DEEPSEEK_API_KEY', 'ambient-must-not-be-used')
+    monkeypatch.setenv('OP_SERVICE_ACCOUNT_TOKEN', 'ambient-service-token-must-not-pass')
+    monkeypatch.setenv('OP_ACCOUNT', 'personal-account')
+    monkeypatch.setenv('OP_BIOMETRIC_UNLOCK_ENABLED', 'true')
+    calls = []
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0, stdout=b'synthetic-onepassword-key\n')
+    assert reader.read_ref(OP_REF, runner=run) == 'synthetic-onepassword-key'
+    argv, options = calls[0]
+    assert argv == [str(prepared_onepassword), 'read', OP_REF['reference']]
+    assert options['stdin'] == subprocess.DEVNULL and options['timeout'] == 20
+    assert set(options['env']) == {'HOME', 'PATH', 'LANG', 'OP_ACCOUNT', 'OP_BIOMETRIC_UNLOCK_ENABLED'}
+    assert not any('synthetic-onepassword-key' in str(value) for value in (argv, options))
+
+
+def test_onepassword_static_check_requires_known_executable_but_never_reads_key(prepared_onepassword, monkeypatch):
+    monkeypatch.setattr(reader.subprocess, 'run', lambda *args, **kwargs: pytest.fail('static check read a key'))
+    reader.validate_ref(OP_REF)
+    reader.validate_environment(OP_REF)
+    prepared_onepassword.unlink()
+    with pytest.raises(ValueError, match='^credential_reader_unavailable$'):
+        reader.validate_environment(OP_REF)
+    monkeypatch.setattr(reader.sys, 'platform', 'linux')
+    with pytest.raises(ValueError, match='^unsupported_credential_store$'):
+        reader.validate_environment(OP_REF)
+
+
+def test_onepassword_failed_read_reports_only_sanitized_error(prepared_onepassword):
+    def run(*args, **kwargs):
+        return SimpleNamespace(returncode=1, stdout=b'private-error')
+    with pytest.raises(ValueError, match='^credential_unavailable$'):
+        reader.read_ref(OP_REF, runner=run)

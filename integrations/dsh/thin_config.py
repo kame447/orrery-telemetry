@@ -176,7 +176,7 @@ def validate_input(document):
                 raise ValueError('credential_reader_unavailable')
             reader = runpy.run_path(str(reader_file))
             reader['validate_ref'](credential_ref)
-            reader['validate_environment']()
+            reader['validate_environment'](credential_ref)
             reader_command = reader['command'](root, document['manifest_file'], backend_id, sys.executable)
             credential_context = reader['context']()
         else:

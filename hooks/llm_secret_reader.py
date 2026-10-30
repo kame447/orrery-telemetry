@@ -11,6 +11,7 @@ import subprocess
 import sys
 
 SECRET_TOOL = '/usr/bin/secret-tool'
+OP_CLI_CANDIDATES = ('/opt/homebrew/bin/op', '/usr/local/bin/op')
 CONTEXT_KEYS = ('DBUS_SESSION_BUS_ADDRESS', 'XDG_RUNTIME_DIR')
 CONNECTIONS = runpy.run_path(str(Path(__file__).with_name('native_connections.py')))
 REASONS = {'invalid_credential_ref', 'credential_reference_conflict',
@@ -19,6 +20,17 @@ REASONS = {'invalid_credential_ref', 'credential_reference_conflict',
 
 
 def validate_ref(ref):
+    if isinstance(ref, dict) and ref.get('store') == '1password':
+        reference = ref.get('reference')
+        if (set(ref) != {'store', 'reference'} or not isinstance(reference, str)
+                or len(reference) > 2048 or not reference.startswith('op://')
+                or any(ord(c) < 32 or ord(c) == 127 for c in reference)
+                or '?' in reference or '#' in reference):
+            raise ValueError('invalid_credential_ref')
+        parts = reference[5:].split('/')
+        if (len(parts) < 3 or any(not part or part in ('.', '..') for part in parts)):
+            raise ValueError('invalid_credential_ref')
+        return ref
     if (not isinstance(ref, dict) or set(ref) != {'store', 'attributes'}
             or ref.get('store') != 'secret-service'):
         raise ValueError('invalid_credential_ref')
@@ -34,8 +46,21 @@ def validate_ref(ref):
     return ref
 
 
-def validate_environment():
-    # Admission checks only executable references, never D-Bus or stored keys.
+def op_cli():
+    for candidate in OP_CLI_CANDIDATES:
+        path = Path(candidate)
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    raise ValueError('credential_reader_unavailable')
+
+
+def validate_environment(ref=None):
+    # Static validation checks only known CLI paths, never touches secrets or asks for auth.
+    if isinstance(ref, dict) and ref.get('store') == '1password':
+        if sys.platform != 'darwin':
+            raise ValueError('unsupported_credential_store')
+        op_cli()
+        return
     if sys.platform != 'linux':
         raise ValueError('unsupported_credential_store')
     if not Path(SECRET_TOOL).is_file() or not os.access(SECRET_TOOL, os.X_OK):
@@ -57,15 +82,23 @@ def context(environ=None):
 
 def read_ref(ref, *, runner=None):
     validate_ref(ref)
-    validate_environment()
-    argv = [SECRET_TOOL, 'lookup']
-    for key, value in sorted(ref['attributes'].items()):
-        argv.extend([key, value])
-    env = {'PATH': '/usr/bin:/bin', 'HOME': os.path.expanduser('~'),
-           'LANG': 'C.UTF-8', **context()}
+    validate_environment(ref)
+    env = {'PATH': '/usr/bin:/bin', 'HOME': os.path.expanduser('~'), 'LANG': 'C.UTF-8'}
+    if ref['store'] == '1password':
+        argv = [op_cli(), 'read', ref['reference']]
+        timeout = 20
+        for name in ('OP_ACCOUNT', 'OP_BIOMETRIC_UNLOCK_ENABLED'):
+            if os.environ.get(name):
+                env[name] = os.environ[name]
+    else:
+        argv = [SECRET_TOOL, 'lookup']
+        for key, value in sorted(ref['attributes'].items()):
+            argv.extend([key, value])
+        env.update(context())
+        timeout = 5
     try:
         result = (runner or subprocess.run)(argv, env=env, stdin=subprocess.DEVNULL,
-            capture_output=True, timeout=5)
+            capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         raise ValueError('credential_timeout') from None
     except OSError:
