@@ -12,6 +12,7 @@ import sys
 
 SECRET_TOOL = '/usr/bin/secret-tool'
 OP_CLI_CANDIDATES = ('/opt/homebrew/bin/op', '/usr/local/bin/op')
+MAC_SECURITY = '/usr/bin/security'
 CONTEXT_KEYS = ('DBUS_SESSION_BUS_ADDRESS', 'XDG_RUNTIME_DIR')
 CONNECTIONS = runpy.run_path(str(Path(__file__).with_name('native_connections.py')))
 REASONS = {'invalid_credential_ref', 'credential_reference_conflict',
@@ -20,6 +21,17 @@ REASONS = {'invalid_credential_ref', 'credential_reference_conflict',
 
 
 def validate_ref(ref):
+    if isinstance(ref, dict) and ref.get('store') == '1password-service-account':
+        keychain = ref.get('keychain')
+        if (set(ref) != {'store', 'reference', 'keychain'}
+                or not isinstance(keychain, dict)
+                or set(keychain) != {'service', 'account'}
+                or any(not isinstance(keychain[k], str)
+                       or not re.fullmatch(r'[A-Za-z][A-Za-z0-9._-]{0,127}', keychain[k])
+                       for k in ('service', 'account'))):
+            raise ValueError('invalid_credential_ref')
+        validate_ref({'store': '1password', 'reference': ref.get('reference')})
+        return ref
     if isinstance(ref, dict) and ref.get('store') == '1password':
         reference = ref.get('reference')
         if (set(ref) != {'store', 'reference'} or not isinstance(reference, str)
@@ -56,10 +68,13 @@ def op_cli():
 
 def validate_environment(ref=None):
     # Static validation checks only known CLI paths, never touches secrets or asks for auth.
-    if isinstance(ref, dict) and ref.get('store') == '1password':
+    if isinstance(ref, dict) and ref.get('store') in ('1password', '1password-service-account'):
         if sys.platform != 'darwin':
             raise ValueError('unsupported_credential_store')
         op_cli()
+        if ref['store'] == '1password-service-account':
+            if not Path(MAC_SECURITY).is_file() or not os.access(MAC_SECURITY, os.X_OK):
+                raise ValueError('credential_reader_unavailable')
         return
     if sys.platform != 'linux':
         raise ValueError('unsupported_credential_store')
@@ -84,12 +99,35 @@ def read_ref(ref, *, runner=None):
     validate_ref(ref)
     validate_environment(ref)
     env = {'PATH': '/usr/bin:/bin', 'HOME': os.path.expanduser('~'), 'LANG': 'C.UTF-8'}
-    if ref['store'] == '1password':
+    if ref['store'] in ('1password', '1password-service-account'):
+        if ref['store'] == '1password-service-account':
+            keychain = ref['keychain']
+            lookup = [MAC_SECURITY, 'find-generic-password', '-s', keychain['service'],
+                      '-a', keychain['account'], '-w']
+            try:
+                credential = (runner or subprocess.run)(
+                    lookup, env=env, stdin=subprocess.DEVNULL,
+                    capture_output=True, timeout=8)
+            except subprocess.TimeoutExpired:
+                raise ValueError('credential_timeout') from None
+            except OSError:
+                raise ValueError('credential_unavailable') from None
+            if credential.returncode or not 0 < len(credential.stdout) <= 65536:
+                raise ValueError('credential_unavailable')
+            try:
+                token = credential.stdout.decode('utf-8').removesuffix('\n')
+            except (UnicodeError, AttributeError, TypeError):
+                raise ValueError('credential_unavailable') from None
+            if (not token.startswith('ops_') or not token[4:]
+                    or any(c.isspace() or ord(c) < 33 or ord(c) == 127 for c in token)):
+                raise ValueError('credential_unavailable')
+            env = {**env, 'OP_SERVICE_ACCOUNT_TOKEN': token}
+        else:
+            for name in ('OP_ACCOUNT', 'OP_BIOMETRIC_UNLOCK_ENABLED'):
+                if os.environ.get(name):
+                    env[name] = os.environ[name]
         argv = [op_cli(), 'read', ref['reference']]
         timeout = 20
-        for name in ('OP_ACCOUNT', 'OP_BIOMETRIC_UNLOCK_ENABLED'):
-            if os.environ.get(name):
-                env[name] = os.environ[name]
     else:
         argv = [SECRET_TOOL, 'lookup']
         for key, value in sorted(ref['attributes'].items()):

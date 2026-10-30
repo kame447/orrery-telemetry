@@ -186,3 +186,76 @@ def test_onepassword_failed_read_reports_only_sanitized_error(prepared_onepasswo
         return SimpleNamespace(returncode=1, stdout=b'private-error')
     with pytest.raises(ValueError, match='^credential_unavailable$'):
         reader.read_ref(OP_REF, runner=run)
+
+
+SA_REF = {
+    'store': '1password-service-account',
+    'reference': 'op://Orrery/DeepSeek/credential',
+    'keychain': {'service': 'orrery-1password-service-account', 'account': 'deepseek'},
+}
+
+
+def test_service_account_keychain_bootstrap_injects_only_into_op_process(prepared_onepassword, tmp_path, monkeypatch):
+    keychain = tmp_path / 'security'
+    keychain.write_text('synthetic binary')
+    keychain.chmod(0o700)
+    monkeypatch.setattr(reader, 'MAC_SECURITY', str(keychain))
+    monkeypatch.setenv('OP_SERVICE_ACCOUNT_TOKEN', 'ambient-must-be-ignored')
+    monkeypatch.setenv('DEEPSEEK_API_KEY', 'ambient-provider-key-must-be-ignored')
+    calls = []
+    def run(argv, **opts):
+        calls.append((argv, opts))
+        if argv[0] == str(keychain):
+            return SimpleNamespace(returncode=0, stdout=b'ops_synthetic-test-service-credential\n')
+        assert argv == [str(prepared_onepassword), 'read', SA_REF['reference']]
+        assert opts['env'].get('OP_SERVICE_ACCOUNT_TOKEN') == 'ops_synthetic-test-service-credential'
+        assert 'DEEPSEEK_API_KEY' not in opts['env']
+        return SimpleNamespace(returncode=0, stdout=b'synthetic-deepseek-provider-secret\n')
+    assert reader.read_ref(SA_REF, runner=run) == 'synthetic-deepseek-provider-secret'
+    assert len(calls) == 2
+    assert calls[0][0] == [str(keychain), 'find-generic-password', '-s',
+                            SA_REF['keychain']['service'], '-a',
+                            SA_REF['keychain']['account'], '-w']
+    assert calls[0][1]['stdin'] == subprocess.DEVNULL
+    assert calls[0][1]['timeout'] == 8 and calls[1][1]['timeout'] == 20
+    assert set(calls[0][1]['env']) == {'HOME', 'PATH', 'LANG'}
+
+
+@pytest.mark.parametrize('ref', [
+    {'store': '1password-service-account', 'reference': 'op://a/b/c'},
+    {**SA_REF, 'keychain': {'service': '../bad', 'account': 'deepseek'}},
+    {**SA_REF, 'keychain': {'service': 'valid', 'account': 'bad name'}},
+    {**SA_REF, 'keychain': {'service': 'valid', 'account': 'ok', 'token': 'secret'}},
+    {**SA_REF, 'reference': 'op://bad//field'},
+    {**SA_REF, 'token': 'do-not-store-token-in-manifest'},
+])
+def test_service_account_rejects_malformed_or_embedded_secret_ref(ref):
+    with pytest.raises(ValueError, match='^invalid_credential_ref$'):
+        reader.validate_ref(ref)
+
+
+def test_service_account_missing_token_never_uses_desktop_fallback(prepared_onepassword, tmp_path, monkeypatch):
+    keychain = tmp_path / 'security'
+    keychain.write_text('synthetic binary')
+    keychain.chmod(0o700)
+    monkeypatch.setattr(reader, 'MAC_SECURITY', str(keychain))
+    calls = []
+    def run(argv, **opts):
+        calls.append(argv)
+        return SimpleNamespace(returncode=44, stdout=b'', stderr=b'private details')
+    with pytest.raises(ValueError, match='^credential_unavailable$'):
+        reader.read_ref(SA_REF, runner=run)
+    assert len(calls) == 1 and calls[0][0] == str(keychain)
+
+
+def test_service_account_static_check_never_reads_key(prepared_onepassword, tmp_path, monkeypatch):
+    keychain = tmp_path / 'security'
+    keychain.write_text('synthetic binary')
+    keychain.chmod(0o700)
+    monkeypatch.setattr(reader, 'MAC_SECURITY', str(keychain))
+    monkeypatch.setattr(reader.subprocess, 'run', lambda *a, **kw: pytest.fail('must not read token'))
+    reader.validate_ref(SA_REF)
+    reader.validate_environment(SA_REF)
+    keychain.unlink()
+    with pytest.raises(ValueError, match='^credential_reader_unavailable$'):
+        reader.validate_environment(SA_REF)
