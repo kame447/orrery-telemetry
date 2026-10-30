@@ -12,15 +12,15 @@ import {once} from 'node:events';
 import {providerClass, secretServiceLookup} from '../integrations/dsh/keychain_credentials.mjs';
 
 // Exercise the production function verbatim on any CI host, without a store.
-function linuxReaderProbe(execFile) {
+function readerProbe(execFile, platform = 'linux', extraEnv = {}) {
   const raw = fs.readFileSync(new URL('../integrations/dsh/keychain_credentials.mjs', import.meta.url), 'utf8');
   const start = raw.indexOf('export function secretServiceLookup(');
   const end = raw.indexOf('export function keychainLookup(', start);
   assert.ok(start >= 0 && end > start);
-  const sandbox = {path, execFile, process: {platform: 'linux', env: {
+  const sandbox = {path, execFile, process: {platform, env: {
     HOME: '/synthetic/home', PATH: '/synthetic/bin', LANG: 'C.UTF-8',
     DBUS_SESSION_BUS_ADDRESS: 'unix:path=/synthetic/bus', XDG_RUNTIME_DIR: '/synthetic/runtime',
-    DEEPSEEK_API_KEY: 'synthetic-env-canary', NODE_OPTIONS: '--import forbidden',
+    DEEPSEEK_API_KEY: 'synthetic-env-canary', NODE_OPTIONS: '--import forbidden', ...extraEnv,
   }}};
   vm.createContext(sandbox);
   vm.runInContext(raw.slice(start, end).replace(/^export /, '') + '\nthis.lookup = secretServiceLookup;', sandbox);
@@ -34,7 +34,7 @@ function readerCommand(connection) {
 
 test('secret service reader preserves legacy and additional connection IDs through execFile', async t => {
   const calls = [];
-  const lookup = linuxReaderProbe((file, args, options, callback) => {
+  const lookup = readerProbe((file, args, options, callback) => {
     calls.push({file, args, options}); callback(null, 'synthetic-memory-value\r\n');
   });
   for (const connection of ['deepseek', 'strata', 'strata-epyc']) {
@@ -57,9 +57,32 @@ test('secret service reader preserves legacy and additional connection IDs throu
   assert.equal(calls.length, 3);
 });
 
+test('1Password helper uses pinned reader on Mac without forwarding provider credentials', async () => {
+  const calls = [];
+  const read = readerProbe((file, args, options, callback) => {
+    calls.push({file, args, options}); callback(null, 'synthetic-1password-memory-key\n');
+  }, 'darwin', {
+    OP_ACCOUNT: 'synthetic-1password-account',
+    OP_BIOMETRIC_UNLOCK_ENABLED: 'true',
+    OP_SERVICE_ACCOUNT_TOKEN: 'sensitive-token-must-not-pass',
+  });
+  const argv = readerCommand('deepseek');
+  assert.equal(await read({reader_command: argv}), 'synthetic-1password-memory-key');
+  const call = calls.at(-1);
+  assert.equal(call.file, argv[0]);
+  assert.deepEqual(call.args, argv.slice(1));
+  assert.equal(call.options.timeout, 25000);
+  assert.deepEqual({...call.options.env}, {
+    HOME: '/synthetic/home', PATH: '/synthetic/bin', LANG: 'C.UTF-8',
+    DBUS_SESSION_BUS_ADDRESS: 'unix:path=/synthetic/bus', XDG_RUNTIME_DIR: '/synthetic/runtime',
+    OP_ACCOUNT: 'synthetic-1password-account', OP_BIOMETRIC_UNLOCK_ENABLED: 'true',
+  });
+  assert.equal(calls.length, 1);
+});
+
 test('secret service reader rejects malformed commands and IDs without execFile', async () => {
   let calls = 0;
-  const lookup = linuxReaderProbe(() => {calls++; throw Error('helper must not execute');});
+  const lookup = readerProbe(() => {calls++; throw Error('helper must not execute');});
   const valid = readerCommand('strata-epyc');
   const changed = (index, value) => valid.map((item, position) => position === index ? value : item);
   const commands = [null, {}, valid.slice(1), [...valid, 'extra'],
@@ -75,7 +98,7 @@ test('secret service reader rejects malformed commands and IDs without execFile'
   }
   assert.equal(calls, 0);
   for (const [error, output] of [[Error('synthetic-private-stderr'), 'synthetic-private-value'], [null, ' \n']]) {
-    const failed = linuxReaderProbe((_file, _args, _options, callback) => callback(error, output));
+    const failed = readerProbe((_file, _args, _options, callback) => callback(error, output));
     await assert.rejects(failed({reader_command: valid}), /^Error: DSH_CREDENTIAL_UNAVAILABLE$/);
   }
 });
@@ -92,7 +115,7 @@ test('secret service reader leaves undeclared connection rejection to the real P
     const command = [python, '-I', '-B', path.resolve('hooks/llm_secret_reader.py'),
       '--manifest', manifest, '--backend', 'strata-absent'];
     let calls = 0, result;
-    const lookup = linuxReaderProbe((file, args, options, callback) => {
+    const lookup = readerProbe((file, args, options, callback) => {
       calls++; assert.equal(file, python); assert.deepEqual(args, command.slice(1));
       // Import the actual reader/main; fail the test if it reaches key lookup.
       const probe = 'import runpy,sys\nreader=runpy.run_path(sys.argv[1])\n' +

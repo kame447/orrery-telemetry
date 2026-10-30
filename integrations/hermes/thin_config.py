@@ -165,7 +165,7 @@ def _validate(document):
             raise ValueError('credential_reader_unavailable')
         reader = runpy.run_path(str(reader_file))
         reader['validate_ref'](credential_ref)
-        reader['validate_environment']()
+        reader['validate_environment'](credential_ref)
         route['key_cmd'] = shlex.join(reader['command'](
             product, document['manifest_file'], backend, str(python)))
         credential_context = reader['context']()
