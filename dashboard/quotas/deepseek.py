@@ -45,7 +45,8 @@ class DeepSeekBalanceProvider:
             payload = json.loads(result.stdout)
             if result.returncode != 0 or payload.get('ok') is not True:
                 allowed = {'balance_key_unavailable', 'balance_unauthorized',
-                           'balance_http_error', 'balance_unreachable', 'balance_invalid_response'}
+                           'balance_http_error', 'balance_unreachable', 'balance_invalid_response',
+                           'balance_interactive_credential_required'}
                 reason = payload.get('reason')
                 return unknown(reason if reason in allowed else 'balance_read_failed')
             balance = AccountBalance.from_payload(payload.get('balance'))

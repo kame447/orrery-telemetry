@@ -86,6 +86,10 @@ def main():
             backend = manifest['backends'].get('deepseek', {})
             if 'credential_ref' in backend:
                 selected_ref = True
+                # Background quota refresh must not open a desktop authentication prompt.
+                if backend['credential_ref'].get('store') == '1password':
+                    print(json.dumps({'ok': False, 'reason': 'balance_interactive_credential_required'}))
+                    return 1
                 reader = runpy.run_path(str(Path(__file__).resolve().parents[2] / 'hooks/llm_secret_reader.py'))
                 key = reader['read_ref'](backend['credential_ref'])
             else:

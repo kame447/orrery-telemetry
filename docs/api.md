@@ -174,7 +174,8 @@ dsh opt-inが有効な時だけ `providers` に `provider: "dsh"` を加える�
 0円や百分率bucketへ置き換えない。`observed_at` / `last_observed_at` / `checked_at`
 で取得時刻を示し、4分cacheを使う。鍵・Keychainの応答・HTTPの生エラーは返さない。
 
-取得workerだけがKeychainの `deepseek-api` を読み、dashboardのenvへ鍵を入れない。
+取得workerだけがKeychainの `deepseek-api` または明示された資格参照を読み、dashboardのenvへ鍵を入れない。
+ただし `credential_ref.store: "1password"` はデスクトップの対話認証が必要なため、バックグラウンド残高監視では参照せず `balance_interactive_credential_required` を返す。native agentの起動時認証は変更しない。
 既存の同一origin検査とglobal operator admissionはそのまま使う。
 [公式の残高API](https://api-docs.deepseek.com/api/get-user-balance/) と
 [取得・実確認の手順](dsh-stage-a.md)も参照。

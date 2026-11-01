@@ -37,6 +37,34 @@ def test_secret_service_balance_uses_same_explicit_ref_without_keychain_fallback
     assert 'synthetic-ss-canary' not in json.dumps(result)
     if not available:
         assert result == {'ok': False, 'reason': 'balance_key_unavailable'}
+
+
+def test_background_balance_never_prompts_for_personal_onepassword(tmp_path, monkeypatch, capsys):
+    manifest = tmp_path / 'manifest.json'
+    manifest.write_text(json.dumps({'backends': {'deepseek': {
+        'credential_ref': {'store': '1password', 'reference': 'op://fixture/DeepSeek/key'}}}}))
+    monkeypatch.setattr(sys, 'argv', ['deepseek_worker.py', '--manifest', str(manifest)])
+    monkeypatch.setattr(worker.runpy, 'run_path', lambda _: pytest.fail('desktop 1Password must not be invoked'))
+    monkeypatch.setattr(worker, 'keychain_key', lambda: pytest.fail('must not use Keychain fallback'))
+    monkeypatch.setattr(worker, 'fetch_balance', lambda *a: pytest.fail('must not query account without a key'))
+    with patch.dict(os.environ):
+        assert worker.main() == 1
+    assert json.loads(capsys.readouterr().out) == {
+        'ok': False, 'reason': 'balance_interactive_credential_required'}
+
+
+def test_background_balance_allows_noninteractive_credential_reader(tmp_path, monkeypatch, capsys):
+    reference = {'store': '1password-service-account', 'reference': 'op://fixture/DeepSeek/key'}
+    manifest = tmp_path / 'manifest.json'
+    manifest.write_text(json.dumps({'backends': {'deepseek': {'credential_ref': reference}}}))
+    monkeypatch.setattr(sys, 'argv', ['deepseek_worker.py', '--manifest', str(manifest)])
+    monkeypatch.setattr(worker.runpy, 'run_path', lambda _: {'read_ref': lambda ref: 'synthetic-key' if ref == reference else pytest.fail('wrong reference')})
+    monkeypatch.setattr(worker, 'fetch_balance', lambda key, endpoint: {'ok': True, 'observed_at': 1, 'balance': PAYLOAD} if key == 'synthetic-key' else pytest.fail('wrong key'))
+    with patch.dict(os.environ):
+        assert worker.main() == 0
+    assert json.loads(capsys.readouterr().out)['ok'] is True
+
+
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -195,6 +223,16 @@ def test_adapter_cache_unknown_after_failure_and_disabled_no_process(monkeypatch
     assert service.read_all()['providers'] == []
     assert provider.read().balance is None
     assert len(calls) == 2
+
+
+def test_interactive_credential_reason_survives_quota_adapter():
+    result = SimpleNamespace(returncode=1, stdout=json.dumps({
+        'ok': False, 'reason': 'balance_interactive_credential_required'}))
+    provider = DeepSeekBalanceProvider(lambda: True, runner=lambda *a, **k: result)
+    snapshot = provider.read()
+    assert snapshot.status == 'unavailable'
+    assert snapshot.reason == 'balance_interactive_credential_required'
+    assert snapshot.balance is None
 
 
 def test_same_http_usage_consumer_off_matches_master_then_on(tmp_path, monkeypatch):
