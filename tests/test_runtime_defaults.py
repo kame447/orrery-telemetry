@@ -34,7 +34,7 @@ INSTALL_STATE_SAMPLE = ROOT / "scripts" / "install-state.sample.json"
 # These operator-only source entries are deliberately not installer payload.
 # Keep this literal list narrow: all other tracked bin entries must be copied.
 # Contract: docs/daemon-agents.md and docs/daemon-agents.en.md.
-SOURCE_ONLY_ENTRIES = frozenset({"bin/agentstack-daemon"})
+SOURCE_ONLY_ENTRIES = frozenset({"bin/agentstack-daemon", "bin/orrery-chatgpt-mcp"})
 
 
 def _fake_systemctl() -> str:
