@@ -109,6 +109,24 @@ class ThinTests(unittest.TestCase):
         self.assertNotIn('HOME', plan['env'])
         self.assertEqual(plan, thin.generate(self.doc))
 
+    def test_inherited_codex_browser_becomes_native_mcp_client(self):
+        from hooks import child_tools
+        definition = {'command': 'npx', 'args': ['-y', 'chrome-devtools-mcp@latest',
+                      '--autoConnect', '--no-usage-statistics'],
+                      'env': {'npm_config_cache': '/fixture/cache'}, 'cwd': str(self.root)}
+        selected = child_tools.native_plan(child_tools.normalize(), cwd=str(self.root),
+            claude_json=str(self.root / 'absent.json'),
+            codex_config={'mcp_servers': {'chrome-devtools': definition}})
+        mcp = thin.read(self.doc['mcp_config'])
+        mcp['mcpServers'].update(selected['servers'])
+        thin.save(self.doc['mcp_config'], mcp)
+        self.doc['mcp_selection'] = selected
+        plan = thin.generate(self.doc)
+        row = next(row for parent in self.rows(plan) for row in parent.get('insert', [])
+                   if row['id'] == 'orrery-mcp-chrome-devtools')
+        self.assertEqual(row['name'], '@deepseek-ai/dsh-mcp-client')
+        self.assertEqual(row['config'], {'serverName': 'chrome-devtools', 'transport': 'stdio', **definition})
+
     def test_dynamic_url_model_context_and_resume_pin_without_communication(self):
         manifest = thin.read(self.manifest)
         manifest['backends']['strata'] = {'model_source': 'server', 'urls': [
@@ -219,6 +237,15 @@ class ThinTests(unittest.TestCase):
                                  'native_profile_env': {'DSH_HOME': plan['env']['DSH_HOME']}})
         self.assertEqual(resumed['env']['DSH_TUI_DATA_DIR'], str(tui))
         self.assertEqual({p.name: p.read_bytes() for p in user.iterdir()}, before)
+
+    def test_native_history_expectation_is_passed_only_to_legacy_guard(self):
+        self.doc['history_binding'] = {'agent_id': 7, 'launch_id': 'a' * 32}
+        plan = thin.generate(self.doc)
+        guard = next(r for row in self.rows(plan) for r in row.get('insert', []) if r.get('id') == 'orrery-tools')
+        self.assertEqual(guard['config']['history_binding'], self.doc['history_binding'])
+        fresh = thin.generate({**self.doc, 'fresh_client_dir': str(self.root)})
+        guard = next(r for row in self.rows(fresh) for r in row.get('insert', []) if r.get('id') == 'orrery-tools')
+        self.assertNotIn('history_binding', guard['config'])
 
     def test_model_helper_effort_and_exact_resume_are_projected(self):
         self.doc.update(model='b', helper_model='a', effort='high', resume_session_id='own-session')
