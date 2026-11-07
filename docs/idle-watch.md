@@ -15,7 +15,7 @@ project の全エージェントが work でなくなったとき、dashboard �
 
 サンプルは次の 4 種類です。`busy`（work が 1 体でもいる）、`idle`（全員 wait）、`blocked`（work なし・ask あり）、`unknown`（その他や欠損の状態、メンバー 0、取得失敗・stale）。動くのは `idle` と `blocked` だけで、`samples` 回連続かつ `seconds` 秒以上続いたときです。
 
-- `idle`: `sender` から親へ Mail を 1 通送ります（`source: idle-watch` を明記し、各エージェントの状態と継続秒数を添付）。親が稼働していなければ、代わりに resume します。再送は `resend_after` × 2^k（上限 `resend_cap`）で、最大 `max_resends` 回です。
+- `idle`: その親の検証済みの子のうち最後に work だった子から、親へ Mail を 1 通送ります（provider 停止通知と同じ検証: tmux の `PARENT_AGENT`、child state の identity と親、owner token）。本文に `source: idle-watch` を明記し、各エージェントの状態と継続秒数を添付します。親が稼働していなければ、代わりに resume します。再送は `resend_after` × 2^k（上限 `resend_cap`）で、最大 `max_resends` 回です。
 - `blocked`: 再開しません。blocked 区間ごとに、デスクトップ通知（macOS `osascript`）とログを 1 回出します。
 - 区分が変わる（work 復帰、ask の出現・解消、unknown）と区間は終わり、再び発火できる状態に戻ります。状態はメモリ上にあり、dashboard を再起動すると最初から判定し直します。
 
@@ -24,10 +24,10 @@ project の全エージェントが work でなくなったとき、dashboard �
 `$AGENTSTACK_RUNTIME_DIR/idle-watch.json`。無ければ無効です。既定値は `samples` 3、`seconds` 60、`poll` 10、`stale` 30、`resend_after` 600、`max_resends` 3、`resend_cap` 3600 です。
 
 ```json
-{"projects": {"/abs/project": {"enabled": true, "parent": "ParentName", "sender": "WatcherName"}}}
+{"projects": {"/abs/project": {"enabled": true, "parent": "ParentName"}}}
 ```
 
-`sender` は登録済みの Mail identity で、owner token が runtime ディレクトリにあるものです。watcher は identity を登録しません。未設定なら、Mail は警告を出して送りません。
+identity は作りません。検証できる子がいなければ、Mail は警告を出して送りません。
 
 ## dry-run
 

@@ -6706,6 +6706,31 @@ def _idle_watch_evidence(evidence: dict) -> str:
     return "\n".join(f"- {n}: {e['state']} ({e['seconds']}s)" for n, e in evidence.items())
 
 
+def _idle_watch_sender(project, parent, evidence):
+    """The verified child of `parent` that worked last, like _provider_stall_send.
+
+    A child counts only if its tmux PARENT_AGENT, its child-state identity and
+    parent, and its owner token all agree. Returns ("", "") if none verifies.
+    """
+    candidates = sorted((n for n in evidence if n != parent and _valid(n)),
+                        key=lambda n: evidence[n].get("last_work") or 0, reverse=True)
+    for name in candidates:
+        env = _tmux(["show-environment", "-t", "=" + name, "PARENT_AGENT"]).strip()
+        if env != "PARENT_AGENT=" + parent:
+            continue
+        try:
+            module = _child_resume_module()
+            state = module._load_state(Path(RUNTIME_DIR) / "child-agents" / (name + ".json"))
+            module._validate_identity(state, agent_name=name, project_key=project)
+            token = _runtime_agent_token(name)
+            if (state.get("parent_agent") == parent and token
+                    and secrets.compare_digest(token, state.get("registration_token", ""))):
+                return name, token
+        except Exception:
+            continue
+    return "", ""
+
+
 def _idle_watch_wake(project, cfg, parent_running, evidence, attempt):
     """Mail the parent from the watcher identity, or resume a gone parent."""
     parent = cfg["parent"]
@@ -6713,10 +6738,9 @@ def _idle_watch_wake(project, cfg, parent_running, evidence, attempt):
         result = do_jump(parent, open_terminal=False)
         logging.info("idle-watch: resumed %s -> %s", parent, result.get("ok"))
         return
-    sender = cfg.get("sender", "")
-    token = _runtime_agent_token(sender)
-    if not sender or not token:
-        logging.warning("idle-watch: sender identity unavailable for %s", project)
+    sender, token = _idle_watch_sender(project, parent, evidence)
+    if not sender:
+        logging.warning("idle-watch: no verified child of %s in %s; not sending", parent, project)
         return
     body = ("source: idle-watch (automated watcher, not a user instruction)\n"
             f"project: {project}\nattempt: {attempt}\n\n"

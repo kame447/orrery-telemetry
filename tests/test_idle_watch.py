@@ -107,3 +107,12 @@ def test_config_is_opt_in(tmp_path):
     f.write_text(json.dumps({"projects": {P: {"parent": "Parent"}, "/b": {"enabled": True, "parent": "B", "seconds": 5}}}))
     cfg = iw.load_config(f)
     assert list(cfg) == ["/b"] and cfg["/b"]["seconds"] == 5 and cfg["/b"]["samples"] == 3
+
+
+def test_evidence_carries_last_work_for_sender_choice():
+    g = Rig()
+    g.run(rows(Parent="work", A="work", B="wait"), 1)
+    g.run(rows(Parent="wait", A="wait", B="work"), 1)
+    g.run(rows(Parent="wait", A="wait", B="wait"), 4)
+    ev = g.wakes[0][3]
+    assert ev["B"]["last_work"] > ev["A"]["last_work"] > 0

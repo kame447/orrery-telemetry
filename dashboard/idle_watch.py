@@ -25,7 +25,7 @@ def load_config(path):
         if (isinstance(value, dict) and value.get("enabled") is True
                 and isinstance(value.get("parent"), str) and value["parent"]):
             out[key] = {**DEFAULTS,
-                        **{k: v for k, v in value.items() if k in DEFAULTS or k in ("parent", "sender")}}
+                        **{k: v for k, v in value.items() if k in DEFAULTS or k == "parent"}}
     return out
 
 
@@ -65,6 +65,7 @@ class IdleWatch:
         self.log = log or logging.getLogger("idle-watch")
         self._st = {}
         self._since = {}  # (project, agent) -> (state, first_seen)
+        self._work_at = {}  # (project, agent) -> last time seen working
 
     def tick(self, rows, ts, now):
         for project, cfg in self.config.items():
@@ -78,6 +79,8 @@ class IdleWatch:
         else:
             cls, states = classify(rows, project, cfg["parent"])
         for name, state in states.items():
+            if state == "work":
+                self._work_at[(project, name)] = now
             old = self._since.get((project, name))
             if old is None or old[0] != state:
                 self._since[(project, name)] = (state, now)
@@ -89,7 +92,8 @@ class IdleWatch:
             return
         if st["n"] < cfg["samples"] or now - st["since"] < cfg["seconds"]:
             return
-        evidence = {name: dict(state=s, seconds=int(now - self._since[(project, name)][1]))
+        evidence = {name: dict(state=s, seconds=int(now - self._since[(project, name)][1]),
+                               last_work=self._work_at.get((project, name)))
                     for name, s in states.items()}
         if cls == "blocked":
             if not st["asked"]:
