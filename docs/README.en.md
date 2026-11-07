@@ -44,6 +44,7 @@ Overview: the cockpit is the screen for operating terminals; Telemetry is the da
 - [DeepSeek display and balance (Japanese)](dsh-stage-a.md) — Historical stage-A record. For current dsh / Hermes installation, see [Installation](install.en.md); child spawning needs provider and harness selection ([API](api.en.md)).
 - [Persistent agents](persistent-agents.en.md) — Enrollment, interactive/headless startup, and credential recovery.
 - [Deterministic daemons](daemon-agents.en.md) — Dedicated identity, canonical binding, notification waits, and shutdown.
+- [Project idle watch](idle-watch.en.md) — Opt-in detection of "no agent working" that wakes the parent once: design and settings.
 - [Mail service updates](agentstack-mail-update.en.md) — Operational procedure to verify and replace a running Mail build.
 
 ## Windows and WSL

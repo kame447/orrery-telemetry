@@ -66,8 +66,10 @@ if __name__ == '__main__':
 # `server.py` is both an executable script and an importable dashboard module
 # in the tests.  Support both import roots without coupling callers to cwd.
 try:
+    from dashboard import idle_watch
     from dashboard import codex_models, mail_signals, provider_stalls, harness_runtime, harness_helpers, harness_context, harness_activity, dsh_history, hermes_history
 except ModuleNotFoundError:  # direct `python dashboard/server.py`
+    import idle_watch
     import codex_models
     import mail_signals
     import provider_stalls
@@ -6700,6 +6702,64 @@ def _start_provider_stall_monitor():
     _provider_thread.start()
 
 
+def _idle_watch_evidence(evidence: dict) -> str:
+    return "\n".join(f"- {n}: {e['state']} ({e['seconds']}s)" for n, e in evidence.items())
+
+
+def _idle_watch_wake(project, cfg, parent_running, evidence, attempt):
+    """Mail the parent from the watcher identity, or resume a gone parent."""
+    parent = cfg["parent"]
+    if not parent_running:
+        result = do_jump(parent, open_terminal=False)
+        logging.info("idle-watch: resumed %s -> %s", parent, result.get("ok"))
+        return
+    sender = cfg.get("sender", "")
+    token = _runtime_agent_token(sender)
+    if not sender or not token:
+        logging.warning("idle-watch: sender identity unavailable for %s", project)
+        return
+    body = ("source: idle-watch (automated watcher, not a user instruction)\n"
+            f"project: {project}\nattempt: {attempt}\n\n"
+            "No agent of this project is working; none is waiting for approval.\n"
+            "Per-agent state (time in that state):\n" + _idle_watch_evidence(evidence))
+    _mcp_call("send_message", dict(project_key=project, sender_name=sender,
+        sender_token=token, to=[parent], importance="high",
+        subject=f"[idle-watch] {project} is idle - resume work", body_md=body), timeout=5)
+
+
+def _idle_watch_notify(project, evidence):
+    text = f"{project}: approval pending, auto-resume suppressed"
+    logging.warning("idle-watch: %s\n%s", text, _idle_watch_evidence(evidence))
+    if sys.platform == "darwin":
+        subprocess.run(["osascript", "-e", "on run argv\ndisplay notification (item 1 of argv) "
+                        "with title \"ORRERY idle-watch\"\nend run", text],
+                       capture_output=True, timeout=5, check=False)
+
+
+def _idle_watch_run(config):
+    watch = idle_watch.IdleWatch(config, _idle_watch_wake, _idle_watch_notify)
+    poll = min(c["poll"] for c in config.values())
+    while not _provider_stop.is_set():
+        try:
+            rows, ts = idle_watch.fetch_rows(PORT)
+        except (OSError, ValueError, KeyError):
+            rows, ts = None, 0.0
+        try:
+            watch.tick(rows, ts, time.time())
+        except Exception:
+            logging.exception("idle-watch tick failed")
+        _provider_stop.wait(poll)
+
+
+def _start_idle_watch():
+    """Opt-in: runs only for projects enabled in RUNTIME_DIR/idle-watch.json."""
+    if GLOBAL_MODE:
+        return
+    config = idle_watch.load_config(os.path.join(RUNTIME_DIR, "idle-watch.json"))
+    if config:
+        threading.Thread(target=_idle_watch_run, args=(config,), name="idle-watch", daemon=True).start()
+
+
 @atexit.register
 def _stop_provider_stall_monitor():
     _provider_stop.set()
@@ -10446,6 +10506,7 @@ def main():
     _start_supervisor_watchdog()
     _start_child_resume_maintenance()
     _start_provider_stall_monitor()
+    _start_idle_watch()
 
     # The picker's Claude default checks the claude a child runs; find it once
     # here, where starting a login shell is allowed (requests may not).
