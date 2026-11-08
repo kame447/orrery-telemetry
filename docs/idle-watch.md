@@ -31,4 +31,4 @@ identity は作りません。検証できる子がいなければ、Mail は警
 
 ## dry-run
 
-`bin/agentstack-idle-watch --project KEY --parent NAME [--samples N --seconds T --poll S --iterations K]` は、稼働中の `/api/agents` を取得し、区分と各エージェントの状態をログに出し、送るはずの内容を表示します。送信も resume もしません。
+ソースの checkout から実行します（installer はこのツールをコピーしません）: `bin/agentstack-idle-watch --project KEY --parent NAME [--samples N --seconds T --poll S --iterations K]` は、稼働中の `/api/agents` を取得し、区分と各エージェントの状態をログに出し、送るはずの内容を表示します。送信も resume もしません。

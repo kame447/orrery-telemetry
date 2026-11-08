@@ -31,4 +31,4 @@ No identity is created. If no child verifies, the Mail step logs a warning and s
 
 ## Dry run
 
-`bin/agentstack-idle-watch --project KEY --parent NAME [--samples N --seconds T --poll S --iterations K]` samples the live `/api/agents`, logs the class and per-agent states, and prints what it would send. It never sends or resumes.
+From a source checkout (the installer does not copy this tool): `bin/agentstack-idle-watch --project KEY --parent NAME [--samples N --seconds T --poll S --iterations K]` samples the live `/api/agents`, logs the class and per-agent states, and prints what it would send. It never sends or resumes.
