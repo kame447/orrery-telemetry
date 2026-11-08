@@ -1086,10 +1086,10 @@ def test_notification_formatter_preserves_legacy_line_markers_and_complete_bound
     assert 'Body (complete; no inbox fetch needed): first ⏎ second ⏎ third' in complete
     message['body_md'] = 'x' * 2001
     preview = formatter(message)
-    assert 'Body preview:' in preview and 'Fetch inbox to read the rest.' in preview
+    assert 'Body preview:' in preview and 'Fetch inbox to read the rest (pass include_bodies=true' in preview
     assert 'x' * 2001 not in preview
     message.pop('body_md')
-    assert formatter(message).endswith('Please call fetch_inbox to read it.')
+    assert 'Please call fetch_inbox to read it (pass include_bodies=true' in formatter(message)
 
 
 def test_app_respects_shared_execution_switches_before_cold_handoff(launch, monkeypatch):
