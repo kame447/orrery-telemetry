@@ -34249,7 +34249,7 @@ async function exitAgent(ev,name){
 
 // When a card offers KILL: an agent that is not running, and no one watching
 // it (attached). The 30s note below names KILL only under the same rule.
-function canKill(a){return (a.category==='finished'||a.category==='gone') && !a.attached;}
+function canKill(a){return !a.archive_only && (a.category==='finished'||a.category==='gone') && !a.attached;}
 function showExitSent(card){
   if(!card)return;
   card.classList.remove('exit-arming');card.classList.add('exiting');
@@ -34466,6 +34466,10 @@ function bay(a,i){
   const led=a.running?'on':'';
   const chips=[];
   if(a.model) chips.push(`<span class="chip" title="${esc(a.model_raw||a.model)}">${esc(a.model)}</span>`);
+  if(a.project_key){
+    const projectName=a.project_key.split('/').filter(Boolean).pop()||a.project_key;
+    chips.push(`<span class="chip" title="${esc(a.project_key)}">PROJECT ${esc(projectName)}</span>`);
+  }
   if(a.ctx_window) chips.push(`<span class="chip win" title="context window">◷ ${esc(a.ctx_window)}</span>`);
   if(+a.deliv>0) chips.push(`<span class="chip dv" title="output logs: ${+a.deliv}">¶ ${+a.deliv}</span>`);
   if(a.mail_status==='unavailable') chips.push(`<span class="chip imp" title="${esc(a.mail_message||'This agent cannot send or receive ORRERY Mail')} · ${esc(a.mail_reason||'')}">MAIL UNAVAILABLE</span>`);
@@ -34554,12 +34558,12 @@ function bay(a,i){
     ?`<button class="killbtn" onclick="killAgent(event,'${esc(a.name)}')" title="kill (click twice to confirm)">✕ KILL</button>`
     :'';
   // exit button: running エージェントのみ表示（attached は除外しない — 意図的中断）
-  const exitBtn=a.running
+  const exitBtn=a.running&&!a.archive_only
     ?`<button class="exitbtn" onclick="exitAgent(event,'${esc(a.name)}')" title="graceful exit (/exit)">↩ EXIT</button>`
     :'';
   return `<div class="bay cat-${a.category}${stCls}" style="--i:${i}"
-       data-name="${esc(a.name)}"
-       onclick="openPanel('${esc(a.name)}')">
+       data-name="${esc(a.name)}" data-project="${esc(a.project_key||'')}"
+       onclick="openPanel(this.dataset.name,this.dataset.project)">
     ${stind}<div class="top">
       <div class="port" title="${sci?esc(sci):''}">${port}</div>
       <div class="idcol">
@@ -34599,7 +34603,7 @@ function renderDeck(){
     if(live && !SHOW_DEFAULT.has(a.category)) return false;
     if(needOnly && !agentNeedsYou(a)) return false;
     if(q){
-      const hay=(a.name+' '+a.task+' '+a.live+' '+
+      const hay=(a.name+' '+(a.project_key||'')+' '+a.task+' '+a.live+' '+
         (a.instruction?a.instruction.subject+' '+a.instruction.sender:'')).toLowerCase();
       if(!hay.includes(q)) return false;
     }
@@ -34700,7 +34704,7 @@ async function tick(){
     if(r.status===503)return;
     const j=await r.json();
     if(seq!==tickSeq)return;   // a newer range was requested while this was in flight
-    lastData=j.agents;deckStateAt=Date.now();
+    lastData=j.agents;activeProjectKey=j.project_key||'';deckStateAt=Date.now();
     settleExitSent(j.agents);
     refreshPanelButtons();
     const y=window.scrollY;
@@ -37029,7 +37033,7 @@ function _rbToggleTimeTravel(){
 })();
 
 /* ═══════════════════════ AGENT DETAIL PANEL ═══════════════════════ */
-let panelName=null,panelTab='hist';
+let panelName=null,panelProject='',activeProjectKey='',panelTab='hist';
 const TM=id=>document.getElementById(id);
 
 /* Open the detail panel first, fill it second.  If preparing the contents
@@ -37038,13 +37042,13 @@ const TM=id=>document.getElementById(id);
    Deliberately plain getElementById here, not the TM() helper: TM is declared
    further down with `const`, so if the script died before that point the
    safeguard itself would fail for the very reason it exists. */
-function openPanel(name){
+function openPanel(name,projectKey=''){
   try{
     const T0=document.getElementById('term');
     if(T0){T0.classList.add('on');T0.setAttribute('aria-hidden','false');}
   }catch(_){/* nothing left to fall back to */}
   try{
-    openPanelInner(name);
+    openPanelInner(name,projectKey);
   }catch(err){
     try{reportJsError('openPanel',err,
       {msg:`openPanel(${name}): ${err&&err.message}`});}catch(_){}
@@ -37056,7 +37060,7 @@ function openPanel(name){
 // the panel opens and again with each new agents list while it stays open (an
 // agent resumed or exited meanwhile changes what the button does).
 function renderPanelButtons(a,g,{keepExit=false}={}){
-  const run=!!a.running;
+  const run=!!a.running&&!a.archive_only;
   const exitBtn=TM('tm-exit-btn');
   if(exitBtn&&!keepExit){exitBtn.style.display=run?'':'none';
     exitBtn.classList.remove('arming');exitBtn.disabled=false;
@@ -37069,7 +37073,7 @@ function renderPanelButtons(a,g,{keepExit=false}={}){
   const openBtn=TM('tm-open');
   if(openBtn){
     const verificationRequired=capability==='verification_required';
-    const unavailable=resumeState&&capability!=='ready'&&!verificationRequired;
+    const unavailable=!!a.archive_only||(resumeState&&capability!=='ready'&&!verificationRequired);
     openBtn.disabled=unavailable;
     openBtn.style.opacity=unavailable?'.5':'';
     openBtn.style.cursor=unavailable?'not-allowed':'';
@@ -37079,7 +37083,7 @@ function renderPanelButtons(a,g,{keepExit=false}={}){
     const view=resumeButtonView(resumeState,capability,a.resume_mode||g.resume_mode,
       a.mail_message||g.mail_message,EMBED_MODE);
     openBtn.textContent=view.text;
-    openBtn.title=view.title;
+    openBtn.title=a.archive_only?'Another project: transcript is read-only':view.title;
   }
 }
 // The panel agent's state: a deck row, or a graph node in the same shape
@@ -37089,14 +37093,15 @@ function renderPanelButtons(a,g,{keepExit=false}={}){
 // (The two have their own time windows: one may leave out an agent the other
 // shows.)
 function panelAgentState(name){
-  const g=(typeof gmap!=='undefined'&&gmap.get(name))||null;
-  const fromGraph=view==='net'&&graphStateAt?true:view==='deck'&&deckStateAt?false:graphStateAt>deckStateAt;
+  const foreign=panelProject&&panelProject!==activeProjectKey;
+  const g=!foreign&&(typeof gmap!=='undefined'&&gmap.get(name))||null;
+  const fromGraph=!foreign&&(view==='net'&&graphStateAt?true:view==='deck'&&deckStateAt?false:graphStateAt>deckStateAt);
   if(fromGraph){
     if(!g)return null;
     return {a:{running:!!g.running,retired:!!g.retired,present:!!g.present,state:g.state||'',
       resume_capability:g.resumeCapability,resume_mode:g.resume_mode,mail_message:g.mail_message},g};
   }
-  const a=(lastData||[]).find(x=>x.name===name);
+  const a=(lastData||[]).find(x=>x.name===name&&(!panelProject||x.project_key===panelProject));
   return a?{a,g:g||{}}:null;
 }
 // Called after either source updates. An agent neither lists any more gets
@@ -37120,12 +37125,15 @@ function renderPanelGone({keepExit=false}={}){
     openBtn.title='This agent is no longer in the list. Close this panel.';
   }
 }
-function openPanelInner(name){
+function openPanelInner(name,projectKey=''){
   panelName=name;
-  const a=(lastData||[]).find(x=>x.name===name)||
-          (typeof gmap!=='undefined'&&gmap.get(name))||{};
-  // gmap の補完 (network view では role 等が gmap 側だけにある)
-  const g=(typeof gmap!=='undefined'&&gmap.get(name))||{};
+  panelProject=projectKey||activeProjectKey;
+  const foreign=panelProject&&panelProject!==activeProjectKey;
+  const a=(lastData||[]).find(x=>x.name===name&&x.project_key===panelProject)||
+          (foreign?null:(lastData||[]).find(x=>x.name===name))||
+          (foreign?null:(typeof gmap!=='undefined'&&gmap.get(name)))||{};
+  // A cross-project archive does not inherit another project's network state.
+  const g=foreign?{}:(typeof gmap!=='undefined'&&gmap.get(name))||{};
   const run=!!a.running, rel=a.last_active_rel||a.rel||'';
   const stat=a.retired?'RETIRED':run?'● ONLINE':
     a.category==='finished'?'EXITED':a.present===false?'○ REGISTERED':'○ SHELL';
@@ -37141,7 +37149,10 @@ function openPanelInner(name){
   T.classList.toggle('s-run',run);
   TM('tm-meta').textContent=
     stat+(a.model?' · '+a.model:'')+(a.ctx_window?' · '+a.ctx_window:'')
-    +(rel?' · last '+rel:'');
+    +(rel?' · last '+rel:'')+(panelProject?' · '+panelProject:'')
+    +(a.archive_only?' · READ ONLY':'');
+  const outputTab=TM('tm-tabs').querySelector('[data-tab="deliv"]');
+  if(outputTab)outputTab.disabled=!!a.archive_only;
   // The buttons read the newest source from the start, as refreshes do. Before
   // either has arrived (a link opened at start) nothing is known to be gone.
   const now=panelAgentState(name);
@@ -37150,7 +37161,8 @@ function openPanelInner(name){
   else renderPanelButtons(a,g);
   // gtip 相当のサマリーを tm-summary に描画 (モバイルで hover が効かない救済)
   renderPanelSummary(name, a, g);
-  renderAnnotEditor(name, (g&&g.annot)||a.annot||null);
+  if(a.archive_only){const editor=TM('tm-annot');if(editor)editor.setAttribute('aria-hidden','true');}
+  else renderAnnotEditor(name, (g&&g.annot)||a.annot||null);
   renderHistory24h(name);
   T.classList.add('on');T.setAttribute('aria-hidden','false');
   setTab('hist');
@@ -37290,6 +37302,9 @@ function fmtSpan(sec){
 }
 async function renderHistory24h(name){
   const wrap=TM('tm-spark'); if(!wrap)return;
+  if(panelProject&&panelProject!==activeProjectKey){
+    wrap.setAttribute('aria-hidden','true');return;
+  }
   const svg=TM('sp-svg'); const tot=TM('sp-tot'); const tip=TM('sp-tip');
   const ttl=document.getElementById('sp-ttl');
   const axis=document.getElementById('sp-axis');
@@ -37472,7 +37487,7 @@ function showSparkTip(tip, wrap, svg, ev, idx, since, now){
 }
 
 function closeTerm(){
-  panelName=null;
+  panelName=null;panelProject='';
   // sparkline 後始末: tooltip を確実に閉じる（別 panel で残ると邪魔）
   const tip=TM('sp-tip'); if(tip)tip.setAttribute('aria-hidden','true');
   const sp=TM('tm-spark'); if(sp)sp.setAttribute('aria-hidden','true');
@@ -37492,6 +37507,9 @@ function setTab(tab){
 async function loadDeliverables(){
   if(!panelName)return;
   const box=TM('tm-deliv');
+  if(panelProject&&panelProject!==activeProjectKey){
+    box.innerHTML='<div class="hempty">Output is scoped to the current project</div>';return;
+  }
   box.innerHTML='<div class="hempty">LOADING…</div>';
   let items=[];
   let vault='';
@@ -37526,9 +37544,12 @@ async function loadHistory(){
   const box=TM('tm-hist');
   box.innerHTML='<div class="hempty">LOADING…</div>';
   try{
+    const requestedProject=panelProject;
     const r=await fetch(
-      `/api/history?session=${encodeURIComponent(panelName)}`);
+      `/api/history?session=${encodeURIComponent(panelName)}`+
+      (requestedProject?'&project_key='+encodeURIComponent(requestedProject):''));
     const j=await r.json();
+    if(panelProject!==requestedProject)return;
     if(!j.ok){
       box.innerHTML=`<div class="hempty">${esc(j.error||'no history')}</div>`;
       TM('tm-stat').textContent='— no transcript';return;
@@ -37576,7 +37597,7 @@ async function loadHistory(){
 TM('tm-x').addEventListener('click',closeTerm);
 TM('term').addEventListener('click',e=>{if(e.target.id==='term')closeTerm();});
 async function exitPanelAgent(){
-  if(!panelName)return;
+  if(!panelName||(panelProject&&panelProject!==activeProjectKey))return;
   const btn=TM('tm-exit-btn');
   btn.textContent='…';btn.disabled=true;
   try{
@@ -37604,7 +37625,8 @@ TM('tm-tabs').addEventListener('click',e=>{
   const b=e.target.closest('button[data-tab]');if(b)setTab(b.dataset.tab);
 });
 TM('tm-open').addEventListener('click',()=>{
-  if(panelName&&!TM('tm-open').disabled)jump(panelName,{stopPropagation(){}});
+  if(panelName&&!TM('tm-open').disabled&&
+     (!panelProject||panelProject===activeProjectKey))jump(panelName,{stopPropagation(){}});
 });
 
 document.getElementById('q').addEventListener('input',render);

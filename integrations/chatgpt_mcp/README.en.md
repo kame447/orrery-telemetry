@@ -4,7 +4,7 @@ In this fork the read-only adapter is invoked with python3 -m orrery_chatgpt_mcp
 
 ## Compatibility and exposed scope
 
-Python 3.11+ and explicit ORRERY_MCP_MODE=legacy or fresh are required. Accepted Dashboard API generations are exactly 37 for legacy and 34, 35, 36, 37 for fresh. Both generation and payload shape are checked. Generations never determine mode: legacy must omit runtime_mode; fresh must report runtime_mode=fresh with instance identity and capabilities. Unknown generations, global and mismatches fail closed before reading a roster or opening the listener.
+Python 3.11+ and explicit ORRERY_MCP_MODE=legacy or fresh are required. Accepted Dashboard API generations are exactly 37 or 38 for legacy and 34, 35, 36, 37 for fresh. Legacy API 38 may include other-project archives, which the read-only adapter still filters out using its configured project key. Both generation and payload shape are checked. Generations never determine mode: legacy must omit runtime_mode; fresh must report runtime_mode=fresh with instance identity and capabilities. Unknown generations, global and mismatches fail closed before reading a roster or opening the listener.
 
 Legacy requires one local ORRERY_MCP_PROJECT_KEY, exactly matching the actual Dashboard project key; MCP callers cannot change it. Both the roster's top-level project_key and each exposed row's project_key must match. Older Dashboard APIs do not identify each row's project; API 37 adds this read-only metadata. Old legacy payloads are refused rather than guessed. Use a Dashboard from the same revision, installed separately through the normal procedure; this adapter never changes running services.
 

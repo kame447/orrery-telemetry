@@ -249,9 +249,11 @@ def test_build_agents_exports_binding_for_claude(binding, monkeypatch, surface):
     monkeypatch.setattr(server, "_has_retired_at", lambda: True)
     monkeypatch.setattr(server, "_claude_row_mail_fields", lambda *a, **kw: {})
     rows = server.build_agents(history_days=None)
-    assert len(rows) == 1
-    assert rows[0]["category"] == ("retired" if surface == "retired" else "agent")
-    assert rows[0]["history_binding"] == ("stale" if surface == "stale" else "bound")
-    assert rows[0]["history_session_id"] == SID
-    assert rows[0]["history_receipt_ts"] == RECEIPT_TS
-    assert rows[0]["transcript_path"] == (None if surface == "stale" else str(binding["transcript"]))
+    assert len(rows) == (2 if surface == "retired" else 1)
+    row = (next(r for r in rows if r["project_key"] == binding["record"]["project_key"])
+           if surface == "retired" else rows[0])
+    assert row["category"] == ("retired" if surface == "retired" else "agent")
+    assert row["history_binding"] == ("stale" if surface == "stale" else "bound")
+    assert row["history_session_id"] == SID
+    assert row["history_receipt_ts"] == RECEIPT_TS
+    assert row["transcript_path"] == (None if surface == "stale" else str(binding["transcript"]))

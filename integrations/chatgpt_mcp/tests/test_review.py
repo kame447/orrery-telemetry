@@ -35,6 +35,21 @@ class Backend:
         return self.version if path == "/api/version" else self.roster
 
 
+def test_legacy_generation_38_keeps_foreign_history_out_of_mcp():
+    backend = Backend({**VERSION, "api": 38}, roster={**ROSTER, "agents": [
+        *ROSTER["agents"],
+        {"name": "ForeignArchive", "category": "retired", "project_key": "/fixture/other",
+         "running": False, "archive_only": True, "transcript_path": "/private/foreign"},
+    ]})
+    result = invoke("orrery_list_agents", {}, backend, "legacy", project_key=PROJECT)
+    assert result["runtime_mode"] == "legacy"
+    assert result["count"] == 4
+    assert "ForeignArchive" not in str(result)
+    assert "/private/foreign" not in str(result)
+    with pytest.raises(ToolError, match="unique"):
+        invoke("orrery_get_agent", {"name": "ForeignArchive"}, backend, "legacy", project_key=PROJECT)
+
+
 def test_scoped_legacy_list_status_and_get_keep_stopped_agents():
     backend = Backend()
     result = invoke("orrery_list_agents", {}, backend, "legacy", project_key=PROJECT)
@@ -56,7 +71,7 @@ def test_scoped_legacy_list_status_and_get_keep_stopped_agents():
             invoke("orrery_get_agent", {"name": name}, backend, "legacy", project_key=PROJECT)
 
 
-@pytest.mark.parametrize("api", [999, 38, 0, -1, True, "37", None])
+@pytest.mark.parametrize("api", [999, 39, 0, -1, True, "37", None])
 def test_unknown_generations_fail_before_reading_any_roster(api):
     backend = Backend({**VERSION, "api": api})
     with pytest.raises(DashboardError):

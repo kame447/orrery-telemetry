@@ -161,6 +161,8 @@ running と finished の境目は、pane の先頭 process 名ではなく proce
 
 上部の `FILTER · name / task` は、名前だけでなく **task description、live pane title、最後に受け取った指示の subject と送信者**も対象にします。何をしていた agent かを覚えていれば、名前を思い出せなくても引けます。
 
+localhost で起動した legacy dashboard の `7d` / `30d` / `all` は、設定中の project に限らず全 project の終了済み agent を表示します。カードには `PROJECT` ラベルが付き、検索欄に project 名を入れて絞れます。異なる project の archive は読み取り専用で、確認済み Claude / Codex 会話履歴だけを閲覧できます。Mail・resume・終了操作・Output は設定中の project に限定され、LAN 待受では他 project の archive を列挙しません。
+
 既定の history `live` では running と finished しか出ません。`7d` / `30d` / `all` に切り替えるとその範囲で活動した `gone` / `retired` も対象に入るので、**終了した agent を検索で見つけて resume する**という使い方ができます。過去の文脈を持った相手を取っておいて、必要になったら再開する形です（手順は[やりたいことから探す](#やりたいことから探す)の「終了したエージェントを resume する」、見え方は[Child 完了後の表示](#child-完了後の表示)）。
 
 card と詳細 panel は backend の `resume_capability` を表示します。終了済み Claude row に exact session index も transcript directory mtime と一致する確定済み cache もない場合、poll 中に大量の transcript を全読みせず `verification_required`（`RESUME · VERIFY`）を返します。詳細 panel の `VERIFY & RESUME` は `/api/jump` の1回の呼び出しで full 検証し、`ready` になればそのまま resume します。確定結果は directory mtime が変わるまで表示にも再利用します。NETWORK の一括 resume は `ready` だけを対象にします。それ以外の非 `ready` 理由では詳細 panel の action は `RESUME UNAVAILABLE` になり、固定理由（`NO HISTORY`、`PROVENANCE MISSING`、`CREDENTIAL MISSING`、`RETENTION EXPIRED`、`PURGED` など）を併記します。新しい Codex child の bound receipt は非秘密の child provenance を cleanup 後も保持し、private state / credential が有効期限内なら `ready` になります。`cx` / `agent-start-codex` など製品が起動した top-level Codex は `launch_origin: standalone` と private owner credential を検証し、child 専用の保持・home 再生成を使わず従来どおり resume します。provenance 導入前や製品外の origin 不明 row は名前や履歴から推測せず `provenance_missing` として閉じます。`/api/jump` も操作直前に同じ判定をやり直すため、古い画面や API の直接呼び出しでこの gate を迂回できません。

@@ -46,10 +46,10 @@ with HTTP 400. A media-type mismatch is HTTP 415, a cross-origin POST is HTTP 40
 | GET | `/api/name-status` | `name` | exact identity status |
 | GET | `/api/suggest-name` | `scientist` | verified `Adjective-Scientist` (requested form; read-back from the registration response is authoritative for the actual registered name) |
 | GET | `/api/fs/dirs` | optional `path` | root-scoped child directories |
-| GET | `/api/agents` | none | `{ts, agents}` |
+| GET | `/api/agents` | `days`, `scope` | `{ts, project_key, agents}`; legacy loopback includes archived agents from all projects (API 38) |
 | GET | `/api/agents/<name>/history-binding` | none | `{ok, agent}` (one agent's conversation-record binding, API 36) |
 | GET | `/api/graph` | `days`, `all` | `{nodes, edges, spawn, timestamp_diagnostics, degraded, ts}` |
-| GET | `/api/history` | `session`, `limit` | transcript events |
+| GET | `/api/history` | `session`, `limit`, optional `project_key` | transcript events; other-project records require a verified receipt (API 38) |
 | GET | `/api/agent-history` | `name` or `names`, `hours`, `include_pane_states` | agent event timeline |
 | GET | `/api/edge-messages` | `a`, `b`, `limit` | messages between two agents |
 | GET | `/api/messages-since` | `since`, `limit` | live mail events |
@@ -66,6 +66,9 @@ with HTTP 400. A media-type mismatch is HTTP 415, a cross-origin POST is HTTP 40
 | POST | `/api/annotate` | `{name, role, emoji, group}` | saved annotation |
 | POST | `/api/spawn` | spawn payload | child launch result |
 
+
+On a loopback-bound legacy dashboard, `/api/agents?days=7|30|all` includes archived records from all projects, each with `project_key`. `archive_only:true` means a read-only card from a different project; Resume / Exit / Kill / Output / annotation edits are disabled. Same-named agents from different projects remain distinguishable by `project_key`. `/api/history?session=<name>&project_key=<project>` verifies that project's exact registration and Claude/Codex native receipt; it never guesses a foreign transcript. Mail/message routes and operation authority remain scoped to the configured project. An unauthenticated LAN bind (such as `AGENTSTACK_BIND_HOST=0.0.0.0`) cannot enumerate or read other projects' archives. Fresh/global modes are unchanged.
+
 ## GET `/api/version`
 
 ```bash
@@ -73,7 +76,7 @@ curl -s http://127.0.0.1:8770/api/version
 ```
 
 ```json
-{"name":"orrery-telemetry","version":"2026.09.16.1","api":37}
+{"name":"orrery-telemetry","version":"2026.09.16.1","api":38}
 ```
 
 See [Installation](install.en.md#version) for version resolution order.

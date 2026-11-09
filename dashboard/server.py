@@ -44,7 +44,7 @@ import urllib.request
 from urllib.parse import urlparse, parse_qs
 
 # Public dashboard compatibility generation (docs/tests read this source).
-API_GENERATION = 37
+API_GENERATION = 38
 # Mode admission is shared with hooks and operator/service entry points.
 import runpy as _runtime_runpy
 _MODE_API = _runtime_runpy.run_path(str(Path(__file__).resolve().parents[1] / 'bin/lib/runtime_client.py'))
@@ -1788,12 +1788,22 @@ def _history_binding_fields(row: dict, *, now: float, claude_index=None) -> dict
     so the light route can never judge a binding differently from the roster.
     """
     program = row.get("program")
+    foreign = row.get("project_key") and row["project_key"] != _project_key()
+    scope = {"project_key": row["project_key"]} if foreign else {}
     if program in {"codex", "codex-cli"}:
-        return _codex_history_binding(row["name"], now=now)
+        return _codex_history_binding(row["name"], now=now, **scope)
     if program in {"claude", "claude-code"}:
         if claude_index is None:
             claude_index = claude_history.ReceiptIndex(SESSION_INDEX_DIR)
-        return _claude_history_binding(row["name"], index=claude_index, session_created=row.get("created"))
+        return _claude_history_binding(row["name"], index=claude_index,
+                                       session_created=row.get("created"), **scope)
+    if program in {"dsh", "hermes"} and foreign:
+        # No project-qualified receipt resolver for these providers yet.
+        # A same-named current-project agent must never supply this transcript.
+        return {"history_binding": "unconfirmed",
+                "history_binding_reason": "Cross-project transcript binding is unavailable for this provider",
+                "history_binding_reason_code": "unsupported_cross_project_provider",
+                "transcript_path": None}
     if program == "dsh":
         return _dsh_history_binding(row["name"], session_created=row.get("created"))
     if program == "hermes":
@@ -1936,25 +1946,33 @@ def build_agents(history_days: float | None = HISTORY_DAYS_DEFAULT) -> list[dict
                 "a.retired_at IS NOT NULL" if _has_retired_at() else "0"
             )
             cutoff_sql, cutoff_params = _history_cutoff(history_days)
+            # The dashboard has no login layer: a LAN bind must not expose
+            # other projects' history. Localhost can show the owner's archives.
+            cross_project = BIND_HOST in {"127.0.0.1", "localhost", "::1"}
+            where = "1=1" if cross_project else "p.human_key = ?"
+            params = cutoff_params if cross_project else (project_key, *cutoff_params)
             cur.execute(
                 f"""
                 SELECT a.name, a.model, a.program, a.task_description, a.last_active_ts,
-                       {retired_flag} AS retired
+                       p.human_key AS project_key, {retired_flag} AS retired
                 FROM agents a
                 JOIN projects p ON a.project_id = p.id
-                WHERE p.human_key = ?
-                  {cutoff_sql}
+                WHERE {where} {cutoff_sql}
                 ORDER BY a.last_active_ts DESC
                 """,
-                (project_key, *cutoff_params),
+                params,
             )
             for r in cur.fetchall():
+                # Live tmux rows are already present. Their names alone do not
+                # establish which project owns a second, historical row.
                 if r["name"] in seen:
                     continue
                 la = _iso_to_epoch(r["last_active_ts"])
+                archive_only = r["project_key"] != project_key
                 row = {
                     "name": r["name"],
-                    "project_key": project_key,
+                    "project_key": r["project_key"],
+                    "archive_only": archive_only,
                     "category": "retired" if r["retired"] else "gone",
                     "running": False, "attached": False, "mail_linked": False,
                     "cmd": "", "live": "",
@@ -1966,7 +1984,7 @@ def build_agents(history_days: float | None = HISTORY_DAYS_DEFAULT) -> list[dict
                     "work_disp": None, "last_disp": None,
                     "task": r["task_description"] or "",
                     "instruction": None,
-                    "deliv": len(didx.get(r["name"], [])),
+                    "deliv": 0 if archive_only else len(didx.get(r["name"], [])),
                     "mail_active": la,
                     "last_active": la, "last_active_rel": _rel(la, now),
                     "created": 0, "retired": bool(r["retired"]),
@@ -1975,7 +1993,7 @@ def build_agents(history_days: float | None = HISTORY_DAYS_DEFAULT) -> list[dict
                 # A Codex App runtime has no tmux pane.  It may still be a
                 # live dashboard agent, but only provider-validated snapshots
                 # are allowed to promote it from gone/retired.
-                runtime = None if r["retired"] else codex_apps.get(r["name"])
+                runtime = None if r["retired"] or archive_only else codex_apps.get(r["name"])
                 if runtime:
                     _apply_codex_app_runtime(row, runtime)
                 rows.append(row)
@@ -1988,8 +2006,9 @@ def build_agents(history_days: float | None = HISTORY_DAYS_DEFAULT) -> list[dict
     observed_now = time.time()
     claude_history_index = None
     for row in rows:
-        row.update(harness_runtime.metadata(RUNTIME_DIR, row["name"], row.get("program")))
-        profile = persistent_profiles.get(row["name"])
+        if not row.get("archive_only"):
+            row.update(harness_runtime.metadata(RUNTIME_DIR, row["name"], row.get("program")))
+        profile = None if row.get("archive_only") else persistent_profiles.get(row["name"])
         row.update(
             profile_provider=(profile or {}).get("profile_provider", ""),
             parentless=(profile or {}).get("parentless"),
@@ -1999,20 +2018,21 @@ def build_agents(history_days: float | None = HISTORY_DAYS_DEFAULT) -> list[dict
         if row.get("program") in {"claude", "claude-code"} and claude_history_index is None:
             claude_history_index = claude_history.ReceiptIndex(SESSION_INDEX_DIR)
         row.update(_history_binding_fields(row, now=observed_now, claude_index=claude_history_index))
-        row["resume_capability"] = _resume_capability_for_row(
-            row["name"],
-            row.get("program") or "",
-            category=row.get("category") or "",
-        )
-        row.update(_claude_row_mail_fields(row, category=row.get("category") or "", session_state=sessions.get(row["name"], {})))
+        # The observer can read an archived record from another project, but
+        # does not acquire its control or Mail privileges.
+        row["resume_capability"] = ("unavailable" if row.get("archive_only") else
+            _resume_capability_for_row(row["name"], row.get("program") or "",
+                                       category=row.get("category") or ""))
+        if not row.get("archive_only"):
+            row.update(_claude_row_mail_fields(row, category=row.get("category") or "",
+                                               session_state=sessions.get(row["name"], {})))
         signature = (
             row.get("act_state"),
             row.get("ctx_used"),
             _stable_live(row.get("live") or ""),
         )
-        row["observed_active"] = _observe_activity(
-            row["name"], signature, observed_now,
-        )
+        row["observed_active"] = (0.0 if row.get("archive_only") else
+            _observe_activity(row["name"], signature, observed_now))
     _prune_observed({row["name"] for row in rows})
 
     order = {
@@ -3457,12 +3477,12 @@ def _transcript_cwd(path: str) -> str | None:
     return None
 
 
-def _agent_program(session: str) -> str:
+def _agent_program(session: str, *, project_key: str | None = None) -> str:
     """ORRERY Mail から program 文字列を引く（codex 判定用）。
 
     register_agent の program は警告系で書き換わらず安定。空なら "" を返す。
     codex は "codex" / "codex-cli" の双方があるため startswith("codex") で判定。"""
-    project_key = _project_key()
+    project_key = _project_key() if project_key is None else project_key
     if not project_key:
         return ""
     try:
@@ -5293,11 +5313,11 @@ def _block_text(content) -> list[tuple[str, str]]:
     return rows
 
 
-def _resume_registration(session: str, programs: set[str]) -> dict | None:
+def _resume_registration(session: str, programs: set[str], *, project_key: str | None = None) -> dict | None:
     """Return the exact project registration, never an alias or another provider."""
 
     include_profile = "claude" in programs or bool(programs.intersection(harness_runtime.HARNESSES))
-    project_key = _project_key()
+    project_key = _project_key() if project_key is None else project_key
     if not project_key or not os.path.isfile(DB_PATH):
         return None
     if (index := _batched_registrations()) is not None:
@@ -5347,17 +5367,18 @@ def _dsh_history_binding(session: str, *, session_created=None) -> dict:
                                session_created=session_created)
 
 
-def _codex_registration(session: str) -> dict | None:
-    return _resume_registration(session, {"codex", "codex-cli"})
+def _codex_registration(session: str, *, project_key: str | None = None) -> dict | None:
+    return _resume_registration(session, {"codex", "codex-cli"}, project_key=project_key)
 
 
-def _claude_registration(session: str) -> dict | None:
-    return _resume_registration(session, {"claude", "claude-code"})
+def _claude_registration(session: str, *, project_key: str | None = None) -> dict | None:
+    return _resume_registration(session, {"claude", "claude-code"}, project_key=project_key)
 
 
-def _claude_history_binding(session: str, *, index=None, session_created=None) -> dict:
+def _claude_history_binding(session: str, *, index=None, session_created=None,
+                            project_key: str | None = None) -> dict:
     return claude_history.history_binding(
-        session, _claude_registration(session), projects=CLAUDE_PROJECTS,
+        session, _claude_registration(session, project_key=project_key), projects=CLAUDE_PROJECTS,
         index=index if index is not None else claude_history.ReceiptIndex(SESSION_INDEX_DIR),
         session_created=session_created,
     )
@@ -5468,10 +5489,11 @@ _CODEX_BINDING_REASONS = {
 }
 
 
-def _codex_history_binding(session: str, *, now: float | None = None) -> dict:
+def _codex_history_binding(session: str, *, now: float | None = None,
+                           project_key: str | None = None) -> dict:
     """Return visible binding state for the current launch, never a guess."""
 
-    registration = _codex_registration(session)
+    registration = _codex_registration(session, project_key=project_key)
     if registration is None:
         return {
             "history_binding": "unconfirmed",
@@ -5636,7 +5658,7 @@ def _codex_history_binding(session: str, *, now: float | None = None) -> dict:
     }
 
 
-def _codex_indexed_transcript(session: str) -> str | None:
+def _codex_indexed_transcript(session: str, *, project_key: str | None = None) -> str | None:
     """Return a receipt verified for the current Codex launch, or fail closed.
 
     A Codex rollout has no agent name, so cwd, timestamps and candidate counts
@@ -5646,12 +5668,12 @@ def _codex_indexed_transcript(session: str) -> str | None:
     remains separate because its pre-provider records have a different
     compatibility contract.
     """
-    state = _codex_history_binding(session)
+    state = _codex_history_binding(session, project_key=project_key)
     path = state.get("transcript_path")
     return path if state.get("history_binding") == "bound" and isinstance(path, str) else None
 
 
-def _codex_transcript_path(session: str) -> str | None:
+def _codex_transcript_path(session: str, *, project_key: str | None = None) -> str | None:
     """Resolve Codex history only through a verified session-index binding.
 
     This path intentionally has no cache and no timestamp/cwd scan. Reading
@@ -5659,7 +5681,7 @@ def _codex_transcript_path(session: str) -> str | None:
     binding visible immediately and prevents a prior guessed path (including a
     cached ``None``) from becoming authority for the current run.
     """
-    return _codex_indexed_transcript(session)
+    return _codex_indexed_transcript(session, project_key=project_key)
 
 
 def _events_from_codex_jsonl(path: str) -> list[dict]:
@@ -5799,14 +5821,17 @@ def _tail_events(path: str, line_events, limit: int) -> tuple[list[dict], bool]:
     return ordered[-limit:], count > limit
 
 
-def history_payload(session: str, limit: int) -> dict:
+def history_payload(session: str, limit: int, *, project_key: str | None = None) -> dict:
     if not _valid(session):
         return {"ok": False, "error": "invalid session name"}
     # Provider-specific transcript formats must never fall through into
     # another provider's heuristic search. Antigravity stream-json results are
     # not Claude/Codex transcripts, so history is unavailable until a native
     # Antigravity history source is implemented.
-    program = _agent_program(session)
+    foreign = project_key is not None and project_key != _project_key()
+    if foreign and BIND_HOST not in {"127.0.0.1", "localhost", "::1"}:
+        return {"ok": False, "error": "Cross-project history is local-only"}
+    program = _agent_program(session, project_key=project_key) if foreign else _agent_program(session)
     if program.startswith("antigravity"):
         return {
             "ok": False,
@@ -5815,17 +5840,25 @@ def history_payload(session: str, limit: int) -> dict:
     # codex agent は Claude 用 selfref 探索だと子の transcript を誤マッチする
     # ため、program で先に分岐する（do_resume と同じ理由）。
     if program.startswith("codex"):
-        path = _codex_transcript_path(session)
+        path = _codex_transcript_path(session, project_key=project_key) if foreign else _codex_transcript_path(session)
         if not path:
             if program in {"codex", "codex-cli"}:
-                binding = _codex_history_binding(session)
+                binding = (_codex_history_binding(session, project_key=project_key)
+                           if foreign else _codex_history_binding(session))
                 return {"ok": False, "error": binding["history_binding_reason"], **binding}
             return {"ok": False, "error": "Codex transcript history binding is unconfirmed"}
         is_codex = True
     elif program.startswith("claude"):
-        path = _transcript_path(session)
+        if foreign:
+            binding = _claude_history_binding(session, project_key=project_key)
+            path = binding.get("transcript_path") if binding.get("history_binding") == "bound" else None
+            if not path:
+                return {"ok": False, "error": binding.get("history_binding_reason") or
+                        "Verified transcript binding is unavailable"}
+        else:
+            path = _transcript_path(session)
         is_codex = False
-        if not path:
+        if not path and not foreign:
             path = _codex_transcript_path(session)
             is_codex = bool(path)
     else:
@@ -9903,7 +9936,8 @@ class Handler(BaseHTTPRequestHandler):
                 lim = int((q.get("limit") or ["220"])[0])
             except ValueError:
                 lim = 220
-            payload = history_payload(sess, lim)
+            project = (q.get("project_key") or [None])[0]
+            payload = history_payload(sess, lim, project_key=project)
             self._send(
                 200 if payload.get("ok") else 400,
                 json.dumps(payload, ensure_ascii=False).encode(),

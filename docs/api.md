@@ -45,10 +45,10 @@ POST の Origin は、検証済み Host に対応する固定 origin とだけ�
 | GET | `/api/name-status` | `name` | exact identity status |
 | GET | `/api/suggest-name` | `scientist` | verified `Adjective-Scientist`（要求形。実登録名は register 応答の read-back が正） |
 | GET | `/api/fs/dirs` | optional `path` | root-scoped child directories |
-| GET | `/api/agents` | なし | `{ts, agents}` |
+| GET | `/api/agents` | `days`, `scope` | `{ts, project_key, agents}`。legacy localhost では各 project の archive を含む（API 38） |
 | GET | `/api/agents/<name>/history-binding` | なし | `{ok, agent}`（1人分の会話の記録の binding、API 36） |
 | GET | `/api/graph` | `days`, `all` | `{nodes, edges, spawn, timestamp_diagnostics, degraded, ts}` |
-| GET | `/api/history` | `session`, `limit` | transcript events |
+| GET | `/api/history` | `session`, `limit`, `project_key`（optional） | transcript events。別 project は検証済み会話記録のみ（API 38） |
 | GET | `/api/agent-history` | `name` または `names`, `hours`, `include_pane_states` | agent event timeline |
 | GET | `/api/edge-messages` | `a`, `b`, `limit` | 二者間 messages |
 | GET | `/api/messages-since` | `since`, `limit` | live mail events |
@@ -65,6 +65,9 @@ POST の Origin は、検証済み Host に対応する固定 origin とだけ�
 | POST | `/api/annotate` | `{name, role, emoji, group}` | saved annotation |
 | POST | `/api/spawn` | spawn payload | child launch result |
 
+
+legacy dashboard の loopback 待受では、`/api/agents?days=7|30|all` は全 project の終了済み agent も `project_key` 付きで返します。`archive_only:true` は現在の設定 project 以外の読み取り専用カードを意味し、UI の Resume / Exit / Kill / Output / 注釈変更は無効です。同名が別 project にあっても `project_key` で区別します。`/api/history?session=<name>&project_key=<project>` はその project の厳密な登録と確認済み Claude/Codex receipt を照合し、推測による他 project のログ探索を行いません。Mail のメッセージ一覧と操作権限は従来の project 境界のままです。認証のない LAN 待受（`AGENTSTACK_BIND_HOST=0.0.0.0` 等）では、全 project archive は表示・参照できません。fresh/global mode は変更しません。
+
 ## GET `/api/version`
 
 ```bash
@@ -72,7 +75,7 @@ curl -s http://127.0.0.1:8770/api/version
 ```
 
 ```json
-{"name":"orrery-telemetry","version":"2026.09.16.1","api":37}
+{"name":"orrery-telemetry","version":"2026.09.16.1","api":38}
 ```
 
 version の解決順は [インストール](install.md#version)を参照してください。

@@ -106,7 +106,8 @@ def test_dsh_roster_uses_bounded_closed_database_connections(roster, monkeypatch
         return connection
     monkeypatch.setattr(sqlite3, 'connect', tracked)
     try:
-        assert len(server.build_agents(None)) == ROWS
+        # An archived registration from the second project now also appears.
+        assert len(server.build_agents(None)) == ROWS + 1
         if check == 'count':
             assert len(connections) <= 10, len(connections)
         else:
@@ -155,7 +156,7 @@ def test_one_poll_reads_the_registrations_once(roster, surface):
         rows = server.graph_payload(4, True)["nodes"]
     else:
         rows = server.build_agents(None)
-    assert len(rows) == ROWS
+    assert len(rows) == (ROWS if surface == "graph" else ROWS + 1)
     # Before: about one or two connections per row (3,000+ for 2,000 rows).
     assert len(roster["opened"]) <= 10, len(roster["opened"])
 
