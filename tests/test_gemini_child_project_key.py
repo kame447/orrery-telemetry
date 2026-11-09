@@ -11,6 +11,8 @@ import os
 import pathlib
 import subprocess
 
+from service_teardown import TEST_LABEL_PREFIX
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CHILD = ROOT / "hooks" / "spawn_gemini_child.sh"
 ENV_SH = "export AGENTSTACK_PROJECT_KEY=/saved/default-project\n"
@@ -36,7 +38,8 @@ def launch(tmp_path: pathlib.Path, **caller_env: str) -> tuple[list[str], str]:
     subprocess.run([*git, "-c", "user.email=a@b", "-c", "user.name=n", "commit", "-q",
                     "--allow-empty", "-m", "init"], check=True)
     env = {"HOME": str(tmp_path), "PATH": f"{stub}:/usr/bin:/bin:/opt/homebrew/bin",
-           "AGENTSTACK_HOME": str(home), "PARENT_AGENT": "Parent",
+           "AGENTSTACK_HOME": str(home), "AGENTSTACK_LABEL_PREFIX": TEST_LABEL_PREFIX,
+           "PARENT_AGENT": "Parent",
            "AGENTSTACK_MCP_URL": "http://127.0.0.1:1/mcp", **caller_env}
     subprocess.run(["bash", str(CHILD), "--unsafe-no-resources", "task", str(repo)],
                    env=env, capture_output=True, text=True, timeout=60)
