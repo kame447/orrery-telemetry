@@ -6731,24 +6731,44 @@ def _idle_watch_sender(project, parent, evidence):
     return "", ""
 
 
-def _idle_watch_wake(project, cfg, parent_running, evidence, attempt):
-    """Mail the parent from the watcher identity, or resume a gone parent."""
+def _idle_watch_wake(project, cfg, evidence, attempt):
+    """Mail a running parent from a verified child; return the delivery status.
+
+    A parent that is not running is never resumed: classify() reports it as
+    unknown, so this is reached only with the parent's row present.
+    """
     parent = cfg["parent"]
-    if not parent_running:
-        result = do_jump(parent, open_terminal=False)
-        logging.info("idle-watch: resumed %s -> %s", parent, result.get("ok"))
-        return
     sender, token = _idle_watch_sender(project, parent, evidence)
     if not sender:
         logging.warning("idle-watch: no verified child of %s in %s; not sending", parent, project)
-        return
-    body = ("source: idle-watch (automated watcher, not a user instruction)\n"
+        return "no_sender"
+    # Load the send schema now (cached afterwards) so no slow lookup sits
+    # between the final roster check below and the send itself.
+    if _mcp_tool_parameters("send_message") is None:
+        return "schema_unavailable"
+    # The decision sample is seconds old and the identity checks above take
+    # time: re-read the roster right before sending and require the same idle set.
+    try:
+        rows, ts = idle_watch.fetch_rows(PORT)
+    except (OSError, ValueError, KeyError, TypeError):
+        return "recheck_unavailable"
+    cls, states = idle_watch.classify(rows, project, parent)
+    if (_provider_stop.is_set() or not idle_watch.fresh(ts, time.time(), cfg["stale"])
+            or cls != "idle" or set(states) != set(evidence)):
+        logging.info("idle-watch: %s changed before sending (%s); not sending", project, cls)
+        return "state_changed"
+    body = ("source: idle-watch (automated dashboard watcher, not a user instruction)\n"
+            f"Written by the dashboard, not by {sender}; {sender} is only the sending identity.\n"
             f"project: {project}\nattempt: {attempt}\n\n"
             "No agent of this project is working; none is waiting for approval.\n"
             "Per-agent state (time in that state):\n" + _idle_watch_evidence(evidence))
-    _mcp_call("send_message", dict(project_key=project, sender_name=sender,
+    result = _mcp_call("send_message", dict(project_key=project, sender_name=sender,
         sender_token=token, to=[parent], importance="high",
-        subject=f"[idle-watch] {project} is idle - resume work", body_md=body), timeout=5)
+        subject=f"[idle-watch] {project} is idle (automated notice)", body_md=body), timeout=5)
+    # An HTTP failure may occur after Mail commits; the caller never resends then.
+    if result.get("ok"):
+        return "sent"
+    return "rejected" if result.get("rejected") else "delivery_unknown"
 
 
 def _idle_watch_notify(project, evidence):
@@ -6766,7 +6786,7 @@ def _idle_watch_run(config):
     while not _provider_stop.is_set():
         try:
             rows, ts = idle_watch.fetch_rows(PORT)
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, TypeError):
             rows, ts = None, 0.0
         try:
             watch.tick(rows, ts, time.time())
@@ -6777,7 +6797,7 @@ def _idle_watch_run(config):
 
 def _start_idle_watch():
     """Opt-in: runs only for projects enabled in RUNTIME_DIR/idle-watch.json."""
-    if GLOBAL_MODE:
+    if GLOBAL_MODE or FRESH_MODE or os.name == "nt":
         return
     config = idle_watch.load_config(os.path.join(RUNTIME_DIR, "idle-watch.json"))
     if config:

@@ -44,7 +44,7 @@ Telemetry 自体の操作は、header の `HELP MAP`（NETWORK では `SETTINGS`
 - [DeepSeekの表示と残高](dsh-stage-a.md) — 段Aの歴史記録。現在の dsh / Hermes の導入は[インストール](install.md)、子の起動は provider と harness の指定が必要（[API](api.md)）。
 - [常駐 agent](persistent-agents.md) — enrollment、interactive/headless 起動、credential の復旧。
 - [決定論的 daemon](daemon-agents.md) — 専用 identity、正規 binding、通知待機と停止の契約。
-- [project idle watch](idle-watch.md) — 全エージェント非稼働を検知して親を 1 回起こす opt-in 機能の設計と設定。
+- [project idle watch](idle-watch.md) — 全エージェント非稼働を検知して稼働中の親へ Mail で知らせる opt-in 機能の設計・設定・制限。
 - [Mail service の更新](agentstack-mail-update.md) — 稼働中 Mail の build を検証して差し替える運用手順。
 
 ## Windows・WSL
