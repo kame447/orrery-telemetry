@@ -79,6 +79,16 @@ else:
     command = json.loads(next(value.split('=',1)[1] for value in values if value.startswith('mcp_servers.orrery-mail.command=')))
     proxy_args = json.loads(next(value.split('=',1)[1] for value in values if value.startswith('mcp_servers.orrery-mail.args=')))
     proxy_cmd = [command,*proxy_args]
+# launch() already holds its exclusive operation lock when this CLI starts.
+# Signal before hook/proxy round trips; hold until the competing launch finishes.
+if os.environ.get('TEST_BLOCK'):
+    ready = pathlib.Path(os.environ['TEST_BLOCK'])
+    ready.write_text('ready')
+    deadline = time.monotonic() + 45
+    while not ready.with_suffix('.released').exists():
+        if time.monotonic() >= deadline:
+            raise RuntimeError('fixture release was not received')
+        time.sleep(0.05)
 recorded = subprocess.run(session_cmd, input=json.dumps(event), capture_output=True, text=True, timeout=15)
 if provider == 'codex':
     target = '*** Begin Patch\n*** Add File: note.py\n+new\n*** End Patch'
@@ -98,9 +108,6 @@ result = dict(provider=provider, args=args, session_id=session, session_hook_rc=
     runtime=os.environ.get('AGENTSTACK_RUNTIME_DIR'),
     old_identity_present=any(key in os.environ for key in ('PROJECT_KEY','AGENTSTACK_PROJECT_KEY','CHILD_REGISTRATION_TOKEN','MCP_AGENT_MAIL_TOKEN')))
 pathlib.Path(os.environ['TEST_TRACE']).write_text(json.dumps(result))
-if os.environ.get('TEST_BLOCK'):
-    pathlib.Path(os.environ['TEST_BLOCK']).write_text('ready')
-    time.sleep(8)
 sys.exit(0 if recorded.returncode == 0 and guarded.returncode == 0 and proxied.returncode == 0 else 17)
 '''
 
@@ -385,11 +392,16 @@ def test_one_context_cannot_start_two_native_processes(tmp_path):
             try:
                 for _ in range(120):
                     if ready.exists():break
+                    if first.done():
+                        result = first.result()
+                        pytest.fail(f'native fixture exited before ready: {result.returncode}: {result.stderr}')
                     await asyncio.sleep(0.1)
-                assert ready.exists()
+                assert ready.exists(), 'native fixture did not signal ready'
                 second = await invoke(client, 'claude', binary, tmp_path)
                 assert second.returncode == 2 and 'FRESH_LAUNCH_BUSY' in second.stderr
+                assert not first.done(), 'first launch exited before the exclusion check'
             finally:
+                ready.with_suffix('.released').write_text('release')
                 result = await first
             assert result.returncode == 0, result.stderr
     asyncio.run(run())
