@@ -66,8 +66,10 @@ if __name__ == '__main__':
 # `server.py` is both an executable script and an importable dashboard module
 # in the tests.  Support both import roots without coupling callers to cwd.
 try:
+    from dashboard import idle_watch
     from dashboard import codex_models, mail_signals, provider_stalls, harness_runtime, harness_helpers, harness_context, harness_activity, dsh_history, hermes_history
 except ModuleNotFoundError:  # direct `python dashboard/server.py`
+    import idle_watch
     import codex_models
     import mail_signals
     import provider_stalls
@@ -6700,6 +6702,108 @@ def _start_provider_stall_monitor():
     _provider_thread.start()
 
 
+def _idle_watch_evidence(evidence: dict) -> str:
+    return "\n".join(f"- {n}: {e['state']} ({e['seconds']}s)" for n, e in evidence.items())
+
+
+def _idle_watch_sender(project, parent, evidence):
+    """The verified child of `parent` that worked last, like _provider_stall_send.
+
+    A child counts only if its tmux PARENT_AGENT, its child-state identity and
+    parent, and its owner token all agree. Returns ("", "") if none verifies.
+    """
+    candidates = sorted((n for n in evidence if n != parent and _valid(n)),
+                        key=lambda n: evidence[n].get("last_work") or 0, reverse=True)
+    for name in candidates:
+        env = _tmux(["show-environment", "-t", "=" + name, "PARENT_AGENT"]).strip()
+        if env != "PARENT_AGENT=" + parent:
+            continue
+        try:
+            module = _child_resume_module()
+            state = module._load_state(Path(RUNTIME_DIR) / "child-agents" / (name + ".json"))
+            module._validate_identity(state, agent_name=name, project_key=project)
+            token = _runtime_agent_token(name)
+            if (state.get("parent_agent") == parent and token
+                    and secrets.compare_digest(token, state.get("registration_token", ""))):
+                return name, token
+        except Exception:
+            continue
+    return "", ""
+
+
+def _idle_watch_wake(project, cfg, evidence, attempt):
+    """Mail a running parent from a verified child; return the delivery status.
+
+    A parent that is not running is never resumed: classify() reports it as
+    unknown, so this is reached only with the parent's row present.
+    """
+    parent = cfg["parent"]
+    sender, token = _idle_watch_sender(project, parent, evidence)
+    if not sender:
+        logging.warning("idle-watch: no verified child of %s in %s; not sending", parent, project)
+        return "no_sender"
+    # Load the send schema now (cached afterwards) so no slow lookup sits
+    # between the final roster check below and the send itself.
+    if _mcp_tool_parameters("send_message") is None:
+        return "schema_unavailable"
+    # The decision sample is seconds old and the identity checks above take
+    # time: re-read the roster right before sending and require the same idle set.
+    try:
+        rows, ts = idle_watch.fetch_rows(PORT)
+    except (OSError, ValueError, KeyError, TypeError):
+        return "recheck_unavailable"
+    cls, states = idle_watch.classify(rows, project, parent)
+    if (_provider_stop.is_set() or not idle_watch.fresh(ts, time.time(), cfg["stale"])
+            or cls != "idle" or set(states) != set(evidence)):
+        logging.info("idle-watch: %s changed before sending (%s); not sending", project, cls)
+        return "state_changed"
+    body = ("source: idle-watch (automated dashboard watcher, not a user instruction)\n"
+            f"Written by the dashboard, not by {sender}; {sender} is only the sending identity.\n"
+            f"project: {project}\nattempt: {attempt}\n\n"
+            "No agent of this project is working; none is waiting for approval.\n"
+            "Per-agent state (time in that state):\n" + _idle_watch_evidence(evidence))
+    result = _mcp_call("send_message", dict(project_key=project, sender_name=sender,
+        sender_token=token, to=[parent], importance="high",
+        subject=f"[idle-watch] {project} is idle (automated notice)", body_md=body), timeout=5)
+    # An HTTP failure may occur after Mail commits; the caller never resends then.
+    if result.get("ok"):
+        return "sent"
+    return "rejected" if result.get("rejected") else "delivery_unknown"
+
+
+def _idle_watch_notify(project, evidence):
+    text = f"{project}: approval pending, auto-resume suppressed"
+    logging.warning("idle-watch: %s\n%s", text, _idle_watch_evidence(evidence))
+    if sys.platform == "darwin":
+        subprocess.run(["osascript", "-e", "on run argv\ndisplay notification (item 1 of argv) "
+                        "with title \"ORRERY idle-watch\"\nend run", text],
+                       capture_output=True, timeout=5, check=False)
+
+
+def _idle_watch_run(config):
+    watch = idle_watch.IdleWatch(config, _idle_watch_wake, _idle_watch_notify)
+    poll = min(c["poll"] for c in config.values())
+    while not _provider_stop.is_set():
+        try:
+            rows, ts = idle_watch.fetch_rows(PORT)
+        except (OSError, ValueError, KeyError, TypeError):
+            rows, ts = None, 0.0
+        try:
+            watch.tick(rows, ts, time.time())
+        except Exception:
+            logging.exception("idle-watch tick failed")
+        _provider_stop.wait(poll)
+
+
+def _start_idle_watch():
+    """Opt-in: runs only for projects enabled in RUNTIME_DIR/idle-watch.json."""
+    if GLOBAL_MODE or FRESH_MODE or os.name == "nt":
+        return
+    config = idle_watch.load_config(os.path.join(RUNTIME_DIR, "idle-watch.json"))
+    if config:
+        threading.Thread(target=_idle_watch_run, args=(config,), name="idle-watch", daemon=True).start()
+
+
 @atexit.register
 def _stop_provider_stall_monitor():
     _provider_stop.set()
@@ -10446,6 +10550,7 @@ def main():
     _start_supervisor_watchdog()
     _start_child_resume_maintenance()
     _start_provider_stall_monitor()
+    _start_idle_watch()
 
     # The picker's Claude default checks the claude a child runs; find it once
     # here, where starting a login shell is allowed (requests may not).

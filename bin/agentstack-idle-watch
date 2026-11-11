@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""Dry-run the project idle watch against the live dashboard. Never sends anything.
+
+Sending is done only by the dashboard thread, from idle-watch.json (docs/idle-watch.md).
+"""
+import argparse
+import json
+import logging
+import os
+from pathlib import Path
+import sys
+import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from dashboard import idle_watch
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--project", required=True)
+    p.add_argument("--parent", required=True)
+    p.add_argument("--port", type=int, default=int(os.environ.get("AGENTSTACK_PORT", "8770")))
+    p.add_argument("--iterations", type=int, default=0, help="0 = until interrupted")
+    for key, value in idle_watch.DEFAULTS.items():
+        p.add_argument("--" + key.replace("_", "-"), type=int, default=value)
+    a = p.parse_args()
+    cfg = {k: getattr(a, k) for k in idle_watch.DEFAULTS}
+    bad = [k for k, v in cfg.items() if not idle_watch._valid_setting(k, v)]
+    if bad:
+        p.error("out of range: " + ", ".join(
+            f"--{k.replace('_', '-')} ({idle_watch.LIMITS[k][0]}..{idle_watch.LIMITS[k][1]})" for k in bad))
+    cfg["parent"] = a.parent
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    log = logging.getLogger("idle-watch")
+
+    def wake(project, cfg, evidence, attempt):
+        log.info("DRY-RUN would mail-parent attempt=%d evidence=%s", attempt,
+                 json.dumps(evidence, ensure_ascii=False))
+        return "sent"  # show the resend schedule as if delivery had been confirmed
+
+    def notify(project, evidence):
+        log.info("DRY-RUN would notify human (ask pending) evidence=%s",
+                 json.dumps(evidence, ensure_ascii=False))
+
+    watch = idle_watch.IdleWatch({a.project: cfg}, wake, notify)
+    n = 0
+    while a.iterations == 0 or n < a.iterations:
+        n += 1
+        try:
+            rows, ts = idle_watch.fetch_rows(a.port)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            rows, ts = None, 0.0
+            log.info("sample unavailable: %s", exc)
+        now = time.time()
+        if rows is not None:
+            cls, states = idle_watch.classify(rows, a.project, a.parent)
+            log.info("sample %d class=%s states=%s", n, cls, json.dumps(states, ensure_ascii=False))
+        watch.tick(rows, ts, now)
+        if a.iterations == 0 or n < a.iterations:
+            time.sleep(a.poll)
+
+
+if __name__ == "__main__":
+    main()
