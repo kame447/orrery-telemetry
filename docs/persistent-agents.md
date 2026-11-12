@@ -8,6 +8,101 @@
 
 通常の `agent-start` / `agent-start-codex` や child launcher を通る一時的な agent は、従来の登録経路を使います。この文書の enrollment は、launcher を一度も通らなかった既存 bot、または local credential を失った同じ数値 row を移行するための operator 手順です。
 
+## fresh の Claude Channels
+
+`runtime_mode=fresh` では、先に [fresh の登録と準備](fresh-global-update.md) を行い、
+本人が prepared Claude HOME のログイン・hook・Channels plugin を準備します。
+`AGENTSTACK_PYTHON` には、通常の fresh 起動と同じ確認済みの Mail package を import できる Python を指定します。
+旧 enrollment や旧 Mail token を移す操作は行いません。owner 限定の JSON profile を作ります。
+
+```json
+{
+  "kind": "orrery-fresh-persistent-v1",
+  "context": "/path/to/prepared/context.json",
+  "provider": "claude",
+  "working_directory": "/path/to/workspace",
+  "channels": ["plugin:telegram@claude-plugins-official"],
+  "model": "sonnet",
+  "environment": {"TELEGRAM_STATE_DIR": "/path/to/channel-state"}
+}
+```
+
+```bash
+chmod 600 /path/to/bot.json
+agentstack-persistent inspect --profile /path/to/bot.json
+agentstack-persistent run --profile /path/to/bot.json
+```
+
+profile は明示的な fresh 分岐で通常の launch へ渡ります。登録、prepare、service 登録を
+自動で行いません。Channels の設定 source の検査と Mail alias の置換は従来の interactive
+と共用し、Channels を残したまま bound Mail と通常の予約 hook を使います。
+待機中の Mail は既存の fresh watcher が同じ tmux の入力面へ届けます。
+
+起動元の環境と profile に鍵の値を入れず、Channels の既存 state の読取を使います。
+公式 plugin が起動後に自分の process 内で `.env` を読む挙動は変更しません。
+旧 raw Mail token は引き継ぎません。モデルが使う Bash へ鍵を渡しません。
+
+停止は **pane を kill せず、この launcher process へ SIGTERM** を送って完了を待ちます。
+launcher が provider の終了を確認して `ended.json` を記録した後、同じ profile で再起動します。
+異常終了・強制 kill・停止 timeout は unknown で止まり、次の run を起動しません。
+会話は 1 起動につき 1 つです。`/clear` などで session が変わるとその run を停止し、
+`FRESH_BOT_RESTART_REQUIRED` を表示します。旧会話の自動復元や無停止の切替は行いません。
+本番と同じ Telegram token の新旧 poller を並走させず、旧 poller の終了も確認してください。
+
+Mac の bot process の再起動と機体再起動は別です。Mac／WSL の機体再起動・自動 unlock は
+未受入で、この手順だけで対応済みとはしません。通常の旧 profile は次の enrollment 手順を使います。
+
+## fresh の Hermes Telegram（interactive）
+
+Hermes も準備済みの同じ登録を使います。本物の `hermes chat --tui` に同梱の
+`orrery-telegram` plugin を載せ、Telegram の受信を生きた TUI へ入れます。
+返信は `telegram_reply` tool、Mail は bound proxy と標準 watcher、端末からの入力は同じ TUI です。
+独自の gateway や headless bridge は起動しません。
+
+```json
+{
+  "kind": "orrery-fresh-persistent-v1",
+  "context": "/path/to/prepared/context.json",
+  "provider": "hermes",
+  "working_directory": "/path/to/workspace",
+  "model": "configured-model-id",
+  "managed": {
+    "manifest_file": "/path/to/native-manifest.json",
+    "backend_id": "deepseek"
+  },
+  "telegram": {
+    "token_ref": {"store": "keychain", "service": "telegram-bot", "account": "owner"},
+    "allow_from": [123456789]
+  }
+}
+```
+
+profile は `0600`、context と Hermes HOME は Linux／Mac の私有 filesystem に置きます。
+allowlist の数字は例で、自分の Telegram user ID に置き換えてください。group の受信は対象外です。
+Mac は本人が Keychain に保存した参照、Linux／WSL は
+`{"store":"secret-service","attributes":{"application":"telegram-bot"}}` のような
+既存の [Secret Service 参照](install.md#ubuntu-wsl-の-secret-service-参照実機受け入れ前)を使います。
+値を profile や環境へ入れません。plugin が process 内で読み、通常の鍵読み取り guard にも参照を渡します。
+provider は通常の子と同じ manifest・`key_cmd`・設定生成器を使います。
+
+本人が provider の設定・hook／plugin の承認を済ませてから、上と同じ `inspect`／`run` を使います。
+Hermes HOME は context の隣の `providers/hermes` です。必要な非秘密の personality／設定は
+起動前に本人が置き、古い Mail MCP・鍵の値・旧 token をコピーしないでください。
+常駐登録は既存の launchd／systemd user unit から同じ foreground launcher を起動します。
+新しい service の自動登録はありません。Linux／WSL は user bus と Secret Service の unlock が前提です。
+`/mnt/c` は私有 runtime の既定保存先にしません。
+
+停止・再起動と会話変更の規則は Channels と共通です。Hermes の停止時は、その起動が所有する
+TUI／backend を起動中から観測し、通常終了でも子の終了を確認してから `ended.json` を残します。
+この run の独立した前景 pane／job の process group が必要です。子が残る・観測できない場合は unknown で止めます。
+`logs/telegram-status.json` の `telegram-ready` は poller の準備であり、Mail や返信の成功を保証しません。
+409・credential-unavailable・allowlist-empty は失敗として扱い、新旧の同 token を並走させません。
+
+既知の制限: 既存 plugin の並行 flush と、長文返信の途中失敗による部分返信は今回直していません。
+Hermes の子が別 session に離れて残ったまま起動役が終わると、その子が終わるまで新しい bot は Telegram を受けない（profile ごとの lock で二重受信は起きない）。
+新 run は新会話で、旧会話の自動復元はありません。合成 transport／native による試験と実 Telegram の
+受け入れは別です。実 provider／Telegram の往復、WSL 実機、Mac／WSL の機体再起動は未受入です。
+
 ## 保証範囲
 
 ここでいう **operator** は、この機体の local terminal で専用 CLI を明示的に実行する人です。実装が保証するのは次の範囲です。

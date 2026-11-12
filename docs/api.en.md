@@ -63,7 +63,7 @@ with HTTP 400. A media-type mismatch is HTTP 415, a cross-origin POST is HTTP 40
 | POST | `/api/jump` | `{session, open?, base?, tools?}` | open / focus / resume action |
 | POST | `/api/exit` | `{session}` | graceful exit action |
 | POST | `/api/kill` | `{session, mode}` | kill / retire action |
-| POST | `/api/annotate` | `{name, role, emoji, group}` | saved annotation |
+| POST | `/api/annotate` | `{name, role?, emoji?, group?, task?}` | saved annotation |
 | POST | `/api/spawn` | spawn payload | child launch result |
 
 ## GET `/api/version`
@@ -73,7 +73,7 @@ curl -s http://127.0.0.1:8770/api/version
 ```
 
 ```json
-{"name":"orrery-telemetry","version":"2026.09.16.1","api":37}
+{"name":"orrery-telemetry","version":"2026.09.16.1","api":39}
 ```
 
 See [Installation](install.en.md#version) for version resolution order.
@@ -98,7 +98,7 @@ A parent name must be unique across the whole directory, including retired rows.
 
 The successful response `ok:true,pending:true,child_name,job_id,I/A` means handoff acceptance, not completed native startup. Status `state:launching,result:null` is unconfirmed; detail:unknown means an uncertain outcome that must not be automatically retried, and detail:not_started means saved preparation without handoff. A confirmed native receipt yields the existing caller's launch verdict state:ready. Execution state stays separate in detail:started/ended and result.native_ready. Ending without native confirmation yields state:failed; termination alone never means success. Roster native_ready also describes a receipt, not current OS process liveness; unconfirmed running remains null. A failure after preparation returns the same job/I/A for status and manual resolution; it does not automatically create another same-name agent. Fresh I is projected byte-for-byte as its generated 32 lowercase hex digits, without converting it to a hyphenated UUID.
 
-API2a connects the Mail/graph readers below; API2b-1 connects PC term/history/jump/exit for the current target. Ended kill/retire uses the management contract below; R4 has a separate human opt-in contract. Reactivate, retired resume and App GUI activation remain unconnected. Worktree, browser, custom base/tools, spawn's terminal option, annotations(role/group/emoji), and dry_run are also explicitly unavailable. This does not replace ordinary standalone/parented automatic spawning with manual child creation. The user's agent can prepare work folders and provider settings using the [migration procedure](fresh-global-update.en.md), which also covers configuration, cutover and recovery.
+API2a connects the Mail/graph readers below; API2b-1 connects PC term/history/jump/exit for the current target. Ended kill/retire uses the management contract below; R4 has a separate human opt-in contract. Reactivate, retired resume and App GUI activation remain unconnected. Worktree, browser, custom base/tools, spawn's terminal option, annotations(role/group/emoji/task), and dry_run are also explicitly unavailable. This does not replace ordinary standalone/parented automatic spawning with manual child creation. The user's agent can prepare work folders and provider settings using the [migration procedure](fresh-global-update.en.md), which also covers configuration, cutover and recovery.
 
 #### Current PC targets (API2b-1)
 
@@ -513,7 +513,7 @@ The response contains the message list and watermark for live comet. Missing con
 {
   "ok":true,
   "annotations":{
-    "WindyFermi":{"role":"docs","emoji":"","group":"release"}
+    "WindyFermi":{"role":"docs","emoji":"","group":"release","task":"Review release documentation"}
   }
 }
 ```
@@ -660,7 +660,7 @@ Expected `mode` values are `tmux`, `retire`, and `both`. The response is `{ok, s
 Request:
 
 ```json
-{"name":"WindyFermi","role":"docs","emoji":"","group":"release"}
+{"name":"WindyFermi","role":"docs","emoji":"","group":"release","task":"Review release documentation"}
 ```
 
 `session` can be used instead of `name`.
@@ -670,11 +670,17 @@ Response:
 ```json
 {
   "ok":true,
-  "annot":{"name":"WindyFermi","role":"docs","emoji":"","group":"release"}
+  "annot":{"name":"WindyFermi","role":"docs","emoji":"","group":"release","task":"Review release documentation"}
 }
 ```
 
-An annotation is deleted when `role` and `emoji` are empty and no group remains. Spawn does not save `emoji`; it uses only role / group.
+Since API 38, omitted fields retain their current values. Send an explicit empty string or `null` to clear a field; this applies equally to `role`, `emoji`, `group`, and `task`. All four fields must be empty to delete the entire annotation. `role`, `emoji`, `group`, and `task` are trimmed and limited to 40, 8, 24, and 200 Unicode characters respectively. A nonempty `task` is a user display override; saving an empty string or `null` restores the registered description. `/api/agents` retains the original registered description in `task` and includes the override in `annot.task`. `/api/annotations` and graph-node `annot` use the same shape; `annot.task` is omitted when no override exists. Display clients prefer `annot.task` to `task`. This never changes Mail registration. Existing spawn/delegate callers that send role / emoji / group keep their values and preserve any omitted task override. Earlier API generations replace omitted legacy fields with empty strings and do not support task overrides.
+
+Clear only the task override (omitted role, emoji, and group retain their values):
+
+```json
+{"name":"WindyFermi","task":null}
+```
 
 ## POST `/api/spawn`
 
@@ -849,6 +855,8 @@ API 25: legacy managed `attempt_id` spawn/status requests are retired and return
 
 ## Mobile reader (API 30)
 
+From API 39, snapshot agents optionally include `work_disp` only while running with `act_state: work` and a validated compact upstream duration such as `2m05s`. The field is omitted for stopped agents, other states, missing or invalid values. The viewer does not invent elapsed time.
+
 `GET /api/mobile-mail?window=<period>` is a legacy, loopback-only metadata endpoint. The default is `day` (24h). Allowed values are `all`, `day`, `15m`, and `m<N>` for integer minutes from 15 to 43200 divisible by 15; leading zeros and fractions are rejected. It keeps the existing dashboard Host admission. Missing DB or project/schema/read failure returns 503; unsupported global mode is explicitly refused (501 after admission, or the existing global admission refusal). It never falls back to a legacy DB from global mode. Unknown or repeated query fields return 400.
 
 A 200 response has `status: available`, `window`, `observed_at`, `edges`, `events`, `events_truncated`, `edges_truncated`, `invalid_timestamps`, and `degraded`. `edges` contains source/target/kind/count/last_ts aggregated over the actual period, at most 10,000 rows. Counts are direction-specific to/cc recipient rows, excluding bcc and cross-project endpoints. `events` contains the latest 200 recipient rows with stable opaque `key`, source/target/kind/`count:1`/event_at, ordered by event time, message id and recipient id descending. The SQL reads only metadata; subjects, bodies and read/ack writes are excluded. Invalid timestamps are excluded and reported as degraded. An empty successful query differs from an unavailable query.
@@ -873,7 +881,9 @@ The viewing contract remains; a separate pane adapter is opt-in. Preview and inp
 
 External JSON is `targets:{epoch,name}`, `preview:{epoch,choice}`, `prepare:{epoch,choice,revision,text}`, `commit:{epoch,intent,confirmation}` and `cancel/status:{epoch,intent}`. Targets use an exact existing manager session-name match. At most 128 candidates fit within the actual 16 KiB serialized response; omissions are explicit. The user chooses among panes. Aliases and the active pane are not guessed. Owner/reader/bridge/pane-bound handles live in memory for 30 seconds, with at most 16 selected proofs. Foreground previews can renew that selection lease, never a prepared confirmation's text, proof or 30 second expiry.
 
-Preview uses fresh shared-helper legacy admission and kernel birth, comparing socket/server/session/pane/UID/bridge incarnation before and after capture. Unknown helpers, OS facts or targets are refused; no Codex launch binding or registration DB is used. Fixed capture is limited to the last 40 lines/6 KiB displayed UTF-8, 64 KiB collected and 3 seconds overall. The actual serialized JSON response is capped at 16 KiB. ANSI/OSC/C0/C1/directional controls are removed; literal text, observation time and removal/truncation flags are returned. No preview body is cached. Collection overflow discards the body while preserving the ACK queue position. Missing termination after 3 seconds quarantines that control stream rather than reusing uncertain synchronization.
+Preview uses fresh shared-helper legacy admission and kernel birth, comparing socket/server/session/pane/UID/bridge incarnation before and after capture. Unknown helpers, OS facts or targets are refused; no Codex launch binding or registration DB is used. Fixed capture is limited to the last 120 lines/12 KiB displayed UTF-8, 64 KiB collected and 3 seconds overall. The actual serialized JSON response is capped at 16 KiB. ANSI/OSC/C0/C1/directional controls are removed; literal text, observation time and removal/truncation flags are returned. No preview body is cached. Collection overflow discards the body while preserving the ACK queue position. Missing termination after 3 seconds quarantines that control stream rather than reusing uncertain synchronization.
+
+Expanded terminal previews require `X-ORRERY-Mobile-Preview: 120/12288` on the loopback request. If either side is older, previews keep the 40-line/6-KiB limits; the newer reader validates text against the declared limits. Expanded responses still fit within 16 KiB of serialized JSON, shortening the tail further when quote escaping requires it. The relay sends UTF-8 without expanding non-ASCII characters into `\uXXXX`.
 
 Prepare binds an unchanged UTF-8 line of at most 4 KiB. Limits are 16 pending confirmations, 256 result metadata entries/10 minutes, one simultaneous send per pane and 6 sends/minute per pane. Commit claims once and holds the same write lock from fresh pane validation through every chunk/Enter write, then releases it before awaiting all tmux ACKs. All ACKs within 5 seconds mean accepted; partial failure/timeout/error means unknown with no retries or remaining-chunk compensation. Status only queries. Program identity or task completion is not guaranteed: return to a shell, existing input, external writers and races after the final check remain possible. See the [mobile guide](mobile.en.md#inspect-a-pane-and-send-input-from-your-phone) for UI, enabling and disabling.
 

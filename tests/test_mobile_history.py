@@ -271,14 +271,19 @@ def test_cockpit_offline_or_wrong_type_is_unavailable():
 HARNESS = r'''
 const vm=require('node:vm'),assert=require('node:assert/strict');
 class El{
- constructor(tag){this.tagName=tag.toUpperCase();this.children=[];this.parent=null;this._text='';this.className='';this.dataset={};this.hidden=false;this.attrs={};this.listeners={};this.scrollTop=0;}
+ constructor(tag){this.tagName=tag.toUpperCase();this.children=[];this.parent=null;this._text='';this.className='';this.dataset={};this.hidden=false;this.attrs={};this.listeners={};this.scrollTop=0;this.style={};this.classList={add:(...xs)=>{this.className=[this.className,...xs].filter(Boolean).join(' ');}};}
  get isConnected(){let n=this;while(n.parent)n=n.parent;return n===body;}
  get textContent(){return this._text+this.children.map(c=>c.textContent).join('');}
  set textContent(v){this._text=String(v);this.children.forEach(c=>c.parent=null);this.children=[];}
  set innerHTML(v){throw Error('innerHTML must not be used');}
  get scrollHeight(){return 1000;} get clientHeight(){return 200;}
+ appendChild(x){this.append(x);return x;}
  append(...xs){for(const x of xs){x.parent?.children.splice(x.parent.children.indexOf(x),1);x.parent=this;this.children.push(x);}}
- insertBefore(x,ref){if(!ref)return this.append(x);x.parent=this;this.children.splice(this.children.indexOf(ref),0,x);}
+ insertBefore(x,ref){if(x===ref)return;if(!ref)return this.append(x);x.parent?.children.splice(x.parent.children.indexOf(x),1);x.parent=this;this.children.splice(this.children.indexOf(ref),0,x);}
+ get nextElementSibling(){return this.parent?.children[this.parent.children.indexOf(this)+1]||null;}
+ contains(x){return this===x||this.children.some(c=>c.contains(x));}
+ focus(){doc.activeElement=this;}
+ getBoundingClientRect(){return {top:0,width:0};}
  remove(){if(this.parent){this.parent.children.splice(this.parent.children.indexOf(this),1);this.parent=null;}}
  replaceChildren(...xs){this.children.forEach(c=>c.parent=null);this.children=[];this._text='';this.append(...xs);}
  setAttribute(k,v){this.attrs[k]=String(v);} addEventListener(k,f){this.listeners[k]=f;}
@@ -288,15 +293,16 @@ class El{
  all(){return [this,...this.children.flatMap(c=>c.all())];}
 }
 const body=new El('body');const timers=new Map();let seq=0;const fetches=[];let docListeners={};
-const doc={hidden:false,createElement:t=>new El(t),addEventListener(k,f){docListeners[k]=f;}};
+const doc={hidden:false,createTextNode:t=>{const n=new El('#text');n.textContent=t;return n;},createElement:t=>new El(t),addEventListener(k,f){docListeners[k]=f;}};
 let reply=null;
-const context={document:doc,console,TextEncoder,AbortController,CSS:{escape:s=>s},Date,JSON,
+const context={document:doc,console,TextEncoder,AbortController,URL,CSS:{escape:s=>s},Date,JSON,
  setTimeout(f,ms){timers.set(++seq,{f,ms});return seq;},clearTimeout(id){timers.delete(id);},
  addEventListener(){},
  fetch:async(url,opts)=>{fetches.push({url,opts});
   const aborted=new Promise((_,no)=>{if(context.honorAbort&&opts.signal)opts.signal.addEventListener('abort',()=>{const e=Error('aborted');e.name='AbortError';no(e);});});
   const v=await Promise.race([reply(url),aborted]);return {ok:true,status:v.status||200,text:async()=>JSON.stringify(v.body),json:async()=>v.body};}};
 context.window=context;
+vm.runInNewContext(MARKDOWN,context);
 vm.runInNewContext(SOURCE,context);
 const C=context.OrreryMobileConversation;
 const settle=async()=>{for(let i=0;i<20;i++)await new Promise(r=>setImmediate(r));};
@@ -316,16 +322,111 @@ def run(body):
     if not node:
         pytest.skip('node is unavailable')
     source = (ROOT / 'dashboard/mobile/conversation.js').read_text()
-    script = HARNESS.replace('SOURCE', json.dumps(source)).replace('BODY', body)
+    script = HARNESS.replace('MARKDOWN', json.dumps((ROOT / 'dashboard/mobile/conversation_markdown.js').read_text())).replace('SOURCE', json.dumps(source)).replace('BODY', body)
     result = subprocess.run([node, '-'], input=script, text=True, capture_output=True, timeout=20)
     assert result.returncode == 0, result.stderr + result.stdout
     assert result.stdout.strip().endswith('ok')
 
 
+def test_phone_groups_tool_runs_and_keeps_open_group_and_focus_on_poll():
+    run(r'''
+      const tool=(id,text,ts='2026-11-10T07:10:00Z')=>({id,kind:'tool',role:'assistant',text,ts});
+      let rows=[tool('t1','Read'),tool('t2','Bash'),tool('t3','Read','2026-11-10T07:12:00Z')];
+      reply=async()=>page(rows);
+      const root=C.mount('Vega');body.append(root);await settle();
+      const button=root.querySelector('.conversation-tool-group');assert.ok(button,'tool summary exists');
+      assert.equal(button.querySelector('.conversation-tool-count').textContent,'3 tool calls');
+      assert.equal(button.querySelector('.conversation-tool-names').textContent,'· Read ×2, Bash ×1');
+      assert.ok(button.querySelector('.conversation-tool-times').textContent.includes('–'));
+      assert.ok(button.title.includes('2026'));assert.equal(button.attrs['aria-label'],button.title);
+      assert.equal(button.attrs['aria-expanded'],'false');
+      assert.ok(root.querySelectorAll('.conversation-tool').every(row=>row.hidden));
+      button.focus();button.onclick();
+      assert.equal(button.attrs['aria-expanded'],'true');
+      const original=root.querySelector('[data-id="t1"]');
+      rows=[...rows,tool('t4','Read')];await tick();
+      assert.equal(root.querySelector('.conversation-tool-group'),button,'keep the button node');
+      assert.equal(root.querySelector('[data-id="t1"]'),original,'keep the row node');
+      assert.equal(doc.activeElement,button,'keep keyboard focus');
+      assert.equal(button.attrs['aria-expanded'],'true');
+      assert.ok(root.querySelectorAll('.conversation-tool').every(row=>!row.hidden));
+      assert.equal(button.querySelector('.conversation-tool-count').textContent,'4 tool calls');
+      rows=[...rows,ev('break'),tool('t5','Edit')];await tick();
+      const groups=root.querySelectorAll('.conversation-tool-group');assert.equal(groups.length,2);
+      assert.equal(groups[1].querySelector('.conversation-tool-count').textContent,'1 tool call');
+      assert.equal(groups[1].attrs['aria-expanded'],'false');
+      C.unmount();assert.equal(root.children.length,0);
+    ''')
+
+
+def test_phone_keeps_mail_tool_rows_outside_groups_and_resolves_missing_recipient():
+    run(r'''
+      const mail=direction=>({direction,sender:'Lead',recipients:[],subject:'Recorded subject',importance:'normal',coverage:'complete',body:'Mail body'});
+      reply=async()=>page([
+        {id:'tool',kind:'tool',role:'assistant',text:'Read',ts:''},
+        {id:'mail-tool',kind:'tool',role:'assistant',text:'send_message',ts:'',mail:[mail('received')]},
+        {id:'received',kind:'mail',role:'assistant',text:'',ts:'',mail:[mail('received')]},
+        {id:'sent',kind:'mail',role:'assistant',text:'',ts:'',mail:[mail('sent')]}]);
+      const root=C.mount('Vega');body.append(root);await settle();
+      const direct=root.querySelector('[data-id="received"]');
+      assert.ok(direct.textContent.includes('Vega'),'received Mail uses the conversation owner');
+      assert.ok(!direct.textContent.includes('unknown'));
+      assert.equal(root.querySelectorAll('.conversation-tool-group').length,1);
+      const received=root.querySelector('[data-id="mail-tool"]');assert.equal(received.hidden,false);
+      assert.ok(received.textContent.includes('Vega'),'received Mail uses the conversation owner');
+      assert.ok(!received.textContent.includes('unknown'));
+      assert.ok(root.querySelector('[data-id="sent"]').textContent.includes('recorded recipient unavailable'));
+      C.unmount();
+    ''')
+
+
+def test_phone_tool_group_survives_older_page_trim_and_reset():
+    run(r'''
+      const tool=i=>({id:'t'+i,kind:'tool',role:'assistant',text:'Read',ts:''});
+      const token='a'.repeat(32);let rows=[tool(2),tool(3)];
+      reply=async url=>url.includes('page=')?page([tool(1)]):page(rows,token);
+      const root=C.mount('Vega');body.append(root);await settle();
+      const button=root.querySelector('.conversation-tool-group');button.focus();button.onclick();
+      const original=root.querySelector('[data-id="t2"]');
+      await olderButton(root).onclick();await settle();
+      assert.equal(root.querySelector('.conversation-tool-group'),button);
+      assert.equal(button.attrs['aria-expanded'],'true');assert.equal(doc.activeElement,button);
+      assert.equal(root.querySelector('[data-id="t2"]'),original);
+      assert.equal(button.querySelector('.conversation-tool-count').textContent,'3 tool calls');
+      reply=async()=>page(rows);
+      for(let start=4;start<204;start+=40){rows=Array.from({length:40},(_,i)=>tool(start+i));await tick();}
+      assert.equal(ids(root).length,200);assert.ok(!root.querySelector('[data-id="t1"]'));
+      assert.equal(root.querySelector('.conversation-tool-group'),button);
+      assert.equal(button.querySelector('.conversation-tool-count').textContent,'200 tool calls');
+      assert.equal(button.attrs['aria-expanded'],'true');assert.equal(doc.activeElement,button);
+      reply=async()=>({body:{ok:false,error:'history_changed'}});await tick();
+      assert.equal(root.querySelectorAll('.conversation-tool-group').length,0);
+      assert.equal(ids(root).length,0);C.unmount();
+    ''')
+
+
+def test_phone_tool_group_range_uses_earliest_and_latest_when_middle_arrives_late():
+    run(r'''
+      const tool=(id,minute)=>({id,kind:'tool',role:'assistant',text:'Read',ts:'2026-11-09T22:'+minute+':00Z'});
+      const first=tool('t1','10'),middle=tool('t2','11'),last=tool('t3','12');let rows=[first,last];
+      reply=async()=>page(rows);
+      const root=C.mount('Vega');body.append(root);await settle();
+      const button=root.querySelector('.conversation-tool-group');button.focus();button.onclick();
+      rows=[first,middle,last];await tick();
+      const time=ts=>new Date(ts).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});
+      assert.equal(button.querySelector('.conversation-tool-times').textContent,time(first.ts)+'–'+time(last.ts));
+      assert.ok(button.title.includes(new Date(first.ts).toLocaleString()));
+      assert.ok(button.title.includes(new Date(last.ts).toLocaleString()));
+      assert.equal(button.attrs['aria-label'],button.title);
+      assert.equal(button.attrs['aria-expanded'],'true');assert.equal(doc.activeElement,button);
+      assert.deepEqual(ids(root),['t1','t3','t2'],'late arrival ordering remains unchanged');C.unmount();
+    ''')
+
+
 def test_conversation_source_has_no_html_sinks():
     import re
     source = re.sub(r'/\*.*?\*/', '', (ROOT / 'dashboard/mobile/conversation.js').read_text(), flags=re.S)
-    # The one image source is the checked PNG data URL; closing clears it.
+    # Preview and thumbnails share the checked PNG source and cleanup.
     assert source.count('.src=') == 2 and "img.src=pngSource(v);" in source and "img.src='';" in source
     assert source.count("'data:image/png;base64,'+v.data") == 1
     source = source.replace('img.src=pngSource(v);', '').replace("img.src='';", '')
@@ -355,12 +456,12 @@ def test_recorded_html_stays_text_and_tables_are_built_as_dom():
       assert.ok(root.textContent.includes('<svg onload=x>.png'));
       const table=root.all().find(e=>e.tagName==='TABLE');assert.ok(table);
       assert.deepEqual(table.all().filter(e=>e.tagName==='TD').map(e=>e.textContent),['<b>1</b>','2']);
-      assert.equal(root.all().find(e=>e.tagName==='PRE'&&e.className==='conversation-code').textContent,'<i>code</i>');
+      assert.equal(root.all().find(e=>e.tagName==='PRE'&&e.className==='markdown-code').textContent,'<i>code</i>\n');
       assert.ok(fetches.every(f=>f.url.startsWith('/view/conversation?name=Vega')&&!/path|cursor|before/.test(f.url)));
     ''')
 
 
-def test_close_and_background_clear_dom_requests_timers_and_pending():
+def test_close_clears_dom_and_background_pauses_requests_without_unmounting():
     run(r'''
       reply=async()=>({body:{ok:true,agent:'Vega',events:[{id:'1',kind:'text',role:'assistant',text:'kept?',ts:'',truncated:false}],older:'a'.repeat(32),limited:false}});
       let root=C.mount('Vega');body.append(root);await settle();
@@ -377,7 +478,10 @@ def test_close_and_background_clear_dom_requests_timers_and_pending():
       reply=async()=>({body:{ok:true,agent:'Vega',events:[{id:'1',kind:'text',role:'assistant',text:'again',ts:'',truncated:false}],older:null,limited:false}});
       root=C.mount('Vega');body.append(root);await settle();assert.ok(root.textContent.includes('again'));
       doc.hidden=true;docListeners.visibilitychange();
-      assert.equal(root.textContent,'');assert.equal(timers.size,0);
+      assert.ok(root.textContent.includes('again'));assert.equal(C.element(),root);assert.equal(timers.size,0);
+      doc.hidden=false;docListeners.visibilitychange();await settle();
+      assert.ok(root.textContent.includes('again'));assert.ok([...timers.values()].some(t=>t.ms===5000));
+      C.unmount();assert.equal(root.textContent,'');assert.equal(timers.size,0);
     ''')
 
 
@@ -427,6 +531,11 @@ vm.runInNewContext(SOURCE,context);"""),
     ]:
         assert harness.count(old) == 1, old
         harness = harness.replace(old, new)
+    harness = harness.replace("setAttribute(){}", "setAttribute(k,v){this[k]=v;}")
+    harness = harness.replace("setProperty(key,value){this[key]=value;}", "setProperty(key,value){this[key]=value;},getPropertyValue(key){return this[key]||'';}")
+    harness = harness.replace("focus(){}", "focus(){}getBoundingClientRect(){return {height:80};}")
+    harness = harness.replace("createElement:t=>new Element(t)", "createElement:t=>new Element(t),createElementNS:(_ns,t)=>new Element(t)")
+    harness = harness.replace("document:doc,console", "history:{state:null,pushState(v){this.state=v;},back(){}},document:doc,console")
     source = (ROOT / 'dashboard/mobile/mobile.js').read_text()
     source = '/* Common, opt-in pane terminal.' + source.split('/* Common, opt-in pane terminal.', 1)[1]
     script = (harness.replace('TERMINAL', 'true' if terminal else 'false')
@@ -441,14 +550,15 @@ def test_sheet_opens_on_conversation_and_sends_only_through_the_reviewed_termina
       await context.OrreryMobileTerminal.open('ScrollFixture');await settle();
       assert.deepEqual(mounted,['ScrollFixture']);assert.ok(q('#conversation'));
       assert.equal(q('#terminal-output'),null,'conversation tab hides the terminal tail');
-      assert.equal(q('#terminal-text'),null,'no compose before a pane is chosen');
-      button('Terminal').onclick();await settle();
+      assert.equal(q('#terminal-text').disabled,true,'no input before a pane is chosen');
+      q('.reader-bar').children.find(b=>b['aria-label']==='Terminal').onclick();await settle();
       button('Pane 1ScrollFixture').onclick();await settle();
       assert.ok(q('#terminal-output'));
-      button('Conversation').onclick();await settle();
+      q('.reader-bar').children.find(b=>b['aria-label']==='Conversation').onclick();await settle();
       assert.ok(q('#conversation'));assert.equal(q('#terminal-output'),null);
+      q('#terminal-text').onfocus();
       const field=q('#terminal-text');field.value='synthetic line';field.oninput();
-      await button('Review input').onclick();await settle();
+      await q('#terminal-review').onclick();await settle();
       assert.ok(calls.some(c=>c.op==='prepare'),'review uses the existing prepare step');
       assert.ok(!calls.some(c=>c.op==='commit'),'nothing is sent before Send once');
       await button('Send once').onclick();await settle();
@@ -632,19 +742,20 @@ def test_reopening_the_same_agent_ignores_the_previous_sheets_response():
     ''')
 
 
-def test_review_from_the_conversation_tab_shows_the_terminal_tail_before_send():
+def test_review_from_the_conversation_tab_shows_only_the_target_and_text():
     run_sheet(r'''
       await context.OrreryMobileTerminal.open('ScrollFixture');await settle();
-      button('Terminal').onclick();await settle();
+      q('.reader-bar').children.find(b=>b['aria-label']==='Terminal').onclick();await settle();
       button('Pane 1ScrollFixture').onclick();await settle();
       const tail=q('#terminal-output').textContent;assert.ok(tail.includes('line'));
-      button('Conversation').onclick();await settle();
+      q('.reader-bar').children.find(b=>b['aria-label']==='Conversation').onclick();await settle();
+      q('#terminal-text').onfocus();
       const field=q('#terminal-text');field.value='synthetic line';field.oninput();
-      await button('Review input').onclick();await settle();
-      const shown=q('#terminal-output');
-      assert.ok(shown,'review shows the terminal tail');
-      assert.ok(shown.textContent.includes('line'),'tail text is visible: '+shown.textContent);
-      assert.match(q('.terminal-observed').textContent,/40 lines.*6 KiB/);
+      await q('#terminal-review').onclick();await settle();
+      assert.equal(q('#terminal-output'),null,'review omits the terminal tail');
+      assert.equal(q('.terminal-observed'),null);
+      assert.match(q('.reader-input-target').textContent,/ScrollFixture.*Pane 1/);
+      assert.equal(q('.terminal-exact').textContent,'synthetic line');
       assert.ok(button('Send once'));
       context.OrreryMobileTerminal.close();
     ''')
@@ -830,3 +941,12 @@ def test_phone_treats_its_own_wait_running_out_as_slow():
       assert.ok(root.all().some(e=>e.tagName==='BUTTON'&&e.textContent==='Retry'&&!e.hidden));
       C.unmount();
     ''')
+
+
+def test_generated_notification_is_a_short_activity_not_a_user_message():
+    raw = dict(id='notification', kind='system', role='system', text='Background task completed · check',
+               system_detail='Status: completed\nOutput: /fixture/private-output.txt', ts='')
+    event = history.project_event(raw)
+    assert event['kind'] == 'tool' and event['role'] == 'assistant'
+    assert event['text'] == 'Background task completed · check'
+    assert 'system_detail' not in event and '/fixture/' not in json.dumps(event)

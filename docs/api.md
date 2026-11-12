@@ -62,7 +62,7 @@ POST の Origin は、検証済み Host に対応する固定 origin とだけ�
 | POST | `/api/jump` | `{session, open?, base?, tools?}` | open / focus / resume action |
 | POST | `/api/exit` | `{session}` | graceful exit action |
 | POST | `/api/kill` | `{session, mode}` | kill / retire action |
-| POST | `/api/annotate` | `{name, role, emoji, group}` | saved annotation |
+| POST | `/api/annotate` | `{name, role?, emoji?, group?, task?}` | saved annotation |
 | POST | `/api/spawn` | spawn payload | child launch result |
 
 ## GET `/api/version`
@@ -72,7 +72,7 @@ curl -s http://127.0.0.1:8770/api/version
 ```
 
 ```json
-{"name":"orrery-telemetry","version":"2026.09.16.1","api":37}
+{"name":"orrery-telemetry","version":"2026.09.16.1","api":39}
 ```
 
 version の解決順は [インストール](install.md#version)を参照してください。
@@ -97,7 +97,7 @@ version の解決順は [インストール](install.md#version)を参照して�
 
 成功応答の `ok:true,pending:true,child_name,job_id,I/A` は handoff の受付であり、native 起動完了ではありません。status の `state:launching,result:null` は未確認、`detail:unknown` は自動再試行しない結果不明、`detail:not_started` は保存済み準備後の未開始です。native receipt が成立した起動verdictは既存callerと同じ `state:ready`。実行中／終了は `detail:started/ended` と `result.native_ready` で別に示します。native未成立の終了は `state:failed` であり、終了だけを成功へ寄せません。roster の native_ready も receipt の観測であり、OS process の現在の生存を証明しないため、未確認時の running は null のままです。準備後に失敗した場合は同じ job/I/A をエラーへ返し、status と手順で解決します。同名で自動的に別の agent を起こしません。fresh Iは生成された32桁の小文字hexをそのまま投影し、hyphen形式へ変換しません。
 
-API2a は下記の Mail/graph 読取、API2b-1 は PC の現在対象に対する term/history/jump/exit を接続します。終了済み kill/retire は下記の管理契約、R4 は別の本人opt-inの契約です。reactivate／退役済みresume／App GUI activationは未接続です。worktree、browser、独自 base/tools、spawn 時の terminal 指定、annotation(role/group/emoji)、dry_run も明示拒否です。通常の standalone／親付き自動起動の代わりに手動子作成を要求する意味ではありません。必要な作業folderやprovider設定は利用者のagentが手順で準備します。設定・切替・復旧は [日英の移行手順](fresh-global-update.md) を参照してください。
+API2a は下記の Mail/graph 読取、API2b-1 は PC の現在対象に対する term/history/jump/exit を接続します。終了済み kill/retire は下記の管理契約、R4 は別の本人opt-inの契約です。reactivate／退役済みresume／App GUI activationは未接続です。worktree、browser、独自 base/tools、spawn 時の terminal 指定、annotation(role/group/emoji/task)、dry_run も明示拒否です。通常の standalone／親付き自動起動の代わりに手動子作成を要求する意味ではありません。必要な作業folderやprovider設定は利用者のagentが手順で準備します。設定・切替・復旧は [日英の移行手順](fresh-global-update.md) を参照してください。
 
 #### PC の現在対象（API2b-1）
 
@@ -514,7 +514,7 @@ response は live comet 用の message list と watermark を含みます。設�
 {
   "ok":true,
   "annotations":{
-    "WindyFermi":{"role":"docs","emoji":"","group":"release"}
+    "WindyFermi":{"role":"docs","emoji":"","group":"release","task":"Review release documentation"}
   }
 }
 ```
@@ -661,7 +661,7 @@ request:
 request:
 
 ```json
-{"name":"WindyFermi","role":"docs","emoji":"","group":"release"}
+{"name":"WindyFermi","role":"docs","emoji":"","group":"release","task":"Review release documentation"}
 ```
 
 `name` の代わりに `session` も使えます。
@@ -671,11 +671,17 @@ response:
 ```json
 {
   "ok":true,
-  "annot":{"name":"WindyFermi","role":"docs","emoji":"","group":"release"}
+  "annot":{"name":"WindyFermi","role":"docs","emoji":"","group":"release","task":"Review release documentation"}
 }
 ```
 
-`role` と `emoji` を空にし、group も残さない場合は annotation を削除します。spawn は `emoji` を保存せず role / group だけを使います。
+API 38から、省略した欄は現在の値を維持します。`role`・`emoji`・`group`・`task`は、明示的な空文字または`null`でその欄だけを外し、4欄がすべて空のときだけannotation全体を削除します。`role`・`emoji`・`group`・`task`は前後の空白を除き、それぞれ40・8・24・200 Unicode文字まで保存します。空でない`task`は利用者による表示の上書きで、空文字または`null`で保存すると登録時の説明へ戻ります。`/api/agents`の`task`は元の登録値を維持し、上書きは`annot.task`で返します。`/api/annotations`とgraphの`annot`も同じ形式で、上書きがなければ`annot.task`を省略します。表示側は`annot.task`を優先します。Mailの登録値は変えません。既存のspawn・delegateからrole / emoji / groupを送る呼び出しはその値を保存し、省略したtask上書きは維持します。以前のAPI世代では省略した旧欄は空で置き換わり、task上書きは扱えません。
+
+taskの上書きだけを外す例（省略したrole・emoji・groupは維持）:
+
+```json
+{"name":"WindyFermi","task":null}
+```
 
 ## POST `/api/spawn`
 
@@ -727,6 +733,7 @@ request:
 | `provider` | no | `claude`（既定）、`codex`、またはcatalogが返したnative接続ID（旧`deepseek`/`strata`、追加例`strata-epyc`）。表示名や`kind`へ置き換えず、そのIDを送る |
 | `harness` | DeepSeek / Local 必須 | `dsh` または `hermes`。Claude は `claude-code`（従来 alias `claudecode`）、Codex は `codex-cli`（従来 alias `codex`）を省略可 |
 | `helper_model` | no | 省略または `same` は主モデルを継承。DeepSeek / Local は選択した model × harness の `helper_models` にある同 backend の正式 ID も指定可。未提供・別 backend の ID は拒否 |
+| `web_search` | no | native の dsh / Hermes だけ。`exa` または `searxng` で今回の検索先を上書きする。URL・資格の参照は managed spawn manifest の共通 `web_search` を使う。省略時は共通設定、共通設定も無ければ従来どおり。既存 API 世代の任意 field |
 | `model` | DeepSeek / Local 必須 | 正式 ID。DeepSeek / Local は選択した provider と harness の有効な catalog entry と一致必須。Claude / Codex は既存の省略時の既定を維持 |
 | `url_index`, `url_key` | 動的Local必須 | 選択model行の両値をそのまま送る。indexは0以上の整数、keyは設定URLと束縛。URL変更・並べ替えは拒否し、再取得・再選択が必要。固定model・他providerには指定不可 |
 | `effort` | no | 明示時だけ送る。Claude / Codex は `model_efforts` / `model_effort_defaults`、DeepSeek / Local は選択した model × harness の能力で検証。未指定は CLI 設定を使用し、能力不明の値は推測しない |
@@ -850,6 +857,8 @@ API 25: 旧 managed の `attempt_id` による起動・状態照会は廃止し�
 
 ## スマホ閲覧用（API 30）
 
+API 39から、snapshotのagentに任意の`work_disp`を含めます。稼働中かつ`act_state: work`で、上流の短い経過表示（例`2m05s`）を検証できたときだけです。停止・別状態・欠損・不正値では欄を付けず、表示側で経過を推測しません。
+
 `GET /api/mobile-mail?window=<period>`はlegacy modeのloopback専用metadata endpointです。期間の既定は`day`（24h）。`all`、`day`、`15m`と、15〜43200の15の倍数を表す`m<N>`（分）だけを受け付け、先頭ゼロや小数は拒否します。既存のHost admissionを維持します。DB不在・project/schema/読取失敗は503、global modeは明示拒否（admission通過後501、または既存global admissionの拒否）です。globalから旧DBへfallbackしません。不明・重複queryは400です。
 
 200応答は`status: available`、`window`、`observed_at`、`edges`、`events`、`events_truncated`、`edges_truncated`、`invalid_timestamps`、`degraded`を返します。`edges`は実際の期間で集計したsource/target/kind/count/last_tsで最大10,000行。件数は方向別のto/cc宛先行数で、bcc・別projectの端点を除きます。`events`は最新200宛先行までで、安定した不透明`key`とsource/target/kind/count1/event_atを持ち、時刻・message id・recipient idの降順です。SQLはmetadataだけを読み、件名・本文・read/ack更新を含みません。不正時刻は除外してdegradedとして報告します。正常な空結果と取得不能は別です。
@@ -874,7 +883,9 @@ metadata pageのloopback経路は`/api/mobile-mail-page`、固定24hの内部cac
 
 外側JSONは`targets:{epoch,name}`、`preview:{epoch,choice}`、`prepare:{epoch,choice,revision,text}`、`commit:{epoch,intent,confirmation}`、`cancel/status:{epoch,intent}`です。targetsは既存manager上でsession名が厳密一致するpane候補を最大128件、serialized16KiB以内に収まる件数まで返し、切詰めを明示します。複数は利用者が選び、別名/active paneへ推測しません。候補handleはowner/reader/bridge/paneへ束縛してメモリに30秒、選択後proofは最大16件です。前面previewは同じ選択leaseを更新できますが、preparedの本文・proof・30秒期限を延長しません。
 
-previewは既存shared helperのfresh legacy admissionとkernel birthを使い、socket/server/session/pane/UID/bridge incarnationを取得前後に照合します。未知helper/OS/対象は拒否し、Codex launch bindingや登録DBを使いません。固定captureは末尾40行・表示6KiB、収集64KiB・全体3秒、返却JSON全体は実serialized byteで16KiB以内です。ANSI/OSC/C0/C1/方向制御を除去し、literal textと観測時刻・除去/切詰めを返します。本文はcacheしません。収集上限超過では本文を破棄してACK位置を維持し、3秒で終端未着ならそのcontrol streamを隔離して再利用しません。
+previewは既存shared helperのfresh legacy admissionとkernel birthを使い、socket/server/session/pane/UID/bridge incarnationを取得前後に照合します。未知helper/OS/対象は拒否し、Codex launch bindingや登録DBを使いません。固定captureは末尾120行・表示12KiB、収集64KiB・全体3秒、返却JSON全体は実serialized byteで16KiB以内です。ANSI/OSC/C0/C1/方向制御を除去し、literal textと観測時刻・除去/切詰めを返します。本文はcacheしません。収集上限超過では本文を破棄してACK位置を維持し、3秒で終端未着ならそのcontrol streamを隔離して再利用しません。
+
+端末の拡張previewは`X-ORRERY-Mobile-Preview: 120/12288`をloopback側で要求したときだけ有効です。新旧どちらかが古い場合は40行・6KiBを使い、新しいreaderは応答が宣言した上限で検証します。拡張時もJSON全体は16KiBまでで、引用符のescape等で収まらない場合は末尾をさらに短くします。relayはUTF-8で応答し、非ASCII文字を`\uXXXX`へ膨らませません。
 
 prepareは1行4KiB UTF-8を改変せず束縛します。pending最大16件、結果metadataは最大256件/10分、同pane同時送信1件・6件/分です。commitは一回claimし、同write lock内でfresh同一pane検査から全chunk/Enterのwriteまでを行い、lock解放後に全tmux ACKを待ちます。5秒以内の全ACKでaccepted、部分失敗/timeout/errorはunknownで再送・残chunk補送0です。statusは照会のみ。プログラムの同一性や実行完了は保証せず、shell化/既存buffer/外部writer/最終検査後raceは残ります。UIと有効化・停止手順は[mobile guide](mobile.md#スマホからpaneを確認して送る)を参照してください。
 

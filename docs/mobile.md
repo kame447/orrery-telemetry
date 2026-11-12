@@ -70,7 +70,6 @@ badgeが**ON**になり、Setupの手順は消えます。**自分で確かめ�
 
 スマホで、手順2の**Address on the phone**（`https://…:9443/`）を開き、agentを開きます。最初のHTTPSは、証明書の発行で数秒かかることがあります。**Conversation** tabが出れば、会話の記録まで届いています（[会話の記録を読む](#スマホでagentの会話の記録を読む)）。
 
-<img src="images/mobile-conversation.png" width="300" alt="スマホのConversation tab。発言とMailのcardが並ぶ">
 
 ### demo modeのとき
 
@@ -117,6 +116,14 @@ Telemetryを動かしているコンピューターのClaude CodeやCodexのagen
 
 macOSで`tailscale`がPATHに無いときは、CLIは通常`/Applications/Tailscale.app/Contents/MacOS/Tailscale`です。手で起動したreaderは前面で動きます。常駐させるならcockpitのSettings（または`agentstack-mobile apply`）を使ってください。launchdのjobで動きます。
 
+## ホーム画面にインストールする
+
+Tailscaleを接続し、Android ChromeでreaderのHTTPSのServeアドレスを開きます。Chromeのメニューから **アプリをインストール**（版によっては **ホーム画面に追加** の中）を選び、インストールします。古いブラウザのショートカットは消して入れ直してください。新しい **ORRERY** のアイコンから開くとURLバーなしで表示されます。通常のブラウザのタブでアドレスを開いた場合はURLバーが出ます。iOSではSafariの **ホーム画面に追加** を使います。
+
+インストール後も、本人のアクセス条件と接続は必要です。記録のoffline保存やservice workerは追加しません。Android Chromeのメニューからのインストールにservice workerは不要です（[Chrome公式の条件](https://developer.chrome.com/blog/update-install-criteria)）。操作は端末のsafe-area内に収めます。更新後のインストールと背景からの復帰は実機でも確かめてください。
+
+同梱のアイコンは `dashboard/assets/orbit.svg` から `python3 scripts/mobile_pwa_icons.py` で再生成します（開発用に `rsvg-convert` が必要）。
+
 ## 画面で分かること
 
 <img src="images/mobile-home.png" width="300" alt="スマホ幅の画面。上に要確認のagent、下にGraphのFocus表示">
@@ -127,7 +134,7 @@ macOSで`tailscale`がPATHに無いときは、CLIは通常`/Applications/Tailsc
 - 文脈残量弧とWorkingの動きはPCと共通です。文脈の取得時刻は不明なまま扱い、未知値には弧を描きません。アカウント利用枠はUnavailableで、更新要求もしません。
 - **Tune graph**の6設定はこのブラウザ内の表示調整だけです。agentの起動・停止・Mail返信はありません。Activityの絞込も閲覧だけです。会話の記録は下のpolicyの確認の後に、ターミナルの表示と送信はさらにその設定を有効にした場合だけ使えます。
 
-前面では約10秒ごとに取得し、背景ではpollを止めます。取得に失敗した値は「Last known」として残し、失敗を正常な0件や待機状態には変えません。SnapshotはHTTPで観測した時刻です。Mailは1ページ200宛先行までで、**Older / Newer**で差し替えます。古いページを見ている間もGraphは更新されますが、一覧が勝手に先頭へ戻ることはありません。Statusは最新ページだけに表示します。graphは最大10,000集約リンクまでで、切詰めは画面に明示します。ブラウザに保存するのは6つの表示設定だけで、観測データのoffline保存やservice workerはありません。
+前面では約10秒ごとに取得し、背景ではpollを止めます。取得に失敗した値は「Last known」として残し、失敗を正常な0件や待機状態には変えません。SnapshotはHTTPで観測した時刻です。Mailは1ページ200宛先行までで、**Older / Newer**で差し替えます。古いページを見ている間もGraphは更新されますが、一覧が勝手に先頭へ戻ることはありません。Statusは最新ページだけに表示します。graphは最大10,000集約リンクまでで、切詰めは画面に明示します。ブラウザには6つの表示設定と、sessionStorageに開いているagent名・Conversation/Terminalのタブと、選択時に得たMailのinstance/agentのID（ある場合）を保存します。記録や下書きのoffline保存やservice workerはありません。
 
 GraphのMail線をタップすると、その2体間の選択期間の一覧が開きます。初期表示は**Both**（両方向）で、差出人→宛先のボタンで方向を絞れます。親子線はMail一覧を開きません。一覧の1件をタップして本文を開き、**Back**で一覧、**Done**でGraphへ戻ります。選択と拡大率は保持します。
 
@@ -260,50 +267,60 @@ PY
 
 有効時はheaderが**Terminal enabled**になります。Graphでagentを選んだパネル、ActivityのStatus行、要確認行、Mail詳細のFrom/Toにある**Terminal**から同じsheetを開きます。Graphの選択やMail本文を開く操作はそのままです。複数paneなら自分で選び、不明な対応を名前から補いません。legacyの対象はPCの既存managerが扱う同じtransport内で、既存保護が許すpaneです。agentの種類や現在の表示期間は起動許可には使わず、別socket/global対象へ迂回しません。paneのsessionは現在のmetadata project外にある場合もあります。freshは下の明示I/Aの手順を使います。
 
-上側は選択paneの末尾40行、UTF-8で6KiBまでの文字表示です。前面で開いている1paneだけ約3秒ごとに更新し、失敗時は6、12、最大24秒へ間隔を延ばします。制御文字の除去・表示の切詰めを明示し、画像、HTML、リンクを実行しません。既存recorderや復元history全体は送りません。検証済みの会話の記録だけを見る[History](#スマホでagentの会話の記録を読む)は別です。**画面にはキーや私的文章が含まれ得ます。** 誰かへ見せる前に内容を確かめてください。
+選択paneの末尾120行、UTF-8で12KiBまでを文字として表示します。Conversationも有効な画面では、端末本文を全面の下端へ寄せ、長い行は折り返し、続きの行にも元の字下げを残します（深い字下げは画面幅の40%まで）。罫線だけの行は折らず、幅で切ります。枠は出さず、取得上限・更新間隔・Shownの時刻を本文の下の小さな1行に出します。切詰め・制御文字の除去や読み返しの停止は必要なときだけ下に示します。更新の印は小さな点で、読み返しによる停止と取得失敗は画面上に残します。前面で開いている1paneだけ約3秒ごとに更新し、失敗時は6、12、最大24秒へ間隔を延ばします。制御文字の除去・表示の切詰めを明示し、画像、HTML、リンクを実行しません。既存recorderや復元history全体は送りません。検証済みの会話の記録だけを見る[History](#スマホでagentの会話の記録を読む)は別です。**画面にはキーや私的文章が含まれ得ます。** 誰かへ見せる前に内容を確かめてください。
 
-上へスクロールして読み返している間は、本文・**Shown**の時刻・切詰めと制御文字除去の注記を同じsnapshotに固定し、取得は続けます。新しい出力が届くと**New output · paused**と表示します。下端へ戻すと最新の末尾へ切り替わり、追従を再開します。全出力を蓄積する機能ではなく、保留中に40行・6KiBを超える出力があった場合、旧表示と最新の末尾の間は表示できないことがあります。実機では、流れる出力のpaneで上へ戻し、3秒以上待っても読んでいる行・Shownの時刻が変わらないことと、下端へ戻すと最新へ切り替わることを確認してください。keyboardの開閉や画面の回転後も、追従中は下端を保ち、読み返し中は本文を保持することを確かめます。
+端末の拡張previewは`X-ORRERY-Mobile-Preview: 120/12288`をloopback側で要求したときだけ有効です。新旧どちらかが古い場合は40行・6KiBを使い、新しいreaderは応答が宣言した上限で検証します。拡張時もJSON全体は16KiBまでで、引用符のescape等で収まらない場合は末尾をさらに短くします。relayはUTF-8で応答し、非ASCII文字を`\uXXXX`へ膨らませません。
+
+Conversationの本文で左へ、Terminalの本文で右へ、はっきり横にスワイプすると切り替わります。画面端の24pxから始まる操作はOSに任せます。縦スクロール・文字選択・横スクロールが必要な表やコードの上、入力にfocusがある間、下書き・確認・送信中は切り替えません。空でfocusのない常設欄は本文のスワイプを妨げません。上の帯のボタンでも切り替えられます。
+
+上へスクロールして読み返している間は、本文・**Shown**の時刻・切詰めと制御文字除去の注記を同じsnapshotに固定し、取得は続けます。新しい出力が届くと**New output · paused**と表示します。下端へ戻すと最新の末尾へ切り替わり、追従を再開します。全出力を蓄積する機能ではなく、保留中に120行・12KiBを超える出力があった場合、旧表示と最新の末尾の間は表示できないことがあります。実機では、流れる出力のpaneで上へ戻し、3秒以上待っても読んでいる行・Shownの時刻が変わらないことと、下端へ戻すと最新へ切り替わることを確認してください。keyboardの開閉や画面の回転後も、追従中は下端を保ち、読み返し中は本文を保持することを確かめます。
 
 正常に取得した空のsnapshotも、読み返し中は保留し、下端へ戻した時に空の表示へ切り替えます。取得に失敗した場合は例外で、本文とShown・注記を消し、復旧後は最新の末尾から始まります。寸法変更だけで表示が下端へ寄せられても保留は解除せず、もう一度下端へ向けてスクロールすると最新へ切り替わります。
 
 操作中に向きを反転した時は、最後の動きの向きで再開を判断します。上向きへ戻す・2本指にする・touch操作がキャンセルされる場合は保留を続け、再び下向きへ動かして下端にいる時に再開します。
 
-安全に試せる専用paneで、別paneへの切替とClose後の開き直しが新しい末尾から始まること、読み返し中の**Review input**→**Edit**で本文とShownが保たれることを確認します。送信を試す場合は、受け手が分かり、副作用のない短いテスト入力を明示的に受け入れるpaneだけを使い、宛先・全文・Enterを確認して**Send once**を1回押し、応答と受理表示を確認してください。実行中のagentや用途不明のshellにはテスト文字を送らないでください。背景へ回すとsheetと表示・下書き・確認が消え、前面へ戻してTerminalを開き直すと新しい末尾が表示されることも確かめます。
+安全に試せる専用paneで、別paneへの切替とClose後の開き直しが新しい末尾から始まること、**Review input**→**Edit**で入力が保たれ、確認するpaneと文面が正しいことを確認します。送信を試す場合は、受け手が分かり、副作用のない短いテスト入力を明示的に受け入れるpaneだけを使い、宛先・全文・Enterを確認して**Send once**を1回押し、応答と受理表示を確認してください。実行中のagentや用途不明のshellにはテスト文字を送らないでください。背景では取得が止まり、開いているagent・タブ・読む位置・メモリ内の下書きが残ることも確かめます。復帰時はpaneのrevisionを再確認し、変化・消失した場合は選び直しと再確認が必要です。期限切れの確認は編集へ戻ります。結果不明の送信は再送せず **Check receipt** を残します。
 
-下側へUTF-8で4KiB以内の1行を書き、**Review input**で宛先pane・全文・Enterを確認してから**Send once**を押します。確認は30秒で失効し、出力更新で本文や宛先・期限を差し替えません。paneの交換や取得失敗後は再確認が必要です。送信後も前面で開いていれば同じpaneの応答を見られます。**Received by terminal**はtmuxの受理までで、agentの実行やタスク完了を意味しません。**Outcome unknown**では一部だけ届いた可能性があり、自動再送しません。**Check receipt**は受理状態の照会だけです。
+ConversationとTerminalの下には宛先chipと丸い入力欄を常に表示します。UTF-8で4KiB以内の1行を書き、**↑（Review input）**で同じ欄を確認へ切り替えます。宛先agent・window・pane、まだ送信していないこと、全文と続くEnterを確認し、**Send once**を1回押します。**Edit**で文面を保持して入力に戻れます。確認は30秒で失効し、出力更新で本文や宛先・期限を差し替えません。paneの交換や取得失敗後は再確認が必要です。送信後も前面で開いていれば同じpaneの応答を見られます。**Received by terminal**はtmuxの受理までで、agentの実行やタスク完了を意味しません。**Outcome unknown**では一部だけ届いた可能性があり、自動再送しません。**Check receipt**は受理状態の照会だけです。
 
-<img src="images/mobile-terminal.png" width="300" alt="Terminal sheet。選んだpaneの末尾と、下に1行の入力欄"> <img src="images/mobile-terminal-review.png" width="300" alt="Review input。送る全文とEnterを、同じpaneの末尾と一緒に確認する">
+**画像の添付:** 選んだpaneの作業folderを検証でき、bridgeにPillowがあるときだけ、**＋**でスマホのfile pickerを開けます。JPEG・PNG・静止WebPを1枚、10MiB・2400万画素まで選べます。thumbnailは手元で選んだ画像で、**×**で添付を外すと、確認用の全文にもpathを含めなくなります。HEIC・動画やアニメーション画像は対象外です。uploadだけでは入力を送りません。bridgeは向きを直し、EXIF/GPS等の元のメタデータを含めず画素を描き直して、agentの作業folderの`.orrery-input-images/<乱数>.jpg|png`へ保存します。編集欄には利用者の文とthumbnailだけを出し、↑で文に`[image: '<絶対path>']`を足した全文を組み立てます。普段と同じReview input・Send onceでその全文を確認し、Editでは利用者の文だけに戻ります。bytes表示と4KiBの上限は、pathを含む全文で数えます。agentはnativeの画像toolでそのpathを開くため、modelも画像入力に対応している必要があります。dashboardのAPIや、文字だけの送信経路は変えません。
+
+専用folderに`*`だけの`.gitignore`を置きます。次の画像を保存するときに7日より古い生成画像を掃除し、folderあたり現在の画像を50枚まで保持します。thumbnailの削除・取消・Closeでは保存物をすぐ消さず、古い会話に残ったpathは掃除後に読めなくなることがあります。同期・backupは作業folderの方針のままです。MacとWindowsの**WSL2**で同じ実装を使い、relay・bridge・ローカルのharnessが同じLinux/POSIXのpathを読みます。WSLのLinux側の作業folderを推奨します。`/mnt/c/...`もWSLのpathのまま扱いますが、WindowsのACL・DrvFSの設定によっては指定した`0700`/`0600`が効かず、Windowsから共有されたfolderを非公開にする保証にはなりません。同じpathを読めないWindows nativeのprocess・remote/containerのharnessは対象外です。Pillow・使える作業folder・新しいbridgeが無ければ＋を出さず、文字だけの送信は引き続き使えます。
+
 
 これは人が画面を見て送るターミナル操作です。同じpane内でprogramが変わったりshellへ戻ったりすることは検出保証しません。文章がshellコマンドとして解釈されること、既存の入力bufferや別writerと混ざること、確認後に画面が変わることは残ります。送信のためにbufferを消去・interruptしません。
 
-Close、別paneへの切替、背景移行、離脱でpollを止め、表示・下書き・未送信の確認を消します。遅れた応答で復活させず、内容をURL・log・browser storage・serverのpreview cacheへ残しません。既存PC recorderやOSの記録・撮影まで消す保証はありません。実Android keyboard、実Serve/phone policyと実paneの受入は、隔離HTTP/CDP試験とは別に確認してください。
+Close、別paneへの切替、ページの離脱でpollを止め、表示・下書き・未送信の確認を消します。遅れた応答で復活させません。背景では取得だけ止め、画面と下書きをメモリに残し、復帰時にpaneを再確認してから入力を有効にします。確認の期限は30秒のままです。Androidがページを破棄して再読込みした場合はsessionStorageのagent名とタブを戻し、記録は取り直し、下書きは空になります。Mailのinstance/agentのIDが保存にある場合は、今の送信のON/OFFやlegacyへの切替に関係なく、現在の名簿と両方一致するときだけ戻します。名簿にIDが無い・違う場合は一覧のまま選び直します。IDの無い旧保存は名前で戻します。内容をURL・log・browser storage・serverのpreview cacheへ残しません。既存PC recorderやOSの記録・撮影まで消す保証はありません。実Android keyboard、実Serve/phone policyと実paneの受入は、隔離HTTP/CDP試験とは別に確認してください。
 
 Terminalだけを戻す場合は共有設定を`false`にするか項目を除き、独自のbackend起動に`--enable-mobile-terminal`があればそれも外します。readerの上記3flagも外し、両方を各既存手順で再起動します。稼働中のprocessを残しただけでは無効化されません。通常の閲覧設定や無関係なServe設定を変更する必要はありません。
 
 ## スマホでagentの会話の記録を読む
+
+発言者は肖像（無ければ頭文字）と小さなproviderのロゴ、agent名、時刻で示します。Mailの相手にも同じ肖像とロゴを使い、送り手の名前を優先して残します。複数の宛先は全員の丸と名前が入れば並べ、幅が足りなければ丸を重ねた列と残りの人数`+N`に切り替えます。全員の名前はtitle・ariaに残します。名簿にいない相手は名前だけとし、丸だけの列では`+N`に数えます。装飾の丸と頭文字は本文をまたぐ選択に含めません。high・urgentは件名前の小さな点で示します。compactの要約は人の発言にせず、短い活動の1行のままです。
 
 **HistoryはPhone accessに含まれ、policyの確認（`--phone-policy-reviewed`、SettingsではI reviewed the policy）があれば既定でオンです。** **更新する前に:** これまで`--phone-policy-reviewed`を付け、`--enable-history`を付けずに手で起動していたreaderは、更新後に再起動すると会話の記録とfile・画像のpreviewもスマホに出すようになります。出したくなければ、再起動の前に`--disable-history`を足してください。起動時にも、この変更を1行で知らせます。 確認がなければオフのままreaderが起動し、`/view/history`は`policy_not_reviewed`を返します。cockpitがそのagent自身の記録だと確認できた会話（Codex・Claude Code・dsh・Hermes）を、読み取り専用で表示します。「全履歴はスマホに送らない」の例外になるのは、Historyがオンの間だけです。出したくない場合は、手で起動するreaderに`--disable-history`を付けます。Settingsには会話だけを切るスイッチはなく、Phone accessごと切ります。Historyがオンなら、会話のtoolの呼び出しに出てきた、agentの作業folderの中のfileと画像の今の中身もスマホで開けます（下記のpreview）。これだけを別に切り替える設定はありません。**名前で隠したり中身を伏せたりはしません。** 何を出してよいかは本人が決めます（下記）。下の手順はagentに頼めます。先にアクセスできる人と端末を確認してください。
 
 | 段 | 誰が | 何をする |
 |---|---|---|
 | 1 | agent | Telemetry API 35以上であること、同じコンピューターでORRERYのcockpit backendが動いていること（既定port 8791）を確認する。記録を読むのはcockpitで、readerは読まない |
-| 2 | **本人** | Terminalと同じく、readerを開ける人と端末を確認する。Historyを有効にすると、readerを開ける端末はどれも、端末の末尾40行だけでなく過去の会話を遡って読め、会話に出てきた、agentの作業folderの中のfileと画像の今の中身も開ける。会話・fileの文字・画像は伏せずにそのまま届くので、キーや私的な文章も含まれ得る |
+| 2 | **本人** | Terminalと同じく、readerを開ける人と端末を確認する。Historyを有効にすると、readerを開ける端末はどれも、端末の末尾120行だけでなく過去の会話を遡って読め、会話に出てきた、agentの作業folderの中のfileと画像の今の中身も開ける。会話・fileの文字・画像は伏せずにそのまま届くので、キーや私的な文章も含まれ得る |
 | 3 | agent | readerの起動コマンドに`--phone-policy-reviewed`（8791以外なら`--cockpit-port`も）があることを確かめる。先に同じflagで`--check`し（`conversation history and previews are on`と出る）、今の管理方法でreaderを再起動する。以前の`--enable-history`もそのまま使える |
 | 4 | **本人** | スマホでagentを開き、**Conversation** tabを確認する。末尾に**›**の付いたfileのchipを押してpreviewが開き、**Close**で消えることを確かめる |
 
-有効にすると上部に**History enabled**（Terminalも有効なら**History · Terminal**）と出て、Terminalの入口が**History**に変わります。agentのsheetは**Conversation**で開きます。Terminalも有効なら、上部に**Conversation | Terminal**の切替が出ます。
+有効にすると上部に**History enabled**（Terminalも有効なら**History · Terminal**）と出て、入口が**History**になります。agentを開くと**Conversationが全画面**になり、上の細い帯に顔・名前・状態・Conversation／Terminal・**×**が並び、各ボタンは44px四方以上のtap領域を持ちます。Terminalが有効なら入力欄と送り先chipが下に常設されます。開いた直後に入力へfocusを移したり、キーボードを開いたりしません。説明はこのガイドにまとめ、未確認・通信断・送信失敗は画面上に残します。paneが未選択なら入力と↑は無効で、Terminalで選び直す案内を表示します。**×**で閉じ、Back／Escapeはpreview、次に入力のfocusを外し、非入力時は画面を閉じます。常設欄だけで戻る操作を妨げません。末尾の**Working**は、記録に作業の経過があるときだけ**Working · 2m05s**のように出し、無いときは**Working**だけです。返事待ちは赤い短い行で出します。
 
-<img src="images/mobile-conversation.png" width="300" alt="Conversation tab。上にShow older、発言とMailのcardが並ぶ"> <img src="images/mobile-conversation-table.png" width="300" alt="同じ記録の新しい側。Markdownの表とcode blockが文字のまま組まれている">
 
 - スマホが送るのは、表示中の名簿にあるagentの名前と、**Show older**のときにreaderが発行したpageの印（10分有効。最新のpageを更新している間は延びる）と、fileを開くときにreaderが発行した参照のID（同じ条件）だけです。fileのpath、記録のcursor、cockpitの参照のIDは送りも受け取りもしません。readerは固定のloopbackのcockpitのroute `GET /telemetry/conversation`だけを呼びます。dashboardのboundの記録はcockpitが自分で引き、読んだ後にも確かめ直します。中身は伏せません（下記）。
 - 表示するのは**bound**の記録だけです。unbound・stale・未確認のagentは、短い説明と`binding_missing`などの理由のcodeだけを出し、記録の本文は出しません。
 - 1 pageは最大40件・512 KiBです。発言1件とMailの本文1通はそれぞれ16 KiBで切り、切ったことを示します。pageに収まらなかった発言は飛ばさず、次の**Show older**で出します。1件だけでpageに収まらない発言は、さらに短く切って切ったことを示します。それでも出せないものがあれば、その位置に**Some messages are omitted here**と出します。toolの呼び出しは名前の1行だけで、toolの出力とdiffは送りません。fileと画像は名前のchipで出ます（下記のpreview）。発言から端末の行へ移る機能はスマホにはありません。
 - 開けるfileのchipは押せる形（末尾に**›**）で、押すとConversationの上にpreviewを出します。readerはcockpitの固定のroute `GET /telemetry/conversation/preview`をloopbackで呼び、cockpitがそのたびに、記録とbindingが変わっていないこと、agentの作業folder（またはPCで指定したroot）の中であること、symlinkでない本来のpathであること、種類と大きさ・画素数を確かめます。fileの名前では断りません。textは先頭32 KiBまでで、伏せずに文字として表示し、切ったときは**Showing the start of the file**と出します。HTML・SVGも文字として出し、実行しません。画像はcockpitが画素だけをPNGに描き直したものを、readerがさらに確かめます（IHDR・IDAT・IENDだけのPNG、1辺8192 px・合計8 Mpx・4 MiBまで）。これを超えるもの、開けない種類、範囲外のfileは理由だけを出します。表示するのは**今のfile**で、記録した時点の中身と違うことがあり、previewの下にそう出します。previewを表示できたときだけ上に**Save**が出て、押すと、表示しているものと同じ中身（textは表示した範囲、画像は描き直したPNG）を端末に保存します。HTML・SVG・XMLは文字のfileとして、名前の末尾に`.txt`を足します。新しく読みに行くことはありません。Android・iOSとも、browserのdownloadとしてDownloadsやFilesに入ります。iOSで画像を写真に入れたいときは、画像を長押しして保存します。保存したfileは端末に残り、Closeでは消えません。toolの呼び出しから取り出した参照だけが対象です。範囲外・previewしない種類のfileには、cockpitが参照を付けないので、名前だけの押せないchipになります。
-- 発言・Markdownの表・code blockは文字としてDOMに組みます。HTML・link・記録の中の画像は実行しません。記録の中のORRERY Mailの通知と送ったMailはcardになり、押すと記録にある本文を出します。cardを開いても、Mailの既読・ACK・返信はしません。
+- assistantの本文は太字・見出し・リスト・表・コードを描き、コードと表に**COPY**を付けます。生のHTMLは文字、画像はラベルのままで読み込みません。HTTP(S)／mailtoのリンクだけを別tabで開き、それ以外のリンクとローカルpathは文字のままです。`!`の記録は**SHELL**のコマンドと出力にまとめ、それぞれコピーできます。長い出力は畳んで開けます。自動通知は短い活動の要約だけを出し、task IDや出力fileのpathなどのsystemの詳細は渡しません。記録中のORRERY Mailはcardから本文を開けますが、既読・ACK・返信はしません。描画器の出典と同期確認は[同梱ソースの説明](../dashboard/mobile/MARKDOWN_SOURCE.md)にあります。
 - コンピューターの負荷が高いと、cockpitが記録とbindingを確かめるのに数秒かかり、最初の表示まで**Loading the record…**が数秒続くことがあります。readerは15秒まで待ち、それでも返らなければ**Taking longer than usual**と**Retry**を出します。待つか押せば読み直し、表示中の発言は消しません。
-- tabを前面で開いている間、最新のpageを約5秒ごとに更新します。上へscrollして読んでいる間は新しい発言で表示が動かず、**New messages below · paused**と出ます。sheetを開いている間に保持するのは最大200件で、そこに達すると**Show older**は止まります。pageの印が切れていたら、最新のpageを読み直し、**Show older**も戻ります。
-- 送信は既存のTerminalの経路のままです。Terminalが有効でpaneを選んであれば、Conversationの下の入力欄は同じ**Review input → Send once**の確認・上限・受領を使います。Reviewの画面には、Terminal tabと同じ端末の末尾（最新40行・最大6 KiB）を必ず出すので、paneを見ずに送ることはありません。**Received by terminal**の後、送った文が記録に現れるまで（最長3分）点線の仮の行を出します。この行はこの画面の中だけのもので、agentが受け取ったことの証明にはなりません。
-- Close・別agentへの切替・背景移行・離脱で更新を止め、スマホから記録・pageの印・参照のID・開いていたpreview（画像のdataを含む）・仮の行を消します。遅れた応答で復活させず、URL・log・browser storageへ残しません。reader側で発行済みの印は期限まで残りますが、本文を含まず、同じagentにしか使えません。
+- tabが前面の間は約5秒ごとに最新のpageを更新します。上へscrollして読んでいる間は新しい発言で表示が動きません。読み返している間は新しい発言の追従を止め、下端へ戻すと再開します。保持は最大200件で、そこに達すると**Show older**は止まります。pageの印が切れたら最新のpageを読み直します。
+- 送信は既存のTerminal経路のままです。Terminalが有効でpaneを選んだら、両タブ共通の常設欄で**↑（Review input）→ Send once**の確認・上限・受領を使います。Reviewは現在のタブの入力欄内で行い、送り先・送る文面・その後のEnterを確認します。確認欄に端末の末尾は出しません。送り先の行を押すとpaneを選び直せ、そのとき元の確認と下書きは破棄します。共通のpane確認の更新は続き、対象の変更や取得失敗があれば送信前に再確認が必要です。Terminalから入力を始めた場合も、送信後はConversationへ戻って送った文の吹き出しを末尾に出します。受領は小さな表示で残し、結果不明時のCheck receiptは自動再送せず照会だけを行います。送信・準備中と結果不明時は、宛先の変更や新しい入力で受領情報を捨てません。**Received by terminal**の後の仮の行は、送信後の記録に同じ文が届けば消え、**Dismiss**で閉じるか、最長3分で消えます。`!`は対応するSHELLの記録と照合します。この行は画面内だけの表示で、agentの受領の証明ではありません。
+- ORRERY Mail の `show_files` で明示した画像は、tool の折りたたみの外にも小さく表示します。元の chip は折りたたみの中に残ります。小さい画像をタップすると既存の拡大 preview が開き、閉じると元の画像へ focus が戻ります。画像以外は名前だけを表示します。本文に書いた path や、参照の無い画像を自動で開くことはありません。PC が記録から許可した参照だけを、同じ preview の経路で取得するため、見られる範囲は変わりません。
+- 一覧の画像は画面付近だけを同時に2枚まで取得します。reader に Pillow があれば最大320pxの PNG へ縮小し、無ければ既存の PNG を使います。拡大時は通常の preview を取得します。スクロール中に保持する縮小画像は原則24枚までで、画面外の古いものから解放します。背景では取得を止め、復帰時は中断したものを取り直し、Close・別agent・ページの離脱では画像と遅れた応答を破棄します。
+- Close・別agentへの切替・ページの離脱で更新を止め、スマホから記録・pageの印・参照のID・開いていたpreview（画像のdataを含む）・仮の行を消します。遅れた応答で復活させません。背景では取得を止め、画面と読む位置をメモリに残します。読み込み中に中断したpreviewは復帰時に同じ参照で取り直し、表示済みのpreviewはそのまま残します。再読込み用にagent名・タブと選択時に得たMailの識別IDだけをsessionStorageに残し、記録の本文・下書き・previewはURL・log・browser storageへ残しません。reader側で発行済みの印は期限まで残りますが、本文を含まず、同じagentにしか使えません。
 
 **伏せる処理はありません。** 名前で隠したり、中身を伏せたりはしません。表示は記録とfileのままで、何を出してよいかは持ち主が判断します。会話の本文・Mailの本文・fileのtext・画像の中の鍵、promptに貼った秘密、私的な文章は、書かれたままスマホに届きます。名前が秘密らしいfile（`credentials.yaml`・`api_key.md`など）も、作業folderの中で種類と大きさが合えば開けます（拡張子の無い`.env`や鍵のfileなど、previewする種類に無いものは開けません）。toolの出力は送りませんが、agentがそこから書き写したものは届きます。それでよいagentと端末に限ってHistoryを有効にしてください。
 

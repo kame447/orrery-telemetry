@@ -44,7 +44,7 @@ import urllib.request
 from urllib.parse import urlparse, parse_qs
 
 # Public dashboard compatibility generation (docs/tests read this source).
-API_GENERATION = 37
+API_GENERATION = 39
 # Mode admission is shared with hooks and operator/service entry points.
 import runpy as _runtime_runpy
 _MODE_API = _runtime_runpy.run_path(str(Path(__file__).resolve().parents[1] / 'bin/lib/runtime_client.py'))
@@ -209,7 +209,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 INDEX_HTML = os.path.join(HERE, "index.html")
 THEME_ASSETS = {
     **{"/"+name:(os.path.join(HERE,name),"text/javascript; charset=utf-8" if name.endswith(".js") else "text/css; charset=utf-8") for name in ("global_ui.js","global_ui.css","mail_flow.js","mail_flow.css","network_node.js","network_core.js","runtime_node.js","operator_session.js","mail_controller.js","operation_controller.js")},
-    **{"/assets/"+name+".svg": (os.path.join(HERE,"assets",name+".svg"), "image/svg+xml") for name in ("anthropic","openai","google","deepseek","qwen","orbit","orbit-light")},
+    **{"/assets/"+name+".svg": (os.path.join(HERE,"assets",name+".svg"), "image/svg+xml") for name in ("anthropic","openai","google","deepseek","qwen","glm","orbit","orbit-light")},
     "/theme_core.js": (os.path.join(HERE, "theme_core.js"), "text/javascript; charset=utf-8"),
     "/theme_controller.js": (
         os.path.join(HERE, "theme_controller.js"),
@@ -322,18 +322,40 @@ def _project_key() -> str:
 # future versions (opus-4.8 ...) work with no code change. Source of truth:
 # ORRERY Mail and the dashboard share these accepted provider spellings.
 _MN_FAMILIES = ("fable", "mythos", "opus", "sonnet", "haiku", "gpt", "gemini", "grok",
-                "llama", "qwen", "mistral", "deepseek")
+                "llama", "qwen", "mistral", "deepseek", "glm")
 _MN_FAMILY_RE = re.compile(
-    r"(?P<family>" + "|".join(_MN_FAMILIES) + r")[-_. ]*"
-    r"(?P<version>\d+(?:[.\-]\d+)?)"
+    r"(?P<family>" + "|".join(
+        r"(?<![a-z0-9])glm" if family == "glm" else family
+        for family in _MN_FAMILIES
+    ) + r")[-_. ]*"
+    r"v?(?P<version>\d+(?:[.\-]\d+)?)"
     r"(?P<variant>[-_]?(?:codex|thinking|mini|nano|turbo|flash|pro|preview|exp))?"
 )
+# GPT suffixes are identifiers, including future names and compound variants.
+_GPT_MODEL_RE = re.compile(
+    r"\bgpt[-_. ]*v?(?P<version>\d+(?:[.\-]\d+)?)"
+    r"(?P<variant>(?:-[a-z0-9_]+)*)\b", re.IGNORECASE,
+)
+
+
+def _display_gpt_model(raw: str | None) -> str:
+    family = _MN_FAMILY_RE.search((raw or "").lower())
+    if not family or family.group("family") != "gpt":
+        return ""
+    match = _GPT_MODEL_RE.search(raw or "")
+    if not match:
+        return ""
+    version = match.group("version").replace("-", ".")
+    variant = "-".join(word[:1].upper() + word[1:] for word in match.group("variant").split("-")[1:])
+    return f"GPT-{version}" + (f"-{variant}" if variant else "")
+
+
 _MN_VENDOR_RE = re.compile(r"^(?:claude|anthropic|openai|google)[-_. ]*")
 _MN_CTX_RE = re.compile(r"[\[\(\-_ ]*\d+\s*m(?:[-_ ]?context)?[\]\)]*\s*$")
 _MN_DISPLAY = {"fable": "Fable", "mythos": "Mythos", "opus": "Opus", "sonnet": "Sonnet", "haiku": "Haiku",
                "gpt": "GPT", "gemini": "Gemini", "grok": "Grok",
                "llama": "Llama", "qwen": "Qwen", "mistral": "Mistral",
-               "deepseek": "DeepSeek"}
+               "deepseek": "DeepSeek", "glm": "GLM"}
 _MN_ALIASES: dict[str, str] = {}  # add codename->canonical when one appears
 
 
@@ -347,12 +369,19 @@ def _normalize_model(raw: str | None) -> str:
     m = _MN_FAMILY_RE.search(s)
     if not m:
         return original
+    if m.group("family") == "gpt":
+        gpt = _GPT_MODEL_RE.match(s, m.start())
+        if gpt:
+            return "gpt-" + gpt.group("version").replace("-", ".") + gpt.group("variant")
     variant = (m.group("variant") or "").lstrip("-_")
     canon = f"{m.group('family')}-{m.group('version').replace('-', '.')}"
     return f"{canon}-{variant}" if variant else canon
 
 
 def _display_model(raw: str | None) -> str:
+    gpt = _display_gpt_model(raw)
+    if gpt:
+        return gpt
     canon = _normalize_model(raw)
     if not canon:
         return ""
@@ -373,7 +402,7 @@ _MN_PROVIDER = {
     "gpt": "openai",
     "gemini": "google", "grok": "xai",
     "llama": "meta", "qwen": "alibaba",
-    "mistral": "mistral", "deepseek": "deepseek",
+    "mistral": "mistral", "deepseek": "deepseek", "glm": "zai",
 }
 
 
@@ -1670,7 +1699,7 @@ def _apply_codex_app_runtime(row: dict, runtime: dict) -> None:
     """Promote a gone Codex App agent from its provider-validated snapshot."""
     app_live = _codex_app_live(runtime)
     row.update(cmd="codex-app", live=app_live["live"],
-               surface="codex-app", model=runtime["model"],
+               surface="codex-app", model=_display_gpt_model(runtime["model"]) or runtime["model"],
                model_raw=runtime["model"],
                provider=_provider_of(runtime["model"]))
     if app_live["running"]:
@@ -1985,9 +2014,11 @@ def build_agents(history_days: float | None = HISTORY_DAYS_DEFAULT) -> list[dict
             if con is not None:
                 con.close()
 
+    annotations = _annotations()
     observed_now = time.time()
     claude_history_index = None
     for row in rows:
+        row['annot'] = annotations.get(row['name'])
         row.update(harness_runtime.metadata(RUNTIME_DIR, row["name"], row.get("program")))
         profile = persistent_profiles.get(row["name"])
         row.update(
@@ -2340,6 +2371,8 @@ def _deliverables_index() -> dict:
 # --------------------------------------------------------------------------- #
 ANNOT_PATH = os.path.join(RUNTIME_DIR, "annotations.json")
 LEGACY_ANNOT_PATH = os.path.join(HERE, "annotations.json")
+_ANNOT_UNSET = object()
+_ANNOT_LIMITS = {'role': 40, 'emoji': 8, 'group': 24, 'task': 200}
 _ANNOT_CACHE: dict = {"path": "", "mtime": -1.0, "data": {}}
 _ANNOT_LOCK = threading.Lock()
 
@@ -2386,8 +2419,11 @@ def _annotations() -> dict:
             role = str(v.get("role", "")).strip()[:40]
             emoji = str(v.get("emoji", "")).strip()[:8]
             group = str(v.get("group", "")).strip()[:24]
-            if role or emoji or group:
+            task = str(v.get("task") or "").strip()[:200]
+            if role or emoji or group or task:
                 data[name] = {"role": role, "emoji": emoji, "group": group}
+                if task:
+                    data[name]['task'] = task
     _ANNOT_CACHE.update(path=path, mtime=mt, data=data)
     return data
 
@@ -2470,20 +2506,19 @@ def _record_name_substitution(registered: str, requested: str) -> None:
                         requested, registered, e)
 
 
-def _write_annotation(name: str, role: str, emoji: str,
-                      group: str = "") -> dict:
-    """1 エージェント分の annotation を upsert / 削除。
+def _write_annotation(name: str, role=_ANNOT_UNSET, emoji=_ANNOT_UNSET,
+                      group=_ANNOT_UNSET, task=_ANNOT_UNSET) -> dict:
+    """Patch one annotation atomically; omitted fields retain their values.
 
-    role / emoji / group がすべて空な場合だけ削除する。
-
-    runtime の annotations.json をロックして read-modify-write（atomic
-    replace）。旧 dashboard path しかない場合は内容を引き継いで新 path
-    に書く。"""
-    if not name or _NAME_RE.fullmatch(name) is None:
+    Explicit empty strings clear fields. Remove the entry only when every
+    field is empty. Migrate the legacy store on the next successful write.
+    """
+    if not isinstance(name, str) or not name or _NAME_RE.fullmatch(name) is None:
         return {"ok": False, "error": "invalid name"}
-    role = (role or "").strip()[:40]
-    emoji = (emoji or "").strip()[:8]
-    group = (group or "").strip()[:24]
+    updates = dict(role=role, emoji=emoji, group=group, task=task)
+    if any(value is not _ANNOT_UNSET and value is not None and not isinstance(value, str)
+           for value in updates.values()):
+        return {'ok': False, 'error': 'annotation fields must be strings'}
     with _ANNOT_LOCK:
         source_path = _annotation_read_path()
         try:
@@ -2495,9 +2530,17 @@ def _write_annotation(name: str, role: str, emoji: str,
             raw = {}
         wrapped = isinstance(raw.get("agents"), dict)
         store = raw["agents"] if wrapped else raw
+        previous = store.get(name) if isinstance(store.get(name), dict) else {}
+        annotation = {
+            field: str((previous.get(field, '') if value is _ANNOT_UNSET else value) or '').strip()[:_ANNOT_LIMITS[field]]
+            for field, value in updates.items()
+        }
         removed = False
-        if role or emoji or group:
-            store[name] = {"role": role, "emoji": emoji, "group": group}
+        if any(annotation.values()):
+            # Preserve the legacy shape when no task override is present.
+            if not annotation['task']:
+                annotation.pop('task')
+            store[name] = annotation
         else:
             store.pop(name, None)
             removed = True
@@ -2510,8 +2553,7 @@ def _write_annotation(name: str, role: str, emoji: str,
     _ANNOT_CACHE.update(path="", mtime=-1.0)  # 次回 _annotations で強制再読込
     if removed:
         return {"ok": True, "removed": name}
-    return {"ok": True, "annot": {"name": name, "role": role,
-                                  "emoji": emoji, "group": group}}
+    return {"ok": True, "annot": {"name": name, **annotation}}
 
 
 def _graph_health(g: dict) -> dict:
@@ -2704,7 +2746,8 @@ def graph_payload(days: float, show_all: bool) -> dict:
                         else lv.get("ctx_window") or _ctx_window(n.get("model"))),
          # モデル: pane 由来を優先 (warm pool claim で DB が乖離するケース)
          #   display 形式に揃える (build_agents と同じ正規化)
-         "model": _display_model(_pane_model_for(lv.get("pane_model"), n.get("program"))) or n.get("model"),
+         "model": _display_model(_pane_model_for(lv.get("pane_model"), n.get("program")))
+                  or _display_gpt_model(n.get("model")) or n.get("model"),
          "model_raw": _pane_model_for(lv.get("pane_model"), n.get("program")) or n.get("model") or "",
          # provider: family ベースで anthropic / openai 等を判定（logo 用）
          "provider": _provider_of(_pane_model_for(lv.get("pane_model"), n.get("program"))
@@ -6528,7 +6571,7 @@ _WIN_TRUNC_RE = re.compile(
 #   モデル名（"gpt-5.6-sol に委任"）を statusline より先に拾わないようにする。
 _MODEL_PANE_RE = re.compile(
     r"\b(Opus|Sonnet|Haiku|Fable|Mythos)\s+(\d+(?:\.\d+)?)\b"
-    r"|\b(gpt-\d+(?:\.\d+)?)(?:-(codex|mini|nano|turbo|thinking))?\b",
+    r"|\b(gpt-\d+(?:\.\d+)?)(?:-([a-z0-9_]+(?:-[a-z0-9_]+)*))?\b",
     re.IGNORECASE,
 )
 _STATUSLINE_HINT_RE = re.compile(
@@ -6583,6 +6626,10 @@ _CODEX_INTERRUPT_END_RE = re.compile(
     r"esc to interrupt\)"
     r"(?: · (?:1 background terminal|(?:[2-9]|[1-9][0-9]+) background terminals)"
     r" running · /ps to view · /stop to close)?$")
+_CODEX_TRUNCATED_WORK_RE = re.compile(
+    r"^[•▌●]\s+(?:Working|Thinking)(?: \(([^\n]*))?…$")
+_CODEX_ELAPSED_PREFIX_RE = re.compile(
+    r"\s*(?:(\d+)\s*h\s*)?(?:(\d+)\s*m\s*)?(?:(\d+)\s*s\s*)?(\d*)\s*")
 _LAST_T_RE = re.compile(
     r"\b(?:for|in)\s+(?:(\d+)\s*h\s*)?(?:(\d+)\s*m\s*)?(\d+)\s*s\b",
     re.IGNORECASE)
@@ -6598,6 +6645,50 @@ def _dur(h: int, m: int, s: int) -> tuple[int, str]:
     else:
         disp = f"{s}s"
     return secs, disp
+
+
+def _codex_truncated_work(candidate: str) -> tuple[int | None, str | None] | None:
+    """Read an ellipsized status prefix, only after current-block admission."""
+    label = _CODEX_TRUNCATED_WORK_RE.fullmatch(candidate)
+    if label is None:
+        return None
+    if label.group(1) is None:
+        return None, None
+    elapsed, separator, hint = label.group(1).partition('•')
+    # Real elapsed labels are short. Bound regex work before optional units
+    # can redistribute whitespace, and before converting any captured digits.
+    if len(elapsed) > 64:
+        return None
+    timer = _CODEX_ELAPSED_PREFIX_RE.fullmatch(elapsed.strip())
+    if timer is None:
+        return None
+    h, m, s, incomplete = timer.groups()
+    if separator:
+        if incomplete or not any(value is not None for value in (h, m, s)):
+            return None
+        hint = hint.lstrip()
+        interrupt = 'esc to interrupt)'
+        if not interrupt.startswith(hint):
+            if not hint.startswith(interrupt):
+                return None
+            suffix = hint[len(interrupt):]
+            if not ' · '.startswith(suffix):
+                background = re.fullmatch(r' · ([1-9]\d*)(?: (.*))?', suffix)
+                if background is None:
+                    return None
+                plural = '' if background.group(1) == '1' else 's'
+                expected = f'background terminal{plural} running · /ps to view · /stop to close'
+                if not expected.startswith(background.group(2) or ''):
+                    return None
+    if not any(value is not None for value in (h, m, s)):
+        return None, None
+    seconds, display = _dur(int(h or 0), int(m or 0), int(s or 0))
+    if s is None:
+        # A clipped digit has no known unit. Never invent the missing seconds.
+        display = (f'{int(h)}h' if h is not None else '')
+        if m is not None:
+            display += f'{int(m):02d}m' if h is not None else f'{int(m)}m'
+    return seconds, display
 
 
 _RT_TTL = 4.5
@@ -6748,6 +6839,11 @@ def _runtime_activity(text: str) -> tuple[str, str]:
                 for row in suffix) and all(chrome(row) for row in suffix)):
             composer = index
             break
+    codex_composer = (composer is not None and lines[composer].lstrip().startswith('›')
+        and any(_CTX_CODEX_LEFT_RE.search(row) or _CTX_CODEX_USED_RE.search(row)
+            or re.match(r'^\s*gpt-\S+\s+(?:low|medium|high|xhigh|max|ultra)\s+[·•]',
+                        row, re.IGNORECASE)
+            for row in lines[composer + 1:]))
     current = lines[:composer] if composer is not None else lines[:]
     while current and (not current[-1].strip() or rule(current[-1])):
         current.pop()
@@ -6786,6 +6882,9 @@ def _runtime_activity(text: str) -> tuple[str, str]:
             if (width == 1 and candidate[0] in "•▌●"
                     and _ACTIVE_T_RE.search(candidate) and _WORK_RE.search(candidate)
                     and _CODEX_INTERRUPT_END_RE.search(candidate)):
+                return "work", candidate
+            if (width == 1 and codex_composer and label[0].startswith(('•', '▌', '●'))
+                    and _codex_truncated_work(candidate) is not None):
                 return "work", candidate
             if width > 1 and len(label[0].strip()) == 1:
                 candidate = label[0].strip() + " " + " ".join(row.strip() for row in label[1:])
@@ -6870,6 +6969,10 @@ def _parse_runtime(text: str) -> dict:
         if t:
             work_secs, work_disp = _dur(
                 int(t.group(1) or 0), int(t.group(2) or 0), int(t.group(3)))
+        else:
+            truncated = _codex_truncated_work(work_block)
+            if truncated is not None:
+                work_secs, work_disp = truncated
     else:
         # 直前ターンの所要（最後にマッチしたもの＝最新）
         ms = _LAST_T_RE.findall(text)
@@ -8160,7 +8263,7 @@ def _spawn_request(payload: dict) -> tuple[dict | None, dict | None]:
         "parent", "standalone", "task", "role", "group", "worktree",
         "worktree_base", "name", "dir", "provider", "model", "effort",
         "claude_chrome", "claude_chrome_device", "async", "dry_run", "headless", "emoji",
-        "base", "tools", "harness", "helper_model", "url_index", "url_key",
+        "base", "tools", "harness", "helper_model", "url_index", "url_key", "web_search",
     }
     if str(payload.get("provider") or "").strip().lower() == "gemini":
         allowed.add("resources")
@@ -8310,6 +8413,9 @@ def do_spawn(payload: dict) -> dict:
                 and harness not in native.get(provider, ()))):
         return {"ok": False, "error": "unsupported harness", "error_code": "unsupported_harness"}
     helper_model = payload.get("helper_model")
+    web_search = payload.get('web_search')
+    if web_search is not None and (not is_native or web_search not in ('exa', 'searxng')):
+        return {'ok': False, 'error': 'web_search には native harness と exa または searxng が必要です'}
     if not is_native and ('url_index' in payload or 'url_key' in payload):
         return {'ok': False, 'error': 'url_index requires a dynamic Local connection'}
     if not is_native and helper_model not in (None, "same"):
@@ -8448,7 +8554,8 @@ def do_spawn(payload: dict) -> dict:
         spec = SpawnLaunchSpec(
             provider=provider, program=harness, model=model, script=SPAWN_SCRIPT,
             provider_args=("--harness", harness, "--backend", provider)
-                + (("--url-index", str(payload['url_index']), "--url-key", payload['url_key']) if dynamic else ()) + helper_args + tools_args,
+                + (("--url-index", str(payload['url_index']), "--url-key", payload['url_key']) if dynamic else ()) + helper_args
+                + (('--web-search', web_search) if web_search else ()) + tools_args,
             effort=effort, effort_arg=bool(effort),
         )
     else:
@@ -10161,9 +10268,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/annotate":
             # 役割ラベルの upsert/削除。name は session でも name でも受ける。
             nm = body.get("name") or body.get("session") or ""
-            result = _write_annotation(
-                nm, body.get("role", ""), body.get("emoji", ""),
-                body.get("group", ""))
+            result = _write_annotation(nm, **{
+                field: body[field] for field in _ANNOT_LIMITS if field in body
+            })
         elif path == "/api/jserr":
             result = _log_js_error(body)
         elif path == "/api/spawn":

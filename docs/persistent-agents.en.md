@@ -8,6 +8,102 @@ A persistent agent is a parentless bot that keeps the same ORRERY Mail identity 
 
 Temporary agents started through the normal `agent-start` / `agent-start-codex` or child launchers continue to use their existing registration path. The enrollment procedure here is for migrating an existing bot that never passed through a launcher, or for recovering the same numeric row after its local credential was lost.
 
+## Claude Channels in fresh mode
+
+In `runtime_mode=fresh`, complete [fresh registration and preparation](fresh-global-update.en.md)
+first. The operator prepares login, hooks and the Channels plugin in the prepared Claude HOME.
+Set `AGENTSTACK_PYTHON` to the same verified Python that imports this Mail package for ordinary fresh launch.
+Do not import legacy enrollment or Mail tokens. Create an owner-only JSON profile:
+
+```json
+{
+  "kind": "orrery-fresh-persistent-v1",
+  "context": "/path/to/prepared/context.json",
+  "provider": "claude",
+  "working_directory": "/path/to/workspace",
+  "channels": ["plugin:telegram@claude-plugins-official"],
+  "model": "sonnet",
+  "environment": {"TELEGRAM_STATE_DIR": "/path/to/channel-state"}
+}
+```
+
+```bash
+chmod 600 /path/to/bot.json
+agentstack-persistent inspect --profile /path/to/bot.json
+agentstack-persistent run --profile /path/to/bot.json
+```
+
+This explicit fresh profile dispatches to ordinary launch. It does not register an agent,
+prepare a context or install a service. Channels reuse interactive configuration source checks
+and Mail alias replacement, preserving Channels alongside bound Mail and regular reservation hooks.
+The existing fresh watcher delivers idle Mail to the same tmux input surface.
+
+Keep credential values out of the launch environment and profile. Use the existing Channels state
+reader; the official plugin still reads its `.env` inside its own process after startup.
+Legacy raw Mail tokens are not inherited. Credential values are not passed to the model's Bash.
+
+To stop, send **SIGTERM to this launcher process rather than killing its pane**, and wait for it.
+The launcher observes provider exit and writes `ended.json`; restart with the same profile afterward.
+Unexpected exit, forced kill or stop timeout stays unknown and blocks another run.
+One launch owns one conversation. A session change such as `/clear` stops that run and reports
+`FRESH_BOT_RESTART_REQUIRED`. Automatic old-conversation restoration and seamless reset are not supported.
+Never run old and new pollers with the same Telegram token; verify that the old poller has stopped.
+
+Bot process restart differs from machine restart. Mac/WSL machine reboot and automatic unlock
+remain unverified. Legacy profiles continue to use the enrollment procedure below.
+
+## Fresh Hermes Telegram (interactive)
+
+Use the same prepared registration with the native `hermes chat --tui` and the bundled
+`orrery-telegram` plugin. Incoming Telegram DMs enter that live TUI; replies use the
+`telegram_reply` tool. Bound Mail, the standard watcher, and terminal input share the same TUI.
+No separate gateway or headless bridge is started.
+
+```json
+{
+  "kind": "orrery-fresh-persistent-v1",
+  "context": "/path/to/prepared/context.json",
+  "provider": "hermes",
+  "working_directory": "/path/to/workspace",
+  "model": "configured-model-id",
+  "managed": {
+    "manifest_file": "/path/to/native-manifest.json",
+    "backend_id": "deepseek"
+  },
+  "telegram": {
+    "token_ref": {"store": "keychain", "service": "telegram-bot", "account": "owner"},
+    "allow_from": [123456789]
+  }
+}
+```
+
+Keep the profile at `0600`, with the context and Hermes HOME on a private Linux/macOS filesystem.
+Replace the example number with your Telegram user ID; group messages are excluded.
+On macOS, store the token yourself in Keychain. Linux/WSL uses the existing
+[Secret Service reference](install.en.md#ubuntu-wsl-secret-service-references-real-machine-acceptance-pending),
+for example `{"store":"secret-service","attributes":{"application":"telegram-bot"}}`.
+Keep values out of profiles and environments. The plugin reads the value in-process;
+the same reference enters the ordinary credential-read guard. Provider selection, `key_cmd`,
+and config generation reuse the ordinary managed-child path.
+
+Prepare the provider and personally approve hooks/plugins before using the same `inspect`/`run` commands.
+Hermes HOME is `providers/hermes` beside the context. Place any non-secret personality/settings there
+before launch; do not copy old Mail MCP definitions, credential values, or legacy tokens.
+An existing launchd/systemd user unit can run this foreground launcher; no service is registered automatically.
+Linux/WSL requires the user bus and an unlocked Secret Service. Do not default private runtime state to `/mnt/c`.
+
+Stop/restart and session changes follow the Channels rules. A requested Hermes stop also waits for
+that launch's TUI/backend descendants from startup through normal exit before writing `ended.json`.
+The foreground pane/job must give this run its own process group; surviving children or unavailable observation leave it unknown.
+`telegram-ready` in `logs/telegram-status.json` means the poller is ready, not that Mail or replies succeeded.
+Treat 409, credential-unavailable, and allowlist-empty as failures. Never overlap old/new pollers for one token.
+
+Known limits: the existing plugin's concurrent flush and partial long replies after a send failure are unchanged.
+If a Hermes child detaches into another session and outlives its launcher, a new bot cannot receive Telegram until that child exits (the per-profile lock prevents duplicate reception).
+Each run starts a new conversation; old conversations are not automatically restored. Synthetic transport/native
+tests are separate from real Telegram acceptance. Real provider/Telegram round trips, real WSL, and machine
+reboots on macOS/WSL remain unverified.
+
 ## Scope of the guarantee
 
 An **operator** here means a person who explicitly runs the dedicated CLI in a local terminal on this machine. The implementation guarantees only:

@@ -33,7 +33,7 @@ HERE = Path(__file__).resolve().parent
 MAX_UPSTREAM_BYTES = 4 * 1024 * 1024
 UPSTREAM_TIMEOUT = 2
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-       "font-src 'self'; img-src 'self' data:; connect-src 'self'; "
+       "font-src 'self'; img-src 'self' data:; connect-src 'self'; manifest-src 'self'; "
        "frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
 
 
@@ -144,17 +144,21 @@ def static_assets(root=HERE):
     """Fixed bundled files only; no file path, overlay or provider lookup."""
     fixed = {
         '/': (root/'mobile/index.html', 'text/html; charset=utf-8'),
+        '/manifest.webmanifest': (root/'mobile/manifest.webmanifest', 'application/manifest+json; charset=utf-8'),
         '/mobile.css': (root/'mobile/mobile.css', 'text/css; charset=utf-8'),
         '/mobile.js': (root/'mobile/mobile.js', 'text/javascript; charset=utf-8'),
         '/network_view.js': (root/'mobile/network_view.js', 'text/javascript; charset=utf-8'),
         '/mail_comets.js': (root/'mobile/mail_comets.js', 'text/javascript; charset=utf-8'),
+        '/conversation_markdown.js': (root/'mobile/conversation_markdown.js', 'text/javascript; charset=utf-8'),
         '/conversation.js': (root/'mobile/conversation.js', 'text/javascript; charset=utf-8'),
         '/network_core.js': (root/'network_core.js', 'text/javascript; charset=utf-8'),
         '/network_node.js': (root/'network_node.js', 'text/javascript; charset=utf-8'),
     }
+    for icon in ('orbit-192.png','orbit-512.png','orbit-maskable-512.png','apple-touch-icon.png'):
+        fixed['/icons/'+icon]=(root/'mobile/icons'/icon,'image/png')
     for font in ('fraunces-normal','fraunces-italic','ibm-plex-mono-400','ibm-plex-mono-500','ibm-plex-mono-600'):
         fixed['/fonts/'+font+'.woff2']=(root/'mobile/fonts'/(font+'.woff2'),'font/woff2')
-    for logo in ('orbit','anthropic','openai','google','qwen'):
+    for logo in ('orbit','anthropic','openai','google','qwen','glm'):
         fixed['/assets/'+logo+'.svg']=(root/'assets'/(logo+'.svg'),'image/svg+xml')
     # Byte-identical canonical icon, bundled for the manual mobile reader even
     # when ordinary dashboard DeepSeek presentation is not opted in.
@@ -184,8 +188,8 @@ class Handler(BaseHTTPRequestHandler):
         self.close_connection = True
         self._send(code, {'ok':False,'error':'request_rejected'})
 
-    def _send(self, status, data, mime='application/json; charset=utf-8'):
-        if isinstance(data, dict):data=json.dumps(data,separators=(',',':'),allow_nan=False).encode()
+    def _send(self, status, data, mime='application/json; charset=utf-8', *, utf8=False):
+        if isinstance(data, dict):data=json.dumps(data,separators=(',',':'),allow_nan=False,ensure_ascii=not utf8).encode()
         self.send_response(status)
         for key,value in [('Content-Type',mime),('Content-Length',str(len(data))),
                           ('Cache-Control','no-store'),('Content-Security-Policy',CSP),
@@ -227,7 +231,8 @@ class Handler(BaseHTTPRequestHandler):
         if any(self.headers.get_all(h,[]) for h in ('Upgrade','Transfer-Encoding','X-HTTP-Method-Override','X-Method-Override','X-HTTP-Method')):return False
         lengths=self.headers.get_all('Content-Length',[])
         if write:
-            if (len(lengths)!=1 or re.fullmatch(r'[0-9]{1,5}',lengths[0]) is None or not 0<int(lengths[0])<=mobile_input.MAX_JSON_BYTES
+            limit=mobile_input.MAX_IMAGE_JSON if self.path=='/view/terminal/image' else mobile_input.MAX_JSON_BYTES
+            if (len(lengths)!=1 or re.fullmatch(r'[0-9]{1,8}',lengths[0]) is None or not 0<int(lengths[0])<=limit
                     or self.headers.get_all('Content-Type',[])!=['application/json']
                     or any(self.headers.get_all(h,[]) for h in ('Content-Encoding','Expect'))):return False
         elif len(lengths)>1 or (lengths and lengths[0]!='0'):return False
@@ -274,13 +279,17 @@ class Handler(BaseHTTPRequestHandler):
             # The cockpit reference, path and file stay on this machine.
             query=parse_qs(parts.query,keep_blank_values=True)
             nm=query.get('name',[''])[0];ref=query.get('ref',[''])[0]
-            if (set(query)!={'name','ref'} or any(len(v)!=1 for v in query.values()) or not NAME.fullmatch(nm)
+            if (set(query)-{'name','ref','thumbnail'} or not {'name','ref'}<=set(query)
+                    or 'thumbnail' in query and query['thumbnail']!=['1']
+                    or any(len(v)!=1 for v in query.values()) or not NAME.fullmatch(nm)
                     or not mobile_history.TOKEN.fullmatch(ref)):
                 self._send(400,{'ok':False,'error':'invalid_preview_query'});return
             if not self.server.mobile_store.known_name(nm):
                 self._send(404,{'ok':False,'error':'agent_unavailable'});return
             if self.command=='HEAD':self._send(200,b'');return
-            try:self._send(200,mobile_history.encode(self.server.mobile_history.preview(nm,ref)))
+            try:
+                options={'thumbnail':True} if 'thumbnail' in query else {}
+                self._send(200,mobile_history.encode(self.server.mobile_history.preview(nm,ref,**options)))
             except LookupError:self._send(410,{'ok':False,'error':'preview_expired'})
             except mobile_history.HistoryUnavailable as exc:
                 self._send(503 if exc.code in {'preview_unavailable','dashboard_unavailable','history_slow'} else 200,
@@ -376,21 +385,22 @@ class Handler(BaseHTTPRequestHandler):
             def expire():
                 try:self.connection.shutdown(socket.SHUT_RDWR)
                 except OSError:pass
-            timer=threading.Timer(5,expire);timer.daemon=True;timer.start()
+            timer=threading.Timer(20 if operation=='image' else 5,expire);timer.daemon=True;timer.start()
             size=int(self.headers['Content-Length']);data=self.rfile.read(size)
             if len(data)!=size:raise ValueError('input_json_invalid')
-            payload=mobile_input.decode_json(data)
+            payload=mobile_input.decode_json(data,max_bytes=mobile_input.MAX_IMAGE_JSON if operation=='image' else mobile_input.MAX_JSON_BYTES)
             if not mobile_input.request_fields(operation,payload):raise ValueError('input_json_invalid')
         except (ValueError,OSError):
             self._send(400,{'error':'input_request_invalid'});return
         finally:
             if timer is not None:timer.cancel()
-        try:self._send(200,self.server.mobile_input.call(operation,payload))
-        except Exception:
+        try:self._send(200,self.server.mobile_input.call(operation,payload),utf8=operation=='preview')
+        except Exception as error:
             # A lost response cannot establish whether a commit reached tmux.
             # The UI retains only the operation ID, offers status, and never
             # repeats the send automatically.
-            self._send(503,{'error':'input_unavailable','state':'unknown' if operation=='commit' else 'unavailable'})
+            reason=str(error) if operation=='image' and isinstance(error,mobile_input.InputUnavailable) and re.fullmatch(r'image_[a-z_]+',str(error)) else 'input_unavailable'
+            self._send(503,{'error':reason,'state':'unknown' if operation=='commit' else 'unavailable'})
 
     def _no_method(self):
         self.close_connection=True

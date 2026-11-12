@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+from copy import deepcopy
 import http.client
 import json
 import os
@@ -20,12 +21,12 @@ from orrery_chatgpt_mcp.readonly_server import Config, ConfigurationError, Gatew
 INSTANCE = "0123456789abcdef0123456789abcdef"
 PROJECT = "/fixture/selected"
 FRESH = {
-    "name": "orrery-telemetry", "version": "test", "api": 34, "runtime_mode": "fresh",
+    "name": "orrery-telemetry", "version": "test", "api": 39, "runtime_mode": "fresh",
     "mail_instance_id": INSTANCE, "capabilities": {
         "roster": True, "mail": True, "spawn": True, "terminal": True
     },
 }
-LEGACY = {"name": "orrery-telemetry", "version": "test", "api": 37}
+LEGACY = {"name": "orrery-telemetry", "version": "test", "api": 39}
 AGENTS_FRESH = {
     "mail_instance_id": INSTANCE, "observation_truncated": False, "agents": [
         {"mail_instance_id": INSTANCE, "mail_agent_id": 7, "name": "QuietBohr",
@@ -318,7 +319,7 @@ def test_http_legacy_mode_and_mode_mismatch(tmp_path):
             assert response[1]["result"]["structuredContent"]["error"]["code"] == "dashboard_unavailable"
 
 
-@pytest.mark.parametrize("api", [34, 35, 36, 37])
+@pytest.mark.parametrize("api", [34, 35, 36, 37, 38, 39])
 def test_supported_fresh_generations_still_require_fresh_contract(api):
     version = {**FRESH, "api": api}
     data = snapshot(FakeDashboard(version, AGENTS_FRESH), "fresh")
@@ -327,7 +328,7 @@ def test_supported_fresh_generations_still_require_fresh_contract(api):
     assert data.scope["includes_unobserved"] is True
 
 
-@pytest.mark.parametrize("api", [999, 38, 33, True, "34", None])
+@pytest.mark.parametrize("api", [999, 40, 33, True, "39", None])
 def test_unknown_fresh_generations_are_rejected_before_roster_read(api):
     backend = FakeDashboard({**FRESH, "api": api}, AGENTS_FRESH)
     with pytest.raises(DashboardError):
@@ -335,8 +336,35 @@ def test_unknown_fresh_generations_are_rejected_before_roster_read(api):
     assert backend.calls == ["/api/version"]
 
 
+@pytest.mark.parametrize("mode", ["legacy", "fresh"])
+@pytest.mark.parametrize("tool", ["orrery_status", "orrery_list_agents", "orrery_get_agent"])
+def test_api38_annotations_and_tasks_never_extend_public_projection(mode, tool):
+    version, roster = deepcopy((LEGACY, AGENTS_LEGACY) if mode == "legacy" else (FRESH, AGENTS_FRESH))
+    for row in roster["agents"]:
+        row.update(annot={"role": "private-marker-role", "emoji": "private-marker-emoji",
+                          "group": "private-marker-group", "task": "private-marker-override"},
+                   task="private-marker-registered-task", future_field="private-marker-future")
+    backend = FakeDashboard(version, roster)
+    args = {"name": "QuietBohr"} if tool == "orrery_get_agent" else {}
+    result = invoke(tool, args, backend, mode, project_key=PROJECT if mode == "legacy" else None)
+    assert "private-marker" not in json.dumps(result)
+    agents = result.get("agents", [result["agent"]] if "agent" in result else [])
+    for agent in agents:
+        assert set(agent) == {"name", "mail_instance_id", "mail_agent_id", "provider", "program",
+                              "model", "category", "running", "state", "retired", "observation", "last_active"}
+        assert set(agent["observation"]) == {"state", "age_ms", "reason"}
+
+
 @pytest.mark.parametrize("name", ["A" * 65, "A" * 64 + "/escape", "A" * 64 + "\n"])
 def test_long_fresh_names_are_rejected_not_shortened(name):
     rows = [{**AGENTS_FRESH["agents"][0], "name": name}]
     with pytest.raises(DashboardError):
         snapshot(FakeDashboard(agents={**AGENTS_FRESH, "agents": rows}), "fresh")
+
+
+@pytest.mark.parametrize('raw',['gpt-6.1-sol','gpt-7-nova-preview2'])
+def test_model_projection_prefers_complete_raw_identifier_to_display(raw):
+    roster=deepcopy(AGENTS_LEGACY)
+    roster['agents'][0].update(model='GPT-'+raw[4:].title(),model_raw=raw)
+    data=snapshot(FakeDashboard(LEGACY,roster),'legacy',project_key=PROJECT)
+    assert data.agents[0]['model']==raw

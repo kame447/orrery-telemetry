@@ -29,7 +29,9 @@ def helper(root):
 
 
 def selection(root, program, model, spec):
-    if program not in PROGRAMS or not isinstance(spec, dict) or set(spec) - {'manifest_file','backend_id','effort','helper_model','tools','url_index','url_key','server_url'}:
+    if program not in PROGRAMS or not isinstance(spec, dict) or set(spec) - {'manifest_file','backend_id','effort','helper_model','web_search','tools','url_index','url_key','server_url'}:
+        raise B1Error('FRESH_HARNESS_SELECTION_INVALID')
+    if 'web_search' in spec and spec['web_search'] not in ('exa', 'searxng'):
         raise B1Error('FRESH_HARNESS_SELECTION_INVALID')
     try:
         manifest = Path(spec['manifest_file'])
@@ -47,7 +49,11 @@ def selection(root, program, model, spec):
         raise B1Error('FRESH_HARNESS_CONFIGURE_REQUIRED') from None
 
 
-def setup(client, root, provider):
+def setup(client, root, provider, *, persistent=None):
+    if persistent is not None:
+        runner, binary, pins = selection(root, provider, persistent['model'], persistent['managed'])
+        return client.path.parent / 'providers' / provider, binary, dict(
+            runner=runner, spec=dict(selection=persistent['managed'], pins=pins), model=persistent['model'])
     from .fresh_child import family
     _, _, ready = family(client)
     if ready is None or ready['program'] != provider or not ready.get('managed'):
@@ -58,7 +64,7 @@ def setup(client, root, provider):
     return client.path.parent / 'providers' / provider, binary, dict(runner=runner, spec=spec, model=ready['model'])
 
 
-def plan(client, root, provider, settings, run, cwd, prompt, session_id):
+def plan(client, root, provider, settings, run, cwd, prompt, session_id, *, persistent=None):
     api = helper(root)
     for folder in (client.path.parent / 'providers', client.path.parent / 'providers' / provider):
         folder.mkdir(mode=0o700, exist_ok=True);_directory(folder)
@@ -81,9 +87,11 @@ def plan(client, root, provider, settings, run, cwd, prompt, session_id):
         state_dir=str(state), runtime_dir=str(client.path.parent), fresh_client_dir=str(client.path.parent),
         cwd=str(cwd), mcp_config=str(mcp), prompt_file=str(task), instructions_file=str(instructions),
         tools=selection_spec.get('tools', {'base':'default','tools':{}}), env=env)
-    for key in ('effort','helper_model'):
+    for key in ('effort','helper_model','web_search'):
         if key in selection_spec:document[key] = selection_spec[key]
     document.update({key:settings['runner'][key] for key in ('url_index','url_key','server_url') if key in settings['runner']})
+    if persistent is not None:
+        document['telegram'] = persistent['telegram']
     if session_id is not None:
         home = client.path.parent / 'providers' / provider
         document.update(resume_session_id=session_id, native_profile_env={

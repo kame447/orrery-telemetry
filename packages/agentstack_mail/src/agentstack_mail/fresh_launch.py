@@ -74,10 +74,10 @@ def root_path(value):
     return root
 
 
-def provider_setup(client, root, provider):
+def provider_setup(client, root, provider, *, persistent=None):
     if provider in {'dsh','hermes'}:
         from .fresh_harness import setup
-        return setup(client, root, provider)
+        return setup(client, root, provider, persistent=persistent)
     from .fresh_child import provider_home
     home = provider_home(client, provider)
     for folder in (home.parent, home):_directory(folder)
@@ -110,7 +110,7 @@ def provider_setup(client, root, provider):
     return home, binary, plan
 
 
-def command(root, home, binary, provider, plan, run, cwd, session_id):
+def command(root, home, binary, provider, plan, run, cwd, session_id, *, persistent=None, client=None):
     proxy = ['/bin/bash', str(root / 'bin/agentstack-runtime-client'), 'proxy']
     policy = runpy.run_path(str(root / 'hooks/child_tools.py'))
     if provider == 'claude':
@@ -121,15 +121,23 @@ def command(root, home, binary, provider, plan, run, cwd, session_id):
                 if not policy['looks_like_agent_mail'](name):
                     extra[name] = policy['_copyable_definition'](name, saved, str(cwd))
         config = run / 'mcp.json'
-        _write_private(config, {'mcpServers': {**extra, 'orrery-mail': {'command': proxy[0], 'args': proxy[1:]}}})
+        if persistent is None:
+            _write_private(config, {'mcpServers': {**extra, 'orrery-mail': {'command': proxy[0], 'args': proxy[1:]}}})
         session_hook = shlex.join(['/bin/bash', str(root / 'bin/agentstack-runtime-client'), 'notifications'])
         guard = shlex.join(['/bin/bash', str(root / 'hooks/check-file-reservation.sh')])
         settings = run / 'hooks.json'
-        _write_private(settings, {'hooks': {
+        hooks = {
             'SessionStart': [{'hooks': [{'type': 'command', 'command': session_hook}]}],
             'PostToolUse': [{'hooks': [{'type': 'command', 'command': session_hook}]}],
             'PreToolUse': [{'matcher': 'Edit|Write|MultiEdit|NotebookEdit|Delete|MoveSource',
-                           'hooks': [{'type': 'command', 'command': guard}]}]}})
+                           'hooks': [{'type': 'command', 'command': guard}]}]}
+        if persistent is not None:
+            from .fresh_persistent import claude_command
+            api = runpy.run_path(str(root / 'bin/agentstack-persistent'))
+            args = claude_command(api, client, root, home, binary, run, cwd, persistent)
+            _write_private(settings, {'hooks': hooks})
+            return [*args, '--settings', str(settings)]
+        _write_private(settings, {'hooks': hooks})
         args = [binary, '--mcp-config', str(config), '--strict-mcp-config', '--settings', str(settings)]
         if session_id is not None:args += ['--resume', session_id]
         return args
@@ -149,7 +157,10 @@ def command(root, home, binary, provider, plan, run, cwd, session_id):
     plugin_id = plan['plugin_id']
     if not isinstance(plugin_id, str) or not re.fullmatch(r'agentstack-codex-app@[a-z0-9-]+', plugin_id):
         raise B1Error('CODEX_HOOK_CONFIGURE_REQUIRED')
-    args = [binary, '-C', str(cwd), '-c', 'check_for_update_on_startup=false',
+    # Codex 0.163 drops root -c values when resume also has -c overrides.
+    # Keep every native option at the same level, including later skills.
+    args = [binary] + (['resume', session_id] if session_id is not None else [])
+    args += ['-C', str(cwd), '-c', 'check_for_update_on_startup=false',
             '--sandbox', os.environ.get('AGENTSTACK_CODEX_SANDBOX', 'workspace-write'),
             '--ask-for-approval', os.environ.get('AGENTSTACK_CODEX_APPROVAL', 'on-request'),
             '-c', 'mcp_servers.orrery-mail.command=' + json.dumps(proxy[0]),
@@ -161,6 +172,9 @@ def command(root, home, binary, provider, plan, run, cwd, session_id):
                 'AGENTSTACK_RUNTIME_MODE', 'AGENTSTACK_FRESH_CLIENT_CONTEXT',
                 'AGENTSTACK_PYTHON']),
             '-c', 'plugins.' + plugin_id + '.mcp_servers.agentstack.enabled=false']
+    # Match the existing child launcher: network is on unless explicitly off.
+    if os.environ.get('AGENTSTACK_CODEX_NETWORK', '1') not in {'0', 'off', 'false', 'no'}:
+        args += ['-c', 'sandbox_workspace_write.network_access=true']
     for name in values.get('mcp_servers', {}):
         if name != 'orrery-mail' and policy['looks_like_agent_mail'](name):
             if not re.fullmatch(r'[A-Za-z0-9_-]+', name):
@@ -168,7 +182,6 @@ def command(root, home, binary, provider, plan, run, cwd, session_id):
             args += ['-c', 'mcp_servers.' + name + '.enabled=false']
     vault = os.environ.get('AGENTSTACK_VAULT')
     if vault and Path(vault).is_dir():args += ['--add-dir', vault]
-    if session_id is not None:args += ['resume', session_id]
     return args
 
 
@@ -255,7 +268,7 @@ def codex_config_overrides(root, plan, config):
     return [*overrides, '-c', 'skills.config=' + value]
 
 
-def launch(client, wrapper_root, provider, cwd, *, session_id=None):
+def launch(client, wrapper_root, provider, cwd, *, session_id=None, persistent=None):
     root = root_path(wrapper_root)
     cwd = Path(cwd).resolve(strict=True)
     if not cwd.is_dir() or provider not in {'claude', 'codex', 'dsh', 'hermes'}:raise B1Error('FRESH_LAUNCH_ARGUMENTS_INVALID')
@@ -263,6 +276,8 @@ def launch(client, wrapper_root, provider, cwd, *, session_id=None):
     owner = asyncio.run(verified_owner(client))
     from .fresh_child import family, launch_task
     task, prompt = launch_task(client)
+    if persistent is not None and (task is not None or provider not in {'claude', 'hermes'} or session_id is not None):
+        raise B1Error('FRESH_PERSISTENT_PROFILE_INVALID')
     if task is not None and (task['provider'] != provider or task['cwd'] != str(cwd) or task['wrapper_root'] != str(root)):
         raise B1Error('FRESH_CHILD_INTENT_CONFLICT')
     base = layout(client)
@@ -276,7 +291,7 @@ def launch(client, wrapper_root, provider, cwd, *, session_id=None):
             ended = _read_private(previous_run / 'ended.json')
             if (set(ended) != {'launch_id', 'exit_code'} or ended['launch_id'] != previous['launch_id']
                     or type(ended['exit_code']) is not int):raise B1Error('FRESH_LAUNCH_OUTCOME_UNKNOWN')
-        home, binary, plan = provider_setup(client, root, provider)
+        home, binary, plan = provider_setup(client, root, provider, persistent=persistent)
         if session_id is not None:
             if managed:
                 from .fresh_harness import native_session_id
@@ -303,14 +318,16 @@ def launch(client, wrapper_root, provider, cwd, *, session_id=None):
         intent = dict(kind='orrery-fresh-launch-v1', launch_id=launch_id, provider=provider, cwd=str(cwd),
                       context_digest=client.context_digest, wrapper_root=str(root),
                       resume_session_id=session_id, nonce=secrets.token_hex(32), **identity(client))
+        if persistent is not None:intent['persistent'] = True
         managed_plan = None
         if managed:
             from .fresh_harness import plan as native_plan
             managed_plan = native_plan(client, root, provider, plan, run, cwd,
-                                       prompt if session_id is None else '', session_id)
+                                       prompt if session_id is None else '', session_id, persistent=persistent)
             args = managed_plan['argv']
-        else:args = command(root, home, binary, provider, plan, run, cwd, session_id)
-        config_args = args[:-2] if provider == 'codex' and session_id is not None else list(args)
+        else:args = command(root, home, binary, provider, plan, run, cwd, session_id,
+                           persistent=persistent, client=client)
+        config_args = [args[0], *args[3:]] if provider == 'codex' and session_id is not None else list(args)
         if task is not None:
             _, _, child_record = family(client)
             if binary != task['binary']:raise B1Error('FRESH_CHILD_INTENT_CONFLICT')
@@ -324,6 +341,10 @@ def launch(client, wrapper_root, provider, cwd, *, session_id=None):
                 config_args += model_args
             intent['child_spawn_id'] = task['spawn_id']
         environment = dict(os.environ)
+        if persistent is not None:environment.update(persistent.get('environment', {}))
+        if persistent is not None:
+            from .fresh_persistent import SECRET_ENV
+            environment = {key: value for key, value in environment.items() if not SECRET_ENV.search(key)}
         for key in list(environment):
             if (key in {'AGENTSTACK_PROJECT_KEY', 'PROJECT_KEY', 'PARENT_AGENT', 'CHILD_REGISTRATION_TOKEN',
                         'AGENTSTACK_RESERVED_IDENTITY', 'MCP_URL', 'MCP_AGENT_MAIL_TOKEN', 'OPENAI_API_KEY',
@@ -362,7 +383,11 @@ def launch(client, wrapper_root, provider, cwd, *, session_id=None):
         try:
             process = subprocess.Popen(args, cwd=cwd, env=environment)
             publish(run, captured, process, root)
-            code = process.wait()
+            restarted = False
+            if persistent is not None:
+                from .fresh_persistent import wait_provider
+                code, restarted = wait_provider(process, run, wrapper_root=root if provider == 'hermes' else None)
+            else:code = process.wait()
         except BaseException:
             if process is not None and process.poll() is None:
                 process.terminate()
@@ -370,10 +395,14 @@ def launch(client, wrapper_root, provider, cwd, *, session_id=None):
                 except subprocess.TimeoutExpired:process.kill();process.wait(timeout=5)
             # Leave current as unknown; recovery is a documented operator action.
             raise
-        _write_private(run / 'ended.json', {'launch_id': launch_id, 'exit_code': code})
+        if persistent is None:
+            _write_private(run / 'ended.json', {'launch_id': launch_id, 'exit_code': code})
         if code == 0:
             observed = _read_private(run / 'session.json')
             pinned(client, observed)
+        if persistent is not None:
+            _write_private(run / 'ended.json', {'launch_id': launch_id, 'exit_code': code})
+        if restarted:raise B1Error('FRESH_BOT_RESTART_REQUIRED')
         return code
 
 
@@ -434,6 +463,9 @@ async def record_session(client, payload, *, defer_transcript=False):
     await verified_owner(client)
     state = session_state(client, payload)
     base, run, intent, session_id = state
+    if intent.get('persistent') and any((run / name).exists() for name in ('session.json', 'session-start.json')):
+        from .fresh_persistent import request_restart
+        request_restart(client, payload)
     managed = intent['provider'] in {'dsh','hermes'}
     from .fresh_child import provider_home
     if managed:

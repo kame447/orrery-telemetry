@@ -58,7 +58,7 @@ The six screenshots on this page are real screens from an isolated demo environm
 
 | Display | Interpretation |
 | --- | --- |
-| `GPT 5.6`, `SONNET 5`, etc. under the name | Current model. `◷ 200K` or `◷ 1M`, when present, is the model's total working-memory capacity. |
+| `GPT-6.1-Sol`, `SONNET 5`, etc. under the name | Current model. `◷ 200K` or `◷ 1M`, when present, is the model's total working-memory capacity. |
 | Thin line below the model | **Context remaining**. Longer means more room; below 20% it becomes redder. It is absent when telemetry cannot be obtained. |
 | Black strip | Current terminal display, useful for judging whether the agent is working or waiting. |
 | `ORD` | Most recent instruction assigned to the agent. |
@@ -80,6 +80,8 @@ The header numbers are a **tally** of the states each card shows in its top-righ
 | `NEED YOU` | Agents waiting on a human: pending approval (`APPROVAL`) or asking a question (`?`) | red border, or `?` |
 | `WORKING` | Agents with a turn in progress | amber LED and elapsed time |
 | `WAITING` | Agents at the prompt, free to take work | `LAST 1M41S` |
+
+In a narrow Codex pane, a current `Working` / `Thinking` line ending in `…` still indicates work. Elapsed time includes only readable units and is absent when unreadable. Historical status lines superseded by a later reply or completion marker, and quoted examples, do not establish current work.
 
 `NEED YOU` appears only while such agents exist; clicking it narrows the DECK to them (click again to restore). An agent whose process has stopped and returned to the shell is in none of these counts; its card says `○ SHELL`. The total of active agents is in the sector heading, `ACTIVE AGENTS [ 29 ]`.
 
