@@ -53,6 +53,35 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse(result["same_as_previous_pid"])
         self.assertFalse(result["service_recovered"])
 
+    def test_running_pid_replaced_during_attestation_is_rejected(self):
+        self.check.side_effect = [
+            {"verified": True, "pid": 321},
+            {"verified": True, "pid": 987},
+        ]
+        with self.assertRaisesRegex(FreshRecoveryError, "STATE_CHANGED"):
+            self.examine(previous_pid=321)
+        self.assertEqual(self.check.call_count, 2)
+
+    def test_second_live_probe_must_still_verify_authority(self):
+        self.check.side_effect = [
+            {"verified": True, "pid": 321},
+            {"verified": False, "pid": 321},
+        ]
+        with self.assertRaisesRegex(FreshRecoveryError, "STATE_CHANGED"):
+            self.examine()
+
+    def test_job_unloads_after_second_probe_is_rejected(self):
+        self.loaded.side_effect = [True, True, False]
+        with self.assertRaisesRegex(FreshRecoveryError, "STATE_CHANGED"):
+            self.examine()
+
+    def test_plist_changes_during_second_probe_is_rejected(self):
+        stable = (Path("/tmp/fixture.plist"), "a" * 64)
+        changed = (Path("/tmp/fixture.plist"), "b" * 64)
+        self.snapshot.side_effect = [stable, stable, changed]
+        with self.assertRaisesRegex(FreshRecoveryError, "STATE_CHANGED"):
+            self.examine()
+
     def test_unloaded_without_old_pid_does_not_claim_stop(self):
         self.loaded.return_value = False
         result = self.examine()
