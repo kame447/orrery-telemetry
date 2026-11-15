@@ -31,7 +31,8 @@ class ServiceStatusTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.home = Path(self.temp.name)
+        # macOS tempfile may return /var while the trusted path contract requires /private/var.
+        self.home = Path(self.temp.name).resolve()
         self.state = self.home / 'private'
         self.state.mkdir(mode=0o700)
         self.plan = FakePlan(
