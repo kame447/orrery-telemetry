@@ -26,7 +26,8 @@ SHA256 = re.compile(r'[0-9a-f]{64}')
 MAX_FILES = 20000
 MAX_FILE_BYTES = 40 * 1024 * 1024
 MAX_TOTAL_BYTES = 512 * 1024 * 1024
-MAX_METADATA_BYTES = 65536
+MAX_METADATA_BYTES = 65536  # Private operator pin manifest
+MAX_DISTRIBUTION_METADATA_BYTES = 256 * 1024  # Real package METADATA may exceed 64 KiB
 
 
 def _canonical(path: Path) -> None:
@@ -113,7 +114,7 @@ def _inventory(root: Path) -> tuple[str, tuple[tuple[str, str], ...]]:
         raise ValueError('unidentified dependencies')
     packages = {}
     for path in metadata:
-        if path.stat().st_size > MAX_METADATA_BYTES:
+        if path.stat().st_size > MAX_DISTRIBUTION_METADATA_BYTES:
             raise ValueError('dependency metadata too large')
         info = Parser().parsestr(path.read_text(encoding='utf-8'), headersonly=True)
         name, version = info.get('Name'), info.get('Version')

@@ -146,3 +146,18 @@ def test_empty_and_noncanonical_refused(tmp_path):
         inspect(site)
     with pytest.raises(DependencyAttestationError):
         inspect(Path('relative/site'))
+
+
+def test_normal_distribution_metadata_over_64_kib_is_accepted(tmp_path):
+    site, manifest = fixture(tmp_path)
+    unfreeze(site)
+    metadata=site/'mcp-1.29.1.dist-info'/'METADATA'
+    metadata.write_text('Metadata-Version: 2.1\nName: mcp\nVersion: 1.29.1\n'
+                        'Description: fixture\n\n'+('Package documentation.\n'*4500))
+    assert metadata.stat().st_size > 65536
+    freeze(site)
+    from orrery_chatgpt_mcp.fresh_dependency_attest import inspect
+    measured=inspect(site)
+    assert any(d['name']=='mcp' for d in measured['distributions'])
+    # The old manifest no longer matches the revised file tree.
+    with pytest.raises(DependencyAttestationError):verify(manifest,site)
