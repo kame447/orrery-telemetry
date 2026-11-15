@@ -102,6 +102,24 @@ def _request(conn: http.client.HTTPConnection, pinned_sock: socket.socket,
     return payload["result"]
 
 
+def _initialized(conn: http.client.HTTPConnection, pinned_sock: socket.socket,
+                 secret: str) -> None:
+    """Complete the MCP initialization handshake without changing the pinned socket."""
+    if conn.sock is not pinned_sock or pinned_sock.fileno() < 0:
+        raise ProbeError("VERIFIED_CONNECTION_CLOSED")
+    body = '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+    conn.request("POST", "/mcp/" + secret, body=body,
+                 headers={"Content-Type": "application/json",
+                          "Accept": "application/json, text/event-stream"})
+    response = conn.getresponse()
+    # Notifications have no JSON-RPC result. The read-only adapter uses 202.
+    data = response.read(1025)
+    if response.status != 202 or data:
+        raise ProbeError("MCP_PROTOCOL_UNVERIFIED")
+    if conn.sock is not pinned_sock or pinned_sock.fileno() < 0:
+        raise ProbeError("VERIFIED_CONNECTION_CLOSED")
+
+
 def _recipients(value: object) -> set[tuple[int, str, str]]:
     if not isinstance(value, list):
         raise ProbeError("EFFECTIVE_AUTHORITY_UNVERIFIED")
@@ -171,8 +189,11 @@ def probe(*, label: str, plist_path: str, port: int, pairing_secret: str,
             "protocolVersion": "2025-11-25", "capabilities": {},
             "clientInfo": {"name": "fresh-process-probe", "version": "1"},
         })
-        if init.get("serverInfo", {}).get("name") != "orrery-chatgpt-mcp":
+        if (init.get("serverInfo", {}).get("name") != "orrery-chatgpt-mcp"
+                or init.get("protocolVersion") != "2025-11-25"
+                or not isinstance(init.get("capabilities", {}).get("tools"), dict)):
             raise ProbeError("MCP_IDENTITY_UNVERIFIED")
+        _initialized(conn, pinned_sock, pairing_secret)
         tools = _request(conn, pinned_sock, pairing_secret, "tools/list", 2).get("tools")
         status = _request(conn, pinned_sock, pairing_secret, "tools/call", 3,
                           {"name": "orrery_status", "arguments": {}})
