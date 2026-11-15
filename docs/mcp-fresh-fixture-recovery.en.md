@@ -10,4 +10,4 @@ Every successful observation returns `restart_authorized=false`, `stop_authorize
 
 ## Evidence and limits
 
-The 15 new tests ran successfully in isolated Python in normal and `python -O` modes with launchd/PID/probe dependencies stubbed. These are not full repository/venv or live macOS tests. The Mac Desktop Commander connection failed and all four read retries terminated; therefore real launchd, MCP SDK/Tunnel and Mail/agent E2E remain untested. CI and independent review still require verification. No production service or upstream state is changed.
+The original 15 tests succeeded in isolated Python in normal and `python -O` modes with launchd/PID/probe dependencies stubbed. Four additional double-probe regression tests were pushed but have not yet run because the Mac connection is unavailable and CI is queued. These are not full repository/venv or live macOS tests. The Mac Desktop Commander connection failed and all four read retries terminated; therefore real launchd, MCP SDK/Tunnel and Mail/agent E2E remain untested. CI and independent review still require verification. No production service or upstream state is changed.
