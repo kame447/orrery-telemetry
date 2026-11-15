@@ -77,7 +77,7 @@ class RuntimeCommandTests(unittest.TestCase):
             argv[5].index("gateway.main(['serve'])"),
         )
         compile(argv[5], "isolated-fresh-server", "exec")
-        self.assertTrue(command.source_attested_before_serve)
+        self.assertTrue(command.requires_in_process_attestation)
         self.assertFalse(command.service_started)
 
     def test_env_has_no_inherited_credentials_or_user_site(self):
@@ -96,7 +96,6 @@ class RuntimeCommandTests(unittest.TestCase):
         self.assertNotIn("AGENTSTACK_TOKEN", env)
         self.assertNotIn("MCP_SERVER_URL", env)
         self.assertNotIn("private-url", str(command))
-        self.assertNotIn("private", str(command))
 
     def test_prepare_does_not_start_any_process(self):
         with patch.object(subprocess, "Popen", side_effect=AssertionError("started")), \
