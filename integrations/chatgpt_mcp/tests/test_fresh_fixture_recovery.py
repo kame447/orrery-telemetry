@@ -51,7 +51,28 @@ class RecoveryTests(unittest.TestCase):
     def test_replaced_live_pid_is_not_assumed_original(self):
         result = self.examine(previous_pid=987)
         self.assertFalse(result["same_as_previous_pid"])
+        self.assertTrue(result["previous_pid_absent_observed"])
         self.assertFalse(result["service_recovered"])
+        self.assertEqual(self.alive.call_count, 2)
+
+    def test_running_replacement_refuses_still_alive_previous_pid(self):
+        self.alive.return_value = True
+        with self.assertRaisesRegex(FreshRecoveryError, "PREVIOUS_PID_UNVERIFIED"):
+            self.examine(previous_pid=987)
+        self.assertEqual(self.check.call_count, 1)
+
+    def test_running_replacement_refuses_unknown_previous_pid(self):
+        self.alive.return_value = None
+        with self.assertRaisesRegex(FreshRecoveryError, "PREVIOUS_PID_UNVERIFIED"):
+            self.examine(previous_pid=987)
+        self.assertEqual(self.check.call_count, 1)
+
+    def test_running_replacement_refuses_reappearing_previous_pid(self):
+        self.alive.side_effect = [False, True]
+        with self.assertRaisesRegex(FreshRecoveryError, "STATE_CHANGED"):
+            self.examine(previous_pid=987)
+        self.assertEqual(self.check.call_count, 2)
+        self.assertEqual(self.alive.call_count, 2)
 
     def test_running_pid_replaced_during_attestation_is_rejected(self):
         self.check.side_effect = [
