@@ -1,5 +1,7 @@
 # Optional ORRERY MCP adapter (read only)
 
+Phase-two fresh sends are a separate opt-in fork prototype. See [fresh instruction authority, limits and manual verification](FRESH_MESSAGES.en.md). The original entrypoint and defaults documented here remain read-only.
+
 Phase 1 of upstream Issue #395 exposes exactly orrery_status, orrery_list_agents and orrery_get_agent. There is no spawning, messaging, OAuth or service installation. The regular installer, service startup configuration, UI, hooks and Mail operations are unchanged. Dashboard calls are limited to GET /api/version, fresh GET /api/agents, and legacy GET /api/agents?days=30.
 
 ## Compatibility and exposed scope
