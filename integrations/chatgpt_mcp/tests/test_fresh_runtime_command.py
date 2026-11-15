@@ -70,7 +70,8 @@ class RuntimeCommandTests(unittest.TestCase):
         ))
         self.assertIn("gateway.main(['serve'])", argv[5])
         self.assertLess(
-            argv[5].index("proof = verify(pin_manifest, site)", argv[5].index("try:\n    result = gateway.main"),
+            argv[5].index("proof = verify(pin_manifest, site)"),
+            argv[5].index("try:\n    result = gateway.main"),
         )
         self.assertLess(
             argv[5].rindex("proof = verify(pin_manifest, site)"),
