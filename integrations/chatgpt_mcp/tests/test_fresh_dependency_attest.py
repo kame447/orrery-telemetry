@@ -84,7 +84,8 @@ def test_mutation_or_import_overlay_is_refused(tmp_path, tamper):
     elif tamper == 'metadata_version':
         (site / 'mcp-1.29.1.dist-info' / 'METADATA').write_text('Name: mcp\nVersion: 1.30\n')
     elif tamper == 'extra_dist':
-        d = site / 'MCP-1.29.1.dist-info'
+        # Distinct filename on case-insensitive macOS, same normalized Name.
+        d = site / 'mcp-duplicate-1.29.1.dist-info'
         d.mkdir()
         (d / 'METADATA').write_text('Name: MCP\nVersion: 1.29.1\n')
     if tamper not in ('world_write', 'group_write', 'directory_write'):
