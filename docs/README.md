@@ -36,6 +36,7 @@ Telemetry 自体の操作は、header の `HELP MAP`（NETWORK では `SETTINGS`
 - [fresh MCPの実プロセス照合](mcp-fresh-process-probe.md) — 現在のLaunchAgent PID、接続先、送信権限を照合するforkの検証部品。常駐化やMac本番受入は未完了。
 - [fresh MCP固定releaseの事前検査](mcp-fresh-release-preflight.md) — 専用service ID・権限・private policy・固定digestを起動前に検査するfork部品。実起動や本番受入は対象外。
 - [fresh MCP実プロセス・設定の照合](mcp-fresh-live-service-status.md) — 固定plist・releaseと稼働PID・実効送信権限を照合するfork段階6。常駐化とMac受入は未実施。
+- [fresh MCPのLaunchAgent設定を安全に準備](mcp-fresh-service-staging.md) — 本人が確認した固定設定を新規plistとして一度だけ保存。サービス起動と既存環境の変更は行いません。
 
 ## install・update
 

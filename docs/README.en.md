@@ -36,6 +36,7 @@ Overview: the cockpit is the screen for operating terminals; Telemetry is the da
 - [Live fresh MCP process verification](mcp-fresh-process-probe.en.md) — Fork verification component for the loaded LaunchAgent PID, listener and effective delegated grant; service integration remains pending.
 - [Pinned fresh MCP release preflight](mcp-fresh-release-preflight.en.md) — A fork-only read-only gate for a dedicated service, private policy and pinned release; no live service acceptance is implied.
 - [Fresh MCP live service attestation](mcp-fresh-live-service-status.en.md) — Fork stage 6 checks pinned plist, release and responding PID/authority; installation and macOS acceptance remain pending.
+- [Stage a dedicated fresh MCP LaunchAgent plist](mcp-fresh-service-staging.en.md) — Create one approved inactive service configuration without activating or replacing any running service.
 
 ## Install and update
 

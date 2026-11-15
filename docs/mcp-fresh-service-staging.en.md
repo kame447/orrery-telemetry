@@ -1,0 +1,15 @@
+# Safely stage a dedicated fresh MCP LaunchAgent plist (fork stage seven)
+
+This stage creates a new, operator-approved LaunchAgent plist without loading it. It neither calls launchctl bootstrap/bootout nor starts, stops, restarts, overwrites or migrates any running service. Live service management and fresh production cutover remain separate stages.
+
+`fresh_service_stage.preview(plan, home, *, verify_release, read_release)` executes the stage-five static release/authority preflight, constructs the exact stage-six launchd configuration and returns a non-secret approval digest, dedicated label, port, plist name and release digest. Preview neither writes files nor calls launchctl.
+
+`stage(plan, home, approval_digest, *, verify_release, read_release, is_loaded)` repeats those checks and requires the identical approval. The digest binds the generated plist, pinned source/release digests, Mail instance, sender ID and allowed recipients. Changing any authority requires a new preview. The trusted host-supplied `is_loaded` callback must return exactly False; an error or unknown state is a refusal. The stage never assumes an existing service is safe to replace.
+
+The only destination is the operator's canonical `~/Library/LaunchAgents/<dedicated-label>.plist`. Its existing parent directories must belong to the current user and cannot be symlinks or group/world-writable. The candidate plist is written and fsynced as a temporary file, then published once with an atomic no-clobber hard link. An existing file or racing creator wins. Its mode is 0644, with exactly the approved fresh Python module invocation, nine fixed environment settings, RunAtLoad/KeepAlive true and Umask 0077.
+
+This API is for a trusted local operator, not an MCP-exposed tool or a change to the existing legacy gateway. Production callers must use the trusted `service.verify_release`, `service.read_release` and actual read-only launchctl inspection, not test stubs. Staging does not establish the absence of other port listeners, the identity of imported Python dependencies, live Mail client credentials, live process authority, message delivery, agent receipt or execution. `dependencies_verified` remains false.
+
+A successful result explicitly reports `staged_inactive` with process_started=false and launchd_loaded=false. After an uncertain write/fsync failure, it never automatically removes the possible staged file or restarts a process. Inspect the destination manually, and do not activate it before the following install/start/stop/recovery stage has been verified. Explicit identity and recipient approval, reserved ports, and the fresh cutover conditions remain mandatory.
+
+Tests use synthetic private homes/LaunchAgents and fake read-only service status, covering digest changes, unsafe directories, unknown loaded state, existing files, symlinks and publication races. No production Mail, tunnel or agent is contacted.
