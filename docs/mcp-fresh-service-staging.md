@@ -4,7 +4,7 @@
 
 `orrery_chatgpt_mcp.fresh_service_stage.preview(plan, home, *, verify_release, read_release)` はPR #60の静的preflightを呼び、Planに固定したrelease/policy/送信者・宛先・instanceを検査してから、PR #61のlaunchd設定の完全一致契約に従ってplistを組み立てます。結果は、設定そのものを公開せず、stageの承認用digest、service label、port、plist名、release digestだけを返します。previewはファイルを書かず、launchctlも呼びません。
 
-`stage(plan, home, approval_digest, *, verify_release, read_release, is_loaded)` は同じpreflightと設定生成を再実行し、承認したdigestが同一であることを確認します。このdigestはplistだけでなく、source commit、release digest、Mail instance、sender ID、recipient ID・期待名称にも紐付けています。設定の変更には新しいpreviewが必要です。`is_loaded` は信頼済みhost側の読取り用関数で、正確にFalseと確認できた場合に限り先へ進めます。確認不能、例外、既存のlabel、既存plistを「未起動」と推測して書き換えることはありません。
+`stage(plan, home, approval_digest, *, verify_release, read_release, is_loaded)` は同じpreflightと設定生成を再実行し、承認したdigestが同一であることを確認します。このdigestはplistだけでなく、source commit、release digest、Mail instance、sender ID、recipient ID・期待名称、private policyの内容（context参照先を含む）にも紐付けています。設定の変更には新しいpreviewが必要です。`is_loaded` は信頼済みhost側の読取り用関数で、正確にFalseと確認できた場合に限り先へ進めます。確認不能、例外、既存のlabel、既存plistを「未起動」と推測して書き換えることはありません。
 
 出力先は運用者が指定した正規のhome直下の `Library/LaunchAgents/<専用label>.plist` のみです。homeとLibrary/LaunchAgentsまでの実directoryを確認し、symlink、別owner、group/worldの書込み許可を拒否します。tempfileへ書込・fsyncした後、同directoryで `os.link` により一度だけ新しいファイルを公開するため、競合する既存ファイルを置き換えません。plistは0644、`Umask=0077`、`RunAtLoad=true`、`KeepAlive=true`で、正規のfresh entrypointと固定した9個の環境変数以外を設定しません。
 

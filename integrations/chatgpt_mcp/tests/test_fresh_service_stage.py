@@ -1,6 +1,7 @@
 """No launchctl or real service effects: operator-only offline plist staging."""
 from dataclasses import replace
 import os
+import json
 from pathlib import Path
 import plistlib
 import tempfile
@@ -21,6 +22,15 @@ class StageTests(unittest.TestCase):
         self.library.mkdir(mode=0o700)
         self.agents = self.library / 'LaunchAgents'
         self.agents.mkdir(mode=0o700)
+        (self.home / 'state').mkdir(mode=0o700)
+        policy = self.home / 'policy.json'
+        self.policy_data = {
+            'kind':'orrery-mcp-fresh-message-policy-v1',
+            'context_path':str(self.home/'clients'/'prepared'/'context.json'),
+            'mail_instance_id':'1'*32, 'sender_agent_id':7,
+            'recipients':[{'target_agent_id':8,'expected_target_name':'AgentTwo','kind':'to'}],
+        }
+        policy.write_text(json.dumps(self.policy_data));policy.chmod(0o600)
         self.plan = Plan(
             python=self.home/'venv/bin/python', release_dir=self.home/'release',
             release_digest='a'*64, source_commit='b'*40,
@@ -82,6 +92,14 @@ class StageTests(unittest.TestCase):
                 # Static policy or release verification may refuse before approval comparison.
                 with self.assertRaisesRegex(StageError,'APPROVAL_MISMATCH|STATIC_PLAN_UNVERIFIED'):
                     self.apply(old,new_plan)
+        self.assertFalse(self.target().exists())
+
+    def test_context_pointer_change_invalidates_original_approval(self):
+        approved=self.show()['approval_digest']
+        self.policy_data['context_path']=str(self.home/'other-client'/'context.json')
+        self.plan.policy_path.write_text(json.dumps(self.policy_data))
+        with self.assertRaisesRegex(StageError,'APPROVAL_MISMATCH'):
+            self.apply(approved)
         self.assertFalse(self.target().exists())
 
     def test_existing_file_never_overwritten(self):

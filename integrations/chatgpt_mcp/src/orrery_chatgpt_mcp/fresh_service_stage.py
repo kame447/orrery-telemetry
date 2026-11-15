@@ -10,7 +10,7 @@ import stat
 import tempfile
 from typing import Callable
 
-from .fresh_release_plan import Plan, inspect
+from .fresh_release_plan import Plan, _private_file, inspect
 from .fresh_service_status import _match_plist
 
 
@@ -58,9 +58,12 @@ def _spec(plan: Plan) -> dict:
 
 
 def _candidate(plan: Plan, home: Path, verify_release: Callable, read_release: Callable):
+    first_policy = _private_file(plan.policy_path)
     proof = inspect(plan, verify_release, read_release)
     if proof.get("validated") is not True:
         raise StageError("FRESH_STATIC_PLAN_UNVERIFIED")
+    if _private_file(plan.policy_path) != first_policy:
+        raise StageError("FRESH_STATIC_PLAN_CHANGED")
     path = _destination(home, plan.label)
     spec = _spec(plan)
     _match_plist(plan, spec)
@@ -68,8 +71,11 @@ def _candidate(plan: Plan, home: Path, verify_release: Callable, read_release: C
     # The approval binds the pinned source and release, not just launchd arguments.
     authority = json.dumps({"instance": plan.mail_instance_id, "sender": plan.sender_agent_id,
                             "recipients": plan.recipients}, separators=(",", ":"), sort_keys=True)
+    pinned_policy = json.dumps(first_policy, separators=(",", ":"), sort_keys=True,
+                               ensure_ascii=False).encode("utf-8")
     digest = sha256(payload + plan.release_digest.encode("ascii")
-                    + plan.source_commit.encode("ascii") + authority.encode("utf-8")).hexdigest()
+                    + plan.source_commit.encode("ascii") + authority.encode("utf-8")
+                    + sha256(pinned_policy).digest()).hexdigest()
     return path, payload, digest
 
 
