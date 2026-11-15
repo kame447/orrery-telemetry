@@ -65,7 +65,7 @@ def job_pid(label: str, plist_path: str, *, runner: Callable = subprocess.run) -
         if pid <= 1:
             raise ValueError
         return pid
-    except (OSError, ValueError, TypeError, AttributeError):
+    except (OSError, ValueError, TypeError, AttributeError, subprocess.TimeoutExpired):
         raise ProbeError("SERVICE_PROCESS_UNVERIFIED") from None
 
 
@@ -200,7 +200,8 @@ def probe(*, label: str, plist_path: str, port: int, pairing_secret: str,
         if status.get("isError") is not False:
             raise ProbeError("MCP_STATUS_UNVERIFIED")
         return {"pid": pid, **validate_effective_status(status["structuredContent"], tools, expected)}
-    except (OSError, ValueError, TypeError, KeyError, AttributeError, json.JSONDecodeError, http.client.HTTPException, TimeoutError):
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, json.JSONDecodeError,
+            http.client.HTTPException, subprocess.TimeoutExpired, TimeoutError):
         raise ProbeError("MCP_STATUS_UNVERIFIED") from None
     finally:
         conn.close()
