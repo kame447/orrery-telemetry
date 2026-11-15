@@ -37,6 +37,7 @@ Overview: the cockpit is the screen for operating terminals; Telemetry is the da
 - [Pinned fresh MCP release preflight](mcp-fresh-release-preflight.en.md) — A fork-only read-only gate for a dedicated service, private policy and pinned release; no live service acceptance is implied.
 - [Fresh MCP live service attestation](mcp-fresh-live-service-status.en.md) — Fork stage 6 checks pinned plist, release and responding PID/authority; installation and macOS acceptance remain pending.
 - [Stage a dedicated fresh MCP LaunchAgent plist](mcp-fresh-service-staging.en.md) — Create one approved inactive service configuration without activating or replacing any running service.
+- [Offline fresh MCP import attestation](mcp-fresh-import-attestation.en.md) — Fork stage 8 checks pinned first-party imports with real Python; third-party dependencies remain unpinned and no service is started.
 
 ## Install and update
 

@@ -37,6 +37,7 @@ Telemetry 自体の操作は、header の `HELP MAP`（NETWORK では `SETTINGS`
 - [fresh MCP固定releaseの事前検査](mcp-fresh-release-preflight.md) — 専用service ID・権限・private policy・固定digestを起動前に検査するfork部品。実起動や本番受入は対象外。
 - [fresh MCP実プロセス・設定の照合](mcp-fresh-live-service-status.md) — 固定plist・releaseと稼働PID・実効送信権限を照合するfork段階6。常駐化とMac受入は未実施。
 - [fresh MCPのLaunchAgent設定を安全に準備](mcp-fresh-service-staging.md) — 本人が確認した固定設定を新規plistとして一度だけ保存。サービス起動と既存環境の変更は行いません。
+- [fresh MCPの固定コード・依存import検査](mcp-fresh-import-attestation.md) — 常駐起動前に読取り専用Mail配布物とgatewayを実Pythonで照合するfork段階8。第三者依存は未固定、サービスは起動しません。
 
 ## install・update
 
