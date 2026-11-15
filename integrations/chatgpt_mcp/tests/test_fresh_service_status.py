@@ -113,6 +113,12 @@ class ServiceStatusTests(unittest.TestCase):
                 self.spec['EnvironmentVariables'].pop(update[0],None)
                 if update[0]=='ORRERY_MCP_ENABLE_MESSAGE':self.spec['EnvironmentVariables'][update[0]]='1'
 
+    def test_unknown_launchd_keys_are_refused(self):
+        self.spec['Sockets']={'control':{'SockServiceName':'8792'}}
+        self._write()
+        with self.assertRaisesRegex(StatusError,'LAUNCH_CONFIGURATION_MISMATCH'):self.run_check()
+        self.pair.assert_not_called()
+
     def test_wrong_mode_port_and_spawn_refused(self):
         for key,value in [('ORRERY_MCP_MODE','legacy'),('ORRERY_MCP_PORT','8790'),('ORRERY_MCP_ENABLE_SPAWN','1')]:
             with self.subTest(key=key):
@@ -169,6 +175,11 @@ class ServiceStatusTests(unittest.TestCase):
 
     def test_secret_not_exposed_on_wrong_length(self):
         self.pair.return_value='bad'
+        with self.assertRaisesRegex(StatusError,'PAIRING_UNVERIFIED'):self.run_check()
+        self.live.assert_not_called()
+
+    def test_invalid_pairing_charset_is_refused(self):
+        self.pair.return_value='!'*43
         with self.assertRaisesRegex(StatusError,'PAIRING_UNVERIFIED'):self.run_check()
         self.live.assert_not_called()
 
