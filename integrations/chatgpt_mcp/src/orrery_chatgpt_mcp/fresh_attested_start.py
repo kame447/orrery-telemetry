@@ -21,6 +21,12 @@ class FreshStartError(ValueError):
     """Fixed refusal code; never carries launchctl output or credentials."""
 
 
+def _fixture_label(label: str) -> bool:
+    """Reserve fixture operations for an exact fixture label or its dash suffix."""
+    root = "org.agentstack.chatgpt-mcp-fresh.fixture"
+    return type(label) is str and (label == root or label.startswith(root + "-"))
+
+
 def _approval(digest: str) -> str:
     return sha256(b"orrery-fresh-fixture-launchd-start-v1\0" + digest.encode("ascii")).hexdigest()
 
@@ -69,8 +75,7 @@ def start(plan, dependency, home: Path, approval_digest: str, *,
     The caller is responsible for an isolated identity and Mail instance.
     """
     try:
-        if (fixture_mode is not True
-                or not plan.label.startswith("org.agentstack.chatgpt-mcp-fresh.fixture")):
+        if fixture_mode is not True or not _fixture_label(plan.label):
             raise FreshStartError("FRESH_START_FIXTURE_ONLY")
         path, digest = _snapshot(plan, dependency, home, verify_release, read_release)
         if (type(approval_digest) is not str

@@ -136,4 +136,4 @@ ORRERY_MCP_TEST_TUNNEL_CLIENT="$(command -v tunnel-client)" \
 
 第12段階は[実稼働PID・MCP権限の読み取り専用照合](../../docs/mcp-fresh-attested-status.md)です。新plistとの一致を確認できますが、起動、送信、受信・処理開始は実証しません。
 
-段階13では[隔離fixture専用の明示承認付き起動](../../docs/mcp-fresh-attested-start.md)を追加しました。Mac実機での起動受入は未実施です。
+段階13では[隔離fixture専用の明示承認付き起動](../../docs/mcp-fresh-attested-start.md)を追加しました。Mac実機での起動受入は未実施です。段階14の[停止専用の承認付きAPI](../../docs/mcp-fresh-attested-stop.md)は起動中の専用fixtureだけを対象とし、実Macでの停止・復旧はまだ実証していません。

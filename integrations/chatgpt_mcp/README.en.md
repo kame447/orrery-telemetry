@@ -136,4 +136,4 @@ Phase 11 is documented in [staging the attested Python command in an inactive La
 
 Phase 12 adds [read-only live PID and MCP authority checks](../../docs/mcp-fresh-attested-status.en.md) for the attested plist. It does not activate, send, or observe agent processing.
 
-Stage 13 adds an [operator-only isolated fixture start](../../docs/mcp-fresh-attested-start.en.md), still pending live Mac verification.
+Stage 13 adds an [operator-only isolated fixture start](../../docs/mcp-fresh-attested-start.en.md), still pending live Mac verification. Stage 14 adds an [operator-only fixture stop](../../docs/mcp-fresh-attested-stop.en.md) bound to a live PID and explicit approval; real macOS stop and recovery have not been accepted.

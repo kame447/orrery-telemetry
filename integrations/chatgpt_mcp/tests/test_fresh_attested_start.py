@@ -77,6 +77,12 @@ class StartTests(unittest.TestCase):
             self.launch()
         self.runner.assert_not_called()
 
+    def test_near_match_fixture_prefix_is_not_authorized(self):
+        self.plan.label = "org.agentstack.chatgpt-mcp-fresh.fixtureevil"
+        with self.assertRaisesRegex(FreshStartError, "FIXTURE_ONLY"):
+            self.launch()
+        self.runner.assert_not_called()
+
     def test_wrong_digest_blocks_mutation(self):
         with self.assertRaisesRegex(FreshStartError, "APPROVAL_MISMATCH"):
             self.launch("f" * 64)
