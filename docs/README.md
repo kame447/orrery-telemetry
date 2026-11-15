@@ -42,6 +42,7 @@ Telemetry 自体の操作は、header の `HELP MAP`（NETWORK では `SETTINGS`
 - [fresh MCP検証済みplistの実稼働照合](mcp-fresh-attested-status.md) — plistの全バイトと稼働PID・有効なMCP権限を読み取り専用で照合する段階12。プロセス起動や配送の実証は対象外。
 - [隔離fresh MCPの明示承認付き起動](mcp-fresh-attested-start.md) — 専用fixtureに限りbootstrap/kickstartし、実PID・権限を照合する段階13。Mac実接続と停止・復旧は未実証。
 - [隔離fresh MCPの明示承認付き停止](mcp-fresh-attested-stop.md) — 実PIDとplistの確認・停止専用承認digestを伴う段階14。Mac実停止と復旧は未実証。
+- [隔離fresh MCPの不明結果の読み取り照合](mcp-fresh-fixture-recovery.md) — 段階15。実PIDとジョブ状態を安全に観測しますが、自動再起動や実Mac復旧を保証しません。
 
 ## install・update
 
