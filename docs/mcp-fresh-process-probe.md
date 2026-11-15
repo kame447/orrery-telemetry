@@ -1,0 +1,15 @@
+# fresh MCPの実プロセス照合（fork試作）
+
+MCPへの追加指示を有効にする場合、保存された設定ファイルだけでは「現在動いているプロセスが意図した許可範囲で応答している」ことは証明できません。この小さな検証モジュールは、次の常駐化PRが利用するための照合部品です。現段階ではサービスのinstall・更新・再起動・停止・常駐設定の書き換えを行いません。
+
+`integrations/chatgpt_mcp/src/orrery_chatgpt_mcp/fresh_process_probe.py` の `probe()` は、運用者が別経路で確定したLaunchAgent名・plistパス・待受ポート・privateなpairing secret・固定されたMail instanceと送信者/宛先IDを入力として受け取ります。これらの値を外部のMCPリクエストやChatGPTの発話から選ばせてはいけません。
+
+最初に `launchctl print` の実際のplistパスとPIDを照合し、続いて127.0.0.1への新しいTCP接続のサーバー側が、そのPIDであることを `lsof` で確認します。PIDに変化がないことも再確認します。証明に失敗した場合はpairing secretをHTTP送信しません。確認後、同じ接続上でMCPのinitialize、tools/list、orrery_statusを呼びます。
+
+応答のツール名は読み取り3件とfresh送信3件の計6件だけであることを確認します。稼働中の応答がfreshモード、想定のMail instance、送信者の安定ID、宛先ID/期待名称/kindと一致し、message_enabled_on_server=true、spawn_enabled_on_server=false、read_only=false、approval_mode=operator_delegated、unknown_recovery=authenticated_receipt_readでなければ拒否します。余計なツールや追加宛先が混じっていても拒否します。結果には秘密URL・資格・送信本文・任意のレスポンス内容は含めません。
+
+この照合は「接続したプロセスと応答内容が期待どおりか」を確認するものであって、実行中のコードのdigestやreleaseの整合性を検査するものではありません。常駐化の後続段階では、起動前にreleaseを固定検証し、launchdのProgramArgumentsと実際のPIDを突き合わせたうえでこの照合を呼ぶ必要があります。保存済み設定をそのまま真実と扱ったり、PIDや接続の証明を省いたりしてはいけません。
+
+このモジュールを本番の既存MCPサービスへ適用していません。既存のlegacy gateway、Tunnel、Mail、稼働中agentの設定・通信は変更していません。Macで実際のlaunchdとlsofを使った統合試験は未実施です。今の試験は合成されたlaunchd/lsof結果と127.0.0.1の一時HTTPサーバーによる16ケースで、正しい許可状態、PIDの入れ替わり、別プロセスによるポート占有、許可範囲・ツール数の不一致を確認します。
+
+試験は `python -m unittest discover -s integrations/chatgpt_mcp/tests -p test_fresh_process_probe.py` で実行できます。現在のfork上のPRはこの照合部品までで、実際のサービスstatusや起動・停止CLIの完成を意味しません。
