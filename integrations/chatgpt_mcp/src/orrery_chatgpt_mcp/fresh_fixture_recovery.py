@@ -51,11 +51,16 @@ def inspect(
             if (type(live) is not dict or live.get("verified") is not True
                     or type(live.get("pid")) is not int or live["pid"] <= 1):
                 raise FreshRecoveryError("FRESH_RECOVERY_PROCESS_UNVERIFIED")
+            # An older PID may still belong to a second sender, even when
+            # the current fixture itself is correctly attested.
+            replaced_pid = previous_pid is not None and previous_pid != live["pid"]
+            if replaced_pid and pid_alive(previous_pid) is not False:
+                raise FreshRecoveryError("FRESH_RECOVERY_PREVIOUS_PID_UNVERIFIED")
             result = {
                 "state": "running_attested",
                 "verified_pid": live["pid"],
                 "same_as_previous_pid": previous_pid == live["pid"] if previous_pid is not None else None,
-                "previous_pid_absent_observed": False,
+                "previous_pid_absent_observed": replaced_pid,
             }
         else:
             if previous_pid is not None:
@@ -92,6 +97,8 @@ def inspect(
             if (final_path != path or final_digest != digest
                     or is_loaded(plan.label) is not True
                     or loaded_plist_path(plan.label) != str(path)):
+                raise FreshRecoveryError("FRESH_RECOVERY_STATE_CHANGED")
+            if replaced_pid and pid_alive(previous_pid) is not False:
                 raise FreshRecoveryError("FRESH_RECOVERY_STATE_CHANGED")
         if not loaded and previous_pid is not None and pid_alive(previous_pid) is not False:
             raise FreshRecoveryError("FRESH_RECOVERY_STATE_CHANGED")
