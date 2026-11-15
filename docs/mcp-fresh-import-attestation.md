@@ -19,3 +19,13 @@
 manifest指定時は、ホスト側でサイト全体を検証し、そのSHA-256を隔離Pythonへ渡します。隔離Pythonは `-I -S -B` で開始し、固定gatewayとMailを検証してから、第三者パッケージをimportする前後に同じmanifestとの一致を検査します。FastMCP/MCP/SQLAlchemy/SQLModel/Pydanticのimport元も固定site-packages内であることを確認します。ホストは子プロセス完了後にも再検証し、途中の改変では成功を返しません。通常の開発venvの書込み可能なsite-packagesは承認対象外です。
 
 この検証が成功しても、返す `service_started=false`、`live_process_verified=false` は維持します。運用者が承認していないwheelの配布元真正性を証明せず、別の常駐プロセスへそのまま保証を引き継ぐこともできません。独立した固定releaseの常駐起動・停止、実プロセスとの照合は別段階です。
+
+## 第10段階：同じ隔離Python内で検証してからserveするコマンド構成
+
+追加の `fresh_runtime_command.build_command(plan, dependency, verify_release=..., read_release=...)` は、運用者が管理する固定release・Mail package・承認済み第三者依存を対象に、既存のimport検証を先に実行します。第三者manifestが未承認なら拒否し、受入済みでなければ起動コマンドを返しません。このAPIは運用者用で、MCPツールには公開しません。
+
+返される `RuntimeCommand` は専用の `-I -S -B -c` 実行引数と最小環境変数を保持する非公開の準備物です。子プロセスは既存のoffline probeと同じコードでgateway/Mailの全Pythonソース・承認済みsite-packagesとimport元を検査し、import後の依存再照合に成功して初めて、同じPythonプロセスの `gateway.main(['serve'])` に入ります。検査プロセスが成功した後、別の未検証Pythonでserveする方式にはしません。
+
+コマンドはPATH/HOMEを固定し、`PYTHONPATH`、`AGENTSTACK_*`、稼働中providerのセッション情報を継承しません。利用するMail senderや宛先は既存private policyで固定したままです。生成された引数には内部パスと配布物のdigestが含まれるため、公開ログやIssueに貼らないでください。
+
+この段階ではコマンドを生成するだけで、実際のlaunchctl/bootstrap、Popen、通信、サービス起動は行いません。`requires_in_process_attestation=true` は将来そのプロセス内で照合する設計を意味し、稼働中プロセスの検証済み証拠ではありません。`service_started=false` を維持します。既存の #62 のplistは旧起動経路のため、そのままbootstrapしてはいけません。後続PRで、承認digest、実起動コマンド、launchd PID、実配布コード・依存の証拠を結びつけてから独立したMac受入を行います。
