@@ -141,6 +141,32 @@ class ProcessProbeTests(unittest.TestCase):
     def test_wrong_plist_does_not_receive_secret(self):
         self.call(plist='/another/process.plist')
 
+    def test_launchctl_timeout_refuses_before_disclosing_secret(self):
+        with server() as (port, observed):
+            def timeout(argv, **kwargs):
+                if argv[0] == 'launchctl':
+                    raise subprocess.TimeoutExpired(argv, 10)
+                raise AssertionError('lsof must not run after a launchctl timeout')
+            with self.assertRaises(module.ProbeError) as result:
+                module.probe(label=LABEL, plist_path=PLIST, port=port,
+                             pairing_secret=SECRET, expected=AUTH, runner=timeout)
+            self.assertEqual(str(result.exception), 'SERVICE_PROCESS_UNVERIFIED')
+            self.assertEqual(observed, [])
+
+    def test_lsof_timeout_refuses_before_disclosing_secret(self):
+        with server() as (port, observed):
+            healthy = runner()
+            healthy.state['port'] = port
+            def timeout(argv, **kwargs):
+                if argv[0] == '/usr/sbin/lsof':
+                    raise subprocess.TimeoutExpired(argv, 10)
+                return healthy(argv, **kwargs)
+            with self.assertRaises(module.ProbeError) as result:
+                module.probe(label=LABEL, plist_path=PLIST, port=port,
+                             pairing_secret=SECRET, expected=AUTH, runner=timeout)
+            self.assertEqual(str(result.exception), 'SERVICE_LISTENER_UNVERIFIED')
+            self.assertEqual(observed, [])
+
     def test_launchd_pid_changed_does_not_receive_secret(self):
         self.call(changed_after=4322)
 
