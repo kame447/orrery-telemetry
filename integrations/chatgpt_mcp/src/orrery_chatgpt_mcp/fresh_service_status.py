@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import plistlib
+import re
 import stat
 from typing import Callable
 
@@ -58,7 +59,8 @@ def _match_plist(plan: object, spec: dict) -> None:
         "ORRERY_MCP_FRESH_MESSAGE_POLICY": str(plan.policy_path),
         "ORRERY_MCP_DASHBOARD_URL": "http://127.0.0.1:8770",
     }
-    valid = (spec.get("Label") == plan.label
+    valid = (set(spec) == {"Label", "ProgramArguments", "EnvironmentVariables", "RunAtLoad", "KeepAlive", "Umask"}
+             and spec.get("Label") == plan.label
              and spec.get("ProgramArguments") == [str(plan.python), "-m", "orrery_chatgpt_mcp.fresh_server", "serve"]
              and type(env) is dict and set(env) == EXPECTED_ENV and env == required
              and spec.get("RunAtLoad") is True and spec.get("KeepAlive") is True
@@ -87,7 +89,7 @@ def check_running(
             raise StatusError("FRESH_RELEASE_UNVERIFIED")
         _match_plist(plan, _read_plist(plist_path))
         secret = read_secret(plan.state_dir)
-        if type(secret) is not str or len(secret) != 43:
+        if type(secret) is not str or re.fullmatch(r"[A-Za-z0-9_-]{43}", secret) is None:
             raise StatusError("FRESH_PAIRING_UNVERIFIED")
         authority = Authority(plan.mail_instance_id, plan.sender_agent_id, plan.recipients)
         live = probe(label=plan.label, plist_path=str(plist_path), port=plan.port,
