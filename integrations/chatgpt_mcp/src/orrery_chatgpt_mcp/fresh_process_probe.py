@@ -82,10 +82,13 @@ def _owns_connection(sock: socket.socket, port: int, pid: int, runner: Callable)
         return False
 
 
-def _request(conn: http.client.HTTPConnection, secret: str, method: str, number: int, params=None) -> dict:
+def _request(conn: http.client.HTTPConnection, pinned_sock: socket.socket,
+             secret: str, method: str, number: int, params=None) -> dict:
     body = {"jsonrpc": "2.0", "id": number, "method": method}
     if params is not None:
         body["params"] = params
+    if conn.sock is not pinned_sock or pinned_sock.fileno() < 0:
+        raise ProbeError("VERIFIED_CONNECTION_CLOSED")
     conn.request("POST", "/mcp/" + secret, body=json.dumps(body, separators=(",", ":")),
                  headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"})
     response = conn.getresponse()
@@ -163,19 +166,20 @@ def probe(*, label: str, plist_path: str, port: int, pairing_secret: str,
             raise ProbeError("SERVICE_LISTENER_UNVERIFIED")
         if job_pid(label, plist_path, runner=runner) != pid:
             raise ProbeError("SERVICE_PROCESS_CHANGED")
-        init = _request(conn, pairing_secret, "initialize", 1, {
+        pinned_sock = conn.sock
+        init = _request(conn, pinned_sock, pairing_secret, "initialize", 1, {
             "protocolVersion": "2025-11-25", "capabilities": {},
             "clientInfo": {"name": "fresh-process-probe", "version": "1"},
         })
         if init.get("serverInfo", {}).get("name") != "orrery-chatgpt-mcp":
             raise ProbeError("MCP_IDENTITY_UNVERIFIED")
-        tools = _request(conn, pairing_secret, "tools/list", 2).get("tools")
-        status = _request(conn, pairing_secret, "tools/call", 3,
+        tools = _request(conn, pinned_sock, pairing_secret, "tools/list", 2).get("tools")
+        status = _request(conn, pinned_sock, pairing_secret, "tools/call", 3,
                           {"name": "orrery_status", "arguments": {}})
         if status.get("isError") is not False:
             raise ProbeError("MCP_STATUS_UNVERIFIED")
         return {"pid": pid, **validate_effective_status(status["structuredContent"], tools, expected)}
-    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError, http.client.HTTPException, TimeoutError):
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, json.JSONDecodeError, http.client.HTTPException, TimeoutError):
         raise ProbeError("MCP_STATUS_UNVERIFIED") from None
     finally:
         conn.close()
