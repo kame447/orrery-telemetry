@@ -73,8 +73,26 @@ def inspect(
         )
         if after_path != path or after_digest != digest or is_loaded(plan.label) is not loaded:
             raise FreshRecoveryError("FRESH_RECOVERY_STATE_CHANGED")
-        if loaded and loaded_plist_path(plan.label) != str(path):
-            raise FreshRecoveryError("FRESH_RECOVERY_STATE_CHANGED")
+        if loaded:
+            if loaded_plist_path(plan.label) != str(path):
+                raise FreshRecoveryError("FRESH_RECOVERY_STATE_CHANGED")
+            # The job can be replaced under the same label between the first
+            # live probe and the final plist checks. Attest the same PID again.
+            confirmed = check_running(
+                plan, dependency, home, verify_release=verify_release,
+                read_release=read_release, read_secret=read_secret, probe=probe,
+            )
+            if (type(confirmed) is not dict or confirmed.get("verified") is not True
+                    or type(confirmed.get("pid")) is not int
+                    or confirmed["pid"] != result["verified_pid"]):
+                raise FreshRecoveryError("FRESH_RECOVERY_STATE_CHANGED")
+            final_path, final_digest = _snapshot(
+                plan, dependency, home, verify_release, read_release,
+            )
+            if (final_path != path or final_digest != digest
+                    or is_loaded(plan.label) is not True
+                    or loaded_plist_path(plan.label) != str(path)):
+                raise FreshRecoveryError("FRESH_RECOVERY_STATE_CHANGED")
         if not loaded and previous_pid is not None and pid_alive(previous_pid) is not False:
             raise FreshRecoveryError("FRESH_RECOVERY_STATE_CHANGED")
         return {
