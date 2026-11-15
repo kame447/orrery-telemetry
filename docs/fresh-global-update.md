@@ -439,3 +439,5 @@ fi
 期待値は、`Hook failed` がなく、**今回のrunの `session.json` が1件**表示されることです。表示無し・複数件・別runの記録なら未確認として停止し、前回の成功記録を代用しません。この2点で、選択Pythonを使う承認済みhook経路が実行されsessionを記録したことを確認します。Pythonのimport確認や起動前のread-only `hooks/list` だけは、この実動作確認の代わりになりません。MCPの `runtime_status` による本人確認と通常tool承認も別に確認します。失敗時は `FRESH_CODEX_PYTHON_UNAVAILABLE`（Python pin欠落・不正）、`FRESH_CODEX_ENV_UNAVAILABLE`（他pin・nonce・runtime不整合等）、`FRESH_CODEX_GUARD_UNAVAILABLE`（guard実行・import失敗）、`CODEX_HOOK_CONFIGURE_REQUIRED`（payload・plan・trust不一致等）を停止理由として扱い、PATHのpython3や旧経路へfallbackしません。終了時の `FRESH_PRIVATE_FILE_UNAVAILABLE` も、記録不足のまま受入を進めず原因を確認します。
 
 復帰・App前面化は今回の対象外です。実OS manager/Finder GUI、実provider／App／login／trust／live install、実際の作業pathの支持範囲、最終CIと本人在席の切替を確認するまで、全体完了とはしません。WSLなど未受入の環境を、この私有Macでの確認から受入済みとは扱いません。
+
+送信を再実行せず受付記録だけを確認するfork拡張は[読み取り専用receipt照合](fresh-message-receipts.md)を参照してください。receiptのnot_observedは再送許可ではありません。
