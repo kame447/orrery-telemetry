@@ -17,7 +17,7 @@ INSTANCE = re.compile(r'[0-9a-f]{32}')
 KEY = re.compile(r'[A-Za-z0-9_.:-]{1,128}')
 PREVIEW_SECONDS = 300
 MAX_INTENTS = 10000
-NOTE = ('Mail acceptance is not proof of agent execution. Unknown results are never resent. '
+NOTE = ('Mail acceptance is not proof of agent execution. Unknown results are reconciled read-only and never resent. '
         'Chat confirmation is not server-verified human approval; the operator delegates send authority.')
 
 
@@ -62,6 +62,12 @@ class BoundMail:
     def call(self, tool: str, args: dict, request_id: str | None = None) -> dict:
         return asyncio.run(self.client.call(tool, args, request_id=request_id))
 
+    def receipt(self, request_id: str, expected: dict) -> dict:
+        saved = self.client._saved_request(request_id)
+        if saved['tool'] != 'send_message' or canonical(saved['arguments']) != canonical(expected):
+            raise ValueError('saved request does not match this preview')
+        return asyncio.run(self.client.receipt(request_id))
+
 
 PREVIEW_FIELDS = {
     'idempotency_key': {'type': 'string', 'pattern': '^' + KEY.pattern + '$'},
@@ -83,7 +89,7 @@ TOOL_DEFINITIONS = [
                             ['idempotency_key', 'preview_id', 'content_digest']),
      'annotations': {'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': True, 'openWorldHint': False}},
     {'name': 'orrery_message_status', 'title': 'Read local fresh Mail send evidence',
-     'description': 'Read durable local evidence only; does not replay or resolve unknown sends. ' + NOTE,
+     'description': 'Read local evidence and reconcile unknown sends against authenticated Mail receipts; never replay. ' + NOTE,
      'inputSchema': _schema({'idempotency_key': PREVIEW_FIELDS['idempotency_key']}, ['idempotency_key']),
      'annotations': {'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False}},
 ]
@@ -139,7 +145,7 @@ class FreshMessages:
     def public_policy(self) -> dict:
         return {'mail_instance_id': self.mail.instance, 'sender_agent_id': self.mail.sender_id,
                 'recipients': json.loads(canonical(self.policy['recipients'])),
-                'approval_mode': 'operator_delegated', 'unknown_recovery': 'manual_no_replay'}
+                'approval_mode': 'operator_delegated', 'unknown_recovery': 'authenticated_receipt_read'}
 
     def _envelope(self, args: dict) -> dict:
         if (args['mail_instance_id'] != self.mail.instance or not positive(args['target_agent_id'])
@@ -165,7 +171,7 @@ class FreshMessages:
             raise ToolError('invalid_arguments', 'invalid idempotency key')
         key_hash = digest(key)
         if name == 'orrery_message_status':
-            return self._public(self._record(key_hash))
+            return self.reconcile(key_hash)
         self.check()
         if name == 'orrery_message_preview':
             return self.preview(key_hash, self._envelope(args))
@@ -245,7 +251,50 @@ class FreshMessages:
         record['receipt'] = projected
         record['state'] = 'accepted' if projected is not None else 'unknown'
         with self.state.transaction() as db:
-            self.state.put(db, key_hash, record)
+            current = self._bound(self.state.get(db, key_hash))
+            if current['state'] in ('accepted', 'refused'):
+                record = current  # Never overwrite stronger concurrent receipt evidence with unknown.
+            else:
+                self.state.put(db, key_hash, record)
+        return self._public(record)
+
+    def reconcile(self, key_hash: str) -> dict:
+        record = self._record(key_hash)
+        if record['state'] not in ('sending', 'unknown'):
+            return self._public(record)
+        observation = 'unavailable'
+        resolved = None
+        try:
+            self.check()
+            result = self.mail.receipt(record['request_id'], record['envelope'])
+            if (not isinstance(result, dict) or result.get('contract') != 'orrery-fresh-message-receipt-v1'
+                    or result.get('mail_instance_id') != self.mail.instance
+                    or type(result.get('sender_id')) is not int or result['sender_id'] != self.mail.sender_id
+                    or result.get('request_id') != record['request_id']):
+                raise ValueError('unverified receipt lookup')
+            observation = result.get('status')
+            if observation == 'accepted':
+                receipt = self._receipt(result.get('receipt'), record)
+                if receipt is None:
+                    raise ValueError('unverified stored message')
+                resolved = dict(state='accepted', receipt=receipt)
+            elif observation == 'refused':
+                code = result.get('refusal_code')
+                if not isinstance(code, str) or not re.fullmatch(r'[A-Z][A-Z0-9_]{0,127}', code):
+                    raise ValueError('unverified refusal')
+                resolved = dict(state='refused', receipt=None, refusal_code=code)
+            elif observation != 'not_observed':
+                raise ValueError('unrecognized receipt status')
+        except Exception:
+            observation = 'unavailable'
+        with self.state.transaction() as db:
+            current = self._bound(self.state.get(db, key_hash))
+            if current['state'] not in ('accepted', 'refused'):
+                if resolved is not None:
+                    current.update(resolved)
+                current['receipt_observation'] = observation
+                self.state.put(db, key_hash, current)
+            record = current
         return self._public(record)
 
     def _receipt(self, value: object, record: dict) -> dict | None:
@@ -274,6 +323,10 @@ class FreshMessages:
                   'recipients': json.loads(canonical(record['envelope']['recipients'])),
                   'receipt': record['receipt'], 'execution_status': 'unobserved',
                   'automatic_resend': False, 'note': NOTE}
+        if 'receipt_observation' in record:
+            result['receipt_observation'] = record['receipt_observation']
+        if record.get('refusal_code'):
+            result['refusal_code'] = record['refusal_code']
         if state == 'previewed' and not record['created_at'] <= time.time() < record['expires_at']:
             result['status'] = 'expired'
         if preview:
