@@ -254,6 +254,21 @@ def test_mcp_setup_uninstall_removes_only_orrery_entry() -> None:
         }
 
 
+def test_top_level_hydrogen_xhigh_dry_run(tmp_path) -> None:
+    home = tmp_path / 'home'
+    home.mkdir()
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith('AGENTSTACK_') and key not in ('TMUX', 'AGENT_NAME', 'PARENT_AGENT')}
+    env.update(HOME=str(home), AGENTSTACK_HOME=str(home / '.agentstack'),
+               AGENTSTACK_RUNTIME_MODE='legacy', AGENTSTACK_PROJECT_KEY='/fixture',
+               AGENTSTACK_GEMINI_MODEL='gemini-4-hydrogen-xhigh', AGENTSTACK_GEMINI_EFFORT='xhigh')
+    result = subprocess.run(['/bin/bash', str(_LAUNCHER), '--dry-run', str(home)],
+                            env=env, text=True, capture_output=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    assert '--model gemini-4-hydrogen-xhigh --effort xhigh' in result.stdout
+    assert not (home / '.agentstack').exists()
+
+
 if __name__ == "__main__":
     import pytest
 

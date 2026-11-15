@@ -68,3 +68,11 @@ def test_without_explicit_key_env_sh_default_is_used(tmp_path):
 def test_explicit_key_does_not_rewrite_env_sh(tmp_path):
     launch(tmp_path, AGENTSTACK_PROJECT_KEY="/caller/project")
     assert (tmp_path / "home" / "env.sh").read_text() == ENV_SH
+
+
+def test_hydrogen_xhigh_child_reaches_preregistration(tmp_path):
+    args, seen = launch(tmp_path, AGENTSTACK_PROJECT_KEY='/caller/project',
+                        AGENTSTACK_GEMINI_MODEL='gemini-4-hydrogen-xhigh',
+                        AGENTSTACK_GEMINI_EFFORT='xhigh')
+    assert args == ['--project-key', '/caller/project']
+    assert seen == '/caller/project'

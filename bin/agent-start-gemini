@@ -10,7 +10,7 @@
 # Env:
 #   AGENTSTACK_GEMINI_BIN      Antigravity CLI binary (default: agy)
 #   AGENTSTACK_GEMINI_MODEL    model slug (default: gemini-3.8-flash-high)
-#   AGENTSTACK_GEMINI_EFFORT   low|medium|high (default: high)
+#   AGENTSTACK_GEMINI_EFFORT   low|medium|high|xhigh (default: high)
 #
 # The launcher deliberately does not override Antigravity permission/sandbox
 # settings. Those remain user-owned in ~/.gemini/antigravity-cli/settings.json.
@@ -41,8 +41,8 @@ if [[ "${1:-}" == "--dry-run" ]]; then
 fi
 
 case "$GEMINI_EFFORT" in
-  low|medium|high) ;;
-  *) ags_die "invalid AGENTSTACK_GEMINI_EFFORT '$GEMINI_EFFORT' (expected low, medium, or high)" ;;
+  low|medium|high|xhigh) ;;
+  *) ags_die "invalid AGENTSTACK_GEMINI_EFFORT '$GEMINI_EFFORT' (expected low, medium, high, or xhigh)" ;;
 esac
 
 build_gemini_cmd() {

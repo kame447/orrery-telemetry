@@ -355,8 +355,8 @@ def test_gemini_spawn_rejects_standalone_and_invalid_engine_options(tmp_path):
     }
     bad_model = server.do_spawn({**common, "model": "foreign-not-allowed", "effort": "high"})
     assert bad_model["error"] == "model not allowed for provider gemini: foreign-not-allowed"
-    bad_effort = server.do_spawn({**common, "effort": "xhigh"})
-    assert bad_effort["error"] == "effort not allowed for provider gemini: xhigh"
+    bad_effort = server.do_spawn({**common, "effort": "unsupported"})
+    assert bad_effort["error"] == "effort not allowed for provider gemini: unsupported"
     assert server.do_spawn({**common, "effort": "high", "parent": ""}) == {
         "ok": False, "error": "parent name invalid",
     }
@@ -1309,7 +1309,8 @@ if sys.argv[1] == "reserve" and os.environ.get("FAKE_BLOCK_RESERVE"):
 
 
 def _adapter_run(tmp_path: pathlib.Path, resources: str, block_reserve: bool = False,
-                 links: dict[str, str] | None = None, root_escape: bool = True):
+                 links: dict[str, str] | None = None, root_escape: bool = True,
+                 effort: str = "medium", model: str = "gemini-3.8-flash-high"):
     repo = _make_repo(tmp_path, links, root_escape)
     home = tmp_path / "home"
     _executable(home / "bin" / "agentstack-gemini-child-mail", _FAKE_MAIL_HELPER)
@@ -1342,7 +1343,7 @@ def _adapter_run(tmp_path: pathlib.Path, resources: str, block_reserve: bool = F
         "AGENTSTACK_PYTHON": sys.executable,
         "AGENTSTACK_GEMINI_RESOURCES": resources,
         "AGENTSTACK_GEMINI_TASK_FILE": str(task),
-        "AGENTSTACK_GEMINI_EFFORT": "medium",
+        "AGENTSTACK_GEMINI_EFFORT": effort,
         "PARENT_AGENT": "Parent",
         "FAKE_MAIL_LOG": str(tmp_path / "mail.log"),
     }
@@ -1350,13 +1351,13 @@ def _adapter_run(tmp_path: pathlib.Path, resources: str, block_reserve: bool = F
         env["FAKE_BLOCK_RESERVE"] = str(marker)
     proc = _REAL_POPEN(
         ["/bin/bash", str(ADAPTER), "--pre-registered", "Child", "--child-token-file",
-         str(token), "--model", "gemini-3.8-flash-high", "--worktree", "task", str(repo)],
+         str(token), "--model", model, "--worktree", "task", str(repo)],
         env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         start_new_session=True,
     )
     return types.SimpleNamespace(proc=proc, repo=repo, task=task, marker=marker,
                                  runtime=runtime, worktree=tmp_path / "worktrees" / "Child",
-                                 mail_log=tmp_path / "mail.log")
+                                 mail_log=tmp_path / "mail.log", env=env, fake_bin=fake_bin, home=home)
 
 
 def _mail_calls(run) -> list[str]:
@@ -1648,3 +1649,103 @@ def test_cockpit_payload_launch_uses_headless_policy(monkeypatch, gemini_env, he
     assert args[0] == str(gemini_env.claude_launcher)
     assert kwargs["env"]["AGENTSTACK_AUTO_OPEN_CHILD"] == ("0" if headless else "1")
     assert annotations == [("Sunny-Curie", "review", "", "release")]
+
+
+@pytest.mark.parametrize('selected', ['high', 'xhigh'])
+@pytest.mark.parametrize('effort', ['low', 'medium', 'high', 'xhigh'])
+def test_hydrogen_model_and_effort_match_in_preview_and_launch(gemini_env, monkeypatch, selected, effort):
+    def forbidden():
+        pytest.fail('explicit Hydrogen launch must not discover models')
+    monkeypatch.setattr(gemini_runtime, '_discover_models', forbidden)
+    payload = _gemini_payload(gemini_env, model=f'gemini-4-hydrogen-{selected}', effort=effort)
+    expected = f'gemini-4-hydrogen-{effort}'
+    preview = server.do_spawn({**payload, 'dry_run': True})
+    assert preview['ok'] is True, preview
+    assert preview['model'] == expected
+    assert preview['effort'] == effort
+    assert preview['argv'][preview['argv'].index('--model') + 1] == expected
+    assert preview['launcher_env']['AGENTSTACK_GEMINI_EFFORT'] == effort
+    assert not gemini_env.launches.mcp_calls
+    assert not gemini_env.launches.launched
+    result = server.do_spawn(payload)
+    assert result['ok'] is True, result
+    assert result['model'] == expected
+    registration = gemini_env.launches.registrations['Sunny-Curie']
+    assert registration['model'] == expected
+    argv, options = gemini_env.launches.for_script(str(gemini_env.adapter))[0]
+    assert argv[argv.index('--model') + 1] == expected
+    assert options['env']['AGENTSTACK_GEMINI_EFFORT'] == effort
+    assert options['env']['AGENTSTACK_GEMINI_MODEL'] == expected
+
+
+def test_hydrogen_xhigh_cannot_expand_explicit_allowlist(gemini_env, monkeypatch):
+    monkeypatch.setenv('AGENTSTACK_GEMINI_MODELS', 'gemini-4-hydrogen-high')
+    result = server.do_spawn(_gemini_payload(
+        gemini_env, model='gemini-4-hydrogen-high', effort='xhigh', dry_run=True))
+    assert result == {'ok': False, 'error':
+        'model not allowed for provider gemini at effort xhigh: gemini-4-hydrogen-xhigh'}
+    assert not gemini_env.launches.launched and not gemini_env.launches.mcp_calls
+
+
+def test_preregistered_adapter_accepts_hydrogen_xhigh(tmp_path):
+    run = _adapter_run(tmp_path, 'src/**', effort='xhigh', model='gemini-4-hydrogen-xhigh')
+    stdout, stderr = run.proc.communicate(timeout=60)
+    assert run.proc.returncode == 0, (stdout, stderr)
+    assert 'reserve' in _mail_calls(run)
+    runners = list(run.runtime.glob('*runner*'))
+    assert runners, list(run.runtime.iterdir())
+    assert any('--model gemini-4-hydrogen-xhigh --effort xhigh' in path.read_text()
+               for path in runners)
+
+    argv_log = tmp_path / 'cli-args.json'
+    _executable(run.fake_bin / 'agy', f"#!{sys.executable}\n" +
+        "import json,sys\nfrom pathlib import Path\n" +
+        f"Path({str(argv_log)!r}).write_text(json.dumps({{'argv':sys.argv[1:], 'input':sys.stdin.read()}}))\n" +
+        "print(json.dumps({'event':'result','result':{'status':'SUCCESS','response':'fixture completed','denied_actions':[]}}))\n")
+    _executable(run.home / 'bin' / 'agentstack-gemini-stream',
+                (ROOT / 'bin' / 'agentstack-gemini-stream').read_text())
+    execution = _REAL_RUN(['/bin/bash', str(runners[0])], env=run.env,
+                          capture_output=True, text=True, timeout=30)
+    assert execution.returncode == 0, (execution.stdout, execution.stderr)
+    received = json.loads(argv_log.read_text())
+    assert received['argv'][received['argv'].index('--model') + 1] == 'gemini-4-hydrogen-xhigh'
+    assert received['argv'][received['argv'].index('--effort') + 1] == 'xhigh'
+    assert 'full task' in json.loads(received['input'])['message']['content']
+    assert _mail_calls(run) == ['reserve', 'report', 'release', 'retire']
+    assert not runners[0].exists()
+    assert not (run.runtime / 'agent_token_Child').exists()
+
+
+
+def test_hydrogen_xhigh_ui_switch_does_not_leak_effort_to_argon_or_flash():
+    catalog = {'providers': [gemini_runtime._catalog_item([
+        *gemini_runtime._DEFAULT_MODELS, 'gemini-4-hydrogen-high',
+        'gemini-4-hydrogen-xhigh', 'gemini-4-argon-high'])]}
+    scenario = r"""
+SPM('spm-parent').value='Parent';SPM('spm-task').value='work';SPM('spm-dir').value='/repo';
+resetSpawnProviderCapabilities();
+renderSpawnProviders(normalizeSpawnProviders(CATALOG));
+SPM('spm-resources').value='src/**';SPM('spm-resources').oninput();
+selectSpawnModel('gemini-4-hydrogen-high');
+chooseEffort('xhigh');
+const hydrogen=state();
+selectSpawnModel('gemini-4-argon-high');
+const argon=state(),argonLevels=spawnModelEfforts(spmProviders[0]);
+selectSpawnModel('gemini-3.8-flash-high');
+const flash=state(),flashLevels=spawnModelEfforts(spmProviders[0]);
+process.stdout.write(JSON.stringify({hydrogen,argon,argonLevels,flash,flashLevels}));
+"""
+    script = (f'const CATALOG={json.dumps(catalog)};\n'
+              + _extract_ui_script(_rendered_index()) + '\n'
+              + _UI_HARNESS.split('const out={};', 1)[0] + scenario)
+    result = _REAL_RUN(['node', '-e', script], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out['hydrogen']['payload']['model'] == 'gemini-4-hydrogen-high'
+    assert out['hydrogen']['payload']['effort'] == 'xhigh'
+    assert out['hydrogen']['launchDisabled'] is False
+    assert out['argonLevels'] == ['high']
+    assert out['flashLevels'] == ['low', 'medium', 'high']
+    for key in ('argon', 'flash'):
+        assert out[key]['effort'] == ''
+        assert out[key]['launchDisabled'] is True
