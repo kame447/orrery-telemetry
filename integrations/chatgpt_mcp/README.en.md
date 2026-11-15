@@ -1,5 +1,7 @@
 # Optional ORRERY MCP adapter (read only)
 
+For third-party dependency pinning, see [operator-approved bundle manifests and verification limits](DEPENDENCY_BUNDLE.en.md). This is an offline preflight, not service launch or supply-chain provenance.
+
 Phase-two fresh sends coexist with the existing fork gateway and read-only entrypoint as a separate opt-in. See [fresh instruction authority, limits and manual verification](FRESH_MESSAGES.en.md).
 
 In this fork the read-only adapter is invoked with python3 -m orrery_chatgpt_mcp.readonly_server; python3 -m orrery_chatgpt_mcp remains the existing optional local gateway. Phase 1 of upstream Issue #395 exposes exactly orrery_status, orrery_list_agents and orrery_get_agent. There is no spawning, messaging, OAuth or service installation. The regular installer, service startup configuration, UI, hooks and Mail operations are unchanged. Dashboard calls are limited to GET /api/version, fresh GET /api/agents, and legacy GET /api/agents?days=30.
