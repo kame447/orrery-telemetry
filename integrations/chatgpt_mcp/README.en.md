@@ -132,4 +132,6 @@ Forwarding was verified with tunnel-client 0.0.17+a248b7f725fc989c1eb26680cf4351
 
 For the next step, see [the same-process attested runtime command](../../docs/mcp-fresh-import-attestation.en.md#phase-10-a-command-that-verifies-imports-in-the-serving-interpreter). This is a preparation API and does not start a service.
 
-Phase 11 is documented in [staging the attested Python command in an inactive LaunchAgent](../../docs/mcp-fresh-attested-stage.en.md). It disables RunAtLoad/KeepAlive and never replaces existing plists; activation and live status remain unimplemented.
+Phase 11 is documented in [staging the attested Python command in an inactive LaunchAgent](../../docs/mcp-fresh-attested-stage.en.md). It disables RunAtLoad/KeepAlive and never replaces existing plists; activation remains unimplemented.
+
+Phase 12 adds [read-only live PID and MCP authority checks](../../docs/mcp-fresh-attested-status.en.md) for the attested plist. It does not activate, send, or observe agent processing.

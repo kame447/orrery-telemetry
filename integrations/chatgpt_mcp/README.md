@@ -132,4 +132,6 @@ ORRERY_MCP_TEST_TUNNEL_CLIENT="$(command -v tunnel-client)" \
 
 追加の第10段階は[隔離した同一Pythonで検証後にserveするコマンドの構成](../../docs/mcp-fresh-import-attestation.md#第10段階同じ隔離python内で検証してからserveするコマンド構成)を参照してください。現段階では起動しない準備APIです。
 
-第11段階は[検証済み隔離Python起動コマンドを非起動LaunchAgent設定に組み込む手順](../../docs/mcp-fresh-attested-stage.md)を参照してください。RunAtLoad/KeepAliveは無効で、既存のplistは上書きしません。起動・停止と実プロセス照合は未実装です。
+第11段階は[検証済み隔離Python起動コマンドを非起動LaunchAgent設定に組み込む手順](../../docs/mcp-fresh-attested-stage.md)を参照してください。RunAtLoad/KeepAliveは無効で、既存のplistは上書きしません。起動・停止は未実装です。
+
+第12段階は[実稼働PID・MCP権限の読み取り専用照合](../../docs/mcp-fresh-attested-status.md)です。新plistとの一致を確認できますが、起動、送信、受信・処理開始は実証しません。
