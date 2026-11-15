@@ -43,7 +43,8 @@ def tools():
 
 
 @contextmanager
-def server(*, status_body=None, tool_list=None, close_after_initialize=False):
+def server(*, status_body=None, tool_list=None, close_after_initialize=False,
+           init_result=None, initialized_status=202):
     observed = []
     current_status = status() if status_body is None else status_body
     current_tools = tools() if tool_list is None else tool_list
@@ -55,8 +56,15 @@ def server(*, status_body=None, tool_list=None, close_after_initialize=False):
             amount = int(self.headers['Content-Length'])
             packet = json.loads(self.rfile.read(amount))
             observed.append((self.path, packet['method']))
+            if packet['method'] == 'notifications/initialized':
+                self.send_response(initialized_status)
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
             if packet['method'] == 'initialize':
-                result = {'serverInfo': {'name': 'orrery-chatgpt-mcp'}}
+                result = init_result if init_result is not None else {
+                    'serverInfo': {'name': 'orrery-chatgpt-mcp'},
+                    'protocolVersion': '2025-11-25', 'capabilities': {'tools': {}}}
             elif packet['method'] == 'tools/list':
                 result = {'tools': current_tools}
             else:
@@ -116,7 +124,7 @@ class ProcessProbeTests(unittest.TestCase):
                 self.assertEqual(result['tools_verified'], 6)
                 self.assertTrue(result['verified'])
                 self.assertNotIn(SECRET, json.dumps(result))
-                self.assertEqual(len(observed), 3)
+                self.assertEqual(len(observed), 4)
                 return
             with self.assertRaises(module.ProbeError):
                 module.probe(label=LABEL, plist_path=PLIST, port=port,
@@ -192,6 +200,27 @@ class ProcessProbeTests(unittest.TestCase):
                 module.probe(label=LABEL, plist_path=PLIST, port=port,
                              pairing_secret=SECRET, expected=AUTH, runner=fake)
             self.assertEqual(len(observed), 1)
+
+    def test_wrong_initialize_protocol_refuses_before_discovery(self):
+        init = {'serverInfo': {'name': 'orrery-chatgpt-mcp'},
+                'protocolVersion': 'unsupported', 'capabilities': {'tools': {}}}
+        with server(init_result=init) as (port, observed):
+            fake = runner()
+            fake.state['port'] = port
+            with self.assertRaises(module.ProbeError):
+                module.probe(label=LABEL, plist_path=PLIST, port=port,
+                             pairing_secret=SECRET, expected=AUTH, runner=fake)
+            self.assertEqual([method for _, method in observed], ['initialize'])
+
+    def test_rejected_initialization_notification_refuses_before_discovery(self):
+        with server(initialized_status=200) as (port, observed):
+            fake = runner()
+            fake.state['port'] = port
+            with self.assertRaises(module.ProbeError):
+                module.probe(label=LABEL, plist_path=PLIST, port=port,
+                             pairing_secret=SECRET, expected=AUTH, runner=fake)
+            self.assertEqual([method for _, method in observed],
+                             ['initialize', 'notifications/initialized'])
 
     def test_bool_sender_rejected(self):
         broken = status()
