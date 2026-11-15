@@ -129,3 +129,5 @@ ORRERY_MCP_TEST_TUNNEL_CLIENT="$(command -v tunnel-client)" \
 Real Dashboard builder/HTTP-handler tests use temporary SQLite registrations and fake tmux observations, including mixed projects, ambiguous names, stopped/retired records and the 30-day boundary. The real tunnel-client dev proxy test uses an isolated local-only control plane and temporary secret URL to verify initialization, discovery, status, unknown-tool rejection and Host/Origin/path protection. It uses no hosted tunnel or real account key and changes no production service. Without an explicit binary path, only that test is skipped.
 
 Forwarding was verified with tunnel-client 0.0.17+a248b7f725fc989c1eb26680cf4351ee33421f61. This does not verify hosted tunnel ACLs, a ChatGPT connection, message delivery or actual agent execution. Check validates the Dashboard contract, not all access policies or live process existence.
+
+For the next step, see [the same-process attested runtime command](../../docs/mcp-fresh-import-attestation.en.md#phase-10-a-command-that-verifies-imports-in-the-serving-interpreter). This is a preparation API and does not start a service.
