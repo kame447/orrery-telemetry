@@ -1,5 +1,7 @@
 # ORRERY ChatGPT MCP（読み取り専用・任意導入）
 
+第2段階のfresh送信は、既存fork gatewayと読み取り専用入口を維持した独立opt-inです。[fresh追加指示の設計・制限・手動検証](FRESH_MESSAGES.md)を参照してください。
+
 upstream Issue #395 の第1段階です。このforkでは既存の任意MCPゲートウェイ（通常の python3 -m orrery_chatgpt_mcp）と競合しないよう、読み取り専用版だけ python3 -m orrery_chatgpt_mcp.readonly_server で起動します。公開ツールは `orrery_status`、`orrery_list_agents`、`orrery_get_agent` の3個だけです。spawn・追加指示・Mail送信・OAuth・常駐化は実装しません。通常のinstaller・サービスの起動設定・UI・hook・Mail操作は変えません。Dashboardの呼び出しは `GET /api/version`、freshの `GET /api/agents`、legacyの `GET /api/agents?days=30` だけです。
 
 ## 互換性と公開範囲
