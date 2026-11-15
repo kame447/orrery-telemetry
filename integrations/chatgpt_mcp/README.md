@@ -135,3 +135,5 @@ ORRERY_MCP_TEST_TUNNEL_CLIENT="$(command -v tunnel-client)" \
 第11段階は[検証済み隔離Python起動コマンドを非起動LaunchAgent設定に組み込む手順](../../docs/mcp-fresh-attested-stage.md)を参照してください。RunAtLoad/KeepAliveは無効で、既存のplistは上書きしません。起動・停止は未実装です。
 
 第12段階は[実稼働PID・MCP権限の読み取り専用照合](../../docs/mcp-fresh-attested-status.md)です。新plistとの一致を確認できますが、起動、送信、受信・処理開始は実証しません。
+
+段階13では[隔離fixture専用の明示承認付き起動](../../docs/mcp-fresh-attested-start.md)を追加しました。Mac実機での起動受入は未実施です。

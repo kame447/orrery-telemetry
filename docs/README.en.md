@@ -40,6 +40,7 @@ Overview: the cockpit is the screen for operating terminals; Telemetry is the da
 - [Offline fresh MCP import attestation](mcp-fresh-import-attestation.en.md) — Fork stage 8 checks pinned first-party imports with real Python; third-party dependencies remain unpinned and no service is started.
 - [Stage an attested fresh MCP LaunchAgent without starting it](mcp-fresh-attested-stage.en.md) — Bind pinned in-process verification to an approved, non-overwriting inactive plist; no launchctl activation.
 - [Read-only status of the attested fresh MCP process](mcp-fresh-attested-status.en.md) — Verify staged bytes, loaded PID, and effective MCP authority; it does not start or deliver messages.
+- [Approved start of an isolated fresh MCP fixture](mcp-fresh-attested-start.en.md) — Stage 13 offers guarded bootstrap/kickstart with PID/grant attestation; live macOS and recovery acceptance remain pending.
 
 ## Install and update
 

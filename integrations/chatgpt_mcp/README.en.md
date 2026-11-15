@@ -135,3 +135,5 @@ For the next step, see [the same-process attested runtime command](../../docs/mc
 Phase 11 is documented in [staging the attested Python command in an inactive LaunchAgent](../../docs/mcp-fresh-attested-stage.en.md). It disables RunAtLoad/KeepAlive and never replaces existing plists; activation remains unimplemented.
 
 Phase 12 adds [read-only live PID and MCP authority checks](../../docs/mcp-fresh-attested-status.en.md) for the attested plist. It does not activate, send, or observe agent processing.
+
+Stage 13 adds an [operator-only isolated fixture start](../../docs/mcp-fresh-attested-start.en.md), still pending live Mac verification.
