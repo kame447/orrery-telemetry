@@ -19,3 +19,13 @@ The stage-nine [third-party bundle manifest](../integrations/chatgpt_mcp/DEPENDE
 With a manifest, the host verifies the complete site tree and passes the exact approved SHA-256 to a `-I -S -B` child interpreter. The child verifies immutable first-party sources, checks the same third-party manifest before and after imports, and confirms that FastMCP, MCP, SQLAlchemy, SQLModel and Pydantic actually originate inside the pinned site-packages. The host verifies it again after child completion. A writable development venv is not an approved bundle.
 
 Even on success, `service_started=false` and `live_process_verified=false` remain. This does not authenticate wheel provenance or prove that a separately launched daemon uses the same code. Dedicated launch/stop and live-process attestation remain later stages.
+
+## Phase 10: a command that verifies imports in the serving interpreter
+
+The operator-only `fresh_runtime_command.build_command(plan, dependency, verify_release=..., read_release=...)` first runs the existing offline import attestation for the fixed gateway release, Mail package and approved third-party tree. It refuses missing manifests or evidence that is not explicitly pinned. It does not expose a model-facing MCP tool.
+
+The returned private `RuntimeCommand` carries `-I -S -B -c` arguments and a minimal environment. When a future operator-controlled manager executes it, the child repeats the complete gateway/Mail source and dependency checks, verifies actual import origins, and checks the dependency snapshot after import before entering `gateway.main(['serve'])` in the same Python process. It does not attest one Python interpreter and then serve from another unverified interpreter.
+
+The command fixes PATH/HOME and does not inherit PYTHONPATH, AGENTSTACK_* values or provider-session credentials. Sender and recipients remain fixed by the protected policy. Arguments contain private paths and fingerprints and must not be published in issue comments or logs.
+
+Command creation performs no launchctl, Popen, network calls or live-service changes. `requires_in_process_attestation=true` specifies a future runtime requirement; it is not a live-process proof. `service_started=false` remains explicit. The old staged plist from phase 7 still uses a direct startup path and must not be bootstrapped as-is. Later work must bind this command to an exact approved plist, PID and process/status checks in an isolated macOS acceptance test.
