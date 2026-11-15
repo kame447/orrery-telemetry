@@ -43,7 +43,7 @@ def tools():
 
 
 @contextmanager
-def server(*, status_body=None, tool_list=None):
+def server(*, status_body=None, tool_list=None, close_after_initialize=False):
     observed = []
     current_status = status() if status_body is None else status_body
     current_tools = tools() if tool_list is None else tool_list
@@ -64,6 +64,9 @@ def server(*, status_body=None, tool_list=None):
             data = json.dumps({'jsonrpc': '2.0', 'id': packet['id'], 'result': result}).encode()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
+            if close_after_initialize and packet['method'] == 'initialize':
+                self.send_header('Connection', 'close')
+                self.close_connection = True
             self.send_header('Content-Length', str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -180,6 +183,15 @@ class ProcessProbeTests(unittest.TestCase):
         broken = status()
         broken['message_authority']['unknown_recovery'] = 'replay_automatically'
         self.call(status_body=broken)
+
+    def test_connection_close_cannot_trigger_unverified_reconnect(self):
+        with server(close_after_initialize=True) as (port, observed):
+            fake = runner()
+            fake.state['port'] = port
+            with self.assertRaises(module.ProbeError):
+                module.probe(label=LABEL, plist_path=PLIST, port=port,
+                             pairing_secret=SECRET, expected=AUTH, runner=fake)
+            self.assertEqual(len(observed), 1)
 
     def test_bool_sender_rejected(self):
         broken = status()
