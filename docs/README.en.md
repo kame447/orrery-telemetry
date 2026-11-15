@@ -34,6 +34,7 @@ Overview: the cockpit is the screen for operating terminals; Telemetry is the da
 - [Fresh migration, shutdown and recovery](fresh-global-update.en.md) — Explicit steps for a new empty instance. Private startup/shutdown from saved settings is covered. Ordinary updates do not switch it; real OS managers/Finder GUI, real providers/trust/installation, final CI and an attended cutover remain unaccepted. Reactivation and App foregrounding are outside this cutover scope.
 - [Read-only fresh send receipts](fresh-message-receipts.en.md) — Fork contract for authenticated sender-owned receipt lookup without replay; not_observed never authorizes resending.
 - [Live fresh MCP process verification](mcp-fresh-process-probe.en.md) — Fork verification component for the loaded LaunchAgent PID, listener and effective delegated grant; service integration remains pending.
+- [Pinned fresh MCP release preflight](mcp-fresh-release-preflight.en.md) — A fork-only read-only gate for a dedicated service, private policy and pinned release; no live service acceptance is implied.
 
 ## Install and update
 
