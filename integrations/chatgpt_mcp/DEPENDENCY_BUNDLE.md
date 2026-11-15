@@ -9,3 +9,5 @@ inspect(site) は読取りのみで承認候補digestと配布物一覧を返し
 この検査はファイルの保存時点での固定を意味するだけです。第三者配布物の供給元真正性、起動したプロセスのimport元、実際のMail配送・agent処理開始までは証明しません。応答には第三者コードを固定済みであることと併せて、live_process_verified=false、origin_authenticity_verified=false、service_started=falseを返します。
 
 開発用venvにはeditable .pthや書込み可能なライブラリがあり得ます。そのため基準を緩めず、別の読取り専用bundleを必要とします。PR #63の固定gateway/Mailコードの隔離import検査との統合、固定Pythonの実プロセス内での再照合、安全な起動停止は後続PRに分けます。試験では完全に合成した一時site-packagesだけを使用します。
+
+固定した依存ツリーを隔離importの前後に再検証する[統合手順](../../docs/mcp-fresh-import-attestation.md)も用意しています。単独のat-rest検査とは区別します。

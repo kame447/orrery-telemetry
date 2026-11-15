@@ -66,7 +66,9 @@ def package_digest(package: Path) -> str:
 # code before checking their entire source payload and the stated path roots.
 PROBE = r'''
 import hashlib, importlib, json, os, pathlib, stat, sys
-release, expected_gateway, mail, expected_mail, site = map(pathlib.Path, sys.argv[1:])
+release, expected_gateway, mail, expected_mail, site = map(pathlib.Path, sys.argv[1:6])
+pin_manifest = pathlib.Path(sys.argv[6]) if sys.argv[6] else None
+expected_pin_hash = sys.argv[7]
 expected_gateway, expected_mail = str(expected_gateway), str(expected_mail)
 
 def fail():
@@ -108,6 +110,14 @@ if fingerprint(mail) != expected_mail or mail.name != 'agentstack_mail':
     fail()
 # Explicit site location, no site initialization, .pth or user directories.
 sys.path[:0] = [str(release), str(mail.parent), str(site)]
+if pin_manifest is not None:
+    try:
+        from orrery_chatgpt_mcp.fresh_dependency_attest import verify
+        proof = verify(pin_manifest, site)
+        if not proof['third_party_pinned_at_rest'] or proof['site_packages_sha256'] != expected_pin_hash:
+            fail()
+    except Exception:
+        fail()
 try:
     gateway = importlib.import_module('orrery_chatgpt_mcp.fresh_server')
     client = importlib.import_module('agentstack_mail.fresh_client')
@@ -126,10 +136,25 @@ try:
             or not callable(getattr(gateway, 'main', None))
             or not callable(getattr(fastmcp, 'Client', None))):
         fail()
+    if pin_manifest is not None:
+        # A verified bundle alone does not prove imports came from that bundle.
+        for module_name in ('fastmcp', 'mcp', 'sqlalchemy', 'sqlmodel', 'pydantic'):
+            imported = importlib.import_module(module_name)
+            source = pathlib.Path(imported.__file__).resolve(strict=True)
+            if not source.is_relative_to(site):
+                fail()
 except Exception:
     fail()
+if pin_manifest is not None:
+    try:
+        # A second complete snapshot after imports catches mutation during loading.
+        proof = verify(pin_manifest, site)
+        if not proof['third_party_pinned_at_rest'] or proof['site_packages_sha256'] != expected_pin_hash:
+            fail()
+    except Exception:
+        fail()
 print(json.dumps({'gateway_import':True,'mail_import':True,'receipt_contract':True,
-                  'import_origins_verified':True,'third_party_pinned':False}))
+                  'import_origins_verified':True,'third_party_pinned':pin_manifest is not None}))
 '''
 
 
@@ -139,6 +164,7 @@ class ImportPlan:
     mail_package: Path
     mail_digest: str
     site_packages: Path
+    dependency_manifest: Path | None = None
 
 
 def check(plan: Plan, dependency: ImportPlan, *, verify_release: Callable,
@@ -153,11 +179,18 @@ def check(plan: Plan, dependency: ImportPlan, *, verify_release: Callable,
                 or package_digest(dependency.mail_package) != dependency.mail_digest):
             raise ValueError
         site = dependency.site_packages
+        pin = None
+        if dependency.dependency_manifest is not None:
+            # The operator's manifest is fixed to this selected site by the
+            # read-only verifier; neither is accepted from model tool input.
+            from .fresh_dependency_attest import verify as verify_dependency
+            pin = verify_dependency(dependency.dependency_manifest, site)['site_packages_sha256']
         if (not site.is_absolute() or site.resolve(strict=True) != site
                 or not site.is_dir() or site.is_symlink()):
             raise ValueError
         cmd = [str(plan.python), '-I', '-S', '-B', '-c', PROBE, str(plan.release_dir),
-               plan.release_digest, str(dependency.mail_package), dependency.mail_digest, str(site)]
+               plan.release_digest, str(dependency.mail_package), dependency.mail_digest, str(site),
+               str(dependency.dependency_manifest) if pin is not None else '', pin or '']
         # Keep host credentials, service URLs, user-site controls and provider
         # session data entirely out of the interpreter.
         env = {'PATH': '/usr/bin:/bin', 'HOME': '/nonexistent', 'PYTHONDONTWRITEBYTECODE': '1'}
@@ -166,11 +199,16 @@ def check(plan: Plan, dependency: ImportPlan, *, verify_release: Callable,
             raise ValueError
         value = json.loads(done.stdout)
         if value != {'gateway_import': True, 'mail_import': True, 'receipt_contract': True,
-                     'import_origins_verified': True, 'third_party_pinned': False}:
+                     'import_origins_verified': True, 'third_party_pinned': pin is not None}:
             raise ValueError
+        if pin is not None:
+            # Do not return a successful pinned proof if the operator-approved
+            # tree changes between child verification and the caller's result.
+            if verify_dependency(dependency.dependency_manifest, site)['site_packages_sha256'] != pin:
+                raise ValueError
         return {'validated': True, 'gateway_import': True, 'mail_import': True,
                 'receipt_contract': True, 'import_origins_verified': True,
-                'third_party_pinned': False, 'live_process_verified': False,
+                'third_party_pinned': pin is not None, 'live_process_verified': False,
                 'service_started': False, 'operation': 'offline_import_preflight'}
     except Exception:
         raise ImportAttestationError('FRESH_IMPORT_ATTESTATION_REFUSED') from None

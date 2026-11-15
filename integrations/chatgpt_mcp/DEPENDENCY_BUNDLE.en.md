@@ -9,3 +9,5 @@ inspect(site) returns a proposed digest and distribution inventory without writi
 A successful at-rest pin is not a supply-chain provenance proof or a live process attestation. The response explicitly retains live_process_verified=false, origin_authenticity_verified=false and service_started=false. Do not weaken the policy to accept an editable development virtual environment. A separate read-only dependency artifact is needed.
 
 PR #63 already verifies first-party gateway and Mail source imports. Integrating this checker with that isolated Python process, revalidating the effective code loaded at service start, and safely installing/starting/stopping the dedicated service are separate follow-up changes. Tests use synthetic temporary dependency trees only.
+
+An [integrated isolated-import check](../../docs/mcp-fresh-import-attestation.en.md) additionally verifies the approved bundle before and after imports. This is distinct from the standalone at-rest inspection.
