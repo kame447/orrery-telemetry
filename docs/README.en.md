@@ -42,6 +42,7 @@ Overview: the cockpit is the screen for operating terminals; Telemetry is the da
 - [Read-only status of the attested fresh MCP process](mcp-fresh-attested-status.en.md) — Verify staged bytes, loaded PID, and effective MCP authority; it does not start or deliver messages.
 - [Approved start of an isolated fresh MCP fixture](mcp-fresh-attested-start.en.md) — Stage 13 offers guarded bootstrap/kickstart with PID/grant attestation; live macOS and recovery acceptance remain pending.
 - [Approved stop of an isolated fresh MCP fixture](mcp-fresh-attested-stop.en.md) — Stage 14 requires a live pinned PID and stop-only approval before a one-shot bootout; real macOS stopping and recovery remain unverified.
+- [Read-only recovery observation after uncertain fixture operations](mcp-fresh-fixture-recovery.en.md) — Stage 15 reconciles a pinned job and previous PID, never authorizing retries; real Mac recovery remains unverified.
 
 ## Install and update
 
