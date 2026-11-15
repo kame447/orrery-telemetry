@@ -112,6 +112,15 @@ def _dashboard_quotas_are_offline_by_default(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _gemini_catalog_is_offline_by_default(monkeypatch):
+    """Catalog tests opt into fake CLIs; ordinary tests never start real agy."""
+    from dashboard import provider_server  # loads the optional runtime
+    runtime = sys.modules.get("_orrery_provider_dashboard_gemini")
+    if runtime is not None:
+        monkeypatch.setattr(runtime, "_cli_models", lambda _binary: ())
+
+
+@pytest.fixture(autouse=True)
 def _checkout_dashboard_helpers(monkeypatch):
     """Workers must load this checkout's helpers, never an installed old copy."""
     from pathlib import Path

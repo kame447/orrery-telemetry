@@ -31,7 +31,7 @@ _DEFAULT_MODELS = (
     "gemini-3.8-flash-medium",
     "gemini-3.8-flash-low",
 )
-_EFFORTS = ("low", "medium", "high")
+_EFFORTS = ("low", "medium", "high", "xhigh")
 # Dashboard launches require an explicit effort.  The direct CLI launchers keep
 # their historical ``high`` fallback; this declaration does not reach them.
 CAPABILITIES = {
@@ -82,6 +82,7 @@ def _cli_models(binary: str) -> tuple[str, ...]:
         process = subprocess.Popen(
             [binary, "models"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, start_new_session=os.name == "posix",
+            env={**os.environ, "PATH": _launch_path()},
         )
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ)
@@ -137,7 +138,9 @@ def _cli_models(binary: str) -> tuple[str, ...]:
 
 
 def _discover_models() -> tuple[str, ...]:
-    binary = shutil.which(os.environ.get("AGENTSTACK_GEMINI_BIN") or "agy")
+    binary = shutil.which(
+        os.environ.get("AGENTSTACK_GEMINI_BIN") or "agy", path=_launch_path(),
+    )
     if not binary:
         return ()
     try:
@@ -209,7 +212,8 @@ def _catalog_item(models: list[str]) -> dict:
         "program": "antigravity",
         "models": list(models),
         "default_model": models[0],
-        "efforts": list(_EFFORTS),
+        "efforts": [effort for effort in _EFFORTS
+                    if any(effort in levels for levels in model_efforts.values())],
         "model_efforts": model_efforts,
         "effort_default": "" if CAPABILITIES["effort_required"] else "high",
         "provider_key": "google",

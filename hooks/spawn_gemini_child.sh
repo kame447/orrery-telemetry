@@ -66,7 +66,7 @@ Usage: spawn_gemini_child.sh [options] --resources "path1,path2" "<task>" [WORKD
 
 Options:
   --model MODEL           Antigravity model slug (default gemini-3.8-flash-high)
-  --effort LEVEL          low, medium, or high (default high)
+  --effort LEVEL          low, medium, high, or xhigh (default high)
   --resources CSV         resources to reserve before launch (required)
   --resource-ttl SEC      reservation TTL (default 14400)
   --worktree-base REV     worktree base revision (default current HEAD)
@@ -113,8 +113,8 @@ if [[ -z "$RESOURCES" && "$UNSAFE_NO_RESOURCES" != true ]]; then
   exit 2
 fi
 case "$EFFORT" in
-  low|medium|high) ;;
-  *) echo "$PROG: invalid effort '$EFFORT' (expected low, medium, or high)" >&2; exit 2 ;;
+  low|medium|high|xhigh) ;;
+  *) echo "$PROG: invalid effort '$EFFORT' (expected low, medium, high, or xhigh)" >&2; exit 2 ;;
 esac
 case "$RESOURCE_TTL" in
   ''|*[!0-9]*) echo "$PROG: --resource-ttl must be an integer" >&2; exit 2 ;;

@@ -508,3 +508,37 @@ def test_optional_installer_never_replaces_core_dashboard() -> None:
 
 def test_optional_installer_is_executable() -> None:
     assert INSTALLER.stat().st_mode & 0o100
+
+
+def test_provider_upgrade_replaces_static_catalog_and_keeps_xhigh(tmp_path, monkeypatch):
+    import importlib.util
+    from types import SimpleNamespace
+    root = tmp_path / 'install'
+    _seed_fake_core(root)
+    (root / 'dashboard' / 'provider_server.py').write_text('# old provider\n')
+    runtime_path = root / 'dashboard' / 'gemini_provider_runtime.py'
+    runtime_path.write_text('_DEFAULT_MODELS = ("gemini-4-hydrogen-xhigh",)\n')
+    env = _installer_env()
+    env['HOME'] = str(tmp_path)
+    result = _run_installer(root, env)
+    assert result.returncode == 0, result.stderr
+    assert runtime_path.read_bytes() == (ROOT / 'dashboard' / runtime_path.name).read_bytes()
+    local_bin = tmp_path / '.local' / 'bin'
+    local_bin.mkdir(parents=True)
+    cli = local_bin / 'agy'
+    cli.write_text(f'#!{sys.executable}\nprint("gemini-4-hydrogen-xhigh\\tHydrogen")\n')
+    cli.chmod(0o755)
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.setenv('PATH', '/usr/bin:/bin')
+    monkeypatch.delenv('AGENTSTACK_GEMINI_BIN', raising=False)
+    monkeypatch.delenv('AGENTSTACK_GEMINI_MODELS', raising=False)
+    spec = importlib.util.spec_from_file_location('isolated_upgraded_gemini', runtime_path)
+    runtime = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runtime)
+    models, error = runtime._gemini_models(SimpleNamespace(_SPAWN_MODELS=(), _codex_models=lambda: ()))
+    assert error == ''
+    assert 'gemini-4-hydrogen-xhigh' in models
+    assert runtime._catalog_item(models)['model_efforts']['gemini-4-hydrogen-xhigh'] == ['xhigh']
+    for relative in ('bin/agent-start-gemini', 'hooks/spawn_gemini_child.sh',
+                     'hooks/spawn_gemini_preregistered.sh'):
+        assert (root / relative).read_bytes() == (ROOT / relative).read_bytes()

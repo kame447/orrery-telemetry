@@ -66,6 +66,13 @@ installer. The core `scripts/install.sh` does not copy those files, so a core
 install keeps running `dashboard/server.py`; a core reinstall also leaves an
 already-installed provider extension in place.
 
+既存のGemini環境を更新する場合は、coreの更新後、同じ検証済みrevisionから
+この追加インストーラーも再実行し、作業中のエージェントが終了してから
+Dashboardを再起動してください。coreだけの再インストールは既存providerを
+意図的に保持するため、Gemini部分の更新にはなりません。モデルID追加のために
+古いruntimeを上書きせず、追加インストーラーでruntimeと起動スクリプトを
+一緒に更新してください。
+
 ## Top-level launcher
 
 ```sh
@@ -142,7 +149,7 @@ start does not leave a retained child identity behind:
   explicit allow-list that reuses a Claude/Codex ID disables the Antigravity tab.
 
 The model card displays each Gemini family once (for example, `gemini-3.8-flash`
-and `gemini-4-argon`). The original `gemini-3.8-flash-high` remains the default;
+`gemini-4-argon`, and `gemini-4-hydrogen`). The original `gemini-3.8-flash-high` remains the default;
 only efforts present in the current model list are offered for each family.
 Before registration, Dashboard resolves the selected effort to the corresponding CLI model:
 `low` → `gemini-3.8-flash-low`, `medium` → `gemini-3.8-flash-medium`, and
@@ -154,10 +161,20 @@ validated by the CLI instead of being refused simply because discovery omitted i
 Model IDs without an effort suffix are passed unchanged. Spawn and `dry_run`
 do not run `agy models`; discovery is used only for the picker.
 
+モデルの自動検出は、Dashboardの起動処理と同じ探索経路を使います。
+サービスのPATHから省かれている場合も `~/.local/bin` を探します。
+`AGENTSTACK_GEMINI_BIN` の明示指定は引き続き優先し、そのコマンドが
+見つからなくても別のCLIへ勝手に切り替えません。Dashboardと3種類の
+Gemini起動スクリプトは `xhigh` に対応します。ただし画面では、検出した
+一覧または明示許可リストにそのvariantがあるモデル系列にだけ提示します。
+Hydrogenが追加されてもArgonやFlashへ `xhigh` を一律に提示しません。
+新しいモデルIDを固定一覧へ追記する必要はなく、既定モデルの自動変更や
+明示許可リストの拡大も行いません。
+
 Engine and isolation rules:
 
 - **Effort is explicit.** The Dashboard selects no effort for Antigravity, keeps
-  `SPAWN` disabled until `low`, `medium`, or `high` is chosen, and the server
+  `SPAWN` disabled until `low`, `medium`, `high`, or a supported `xhigh` is chosen, and the server
   rejects a request without one (`effort required for provider gemini`). The
   CLI launchers' `high` fallback is not applied to Dashboard launches.
 - **Isolated worktree is forced.** The isolation checkbox is locked on while
