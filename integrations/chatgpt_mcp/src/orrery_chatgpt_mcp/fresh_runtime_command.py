@@ -24,7 +24,7 @@ class RuntimeCommand:
 
     argv: tuple[str, ...]
     environment: tuple[tuple[str, str], ...]
-    source_attested_before_serve: bool
+    requires_in_process_attestation: bool
     service_started: bool = False
 
     def env(self) -> dict[str, str]:
@@ -114,7 +114,7 @@ def build_command(
         # environment variable from a live agent can enter this command.
         return RuntimeCommand(
             argv=args, environment=tuple(sorted(env.items())),
-            source_attested_before_serve=True,
+            requires_in_process_attestation=True,
         )
     except RuntimeCommandError:
         raise
