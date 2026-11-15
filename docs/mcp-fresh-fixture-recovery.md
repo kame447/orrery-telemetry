@@ -10,6 +10,6 @@
 
 ## 検証範囲
 
-隔離Python 3.11以降で新規15件のunittestを通常実行と `python -O` で実行しました。新しいモジュール自体は実行していますが、既存のlaunchd、PID、probe依存をスタブ化した合成検証です。MacのDesktop Commanderは初回接続に失敗し、その後の読み取り4回もSession terminatedとなったため、実リポジトリvenv、実macOS/launchd、MCP SDK/Tunnel、Mail/agent E2Eは未検証です。CIと第三者レビューの完了も別途確認が必要です。
+初版の新規15件のunittestは隔離Pythonで通常実行と `python -O` の両方で成功しました。今回の二重probeに関する追加4件はGitHubへpush済みですが、Mac接続不能とCI待機のため未実行です。新しいモジュール自体は実行していますが、既存のlaunchd、PID、probe依存をスタブ化した合成検証です。MacのDesktop Commanderは初回接続に失敗し、その後の読み取り4回もSession terminatedとなったため、実リポジトリvenv、実macOS/launchd、MCP SDK/Tunnel、Mail/agent E2Eは未検証です。CIと第三者レビューの完了も別途確認が必要です。
 
 本番のlegacy MCP/Tunnel/Mail/稼働agent、fork master、upstreamの状態は変更しません。段階15をmergeしなくても既存運用は変わりません。
