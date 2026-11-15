@@ -38,6 +38,7 @@ Overview: the cockpit is the screen for operating terminals; Telemetry is the da
 - [Fresh MCP live service attestation](mcp-fresh-live-service-status.en.md) — Fork stage 6 checks pinned plist, release and responding PID/authority; installation and macOS acceptance remain pending.
 - [Stage a dedicated fresh MCP LaunchAgent plist](mcp-fresh-service-staging.en.md) — Create one approved inactive service configuration without activating or replacing any running service.
 - [Offline fresh MCP import attestation](mcp-fresh-import-attestation.en.md) — Fork stage 8 checks pinned first-party imports with real Python; third-party dependencies remain unpinned and no service is started.
+- [Stage an attested fresh MCP LaunchAgent without starting it](mcp-fresh-attested-stage.en.md) — Bind pinned in-process verification to an approved, non-overwriting inactive plist; no launchctl activation.
 
 ## Install and update
 

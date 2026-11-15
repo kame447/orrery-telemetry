@@ -1,0 +1,13 @@
+# Stage an attested fresh MCP command in a LaunchAgent (fork phase 11)
+
+This phase joins the [same-process attested Python command](mcp-fresh-import-attestation.en.md) to the [inactive plist staging contract](mcp-fresh-service-staging.en.md). It does not call launchctl, start, stop, restart, merge, or cut over a live service.
+
+`fresh_attested_stage.preview(plan, dependency, home, *, verify_release, read_release)` calls the phase-10 `build_command`, which verifies the pinned gateway, Mail, dependency bundle, and actual imported module origins in isolated Python before preparing a command that repeats verification and serves in that same interpreter. The plist embeds the exact `python -I -S -B -c ...` argv without a shell, PYTHONPATH, or an inherited agent environment. The approval digest binds the entire plist, release and source pins, Mail instance, sender/recipients, and private policy content. The response never returns argv or credentials.
+
+`stage(..., approval_digest, *, verify_release, read_release, is_loaded)` reruns the preflight, requires an identical approval and a trusted read-only launchctl callback returning exactly False, and publishes a new plist atomically without replacing any existing file, including a symlink. Unknown loaded state, races, policy changes, and permission problems fail closed. Ambiguous writes are not automatically retried or rolled back.
+
+The older `fresh_service_stage` produces an unpinned `python -m ...` and PYTHONPATH launch configuration; this is a separate operator-only API, not an automatic conversion. Existing same-label plists are refused. The new configuration sets `RunAtLoad=false`, `KeepAlive=false`, and `Umask=0077`. No service is automatically bootstrapped or kept alive. The existing `fresh_service_status.check_running` still expects the older plist contract and cannot yet validate this variant.
+
+`same_process_import_preflight=true` describes preparation only, not a serving process. Both `process_started` and `live_process_verified` remain false. Real start/stop/recovery, live PID/listener/authority/source attestation, connected MCP/Tunnel acceptance, and separate evidence of Mail acceptance, agent receipt, and processing start remain outstanding. Explicit identity and allowlist approval is mandatory before production activation.
+
+Regression tests: `PYTHONPATH=integrations/chatgpt_mcp/src:. .venv/bin/python -m pytest -q integrations/chatgpt_mcp/tests/test_fresh_attested_stage.py integrations/chatgpt_mcp/tests/test_fresh_runtime_command.py integrations/chatgpt_mcp/tests/test_fresh_service_stage.py`. The isolated staging tests mock the runtime builder and do not prove a real macOS launchd service.

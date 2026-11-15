@@ -29,3 +29,7 @@ manifest指定時は、ホスト側でサイト全体を検証し、そのSHA-25
 コマンドはPATH/HOMEを固定し、`PYTHONPATH`、`AGENTSTACK_*`、稼働中providerのセッション情報を継承しません。利用するMail senderや宛先は既存private policyで固定したままです。生成された引数には内部パスと配布物のdigestが含まれるため、公開ログやIssueに貼らないでください。
 
 この段階ではコマンドを生成するだけで、実際のlaunchctl/bootstrap、Popen、通信、サービス起動は行いません。`requires_in_process_attestation=true` は将来そのプロセス内で照合する設計を意味し、稼働中プロセスの検証済み証拠ではありません。`service_started=false` を維持します。既存の #62 のplistは旧起動経路のため、そのままbootstrapしてはいけません。後続PRで、承認digest、実起動コマンド、launchd PID、実配布コード・依存の証拠を結びつけてから独立したMac受入を行います。
+
+## 第11段階への接続
+
+承認済みの同一Python起動コマンドを非起動LaunchAgent plistへ固定する手順は[第11段階の安全なステージング](mcp-fresh-attested-stage.md)を参照してください。まだ実サービスは起動しません。

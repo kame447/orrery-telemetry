@@ -131,3 +131,5 @@ Real Dashboard builder/HTTP-handler tests use temporary SQLite registrations and
 Forwarding was verified with tunnel-client 0.0.17+a248b7f725fc989c1eb26680cf4351ee33421f61. This does not verify hosted tunnel ACLs, a ChatGPT connection, message delivery or actual agent execution. Check validates the Dashboard contract, not all access policies or live process existence.
 
 For the next step, see [the same-process attested runtime command](../../docs/mcp-fresh-import-attestation.en.md#phase-10-a-command-that-verifies-imports-in-the-serving-interpreter). This is a preparation API and does not start a service.
+
+Phase 11 is documented in [staging the attested Python command in an inactive LaunchAgent](../../docs/mcp-fresh-attested-stage.en.md). It disables RunAtLoad/KeepAlive and never replaces existing plists; activation and live status remain unimplemented.

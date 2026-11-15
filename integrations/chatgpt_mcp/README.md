@@ -131,3 +131,5 @@ ORRERY_MCP_TEST_TUNNEL_CLIENT="$(command -v tunnel-client)" \
 転送は `tunnel-client 0.0.17+a248b7f725fc989c1eb26680cf4351ee33421f61` で検証しています。ホストされたTunnelのACL・ChatGPT接続・実送信・エージェントの処理開始を検証したという意味ではありません。checkもDashboard互換性の検査であり、アクセス権限全体やプロセスの実在を保証しません。
 
 追加の第10段階は[隔離した同一Pythonで検証後にserveするコマンドの構成](../../docs/mcp-fresh-import-attestation.md#第10段階同じ隔離python内で検証してからserveするコマンド構成)を参照してください。現段階では起動しない準備APIです。
+
+第11段階は[検証済み隔離Python起動コマンドを非起動LaunchAgent設定に組み込む手順](../../docs/mcp-fresh-attested-stage.md)を参照してください。RunAtLoad/KeepAliveは無効で、既存のplistは上書きしません。起動・停止と実プロセス照合は未実装です。

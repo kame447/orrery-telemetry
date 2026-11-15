@@ -29,3 +29,7 @@ The returned private `RuntimeCommand` carries `-I -S -B -c` arguments and a mini
 The command fixes PATH/HOME and does not inherit PYTHONPATH, AGENTSTACK_* values or provider-session credentials. Sender and recipients remain fixed by the protected policy. Arguments contain private paths and fingerprints and must not be published in issue comments or logs.
 
 Command creation performs no launchctl, Popen, network calls or live-service changes. `requires_in_process_attestation=true` specifies a future runtime requirement; it is not a live-process proof. `service_started=false` remains explicit. The old staged plist from phase 7 still uses a direct startup path and must not be bootstrapped as-is. Later work must bind this command to an exact approved plist, PID and process/status checks in an isolated macOS acceptance test.
+
+## Phase 11 integration
+
+See [the attested, inactive LaunchAgent staging contract](mcp-fresh-attested-stage.en.md) for binding the verified Python command to a non-overwriting plist. This is not live-service activation.
