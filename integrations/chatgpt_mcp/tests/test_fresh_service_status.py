@@ -7,7 +7,7 @@ import os
 import plistlib
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from orrery_chatgpt_mcp.fresh_service_status import StatusError, check_running
 
@@ -56,6 +56,12 @@ class ServiceStatusTests(unittest.TestCase):
             },
         }
         self._write()
+        static=patch('orrery_chatgpt_mcp.fresh_release_plan.inspect',
+                     side_effect=lambda plan, verify, read: {
+                         'validated': verify(plan.release_dir, plan.release_digest, str(plan.python))
+                         and read(plan.release_dir).get('digest') == plan.release_digest})
+        static.start()
+        self.addCleanup(static.stop)
         self.verify=Mock(return_value=True)
         self.release=Mock(return_value={'digest':'a'*64})
         self.pair=Mock(return_value='X'*43)
@@ -143,7 +149,7 @@ class ServiceStatusTests(unittest.TestCase):
 
     def test_failed_static_release_blocks_pairing_secret(self):
         self.verify.return_value=False
-        with self.assertRaisesRegex(StatusError,'STATUS_UNVERIFIED'):self.run_check()
+        with self.assertRaisesRegex(StatusError,'RELEASE_UNVERIFIED'):self.run_check()
         self.pair.assert_not_called();self.live.assert_not_called()
 
     def test_probe_failure_is_fail_closed(self):
