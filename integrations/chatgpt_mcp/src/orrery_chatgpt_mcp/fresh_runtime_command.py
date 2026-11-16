@@ -108,7 +108,7 @@ def build_command(
             "ORRERY_MCP_PORT": str(plan.port),
             "ORRERY_MCP_STATE_DIR": str(plan.state_dir),
             "ORRERY_MCP_FRESH_MESSAGE_POLICY": str(plan.policy_path),
-            "ORRERY_MCP_DASHBOARD_URL": "http://127.0.0.1:8770",
+            "ORRERY_MCP_DASHBOARD_URL": plan.dashboard_url,
         }
         # No token, user-supplied PYTHONPATH, project key, inherited HOME or
         # environment variable from a live agent can enter this command.

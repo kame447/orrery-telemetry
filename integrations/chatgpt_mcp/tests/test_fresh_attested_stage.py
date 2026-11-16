@@ -84,7 +84,7 @@ class AttestedStageTests(unittest.TestCase):
             "ORRERY_MCP_PORT": str(plan.port),
             "ORRERY_MCP_STATE_DIR": str(plan.state_dir),
             "ORRERY_MCP_FRESH_MESSAGE_POLICY": str(plan.policy_path),
-            "ORRERY_MCP_DASHBOARD_URL": "http://127.0.0.1:8770",
+            "ORRERY_MCP_DASHBOARD_URL": plan.dashboard_url,
         }
         return RuntimeCommand(args, tuple(sorted(env.items())), True)
 
@@ -157,6 +157,21 @@ class AttestedStageTests(unittest.TestCase):
                 with self.assertRaisesRegex(AttestedStageError, "APPROVAL_MISMATCH|COMMAND_UNVERIFIED"):
                     self.apply(old, plan=plan)
         self.assertFalse(self.target.exists())
+
+    def test_dashboard_target_bound_to_approval_and_plist(self):
+        old = self.show()["approval_digest"]
+        other = replace(self.plan, dashboard_url="http://127.0.0.1:43219")
+        self.build.return_value = self.make_command(plan=other)
+        updated = self.show(plan=other)
+        self.assertNotEqual(old, updated["approval_digest"])
+        with self.assertRaisesRegex(AttestedStageError, "APPROVAL_MISMATCH"):
+            self.apply(old, plan=other)
+        result = self.apply(updated["approval_digest"], plan=other)
+        self.assertEqual(result["approval_digest"], updated["approval_digest"])
+        self.assertEqual(
+            _read_plist(self.target)["EnvironmentVariables"]["ORRERY_MCP_DASHBOARD_URL"],
+            "http://127.0.0.1:43219",
+        )
 
     def test_changed_script_changes_digest(self):
         original = self.show()["approval_digest"]

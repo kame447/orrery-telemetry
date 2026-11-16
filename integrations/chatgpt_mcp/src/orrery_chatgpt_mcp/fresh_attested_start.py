@@ -77,6 +77,10 @@ def start(plan, dependency, home: Path, approval_digest: str, *,
     try:
         if fixture_mode is not True or not _fixture_label(plan.label):
             raise FreshStartError("FRESH_START_FIXTURE_ONLY")
+        # Test fixtures must never silently attach their writable MCP to the
+        # operator's default Dashboard. A dedicated target is required.
+        if plan.dashboard_url == "http://127.0.0.1:8770":
+            raise FreshStartError("FRESH_START_FIXTURE_DASHBOARD_NOT_ISOLATED")
         path, digest = _snapshot(plan, dependency, home, verify_release, read_release)
         if (type(approval_digest) is not str
                 or not hmac.compare_digest(approval_digest, _approval(digest))):

@@ -78,12 +78,22 @@ class Plan:
     mail_instance_id: str
     sender_agent_id: int
     recipients: tuple[tuple[int, str, str], ...]
+    # Explicit override permits isolated fixture Dashboards; default preserves
+    # the legacy loopback Dashboard and requires no change to existing plans.
+    dashboard_url: str = "http://127.0.0.1:8770"
 
     def __post_init__(self) -> None:
         if (not isinstance(self.label, str) or not LABEL.fullmatch(self.label)
                 or type(self.port) is not int or not 1024 <= self.port <= 65535
                 or self.port in RESERVED_PORTS):
             raise PlanError("FRESH_SERVICE_IDENTITY_INVALID")
+        # Never permit an arbitrary network target, DNS alias, URL credentials,
+        # URL path, or the MCP listener itself as the Dashboard endpoint.
+        match = (re.fullmatch(r"http://127\.0\.0\.1:([1-9][0-9]{3,4})", self.dashboard_url)
+                 if type(self.dashboard_url) is str else None)
+        if (match is None or not 1024 <= int(match.group(1)) <= 65535
+                or int(match.group(1)) == self.port):
+            raise PlanError("FRESH_DASHBOARD_TARGET_INVALID")
         if (not isinstance(self.release_digest, str) or not HEX64.fullmatch(self.release_digest)
                 or not isinstance(self.source_commit, str) or not HEX40.fullmatch(self.source_commit)):
             raise PlanError("FRESH_RELEASE_PIN_INVALID")

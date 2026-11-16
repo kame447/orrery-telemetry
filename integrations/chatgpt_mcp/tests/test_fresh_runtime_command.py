@@ -98,6 +98,16 @@ class RuntimeCommandTests(unittest.TestCase):
         self.assertNotIn("MCP_SERVER_URL", env)
         self.assertNotIn("private-url", str(command))
 
+    def test_isolated_dashboard_target_is_used_in_approved_runtime(self):
+        from dataclasses import replace
+        self.plan = replace(self.plan, dashboard_url="http://127.0.0.1:43219")
+        command = self.build()
+        self.assertEqual(
+            command.env()["ORRERY_MCP_DASHBOARD_URL"],
+            "http://127.0.0.1:43219",
+        )
+        self.assertNotIn("http://127.0.0.1:8770", str(command))
+
     def test_prepare_does_not_start_any_process(self):
         with patch.object(subprocess, "Popen", side_effect=AssertionError("started")), \
              patch.object(subprocess, "run", side_effect=AssertionError("started")):

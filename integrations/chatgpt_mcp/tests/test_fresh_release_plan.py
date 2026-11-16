@@ -57,6 +57,23 @@ class PlanTests(unittest.TestCase):
         for bad in [8790,8791,8770,18765,True,70000]:
             with self.assertRaises(PlanError):replace(self.plan,port=bad)
 
+    def test_dashboard_target_is_canonical_loopback_only(self):
+        from dataclasses import replace
+        self.assertEqual(self.plan.dashboard_url, "http://127.0.0.1:8770")
+        alternate = replace(self.plan, dashboard_url="http://127.0.0.1:43219")
+        self.assertTrue(self.check(alternate)["validated"])
+        for bad in (
+            "http://localhost:43219", "http://127.0.0.2:43219",
+            "https://127.0.0.1:43219", "http://127.0.0.1:043219",
+            "http://127.0.0.1:43219/", "http://127.0.0.1:43219/a",
+            "http://127.0.0.1:43219?x=y", "http://u@127.0.0.1:43219",
+            "http://127.0.0.1:8792", "http://127.0.0.1:80",
+            "http://127.0.0.1:65536", "", None, True,
+        ):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(PlanError, "DASHBOARD_TARGET_INVALID"):
+                    replace(self.plan, dashboard_url=bad)
+
     def test_invalid_authority_refused(self):
         from dataclasses import replace
         for v in [True,0]:

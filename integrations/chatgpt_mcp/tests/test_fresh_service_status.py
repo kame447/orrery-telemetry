@@ -25,6 +25,7 @@ class FakePlan:
     mail_instance_id: str
     sender_agent_id: int
     recipients: tuple
+    dashboard_url: str = "http://127.0.0.1:8770"
 
 
 class ServiceStatusTests(unittest.TestCase):
@@ -92,6 +93,17 @@ class ServiceStatusTests(unittest.TestCase):
         self.assertNotIn('X'*43,repr(result))
         self.assertEqual(self.live.call_args.kwargs['pairing_secret'],'X'*43)
         self.assertEqual(self.live.call_args.kwargs['expected'].recipients, self.plan.recipients)
+
+    def test_dashboard_change_is_rejected_before_pairing(self):
+        from dataclasses import replace
+        self.plan = replace(self.plan, dashboard_url="http://127.0.0.1:43219")
+        with self.assertRaisesRegex(StatusError, "LAUNCH_CONFIGURATION_MISMATCH"):
+            self.run_check()
+        self.pair.assert_not_called()
+        self.live.assert_not_called()
+        self.spec["EnvironmentVariables"]["ORRERY_MCP_DASHBOARD_URL"] = self.plan.dashboard_url
+        self._write()
+        assert self.run_check()["verified"] is True
 
     def test_read_only_does_not_modify_plist(self):
         before=self.plist.read_bytes()

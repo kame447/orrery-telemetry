@@ -11,6 +11,7 @@ from orrery_chatgpt_mcp.fresh_attested_start import FreshStartError
 class FixturePlan:
     label = "org.agentstack.chatgpt-mcp-fresh.fixture"
     port = 49152
+    dashboard_url = "http://127.0.0.1:49153"
 
 
 class StartTests(unittest.TestCase):
@@ -82,6 +83,13 @@ class StartTests(unittest.TestCase):
         with self.assertRaisesRegex(FreshStartError, "FIXTURE_ONLY"):
             self.launch()
         self.runner.assert_not_called()
+
+    def test_default_dashboard_refused_before_any_launchctl(self):
+        self.plan.dashboard_url = "http://127.0.0.1:8770"
+        with self.assertRaisesRegex(FreshStartError, "DASHBOARD_NOT_ISOLATED"):
+            self.launch()
+        self.runner.assert_not_called()
+        self.is_loaded.assert_not_called()
 
     def test_wrong_digest_blocks_mutation(self):
         with self.assertRaisesRegex(FreshStartError, "APPROVAL_MISMATCH"):

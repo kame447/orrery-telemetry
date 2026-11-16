@@ -77,6 +77,21 @@ class StageTests(unittest.TestCase):
         self.assertEqual(plistlib.loads(file.read_bytes())['Label'],self.plan.label)
         self.assertEqual(set(self.agents.iterdir()),{file})
 
+    def test_isolated_dashboard_endpoint_changes_plist_and_approval(self):
+        old = self.show()["approval_digest"]
+        alternate = replace(self.plan, dashboard_url="http://127.0.0.1:43219")
+        changed = self.show(alternate)
+        self.assertNotEqual(changed["approval_digest"], old)
+        with self.assertRaisesRegex(StageError, "APPROVAL_MISMATCH"):
+            self.apply(old, alternate)
+        self.apply(changed["approval_digest"], alternate)
+        spec = _read_plist(self.target())
+        self.assertEqual(
+            spec["EnvironmentVariables"]["ORRERY_MCP_DASHBOARD_URL"],
+            alternate.dashboard_url,
+        )
+        _match_plist(alternate, spec)
+
     def test_mismatched_digest_refuses_before_launchd_or_write(self):
         with self.assertRaisesRegex(StageError,'APPROVAL_MISMATCH'):
             self.apply('f'*64)
