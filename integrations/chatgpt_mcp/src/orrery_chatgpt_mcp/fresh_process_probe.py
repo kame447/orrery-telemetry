@@ -82,6 +82,16 @@ def _owns_connection(sock: socket.socket, port: int, pid: int, runner: Callable)
         return False
 
 
+def _unique_object(pairs: list[tuple[str, object]]) -> dict:
+    """Reject ambiguous JSON keys at every depth of an attestation response."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("ambiguous MCP response")
+        result[key] = value
+    return result
+
+
 def _request(conn: http.client.HTTPConnection, pinned_sock: socket.socket,
              secret: str, method: str, number: int, params=None) -> dict:
     body = {"jsonrpc": "2.0", "id": number, "method": method}
@@ -95,9 +105,10 @@ def _request(conn: http.client.HTTPConnection, pinned_sock: socket.socket,
     data = response.read(1024 * 1024 + 1)
     if response.status != 200 or len(data) > 1024 * 1024:
         raise ProbeError("MCP_PROTOCOL_UNVERIFIED")
-    payload = json.loads(data)
+    payload = json.loads(data, object_pairs_hook=_unique_object)
     if (not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0"
-            or payload.get("id") != number or not isinstance(payload.get("result"), dict)):
+            or type(payload.get("id")) is not int or payload["id"] != number
+            or not isinstance(payload.get("result"), dict)):
         raise ProbeError("MCP_PROTOCOL_UNVERIFIED")
     return payload["result"]
 

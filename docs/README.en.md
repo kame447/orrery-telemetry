@@ -33,6 +33,7 @@ Overview: the cockpit is the screen for operating terminals; Telemetry is the da
 
 - [Fresh migration, shutdown and recovery](fresh-global-update.en.md) — Explicit steps for a new empty instance. Private startup/shutdown from saved settings is covered. Ordinary updates do not switch it; real OS managers/Finder GUI, real providers/trust/installation, final CI and an attended cutover remain unaccepted. Reactivation and App foregrounding are outside this cutover scope.
 - [Read-only fresh send receipts](fresh-message-receipts.en.md) — Fork contract for authenticated sender-owned receipt lookup without replay; not_observed never authorizes resending.
+- [Unambiguous fresh MCP JSON-RPC attestation](mcp-fresh-unambiguous-rpc.en.md) — Stage 30 rejects duplicate JSON members and boolean RPC IDs during live authority verification.
 - [Post-RPC fresh MCP PID recheck](mcp-fresh-post-rpc-pid.en.md) — Stage 29 refuses changed or unverifiable LaunchAgent ownership after status RPC; does not guarantee future uptime.
 - [Live fresh MCP process verification](mcp-fresh-process-probe.en.md) — Fork verification component for the loaded LaunchAgent PID, listener and effective delegated grant; service integration remains pending.
 - [Pinned fresh MCP release preflight](mcp-fresh-release-preflight.en.md) — A fork-only read-only gate for a dedicated service, private policy and pinned release; no live service acceptance is implied.

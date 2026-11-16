@@ -44,7 +44,7 @@ def tools():
 
 @contextmanager
 def server(*, status_body=None, tool_list=None, close_after_initialize=False,
-           init_result=None, initialized_status=202):
+           init_result=None, initialized_status=202, wire_responses=None):
     observed = []
     current_status = status() if status_body is None else status_body
     current_tools = tools() if tool_list is None else tool_list
@@ -70,6 +70,8 @@ def server(*, status_body=None, tool_list=None, close_after_initialize=False,
             else:
                 result = {'isError': False, 'structuredContent': current_status}
             data = json.dumps({'jsonrpc': '2.0', 'id': packet['id'], 'result': result}).encode()
+            if wire_responses and packet['method'] in wire_responses:
+                data = wire_responses[packet['method']].encode()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             if close_after_initialize and packet['method'] == 'initialize':
@@ -286,6 +288,52 @@ class ProcessProbeTests(unittest.TestCase):
                              pairing_secret=SECRET, expected=AUTH, runner=fake)
             self.assertEqual([method for _, method in observed],
                              ['initialize', 'notifications/initialized'])
+
+    def test_boolean_response_id_cannot_impersonate_numeric_id(self):
+        # Python's True == 1 must not satisfy JSON-RPC's numeric request id.
+        result = {'serverInfo': {'name': 'orrery-chatgpt-mcp'},
+                  'protocolVersion': '2025-11-25', 'capabilities': {'tools': {}}}
+        wire = json.dumps({'jsonrpc': '2.0', 'id': True, 'result': result})
+        with server(wire_responses={'initialize': wire}) as (port, observed):
+            fake = runner()
+            fake.state['port'] = port
+            with self.assertRaisesRegex(module.ProbeError, 'MCP_STATUS_UNVERIFIED|MCP_PROTOCOL_UNVERIFIED'):
+                module.probe(label=LABEL, plist_path=PLIST, port=port,
+                             pairing_secret=SECRET, expected=AUTH, runner=fake)
+            self.assertEqual([method for _, method in observed], ['initialize'])
+
+    def test_duplicate_jsonrpc_id_is_rejected_even_when_values_match(self):
+        # Duplicate JSON object members are ambiguous across clients.
+        result = {'serverInfo': {'name': 'orrery-chatgpt-mcp'},
+                  'protocolVersion': '2025-11-25', 'capabilities': {'tools': {}}}
+        wire = ('{"jsonrpc":"2.0","id":1,"id":1,"result":'
+                + json.dumps(result) + '}')
+        with server(wire_responses={'initialize': wire}) as (port, observed):
+            fake = runner()
+            fake.state['port'] = port
+            with self.assertRaisesRegex(module.ProbeError, 'MCP_STATUS_UNVERIFIED|MCP_PROTOCOL_UNVERIFIED'):
+                module.probe(label=LABEL, plist_path=PLIST, port=port,
+                             pairing_secret=SECRET, expected=AUTH, runner=fake)
+            self.assertEqual([method for _, method in observed], ['initialize'])
+
+    def test_duplicate_nested_authority_member_is_rejected(self):
+        # The apparently valid last value must not hide an earlier grant.
+        status_json = json.dumps(status())
+        assert '"runtime_mode": "fresh"' in status_json
+        status_json = status_json.replace(
+            '"runtime_mode": "fresh"',
+            '"runtime_mode": "legacy", "runtime_mode": "fresh"',
+        )
+        wire = ('{"jsonrpc":"2.0","id":3,"result":{"isError":false,'
+                '"structuredContent":' + status_json + '}}')
+        with server(wire_responses={'tools/call': wire}) as (port, observed):
+            fake = runner()
+            fake.state['port'] = port
+            with self.assertRaisesRegex(module.ProbeError, 'MCP_STATUS_UNVERIFIED|MCP_PROTOCOL_UNVERIFIED'):
+                module.probe(label=LABEL, plist_path=PLIST, port=port,
+                             pairing_secret=SECRET, expected=AUTH, runner=fake)
+            self.assertEqual([method for _, method in observed],
+                             ['initialize', 'notifications/initialized', 'tools/list', 'tools/call'])
 
     def test_bool_sender_rejected(self):
         broken = status()
