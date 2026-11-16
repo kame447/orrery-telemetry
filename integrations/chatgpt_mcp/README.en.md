@@ -1,5 +1,7 @@
 # Optional ORRERY MCP adapter (read only)
 
+For pinned-release acceptance in a real Mac LaunchAgent, see the [isolated E2E guide](../../docs/mcp-fresh-pinned-launchd-sdk-e2e.en.md). Pairing credentials are sent only after PID and socket ownership verification. This is not a production deployment.
+
 The [isolated CI venv](../../docs/mcp-fresh-ci-venv.en.md) keeps test parent and child dependencies in the same interpreter; it does not change production.
 
 For third-party dependency pinning, see [operator-approved bundle manifests and verification limits](DEPENDENCY_BUNDLE.en.md). This is an offline preflight, not service launch or supply-chain provenance.

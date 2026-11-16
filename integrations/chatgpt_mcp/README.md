@@ -1,5 +1,7 @@
 # ORRERY ChatGPT MCP（読み取り専用・任意導入）
 
+固定releaseを実Mac LaunchAgentで起動する検証は[隔離受入手順](../../docs/mcp-fresh-pinned-launchd-sdk-e2e.md)を参照してください。接続所有者の照合後にのみpairing secretを送ります。本番や実agentへの導入ではありません。
+
 Mac CIの依存import元の分離は[CI用の専用venv](../../docs/mcp-fresh-ci-venv.md)に記載します。テスト用のPythonのみを変更します。
 
 第三者Python依存の固定チェックについては[承認manifestと検証範囲](DEPENDENCY_BUNDLE.md)を参照してください。これは起動前の読取り専用部品であり、本番起動や第三者配布元の真正性を証明しません。

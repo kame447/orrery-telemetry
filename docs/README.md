@@ -39,6 +39,7 @@ Telemetry 自体の操作は、header の `HELP MAP`（NETWORK では `SETTINGS`
 - [fresh MCPのLaunchAgent設定を安全に準備](mcp-fresh-service-staging.md) — 本人が確認した固定設定を新規plistとして一度だけ保存。サービス起動と既存環境の変更は行いません。
 - [fresh MCPの固定コード・依存import検査](mcp-fresh-import-attestation.md) — 常駐起動前に読取り専用Mail配布物とgatewayを実Pythonで照合するfork段階8。第三者依存は未固定、サービスは起動しません。
 - [fresh MCPの検証済みLaunchAgent非起動設定](mcp-fresh-attested-stage.md) — 固定gateway・Mail・依存importを同じPython内で検証してからserveする実行引数を承認digestに固定し、安全にplistを新規作成します。起動はしません。
+- [Mac実LaunchAgentでの固定release MCP受入](mcp-fresh-pinned-launchd-sdk-e2e.md) — 段階26。固定source/依存を実LaunchAgentで実行し、PID/接続所有者・SDK・Mail受理・安全な解除を確認。実agent処理やTunnelは未検証。
 - [固定releaseのfresh MCP実SDK受入](mcp-fresh-fixed-release-sdk-e2e.md) — 段階25。固定source/第三者依存を同一プロセスで照合した実MCPへSDK接続し、Mail受理と改変拒否を隔離確認。launchd本番切替・Tunnel/実agent処理開始は対象外。
 - [fresh MCPの隔離Dashboard接続先](mcp-fresh-dashboard-loopback.md) — 専用loopback Dashboardをplan/固定release起動/承認digestで一致させ、本番Dashboardへの誤接続を防ぐ段階24。実接続受入ではありません。
 - [fresh MCPのCI用Pythonを隔離](mcp-fresh-ci-venv.md) — Mac CIで親・隔離子の依存解決を同じvenvに固定し、実import元を検査。固定releaseや本番受入ではありません。
