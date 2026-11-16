@@ -157,6 +157,9 @@ def validate_effective_status(status: dict, tools: list, expected: Authority) ->
             and set(names) == READ_TOOLS | MESSAGE_TOOLS
             and status["dashboard"]["runtime_mode"] == "fresh"
             and status["dashboard"]["mail_instance_id"] == expected.mail_instance_id
+            and all(type(status["adapter"][flag]) is bool for flag in (
+                "read_only", "spawn_enabled_on_server", "message_enabled_on_server",
+            ))
             and status["adapter"] == {
                 "read_only": False, "spawn_enabled_on_server": False,
                 "message_enabled_on_server": True,

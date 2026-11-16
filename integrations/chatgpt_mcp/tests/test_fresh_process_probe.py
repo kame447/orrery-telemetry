@@ -254,6 +254,18 @@ class ProcessProbeTests(unittest.TestCase):
         broken['adapter']['read_only'] = True
         self.call(status_body=broken)
 
+    def test_numeric_adapter_flags_never_count_as_boolean_authority(self):
+        for numeric_type in (int, float):
+            for field, number in (
+                ('read_only', 0),
+                ('spawn_enabled_on_server', 0),
+                ('message_enabled_on_server', 1),
+            ):
+                with self.subTest(field=field, numeric_type=numeric_type.__name__):
+                    broken = status()
+                    broken['adapter'][field] = numeric_type(number)
+                    self.call(status_body=broken)
+
     def test_wrong_recovery_contract_fails(self):
         broken = status()
         broken['message_authority']['unknown_recovery'] = 'replay_automatically'
