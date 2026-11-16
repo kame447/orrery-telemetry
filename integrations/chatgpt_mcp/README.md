@@ -1,5 +1,7 @@
 # ORRERY ChatGPT MCP（読み取り専用・任意導入）
 
+Mac CIの依存import元の分離は[CI用の専用venv](../../docs/mcp-fresh-ci-venv.md)に記載します。テスト用のPythonのみを変更します。
+
 第三者Python依存の固定チェックについては[承認manifestと検証範囲](DEPENDENCY_BUNDLE.md)を参照してください。これは起動前の読取り専用部品であり、本番起動や第三者配布元の真正性を証明しません。
 
 第2段階のfresh送信は、既存fork gatewayと読み取り専用入口を維持した独立opt-inです。[fresh追加指示の設計・制限・手動検証](FRESH_MESSAGES.md)を参照してください。

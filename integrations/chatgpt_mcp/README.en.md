@@ -1,5 +1,7 @@
 # Optional ORRERY MCP adapter (read only)
 
+The [isolated CI venv](../../docs/mcp-fresh-ci-venv.en.md) keeps test parent and child dependencies in the same interpreter; it does not change production.
+
 For third-party dependency pinning, see [operator-approved bundle manifests and verification limits](DEPENDENCY_BUNDLE.en.md). This is an offline preflight, not service launch or supply-chain provenance.
 
 Phase-two fresh sends coexist with the existing fork gateway and read-only entrypoint as a separate opt-in. See [fresh instruction authority, limits and manual verification](FRESH_MESSAGES.en.md).

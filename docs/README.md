@@ -39,6 +39,7 @@ Telemetry 自体の操作は、header の `HELP MAP`（NETWORK では `SETTINGS`
 - [fresh MCPのLaunchAgent設定を安全に準備](mcp-fresh-service-staging.md) — 本人が確認した固定設定を新規plistとして一度だけ保存。サービス起動と既存環境の変更は行いません。
 - [fresh MCPの固定コード・依存import検査](mcp-fresh-import-attestation.md) — 常駐起動前に読取り専用Mail配布物とgatewayを実Pythonで照合するfork段階8。第三者依存は未固定、サービスは起動しません。
 - [fresh MCPの検証済みLaunchAgent非起動設定](mcp-fresh-attested-stage.md) — 固定gateway・Mail・依存importを同じPython内で検証してからserveする実行引数を承認digestに固定し、安全にplistを新規作成します。起動はしません。
+- [fresh MCPのCI用Pythonを隔離](mcp-fresh-ci-venv.md) — Mac CIで親・隔離子の依存解決を同じvenvに固定し、実import元を検査。固定releaseや本番受入ではありません。
 - [fresh MCP検証済みplistの実稼働照合](mcp-fresh-attested-status.md) — plistの全バイトと稼働PID・有効なMCP権限を読み取り専用で照合する段階12。プロセス起動や配送の実証は対象外。
 - [隔離fresh MCPの明示承認付き起動](mcp-fresh-attested-start.md) — 専用fixtureに限りbootstrap/kickstartし、実PID・権限を照合する段階13。Mac実接続と停止・復旧は未実証。
 - [隔離fresh MCPの明示承認付き停止](mcp-fresh-attested-stop.md) — 実PIDとplistの確認・停止専用承認digestを伴う段階14。Mac実停止と復旧は未実証。
