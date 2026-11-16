@@ -92,6 +92,11 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict:
     return result
 
 
+def _invalid_json_constant(_value: str) -> None:
+    """JSON-RPC responses must not contain Python's nonstandard NaN/Infinity."""
+    raise ValueError("invalid JSON constant")
+
+
 def _request(conn: http.client.HTTPConnection, pinned_sock: socket.socket,
              secret: str, method: str, number: int, params=None) -> dict:
     body = {"jsonrpc": "2.0", "id": number, "method": method}
@@ -103,9 +108,11 @@ def _request(conn: http.client.HTTPConnection, pinned_sock: socket.socket,
                  headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"})
     response = conn.getresponse()
     data = response.read(1024 * 1024 + 1)
-    if response.status != 200 or len(data) > 1024 * 1024:
+    media_type = response.getheader("Content-Type", "").split(";", 1)[0].strip().lower()
+    if response.status != 200 or len(data) > 1024 * 1024 or media_type != "application/json":
         raise ProbeError("MCP_PROTOCOL_UNVERIFIED")
-    payload = json.loads(data, object_pairs_hook=_unique_object)
+    payload = json.loads(data, object_pairs_hook=_unique_object,
+                         parse_constant=_invalid_json_constant)
     if (not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0"
             or "error" in payload
             or type(payload.get("id")) is not int or payload["id"] != number

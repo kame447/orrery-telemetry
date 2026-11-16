@@ -44,7 +44,8 @@ def tools():
 
 @contextmanager
 def server(*, status_body=None, tool_list=None, close_after_initialize=False,
-           init_result=None, initialized_status=202, wire_responses=None):
+           init_result=None, initialized_status=202, wire_responses=None,
+           content_types=None):
     observed = []
     current_status = status() if status_body is None else status_body
     current_tools = tools() if tool_list is None else tool_list
@@ -73,7 +74,7 @@ def server(*, status_body=None, tool_list=None, close_after_initialize=False,
             if wire_responses and packet['method'] in wire_responses:
                 data = wire_responses[packet['method']].encode()
             self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Type', (content_types or {}).get(packet['method'], 'application/json'))
             if close_after_initialize and packet['method'] == 'initialize':
                 self.send_header('Connection', 'close')
                 self.close_connection = True
@@ -332,6 +333,51 @@ class ProcessProbeTests(unittest.TestCase):
                         module.probe(label=LABEL, plist_path=PLIST, port=port,
                                      pairing_secret=SECRET, expected=AUTH, runner=fake)
                     self.assertEqual([value for _, value in observed], sequence[:sequence.index(method) + 1])
+
+    def test_json_content_type_with_utf8_parameter_is_accepted(self):
+        headers = {method: 'application/json; charset=utf-8'
+                   for method in ('initialize', 'tools/list', 'tools/call')}
+        with server(content_types=headers) as (port, observed):
+            fake = runner()
+            fake.state['port'] = port
+            result = module.probe(label=LABEL, plist_path=PLIST, port=port,
+                                  pairing_secret=SECRET, expected=AUTH, runner=fake)
+            self.assertTrue(result['verified'])
+            self.assertEqual(len(observed), 4)
+
+    def test_non_json_content_type_refuses_at_each_rpc_step(self):
+        sequence = ['initialize', 'notifications/initialized', 'tools/list', 'tools/call']
+        for method in ('initialize', 'tools/list', 'tools/call'):
+            with self.subTest(method=method):
+                with server(content_types={method: 'text/plain'}) as (port, observed):
+                    fake = runner()
+                    fake.state['port'] = port
+                    with self.assertRaises(module.ProbeError):
+                        module.probe(label=LABEL, plist_path=PLIST, port=port,
+                                     pairing_secret=SECRET, expected=AUTH, runner=fake)
+                    self.assertEqual([name for _, name in observed], sequence[:sequence.index(method) + 1])
+
+    def test_nonfinite_json_literals_refuse_at_each_rpc_step(self):
+        results = {
+            'initialize': {'serverInfo': {'name': 'orrery-chatgpt-mcp'},
+                           'protocolVersion': '2025-11-25', 'capabilities': {'tools': {}}},
+            'tools/list': {'tools': tools()},
+            'tools/call': {'isError': False, 'structuredContent': status()},
+        }
+        sequence = ['initialize', 'notifications/initialized', 'tools/list', 'tools/call']
+        for method, original_result in results.items():
+            for constant in (float('nan'), float('inf'), -float('inf')):
+                with self.subTest(method=method, constant=str(constant)):
+                    rpc_id = {'initialize': 1, 'tools/list': 2, 'tools/call': 3}[method]
+                    result = {**original_result, 'unexpected': constant}
+                    wire = json.dumps({'jsonrpc': '2.0', 'id': rpc_id, 'result': result})
+                    with server(wire_responses={method: wire}) as (port, observed):
+                        fake = runner()
+                        fake.state['port'] = port
+                        with self.assertRaises(module.ProbeError):
+                            module.probe(label=LABEL, plist_path=PLIST, port=port,
+                                         pairing_secret=SECRET, expected=AUTH, runner=fake)
+                        self.assertEqual([name for _, name in observed], sequence[:sequence.index(method) + 1])
 
     def test_duplicate_jsonrpc_id_is_rejected_even_when_values_match(self):
         # Duplicate JSON object members are ambiguous across clients.
