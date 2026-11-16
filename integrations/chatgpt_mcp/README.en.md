@@ -138,3 +138,4 @@ Phase 12 adds [read-only live PID and MCP authority checks](../../docs/mcp-fresh
 
 Stage 13 adds an [operator-only isolated fixture start](../../docs/mcp-fresh-attested-start.en.md), still pending live Mac verification. Stage 14 adds an [operator-only fixture stop](../../docs/mcp-fresh-attested-stop.en.md) bound to a live PID and explicit approval; real macOS stop and recovery have not been accepted.
 Stage 15 adds [read-only observation of uncertain fixture operations](../../docs/mcp-fresh-fixture-recovery.en.md). It never retries launchctl or messages and has not passed real Mac recovery acceptance.
+Stage 18 adds an [opt-in real macOS launchd fixture smoke](../../docs/mcp-fresh-launchd-smoke.en.md); it does not validate a live fresh MCP process or mail delivery.
