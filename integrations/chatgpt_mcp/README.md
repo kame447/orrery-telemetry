@@ -139,3 +139,4 @@ ORRERY_MCP_TEST_TUNNEL_CLIENT="$(command -v tunnel-client)" \
 段階13では[隔離fixture専用の明示承認付き起動](../../docs/mcp-fresh-attested-start.md)を追加しました。Mac実機での起動受入は未実施です。段階14の[停止専用の承認付きAPI](../../docs/mcp-fresh-attested-stop.md)は起動中の専用fixtureだけを対象とし、実Macでの停止・復旧はまだ実証していません。
 段階15では[不明結果の読み取り専用観測](../../docs/mcp-fresh-fixture-recovery.md)を追加しました。起動・停止の自動再試行は行いません。Mac実機の復旧と配送は未検証です。
 段階18では[Mac実launchdの隔離fixtureスモーク](../../docs/mcp-fresh-launchd-smoke.md)を追加しました。実行は明示opt-in、実fresh MCP/送受信の検証は別です。
+段階19では[隔離fresh MCP別プロセスと実SDK/Mail受入](../../docs/mcp-fresh-process-sdk-mail-e2e.md)を追加しました。固定releaseや実Tunnel/agent受信は未検証です。

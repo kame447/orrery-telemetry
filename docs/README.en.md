@@ -107,3 +107,4 @@ Documents without a translation are labelled with their original language. Image
 
 - [Native context and helper models](native-capabilities.md) — dsh / Hermes context observations and per-model capabilities.
 - [Native catalog and effort capabilities](managed-catalog.en.md)
+- [Isolated fresh MCP subprocess, SDK and Mail acceptance](mcp-fresh-process-sdk-mail-e2e.en.md) — Real HTTP acceptance with fictitious agents.
