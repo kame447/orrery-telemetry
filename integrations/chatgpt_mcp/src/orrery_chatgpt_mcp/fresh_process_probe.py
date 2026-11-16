@@ -199,7 +199,12 @@ def probe(*, label: str, plist_path: str, port: int, pairing_secret: str,
                           {"name": "orrery_status", "arguments": {}})
         if status.get("isError") is not False:
             raise ProbeError("MCP_STATUS_UNVERIFIED")
-        return {"pid": pid, **validate_effective_status(status["structuredContent"], tools, expected)}
+        effective = validate_effective_status(status["structuredContent"], tools, expected)
+        # A verified socket is not proof that launchd still owns the same PID
+        # after the RPC sequence. Reject a changed or vanished service.
+        if job_pid(label, plist_path, runner=runner) != pid:
+            raise ProbeError("SERVICE_PROCESS_CHANGED")
+        return {"pid": pid, **effective}
     except (OSError, ValueError, TypeError, KeyError, AttributeError, json.JSONDecodeError,
             http.client.HTTPException, subprocess.TimeoutExpired, TimeoutError):
         raise ProbeError("MCP_STATUS_UNVERIFIED") from None

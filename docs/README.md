@@ -33,6 +33,7 @@ Telemetry 自体の操作は、header の `HELP MAP`（NETWORK では `SETTINGS`
 
 - [fresh移行・停止復旧](fresh-global-update.md) — 新しい空instanceを使う明示手順。通常設定からの私有起動・停止は確認済み。通常updateでは切り替わらず、実OS manager/Finder GUI・実provider/trust/導入・最終CIと本人在席の切替は未受入。復帰・App前面化は今回の対象外。
 - [fresh送信受付の読取り照合](fresh-message-receipts.md) — 本人の受付記録を再送せず照合するfork契約。未観測を再送許可にしません。
+- [fresh MCP応答後のPID再照合](mcp-fresh-post-rpc-pid.md) — 段階29。最終RPC後のPID変化・判定不能を成功と誤認しない。観測時点の検証であり継続稼働の保証ではない。
 - [fresh MCPの実プロセス照合](mcp-fresh-process-probe.md) — 現在のLaunchAgent PID、接続先、送信権限を照合するforkの検証部品。常駐化やMac本番受入は未完了。
 - [fresh MCP固定releaseの事前検査](mcp-fresh-release-preflight.md) — 専用service ID・権限・private policy・固定digestを起動前に検査するfork部品。実起動や本番受入は対象外。
 - [fresh MCP実プロセス・設定の照合](mcp-fresh-live-service-status.md) — 固定plist・releaseと稼働PID・実効送信権限を照合するfork段階6。常駐化とMac受入は未実施。

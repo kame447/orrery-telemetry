@@ -170,6 +170,45 @@ class ProcessProbeTests(unittest.TestCase):
     def test_launchd_pid_changed_does_not_receive_secret(self):
         self.call(changed_after=4322)
 
+    def test_pid_changed_after_rpc_cannot_be_reported_live(self):
+        with server() as (port, observed):
+            stable = runner()
+            stable.state['port'] = port
+
+            def changed_after_status(argv, **kwargs):
+                if argv[0] == 'launchctl' and stable.state['launchctl'] == 2:
+                    return subprocess.CompletedProcess(
+                        argv, 0,
+                        f'gui/501/{LABEL} = {{\n\tpath = {PLIST}\n\tpid = 4322\n}}\n', '',
+                    )
+                return stable(argv, **kwargs)
+
+            with self.assertRaisesRegex(module.ProbeError, 'SERVICE_PROCESS_CHANGED'):
+                module.probe(label=LABEL, plist_path=PLIST, port=port,
+                             pairing_secret=SECRET, expected=AUTH,
+                             runner=changed_after_status)
+            self.assertEqual(stable.state['launchctl'], 2)
+            self.assertEqual([method for _, method in observed],
+                             ['initialize', 'notifications/initialized', 'tools/list', 'tools/call'])
+
+    def test_launchctl_unavailable_after_rpc_cannot_be_reported_live(self):
+        with server() as (port, observed):
+            stable = runner()
+            stable.state['port'] = port
+
+            def unavailable_after_status(argv, **kwargs):
+                if argv[0] == 'launchctl' and stable.state['launchctl'] == 2:
+                    raise subprocess.TimeoutExpired(argv, 10)
+                return stable(argv, **kwargs)
+
+            with self.assertRaisesRegex(module.ProbeError, 'SERVICE_PROCESS_UNVERIFIED'):
+                module.probe(label=LABEL, plist_path=PLIST, port=port,
+                             pairing_secret=SECRET, expected=AUTH,
+                             runner=unavailable_after_status)
+            self.assertEqual(stable.state['launchctl'], 2)
+            self.assertEqual([method for _, method in observed],
+                             ['initialize', 'notifications/initialized', 'tools/list', 'tools/call'])
+
     def test_saved_grant_more_permissive_than_expected_fails(self):
         broken = status()
         broken['message_authority']['recipients'].append(
