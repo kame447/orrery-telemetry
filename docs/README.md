@@ -109,3 +109,4 @@ Telemetry 自体の操作は、header の `HELP MAP`（NETWORK では `SETTINGS`
 - [Native catalog and effort capabilities](managed-catalog.md)
 - [隔離fresh MCPの実プロセス・SDK・Mail受入](mcp-fresh-process-sdk-mail-e2e.md) — 独立Pythonと架空agentの実HTTP受入。
 - [Mac実LaunchAgentでのfresh MCP・SDK・Mail受入](mcp-fresh-launchd-sdk-e2e.md) — 段階20。隔離fixtureで実サービスのPID・SDK通信・Mail受理・停止を検証。
+- [Mac実LaunchAgent再起動後のfresh受付記録と冪等性](mcp-fresh-launchd-restart-receipt.md) — 段階21。専用fixtureの正常停止・再起動後もSDKでreceiptと再送防止を検証。

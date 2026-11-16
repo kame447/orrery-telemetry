@@ -108,6 +108,7 @@ def test_fresh_mcp_real_launchagent_sdk_mail_and_teardown(live, tmp_path: Path):
 
         attempted = False
         old_pid = None
+        observed_pids: set[int] = set()
         try:
             attempted = True
             boot = _launchctl("bootstrap", domain, str(plist))
@@ -137,6 +138,7 @@ def test_fresh_mcp_real_launchagent_sdk_mail_and_teardown(live, tmp_path: Path):
                 pytest.fail("fresh LaunchAgent did not listen with an attested PID")
 
             assert old_pid is not None and _exists(old_pid) is True
+            observed_pids.add(old_pid)
 
             async def check():
                 async with Client(url) as client:
@@ -168,12 +170,73 @@ def test_fresh_mcp_real_launchagent_sdk_mail_and_teardown(live, tmp_path: Path):
                     )).data == accepted
                     assert (await client.call_tool(
                         "orrery_message_commit", request)).data == accepted
+                    return request, accepted
 
-            asyncio.run(check())
+            request, accepted = asyncio.run(check())
             confirmed = _launchctl("print", target)
             assert confirmed.returncode == 0
             assert _pid(confirmed.stdout) == old_pid
             assert f"path = {plist.resolve()}" in confirmed.stdout
+
+            # First remove the exact fixture job, then verify its old PID is gone.
+            # Do not restart when the outcome of bootout is uncertain.
+            first_stop = _launchctl("bootout", target)
+            assert first_stop.returncode == 0
+            attempted = False
+            assert _launchctl("print", target).returncode != 0
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and _exists(old_pid) is True:
+                time.sleep(0.1)
+            assert _exists(old_pid) is False, "original fresh MCP PID survived bootout"
+
+            # One restart only, reusing the same fixture plist, state and Mail DB.
+            # Never restart a production job or retry an unknown bootstrap.
+            attempted = True
+            assert _launchctl("bootstrap", domain, str(plist)).returncode == 0
+            registration = _launchctl("print", target)
+            assert registration.returncode == 0
+            assert f"path = {plist.resolve()}" in registration.stdout
+            assert "state = not running" in registration.stdout
+            assert _launchctl("kickstart", target).returncode == 0
+
+            new_pid = None
+            deadline = time.monotonic() + 25
+            while time.monotonic() < deadline:
+                observed = _launchctl("print", target)
+                if observed.returncode == 0 and _pid(observed.stdout):
+                    new_pid = _pid(observed.stdout)
+                    observed_pids.add(new_pid)
+                    assert f"path = {plist.resolve()}" in observed.stdout
+                    assert "state = running" in observed.stdout
+                    try:
+                        with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                            break
+                    except OSError:
+                        pass
+                time.sleep(0.1)
+            else:
+                pytest.fail("restarted fresh LaunchAgent did not listen")
+            assert new_pid is not None and new_pid != old_pid
+            assert _exists(old_pid) is False
+            assert _exists(new_pid) is True
+
+            async def check_after_restart():
+                async with Client(url) as client:
+                    status = (await client.call_tool("orrery_status", {})).data
+                    assert status["dashboard"]["mail_instance_id"] == live.instance
+                    assert status["adapter"]["message_enabled_on_server"] is True
+                    saved = (await client.call_tool(
+                        "orrery_message_status",
+                        {"idempotency_key": live.args["idempotency_key"]},
+                    )).data
+                    assert saved == accepted
+                    assert saved["execution_status"] == "unobserved"
+                    assert (await client.call_tool(
+                        "orrery_message_commit", request,
+                    )).data == accepted
+
+            asyncio.run(check_after_restart())
+            assert len(stored(live)[0]) == 1, "restart replayed a Mail message"
         finally:
             # If bootstrap timed out, its outcome may be unknown: do not repeat.
             # One exact-label teardown is required before declaring this fixture safe.
@@ -181,11 +244,11 @@ def test_fresh_mcp_real_launchagent_sdk_mail_and_teardown(live, tmp_path: Path):
                 stopped = _launchctl("bootout", target)
                 assert stopped.returncode == 0, "fixture cleanup uncertain: bootout failed"
             assert _launchctl("print", target).returncode != 0
-            if old_pid is not None:
+            for pid in observed_pids:
                 deadline = time.monotonic() + 10
-                while time.monotonic() < deadline and _exists(old_pid) is True:
+                while time.monotonic() < deadline and _exists(pid) is True:
                     time.sleep(0.1)
-                assert _exists(old_pid) is False, "fresh fixture PID still exists or is unknown"
+                assert _exists(pid) is False, "fresh fixture PID still exists or is unknown"
             output = log.read_text()
             assert secret not in output
             assert live.args["body_md"] not in output

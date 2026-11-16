@@ -141,3 +141,4 @@ ORRERY_MCP_TEST_TUNNEL_CLIENT="$(command -v tunnel-client)" \
 段階18では[Mac実launchdの隔離fixtureスモーク](../../docs/mcp-fresh-launchd-smoke.md)を追加しました。実行は明示opt-in、実fresh MCP/送受信の検証は別です。
 段階19では[隔離fresh MCP別プロセスと実SDK/Mail受入](../../docs/mcp-fresh-process-sdk-mail-e2e.md)を追加しました。固定releaseや実Tunnel/agent受信は未検証です。
 段階20では[Mac実LaunchAgentのfresh MCP・SDK・Mail受入](../../docs/mcp-fresh-launchd-sdk-e2e.md)を追加しました。fixtureの実起動・停止とMail受理を検証しますが、本番常駐化・Tunnel・agent受信は未検証です。
+段階21では[専用LaunchAgent再起動後のreceiptと冪等性](../../docs/mcp-fresh-launchd-restart-receipt.md)を実Macで検証します。異常終了からの復旧、本番Tunnel・agent受信は未検証です。

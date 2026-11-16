@@ -109,3 +109,4 @@ Documents without a translation are labelled with their original language. Image
 - [Native catalog and effort capabilities](managed-catalog.en.md)
 - [Isolated fresh MCP subprocess, SDK and Mail acceptance](mcp-fresh-process-sdk-mail-e2e.en.md) — Real HTTP acceptance with fictitious agents.
 - [Real macOS LaunchAgent with isolated fresh MCP SDK/Mail](mcp-fresh-launchd-sdk-e2e.en.md) — Stage 20 opt-in PID, SDK, Mail acceptance, and cleanup test.
+- [Durable receipt after isolated real LaunchAgent restart](mcp-fresh-launchd-restart-receipt.en.md) — Stage 21 orderly stop/restart, SDK receipt persistence and no replay.
