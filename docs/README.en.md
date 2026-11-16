@@ -39,6 +39,7 @@ Overview: the cockpit is the screen for operating terminals; Telemetry is the da
 - [Stage a dedicated fresh MCP LaunchAgent plist](mcp-fresh-service-staging.en.md) — Create one approved inactive service configuration without activating or replacing any running service.
 - [Offline fresh MCP import attestation](mcp-fresh-import-attestation.en.md) — Fork stage 8 checks pinned first-party imports with real Python; third-party dependencies remain unpinned and no service is started.
 - [Stage an attested fresh MCP LaunchAgent without starting it](mcp-fresh-attested-stage.en.md) — Bind pinned in-process verification to an approved, non-overwriting inactive plist; no launchctl activation.
+- [Pinned-release fresh MCP SDK E2E](mcp-fresh-fixed-release-sdk-e2e.en.md) — Stage 25 exercises fixed gateway/dependency verification in the serving process, real SDK and private Mail plus tamper refusal; no production launchd/Tunnel or agent processing.
 - [Isolated Dashboard target for fresh MCP](mcp-fresh-dashboard-loopback.en.md) — Stage 24 pins a dedicated loopback Dashboard URL across the runtime, plist and approval digest; live acceptance remains pending.
 - [Isolated Python for fresh MCP CI](mcp-fresh-ci-venv.en.md) — Use a per-job venv and verify import origins for parent and isolated child processes; not release pinning or production acceptance.
 - [Read-only status of the attested fresh MCP process](mcp-fresh-attested-status.en.md) — Verify staged bytes, loaded PID, and effective MCP authority; it does not start or deliver messages.
