@@ -133,7 +133,7 @@ def test_startup_diagnostics_redact_private_log(tmp_path):
     body = "never-include-private-mail-body"
     log_path = tmp_path / "startup.log"
     log_path.write_text(
-        f"{secret}\\n{body}\\nstartup refused\\n",
+        f"{secret}\n{body}\nstartup refused\n",
         encoding="utf-8",
     )
 
