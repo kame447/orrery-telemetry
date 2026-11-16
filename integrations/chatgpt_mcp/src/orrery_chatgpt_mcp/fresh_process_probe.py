@@ -53,7 +53,7 @@ def job_pid(label: str, plist_path: str, *, runner: Callable = subprocess.run) -
             or not os.path.isabs(plist_path)):
         raise ProbeError("INVALID_SERVICE_IDENTITY")
     try:
-        done = runner(["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+        done = runner(["/bin/launchctl", "print", f"gui/{os.getuid()}/{label}"],
                       capture_output=True, text=True, timeout=10)
         if done.returncode != 0:
             raise ValueError

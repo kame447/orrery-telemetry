@@ -33,6 +33,7 @@ Telemetry 自体の操作は、header の `HELP MAP`（NETWORK では `SETTINGS`
 
 - [fresh移行・停止復旧](fresh-global-update.md) — 新しい空instanceを使う明示手順。通常設定からの私有起動・停止は確認済み。通常updateでは切り替わらず、実OS manager/Finder GUI・実provider/trust/導入・最終CIと本人在席の切替は未受入。復帰・App前面化は今回の対象外。
 - [fresh送信受付の読取り照合](fresh-message-receipts.md) — 本人の受付記録を再送せず照合するfork契約。未観測を再送許可にしません。
+- [fresh MCPプロセス証明でシステムlaunchctlを固定](mcp-fresh-system-launchctl.md) — 段階35。PATH上の同名実行ファイルによるPID・plist偽装を避ける。
 - [fresh MCP固定releaseで隔離受信者のread/ack確認](mcp-fresh-pinned-recipient-observation.md) — 段階34。認証済み試験用受信者による正規Mail受信とread/ackを確認し、実agent処理とは区別する。
 - [fresh MCP応答のメディア種別・非有限JSON値の検証](mcp-fresh-json-media-attestation.md) — 段階33。実プロセス応答をJSONとして厳密に検証する。
 - [fresh MCPの矛盾したJSON-RPC成功/失敗応答の拒否](mcp-fresh-rpc-envelope.md) — 段階32。success resultとerrorが共存する応答を実プロセス検証で受理しない。

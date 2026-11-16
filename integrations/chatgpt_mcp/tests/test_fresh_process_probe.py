@@ -99,7 +99,7 @@ def runner(*, owns=True, plist=PLIST, pid=4321, changed_after=None):
     state = {'launchctl': 0}
 
     def fake(argv, **kwargs):
-        if argv[0] == 'launchctl':
+        if argv[0] == '/bin/launchctl':
             state['launchctl'] += 1
             actual_pid = changed_after if changed_after and state['launchctl'] > 1 else pid
             stdout = f'gui/501/{LABEL} = {{\n\tpath = {plist}\n\tpid = {actual_pid}\n}}\n'
@@ -135,6 +135,21 @@ class ProcessProbeTests(unittest.TestCase):
             if not owns or plist != PLIST or changed_after:
                 self.assertEqual(observed, [])
 
+    def test_launchctl_lookup_uses_absolute_system_binary(self):
+        recorded = []
+
+        def capture(argv, **kwargs):
+            recorded.append(list(argv))
+            return subprocess.CompletedProcess(
+                argv, 0,
+                f'gui/501/{LABEL} = {{\n\tpath = {PLIST}\n\tpid = 4321\n}}\n', '',
+            )
+
+        self.assertEqual(module.job_pid(LABEL, PLIST, runner=capture), 4321)
+        self.assertEqual(recorded, [
+            ['/bin/launchctl', 'print', f'gui/{module.os.getuid()}/{LABEL}'],
+        ])
+
     def test_genuine_pid_and_effective_status(self):
         self.call()
 
@@ -147,7 +162,7 @@ class ProcessProbeTests(unittest.TestCase):
     def test_launchctl_timeout_refuses_before_disclosing_secret(self):
         with server() as (port, observed):
             def timeout(argv, **kwargs):
-                if argv[0] == 'launchctl':
+                if argv[0] == '/bin/launchctl':
                     raise subprocess.TimeoutExpired(argv, 10)
                 raise AssertionError('lsof must not run after a launchctl timeout')
             with self.assertRaises(module.ProbeError) as result:
@@ -179,7 +194,7 @@ class ProcessProbeTests(unittest.TestCase):
             stable.state['port'] = port
 
             def changed_after_status(argv, **kwargs):
-                if argv[0] == 'launchctl' and stable.state['launchctl'] == 2:
+                if argv[0] == '/bin/launchctl' and stable.state['launchctl'] == 2:
                     return subprocess.CompletedProcess(
                         argv, 0,
                         f'gui/501/{LABEL} = {{\n\tpath = {PLIST}\n\tpid = 4322\n}}\n', '',
@@ -200,7 +215,7 @@ class ProcessProbeTests(unittest.TestCase):
             stable.state['port'] = port
 
             def unavailable_after_status(argv, **kwargs):
-                if argv[0] == 'launchctl' and stable.state['launchctl'] == 2:
+                if argv[0] == '/bin/launchctl' and stable.state['launchctl'] == 2:
                     raise subprocess.TimeoutExpired(argv, 10)
                 return stable(argv, **kwargs)
 
