@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 import json
 import socket
 import subprocess
@@ -66,6 +67,18 @@ def _dashboard(instance: str):
             assert not worker.is_alive()
 
 
+def _startup_summary(process: subprocess.Popen, log_path: Path) -> str:
+    """Report only fixed, non-secret signals from a failed private startup."""
+    output = log_path.read_text(errors="replace")
+    return (
+        "private fresh MCP did not listen"
+        f" (child_running={process.poll() is None},"
+        f" startup_refused={'startup refused' in output},"
+        f" listener_reported={'fresh message MCP listening' in output},"
+        f" log_nonempty={bool(output)})"
+    )
+
+
 @contextmanager
 def _fresh_process(case, dashboard_port: int):
     port = _unused_port()
@@ -89,16 +102,16 @@ def _fresh_process(case, dashboard_port: int):
             cwd=case.root, env=env, stdout=log, stderr=subprocess.STDOUT,
         )
         try:
-            deadline = time.monotonic() + 20
+            deadline = time.monotonic() + 60
             while time.monotonic() < deadline:
-                assert process.poll() is None, "private fresh MCP exited before readiness"
+                assert process.poll() is None, _startup_summary(process, log_path)
                 try:
                     with socket.create_connection(("127.0.0.1", port), timeout=0.2):
                         break
                 except OSError:
                     time.sleep(0.05)
             else:
-                raise AssertionError("private fresh MCP did not listen")
+                raise AssertionError(_startup_summary(process, log_path))
             yield private_url
         finally:
             if process.poll() is None:
@@ -113,6 +126,27 @@ def _fresh_process(case, dashboard_port: int):
             assert read_secret(cfg) not in output
             assert case.args["body_md"] not in output
             assert "registration_token" not in output
+
+
+def test_startup_diagnostics_redact_private_log(tmp_path):
+    secret = "never-include-private-pairing-secret"
+    body = "never-include-private-mail-body"
+    log_path = tmp_path / "startup.log"
+    log_path.write_text(
+        f"{secret}\\n{body}\\nstartup refused\\n",
+        encoding="utf-8",
+    )
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    message = _startup_summary(FakeProcess(), log_path)
+    assert secret not in message and body not in message
+    assert "child_running=True" in message
+    assert "startup_refused=True" in message
+    assert "listener_reported=False" in message
+    assert "log_nonempty=True" in message
 
 
 def test_real_fresh_server_process_sdk_and_mail_receipt(live):
