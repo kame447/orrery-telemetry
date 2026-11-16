@@ -107,6 +107,7 @@ def _request(conn: http.client.HTTPConnection, pinned_sock: socket.socket,
         raise ProbeError("MCP_PROTOCOL_UNVERIFIED")
     payload = json.loads(data, object_pairs_hook=_unique_object)
     if (not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0"
+            or "error" in payload
             or type(payload.get("id")) is not int or payload["id"] != number
             or not isinstance(payload.get("result"), dict)):
         raise ProbeError("MCP_PROTOCOL_UNVERIFIED")

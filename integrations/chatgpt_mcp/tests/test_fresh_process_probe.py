@@ -314,6 +314,25 @@ class ProcessProbeTests(unittest.TestCase):
                              pairing_secret=SECRET, expected=AUTH, runner=fake)
             self.assertEqual([method for _, method in observed], ['initialize'])
 
+    def test_rpc_result_cannot_coexist_with_error_at_any_step(self):
+        init = {'serverInfo': {'name': 'orrery-chatgpt-mcp'},
+                'protocolVersion': '2025-11-25', 'capabilities': {'tools': {}}}
+        results = {'initialize': init, 'tools/list': {'tools': tools()},
+                   'tools/call': {'isError': False, 'structuredContent': status()}}
+        sequence = ['initialize', 'notifications/initialized', 'tools/list', 'tools/call']
+        for method, result in results.items():
+            with self.subTest(method=method):
+                rpc_id = {'initialize': 1, 'tools/list': 2, 'tools/call': 3}[method]
+                wire = json.dumps({'jsonrpc': '2.0', 'id': rpc_id,
+                                   'result': result, 'error': {'code': -32603, 'message': 'failure'}})
+                with server(wire_responses={method: wire}) as (port, observed):
+                    fake = runner()
+                    fake.state['port'] = port
+                    with self.assertRaises(module.ProbeError):
+                        module.probe(label=LABEL, plist_path=PLIST, port=port,
+                                     pairing_secret=SECRET, expected=AUTH, runner=fake)
+                    self.assertEqual([value for _, value in observed], sequence[:sequence.index(method) + 1])
+
     def test_duplicate_jsonrpc_id_is_rejected_even_when_values_match(self):
         # Duplicate JSON object members are ambiguous across clients.
         result = {'serverInfo': {'name': 'orrery-chatgpt-mcp'},
