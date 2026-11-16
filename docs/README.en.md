@@ -33,6 +33,7 @@ Overview: the cockpit is the screen for operating terminals; Telemetry is the da
 
 - [Fresh migration, shutdown and recovery](fresh-global-update.en.md) — Explicit steps for a new empty instance. Private startup/shutdown from saved settings is covered. Ordinary updates do not switch it; real OS managers/Finder GUI, real providers/trust/installation, final CI and an attended cutover remain unaccepted. Reactivation and App foregrounding are outside this cutover scope.
 - [Read-only fresh send receipts](fresh-message-receipts.en.md) — Fork contract for authenticated sender-owned receipt lookup without replay; not_observed never authorizes resending.
+- [Reject out-of-range fresh MCP JSON numbers](mcp-fresh-json-number-bounds.en.md) — Stage 36 refuses exponent overflow and excessive nesting in live-process attestation.
 - [Pin system launchctl in fresh MCP process verification](mcp-fresh-system-launchctl.en.md) — Stage 35 avoids a PATH-based executable substitution before pairing-secret disclosure.
 - [Pinned fresh MCP fixture recipient read/ack](mcp-fresh-pinned-recipient-observation.en.md) — Stage 34 observes authenticated test-recipient fetch/read/ack without claiming real-agent execution.
 - [Strict JSON media type and finite values for fresh MCP](mcp-fresh-json-media-attestation.en.md) — Stage 33 refuses non-JSON response media types and nonstandard JSON numeric constants.

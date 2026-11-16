@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import http.client
 import json
+import math
 import os
 import re
 import socket
@@ -97,6 +98,13 @@ def _invalid_json_constant(_value: str) -> None:
     raise ValueError("invalid JSON constant")
 
 
+def _finite_json_float(number: str) -> float:
+    result = float(number)
+    if not math.isfinite(result):
+        raise ValueError("nonfinite JSON number")
+    return result
+
+
 def _request(conn: http.client.HTTPConnection, pinned_sock: socket.socket,
              secret: str, method: str, number: int, params=None) -> dict:
     body = {"jsonrpc": "2.0", "id": number, "method": method}
@@ -112,7 +120,8 @@ def _request(conn: http.client.HTTPConnection, pinned_sock: socket.socket,
     if response.status != 200 or len(data) > 1024 * 1024 or media_type != "application/json":
         raise ProbeError("MCP_PROTOCOL_UNVERIFIED")
     payload = json.loads(data, object_pairs_hook=_unique_object,
-                         parse_constant=_invalid_json_constant)
+                         parse_constant=_invalid_json_constant,
+                         parse_float=_finite_json_float)
     if (not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0"
             or "error" in payload
             or type(payload.get("id")) is not int or payload["id"] != number
@@ -227,7 +236,7 @@ def probe(*, label: str, plist_path: str, port: int, pairing_secret: str,
         if job_pid(label, plist_path, runner=runner) != pid:
             raise ProbeError("SERVICE_PROCESS_CHANGED")
         return {"pid": pid, **effective}
-    except (OSError, ValueError, TypeError, KeyError, AttributeError, json.JSONDecodeError,
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError,
             http.client.HTTPException, subprocess.TimeoutExpired, TimeoutError):
         raise ProbeError("MCP_STATUS_UNVERIFIED") from None
     finally:

@@ -394,6 +394,58 @@ class ProcessProbeTests(unittest.TestCase):
                                          pairing_secret=SECRET, expected=AUTH, runner=fake)
                         self.assertEqual([name for _, name in observed], sequence[:sequence.index(method) + 1])
 
+    def test_json_exponent_overflow_refuses_at_every_rpc_step(self):
+        results = {
+            'initialize': {'serverInfo': {'name': 'orrery-chatgpt-mcp'},
+                           'protocolVersion': '2025-11-25', 'capabilities': {'tools': {}}},
+            'tools/list': {'tools': tools()},
+            'tools/call': {'isError': False, 'structuredContent': status()},
+        }
+        sequence = ['initialize', 'notifications/initialized', 'tools/list', 'tools/call']
+        for method, result in results.items():
+            for exponent in ('1e999', '-1e999'):
+                with self.subTest(method=method, exponent=exponent):
+                    rpc_id = {'initialize': 1, 'tools/list': 2, 'tools/call': 3}[method]
+                    raw = json.dumps({'jsonrpc': '2.0', 'id': rpc_id,
+                                      'result': {**result, 'unused': 0.0}})
+                    raw = raw.replace('"unused": 0.0', f'"unused": {exponent}')
+                    with server(wire_responses={method: raw}) as (port, observed):
+                        fake = runner()
+                        fake.state['port'] = port
+                        with self.assertRaises(module.ProbeError):
+                            module.probe(label=LABEL, plist_path=PLIST, port=port,
+                                         pairing_secret=SECRET, expected=AUTH, runner=fake)
+                        self.assertEqual([name for _, name in observed],
+                                         sequence[:sequence.index(method) + 1])
+
+    def test_normal_finite_json_exponent_remains_accepted(self):
+        init = {'serverInfo': {'name': 'orrery-chatgpt-mcp'},
+                'protocolVersion': '2025-11-25', 'capabilities': {'tools': {}}}
+        wire = json.dumps({'jsonrpc': '2.0', 'id': 1,
+                           'result': {**init, 'unused': 0.0}})
+        wire = wire.replace('"unused": 0.0', '"unused": 1e2')
+        with server(wire_responses={'initialize': wire}) as (port, observed):
+            fake = runner()
+            fake.state['port'] = port
+            result = module.probe(label=LABEL, plist_path=PLIST, port=port,
+                                  pairing_secret=SECRET, expected=AUTH, runner=fake)
+            self.assertTrue(result['verified'])
+            self.assertEqual(len(observed), 4)
+
+    def test_overdeep_json_is_reported_as_probe_refusal(self):
+        init = {'serverInfo': {'name': 'orrery-chatgpt-mcp'},
+                'protocolVersion': '2025-11-25', 'capabilities': {'tools': {}}}
+        wire = json.dumps({'jsonrpc': '2.0', 'id': 1,
+                           'result': {**init, 'unused': 0}})
+        wire = wire.replace('"unused": 0', '"unused": ' + '[' * 20000 + '0' + ']' * 20000)
+        with server(wire_responses={'initialize': wire}) as (port, observed):
+            fake = runner()
+            fake.state['port'] = port
+            with self.assertRaises(module.ProbeError):
+                module.probe(label=LABEL, plist_path=PLIST, port=port,
+                             pairing_secret=SECRET, expected=AUTH, runner=fake)
+            self.assertEqual([method for _, method in observed], ['initialize'])
+
     def test_duplicate_jsonrpc_id_is_rejected_even_when_values_match(self):
         # Duplicate JSON object members are ambiguous across clients.
         result = {'serverInfo': {'name': 'orrery-chatgpt-mcp'},
