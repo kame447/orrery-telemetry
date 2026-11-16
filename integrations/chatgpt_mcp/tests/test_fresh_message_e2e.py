@@ -20,6 +20,7 @@ import pytest
 from sqlalchemy import select
 
 from agentstack_mail.fresh_client import FreshBoundClient
+from agentstack_mail.storage_origin_contract import B1Error
 from agentstack_mail.fresh_runtime import FreshRuntime
 from agentstack_mail.models import Agent, Message, MessageRecipient
 from orrery_chatgpt_mcp.fresh_messages import FreshMessages
@@ -158,6 +159,46 @@ def test_real_send_storage_request_uuid_and_restart(live):
         assert response.status==200 and json.loads(response.read())['read_only'] is False
     finally:conn.close()
 
+
+
+def test_recipient_owner_fetch_read_ack_are_distinct_from_mcp_acceptance(live):
+    async def recipient():
+        return await FreshBoundClient.prepare(
+            live.root / 'mail/config.json', live.people[1]['binding_path'],
+            live.client.context['endpoint'], client_id=str(uuid4()),
+        )
+
+    client = asyncio.run(recipient())
+    assert asyncio.run(client.call('fetch_inbox', {})) == []
+    preview = unwrap(live.rpc('orrery_message_preview', live.args))
+    accepted = unwrap(live.rpc('orrery_message_commit', commit_args(live, preview)))
+    message_id = accepted['receipt']['message_id']
+    assert accepted['execution_status'] == 'unobserved'
+    inbox = asyncio.run(client.call('fetch_inbox', {}))
+    assert len(inbox) == 1
+    assert (inbox[0]['id'], inbox[0]['sender_id'], inbox[0]['subject'], inbox[0]['body_md']) == (
+        message_id, live.people[0]['agent_id'], live.args['subject'], live.args['body_md'],
+    )
+    assert inbox[0]['read_ts'] is None and inbox[0]['ack_ts'] is None
+
+    # An authenticated sender cannot mark the recipient's message as read.
+    async def wrong_owner():
+        with pytest.raises(B1Error, match='NOT_A_RECIPIENT'):
+            await live.client.call('mark_message_read', {'message_id': message_id})
+
+    asyncio.run(wrong_owner())
+    read = asyncio.run(client.call('mark_message_read', {'message_id': message_id}))
+    assert read['message_id'] == message_id and read['agent_id'] == live.people[1]['agent_id']
+    assert read['read_ts'] and read['ack_ts'] is None
+    acknowledged = asyncio.run(client.call('acknowledge_message', {'message_id': message_id}))
+    assert acknowledged['read_ts'] == read['read_ts'] and acknowledged['ack_ts']
+    again = asyncio.run(client.call('fetch_inbox', {}))
+    assert len(again) == 1
+    assert again[0]['read_ts'] == read['read_ts']
+    assert again[0]['ack_ts'] == acknowledged['ack_ts']
+    # Receipt does not claim that a real agent began processing the instruction.
+    assert unwrap(live.rpc('orrery_message_status', {'idempotency_key': live.args['idempotency_key']})) == accepted
+    assert len(stored(live)[0]) == 1
 
 def test_real_response_loss_keeps_unknown_without_resend(live):
     preview=unwrap(live.rpc('orrery_message_preview',live.args))

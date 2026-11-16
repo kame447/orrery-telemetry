@@ -17,6 +17,7 @@ import time
 from uuid import uuid4
 
 from fastmcp import Client
+from agentstack_mail.fresh_client import FreshBoundClient
 import pytest
 
 from orrery_chatgpt_mcp.readonly_server import Config, pair, read_secret
@@ -170,9 +171,27 @@ def test_fresh_mcp_real_launchagent_sdk_mail_and_teardown(live, tmp_path: Path):
                     )).data == accepted
                     assert (await client.call_tool(
                         "orrery_message_commit", request)).data == accepted
-                    return request, accepted
+                    recipient = await FreshBoundClient.prepare(
+                        live.root / "mail/config.json", live.people[1]["binding_path"],
+                        live.client.context["endpoint"], client_id=str(uuid4()),
+                    )
+                    inbox = await recipient.call("fetch_inbox", {})
+                    message_id = accepted["receipt"]["message_id"]
+                    assert len(inbox) == 1
+                    assert inbox[0]["id"] == message_id
+                    assert inbox[0]["sender_id"] == live.people[0]["agent_id"]
+                    assert inbox[0]["body_md"] == live.args["body_md"]
+                    assert inbox[0]["read_ts"] is None and inbox[0]["ack_ts"] is None
+                    read = await recipient.call("mark_message_read", {"message_id": message_id})
+                    acknowledged = await recipient.call("acknowledge_message", {"message_id": message_id})
+                    assert read["read_ts"] and read["ack_ts"] is None
+                    assert acknowledged["read_ts"] == read["read_ts"] and acknowledged["ack_ts"]
+                    assert (await client.call_tool(
+                        "orrery_message_status", {"idempotency_key": live.args["idempotency_key"]},
+                    )).data == accepted
+                    return request, accepted, acknowledged
 
-            request, accepted = asyncio.run(check())
+            request, accepted, acknowledged = asyncio.run(check())
             confirmed = _launchctl("print", target)
             assert confirmed.returncode == 0
             assert _pid(confirmed.stdout) == old_pid
@@ -234,6 +253,15 @@ def test_fresh_mcp_real_launchagent_sdk_mail_and_teardown(live, tmp_path: Path):
                     assert (await client.call_tool(
                         "orrery_message_commit", request,
                     )).data == accepted
+                    recipient = await FreshBoundClient.prepare(
+                        live.root / "mail/config.json", live.people[1]["binding_path"],
+                        live.client.context["endpoint"], client_id=str(uuid4()),
+                    )
+                    inbox = await recipient.call("fetch_inbox", {})
+                    assert len(inbox) == 1
+                    assert inbox[0]["id"] == accepted["receipt"]["message_id"]
+                    assert inbox[0]["read_ts"] == acknowledged["read_ts"]
+                    assert inbox[0]["ack_ts"] == acknowledged["ack_ts"]
 
             asyncio.run(check_after_restart())
             assert len(stored(live)[0]) == 1, "restart replayed a Mail message"

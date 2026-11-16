@@ -142,3 +142,4 @@ Stage 18 adds an [opt-in real macOS launchd fixture smoke](../../docs/mcp-fresh-
 Stage 19 adds [isolated live fresh MCP subprocess and SDK/Mail acceptance](../../docs/mcp-fresh-process-sdk-mail-e2e.en.md). Pinned releases, hosted Tunnel, and agent receipt remain unverified.
 Stage 20 adds [real macOS LaunchAgent fresh MCP SDK/Mail acceptance](../../docs/mcp-fresh-launchd-sdk-e2e.en.md). Fixture lifecycle and Mail acceptance are tested; production, Tunnel, and agent receipt remain unverified.
 Stage 21 adds [durable receipt after a private real LaunchAgent restart](../../docs/mcp-fresh-launchd-restart-receipt.en.md). Crash recovery, real Tunnel, agent reception and production cutover remain unverified.
+Stage 22 verifies [protected recipient inbox/read/ack and persistence](../../docs/mcp-fresh-recipient-owner-receipt.en.md) across a private macOS LaunchAgent restart. It does not prove actual agent processing or completion.

@@ -110,3 +110,4 @@ Documents without a translation are labelled with their original language. Image
 - [Isolated fresh MCP subprocess, SDK and Mail acceptance](mcp-fresh-process-sdk-mail-e2e.en.md) — Real HTTP acceptance with fictitious agents.
 - [Real macOS LaunchAgent with isolated fresh MCP SDK/Mail](mcp-fresh-launchd-sdk-e2e.en.md) — Stage 20 opt-in PID, SDK, Mail acceptance, and cleanup test.
 - [Durable receipt after isolated real LaunchAgent restart](mcp-fresh-launchd-restart-receipt.en.md) — Stage 21 orderly stop/restart, SDK receipt persistence and no replay.
+- [Isolated fresh MCP recipient-owned inbox and ACK](mcp-fresh-recipient-owner-receipt.en.md) — Stage 22 protected synthetic recipient fetch/read/ack and restart durability; not actual agent processing.
