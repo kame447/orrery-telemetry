@@ -144,6 +144,10 @@ class FreshMailCore(StorageOriginCore):
             await notifications.reconcile(self, [(result['message_id'], result['agent_id'])])
         return result
 
+    async def message_receipt(self, **arguments):
+        from .fresh_message_receipts import read
+        return await read(self, **arguments)
+
     async def write_message(self, operation, *, expected_server_instance_id, auth,
                             request_id, body_md, recipients=None, subject=None,
                             thread_id=None, topic=None, importance=None,

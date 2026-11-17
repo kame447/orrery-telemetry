@@ -16,7 +16,7 @@ from . import show_files
 from .schema_contract import validate_schema
 from .storage_origin_contract import B1Error, canonical
 
-PUBLISHED = frozenset(FIELDS) - {'health_check', 'reconnect', 'guard_edit',
+PUBLISHED = frozenset(FIELDS) - {'get_message_receipt', 'health_check', 'reconnect', 'guard_edit',
                                 'notification_pending', 'notification_complete'}
 STATUS_SCHEMA = {'type': 'object', 'properties': {}, 'additionalProperties': False}
 

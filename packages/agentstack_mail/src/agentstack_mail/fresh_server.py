@@ -11,6 +11,7 @@ import json
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import FunctionTool
+from mcp.types import ToolAnnotations
 
 from .boundary import ToolArgumentBoundary, install_tool_validation_log_sanitizer
 from .fresh_runtime import FreshRuntime
@@ -124,12 +125,20 @@ def build_fresh_server(config_path=None, *, core=None):
             schema = recipient_schema()
             if name == 'reply_message':schema = {'anyOf': [schema, {'type': 'null'}], 'default': None}
             tool.parameters['properties']['recipients'] = schema
+        if name == 'get_message_receipt':
+            tool.annotations = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
         server.add_tool(tool)
 
     async def health_check(expected_server_instance_id: str | None = None) -> dict:
         args = {} if expected_server_instance_id is None else {
             'expected_server_instance_id': expected_server_instance_id}
         return await call('health', **args)
+
+    async def get_message_receipt(expected_server_instance_id: str, auth: dict, send_request_id: str,
+                                  expected_intent_sha256: str, expected_content_sha256: str) -> dict:
+        return await call('message_receipt', expected_server_instance_id=expected_server_instance_id,
+                          auth=auth, send_request_id=send_request_id, expected_intent_sha256=expected_intent_sha256,
+                          expected_content_sha256=expected_content_sha256)
 
     async def send_message(expected_server_instance_id: str, auth: dict, request_id: str,
                            recipients: list[dict], subject: str, body_md: str,
@@ -225,6 +234,7 @@ def build_fresh_server(config_path=None, *, core=None):
                           auth=auth, paths_input=paths, extend_seconds=extend_seconds)
 
     for name, function in (
+        ('get_message_receipt', get_message_receipt),
         ('health_check', health_check), ('send_message', send_message), ('reply_message', reply_message),
         ('fetch_inbox', fetch_inbox), ('whois', whois), ('list_candidates', list_candidates),
         ('mark_message_read', receipt('read')), ('acknowledge_message', receipt('ack')),

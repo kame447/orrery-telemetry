@@ -1,0 +1,15 @@
+# fresh送信結果の読み取り専用照合（fork拡張）
+
+送信応答を失った場合でも、再送せずに正規サーバーの受付記録を照合できます。これはforkの追加契約 `orrery-fresh-message-receipt-v1` です。upstreamへ標準化済みという意味ではありません。
+
+既に準備された同じprotected clientで `python -m agentstack_mail.fresh_client receipt --context <同じcontext> --request-id <保存したUUID>` を実行するか、Pythonの `await client.receipt(request_id)` を使います。clientはowner-privateなrequestsにある元のsend_messageの本文・宛先・設定を読み、正規send handlerの既定値に合わせたintent/content hashを計算します。外部から資格・sender・instanceを選ぶ操作ではありません。send以外の書込みに対する照会は拒否します。
+
+内部の公開ツールは `get_message_receipt` で、`send_request_id`、`expected_intent_sha256`、`expected_content_sha256` に、protected clientが固定したinstanceと認証を加えて呼びます。通常のprovider向けfresh proxyには新たに公開しません。任意のMail DBを読む入口ではなく、既存サーバーが自身のtransactionで検査します。
+
+サーバーは読取りtransaction内で現在のinstance・sender資格・資格世代・退役状態を検証し、そのsender自身のfresh-send受付記録だけを検索します。他の送信者のrequest IDを与えても他人の受付情報は返しません。acceptedの場合はMessageとrecipient参照の存在・送信者・宛先・thread、本文やsubject等のcontent hashも照合し、本文が失われたり変更された記録を成功と扱いません。照会は送信、replay、登録、通知生成、修復、既存データの更新を一切行いません。
+
+応答のstatusはaccepted、refused、not_observedです。acceptedは当該送信が保存されたことを示し、receiptにIDと宛先等の限定情報を返します。refusedは永続記録された拒否で、限定したcodeだけを返し、候補一覧や自由記述のdetailは転送しません。not_observedは、その読取りsnapshotでは記録が見つからなかったという意味です。並行中の送信が後でcommitする可能性があるため、「絶対に届いていない」「新しいIDで再送してよい」とは解釈しません。エージェントの処理開始も証明しません。
+
+応答に本文、資格、ローカルパス、storage project、自由記述エラーは含めません。照会に必要なhashは機密本文から計算されるため、一般公開するメタデータとして扱わないでください。protected clientの保存済みrequestが欠落・不正・別contextの場合や、instance・資格・保存内容が一致しない場合は拒否します。
+
+既存のreplayは別の明示操作として残ります。receiptはreplayを呼ばず、not_observedやエラーを理由に自動送信しません。本変更は既存のfresh Mailサービスを再起動・切替しません。新操作を使うには、そのサービスがこのfork版の契約に対応している必要があります。

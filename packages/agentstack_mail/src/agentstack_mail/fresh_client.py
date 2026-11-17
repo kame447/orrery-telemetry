@@ -21,6 +21,7 @@ KIND = 'orrery-fresh-client-v1'
 MAX_REQUEST_BYTES = 16 * 1024 * 1024  # Only the explicit saved-business-request reader.
 FIELDS = {
     'health_check': set(), 'reconnect': set(),
+    'get_message_receipt': {'send_request_id', 'expected_intent_sha256', 'expected_content_sha256'},
     'send_message': {'recipients', 'subject', 'body_md', 'thread_id', 'topic', 'importance', 'ack_required'},
     'reply_message': {'message_id', 'body_md', 'recipients', 'subject', 'topic', 'importance', 'ack_required'},
     'fetch_inbox': {'target_agent_id', 'target_name', 'topic', 'limit', 'since'},
@@ -256,7 +257,7 @@ class FreshBoundClient:
                 raise B1Error('REQUEST_INTENT_CONFLICT') from None
         return await self._invoke(tool, args, request_id)
 
-    async def replay(self, request_id):
+    def _saved_request(self, request_id):
         self._load()
         request_id = _uuid(request_id)
         saved = _read_private(self.path.parent / 'requests' / (request_id + '.json'),
@@ -267,8 +268,19 @@ class FreshBoundClient:
                 or saved['tool'] not in WRITES or not isinstance(saved['arguments'], dict)
                 or set(saved['arguments']) - FIELDS[saved['tool']]):
             raise B1Error('FRESH_REQUEST_INVALID')
+        return saved
+
+    async def receipt(self, request_id):
+        from .fresh_message_receipts import receipt_query
+        saved = self._saved_request(request_id)
+        if saved['tool'] != 'send_message':
+            raise B1Error('FRESH_RECEIPT_OPERATION_UNSUPPORTED')
+        return await self.call('get_message_receipt', receipt_query(saved['request_id'], saved['arguments']))
+
+    async def replay(self, request_id):
+        saved = self._saved_request(request_id)
         # No current cwd, name lookup, new request ID, or locally cached success.
-        return await self._invoke(saved['tool'], saved['arguments'], request_id)
+        return await self._invoke(saved['tool'], saved['arguments'], saved['request_id'])
 
 
 def main(argv=None):
@@ -286,6 +298,9 @@ def main(argv=None):
     call.add_argument('--context', required=True)
     call.add_argument('--tool', required=True)
     call.add_argument('--request-id')
+    receipt = commands.add_parser('receipt')
+    receipt.add_argument('--context', required=True)
+    receipt.add_argument('--request-id', required=True)
     replay = commands.add_parser('replay')
     replay.add_argument('--context', required=True)
     replay.add_argument('--request-id', required=True)
@@ -322,6 +337,8 @@ def main(argv=None):
             return {'context_path': str(client.path), 'mail_instance_id': client.context['mail_instance_id'],
                     'mail_agent_id': client.context['mail_agent_id']}
         client = FreshBoundClient(options.context)
+        if options.command == 'receipt':
+            return await client.receipt(options.request_id)
         if options.command == 'replay':
             return await client.replay(options.request_id)
         import sys
