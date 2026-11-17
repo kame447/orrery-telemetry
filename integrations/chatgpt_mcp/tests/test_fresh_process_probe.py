@@ -580,6 +580,48 @@ class ProcessProbeTests(unittest.TestCase):
             self.assertTrue(result['verified'])
             self.assertEqual(len(observed), 4)
 
+    def test_deep_but_parseable_json_refused_at_each_rpc_stage(self):
+        # Python 3.14 accepts nesting that earlier versions reject by recursion.
+        deep = 0
+        for _ in range(80):
+            deep = [deep]
+        init = {'serverInfo': {'name': 'orrery-chatgpt-mcp'},
+                'protocolVersion': '2025-11-25',
+                'capabilities': {'tools': {'listChanged': False}}, 'unused': deep}
+        actual_status = {**status(), 'unused': deep}
+        results = {
+            'initialize': init,
+            'tools/list': {'tools': tools(), 'unused': deep},
+            'tools/call': {
+                'isError': False, 'structuredContent': actual_status,
+                'content': [{'type': 'text', 'text': json.dumps(actual_status)}],
+            },
+        }
+        sequence = ['initialize', 'notifications/initialized', 'tools/list', 'tools/call']
+        for method, result in results.items():
+            with self.subTest(method=method):
+                rpc_id = {'initialize': 1, 'tools/list': 2, 'tools/call': 3}[method]
+                wire = json.dumps({'jsonrpc': '2.0', 'id': rpc_id, 'result': result})
+                with server(wire_responses={method: wire}) as (port, observed):
+                    fake = runner()
+                    fake.state['port'] = port
+                    with self.assertRaises(module.ProbeError):
+                        module.probe(label=LABEL, plist_path=PLIST, port=port,
+                                     pairing_secret=SECRET, expected=AUTH, runner=fake)
+                    self.assertEqual([name for _, name in observed],
+                                     sequence[:sequence.index(method) + 1])
+
+    def test_deep_structured_and_text_status_never_agree_for_attestation(self):
+        deep = 0
+        for _ in range(80):
+            deep = [deep]
+        actual_status = {**status(), 'unused': deep}
+        result = {
+            'structuredContent': actual_status,
+            'content': [{'type': 'text', 'text': json.dumps(actual_status)}],
+        }
+        self.assertFalse(module._consistent_status_content(result))
+
     def test_overdeep_json_is_reported_as_probe_refusal(self):
         init = {'serverInfo': {'name': 'orrery-chatgpt-mcp'},
                 'protocolVersion': '2025-11-25', 'capabilities': {'tools': {'listChanged': False}}}

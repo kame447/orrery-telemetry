@@ -35,6 +35,7 @@ Telemetry 自体の操作は、header の `HELP MAP`（NETWORK では `SETTINGS`
 - [fresh送信受付の読取り照合](fresh-message-receipts.md) — 本人の受付記録を再送せず照合するfork契約。未観測を再送許可にしません。
 - [fresh MCP公開ツール契約の完全照合](mcp-fresh-tool-contract.md) — 段階38。隠れたページとschema/annotationsの変化を検出し、6ツールの権限を厳密に照合。
 - [fresh MCP初期化capabilitiesの照合](mcp-fresh-initialize-capabilities.md) — 段階39。追加機能の宣言やツール一覧変更通知を拒否。
+- [fresh MCPのJSON応答深度を固定制限](mcp-fresh-json-depth-attestation.md) — 段階42。Python 3.14等での過深JSON誤受理を防ぎ、status二形式の深度も確認。
 - [fresh MCPツールの表示文言固定照合](mcp-fresh-tool-text-contract.md) — 段階41。6ツールのtitle/description改変による未承認の操作案内を拒否。
 - [fresh MCP公開ツールの追加メタデータ拒否](mcp-fresh-tool-metadata.md) — 段階40。未知の公開フィールドと不正な説明メタデータを拒否。
 - [fresh MCPのstatus本文二形式の一致検証](mcp-fresh-status-dual-content.md) — 段階37。statusの`content`と`structuredContent`が異なる権限を示す場合は拒否。

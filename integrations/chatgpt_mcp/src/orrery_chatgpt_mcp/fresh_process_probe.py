@@ -219,6 +219,22 @@ def _finite_json_float(number: str) -> float:
     return result
 
 
+def _within_json_depth_limit(value: object, *, maximum: int = 64) -> bool:
+    """Bound nesting independently of Python's version-specific JSON decoder limit."""
+    pending = [(value, 0)]
+    while pending:
+        current, depth = pending.pop()
+        if type(current) is dict:
+            if depth >= maximum:
+                return False
+            pending.extend((item, depth + 1) for item in current.values())
+        elif type(current) is list:
+            if depth >= maximum:
+                return False
+            pending.extend((item, depth + 1) for item in current)
+    return True
+
+
 def _request(conn: http.client.HTTPConnection, pinned_sock: socket.socket,
              secret: str, method: str, number: int, params=None) -> dict:
     body = {"jsonrpc": "2.0", "id": number, "method": method}
@@ -236,7 +252,8 @@ def _request(conn: http.client.HTTPConnection, pinned_sock: socket.socket,
     payload = json.loads(data, object_pairs_hook=_unique_object,
                          parse_constant=_invalid_json_constant,
                          parse_float=_finite_json_float)
-    if (not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0"
+    if (not _within_json_depth_limit(payload)
+            or not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0"
             or "error" in payload
             or type(payload.get("id")) is not int or payload["id"] != number
             or not isinstance(payload.get("result"), dict)):
@@ -290,6 +307,7 @@ def _consistent_status_content(result: dict) -> bool:
                              parse_constant=_invalid_json_constant,
                              parse_float=_finite_json_float)
         return (type(textual) is dict
+                and _within_json_depth_limit(textual)
                 and json.dumps(textual, sort_keys=True, allow_nan=False)
                 == json.dumps(structured, sort_keys=True, allow_nan=False))
     except (TypeError, ValueError, OverflowError, RecursionError):
