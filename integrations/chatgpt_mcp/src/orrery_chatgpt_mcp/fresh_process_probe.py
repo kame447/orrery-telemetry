@@ -306,9 +306,14 @@ def probe(*, label: str, plist_path: str, port: int, pairing_secret: str,
             "protocolVersion": "2025-11-25", "capabilities": {},
             "clientInfo": {"name": "fresh-process-probe", "version": "1"},
         })
-        if (init.get("serverInfo", {}).get("name") != "orrery-chatgpt-mcp"
+        capabilities = init.get("capabilities")
+        if (type(init.get("serverInfo")) is not dict
+                or init["serverInfo"].get("name") != "orrery-chatgpt-mcp"
                 or init.get("protocolVersion") != "2025-11-25"
-                or not isinstance(init.get("capabilities", {}).get("tools"), dict)):
+                or type(capabilities) is not dict or set(capabilities) != {"tools"}
+                or type(capabilities["tools"]) is not dict
+                or set(capabilities["tools"]) != {"listChanged"}
+                or capabilities["tools"]["listChanged"] is not False):
             raise ProbeError("MCP_IDENTITY_UNVERIFIED")
         _initialized(conn, pinned_sock, pairing_secret)
         tools = _verified_tools(_request(conn, pinned_sock, pairing_secret, "tools/list", 2))

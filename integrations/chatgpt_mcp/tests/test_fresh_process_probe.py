@@ -69,7 +69,7 @@ def server(*, status_body=None, tool_list=None, close_after_initialize=False,
             if packet['method'] == 'initialize':
                 result = init_result if init_result is not None else {
                     'serverInfo': {'name': 'orrery-chatgpt-mcp'},
-                    'protocolVersion': '2025-11-25', 'capabilities': {'tools': {}}}
+                    'protocolVersion': '2025-11-25', 'capabilities': {'tools': {'listChanged': False}}}
             elif packet['method'] == 'tools/list':
                 result = {'tools': current_tools}
             else:
@@ -385,7 +385,7 @@ class ProcessProbeTests(unittest.TestCase):
 
     def test_wrong_initialize_protocol_refuses_before_discovery(self):
         init = {'serverInfo': {'name': 'orrery-chatgpt-mcp'},
-                'protocolVersion': 'unsupported', 'capabilities': {'tools': {}}}
+                'protocolVersion': 'unsupported', 'capabilities': {'tools': {'listChanged': False}}}
         with server(init_result=init) as (port, observed):
             fake = runner()
             fake.state['port'] = port
@@ -393,6 +393,30 @@ class ProcessProbeTests(unittest.TestCase):
                 module.probe(label=LABEL, plist_path=PLIST, port=port,
                              pairing_secret=SECRET, expected=AUTH, runner=fake)
             self.assertEqual([method for _, method in observed], ['initialize'])
+
+    def test_unexpected_initialize_capabilities_refuse_before_discovery(self):
+        standard = {'tools': {'listChanged': False}}
+        deviations = [
+            {'tools': {'listChanged': True}},
+            {'tools': {}},
+            {'tools': {'listChanged': 0}},
+            {**standard, 'resources': {'subscribe': True}},
+            {**standard, 'prompts': {'listChanged': False}},
+            {**standard, 'logging': {}},
+            {**standard, 'experimental': {'exec': True}},
+        ]
+        for capabilities in deviations:
+            with self.subTest(capabilities=capabilities):
+                init = {'serverInfo': {'name': 'orrery-chatgpt-mcp'},
+                        'protocolVersion': '2025-11-25',
+                        'capabilities': capabilities}
+                with server(init_result=init) as (port, observed):
+                    fake = runner()
+                    fake.state['port'] = port
+                    with self.assertRaisesRegex(module.ProbeError, 'MCP_IDENTITY_UNVERIFIED'):
+                        module.probe(label=LABEL, plist_path=PLIST, port=port,
+                                     pairing_secret=SECRET, expected=AUTH, runner=fake)
+                    self.assertEqual([method for _, method in observed], ['initialize'])
 
     def test_rejected_initialization_notification_refuses_before_discovery(self):
         with server(initialized_status=200) as (port, observed):
@@ -407,7 +431,7 @@ class ProcessProbeTests(unittest.TestCase):
     def test_boolean_response_id_cannot_impersonate_numeric_id(self):
         # Python's True == 1 must not satisfy JSON-RPC's numeric request id.
         result = {'serverInfo': {'name': 'orrery-chatgpt-mcp'},
-                  'protocolVersion': '2025-11-25', 'capabilities': {'tools': {}}}
+                  'protocolVersion': '2025-11-25', 'capabilities': {'tools': {'listChanged': False}}}
         wire = json.dumps({'jsonrpc': '2.0', 'id': True, 'result': result})
         with server(wire_responses={'initialize': wire}) as (port, observed):
             fake = runner()
@@ -419,7 +443,7 @@ class ProcessProbeTests(unittest.TestCase):
 
     def test_rpc_result_cannot_coexist_with_error_at_any_step(self):
         init = {'serverInfo': {'name': 'orrery-chatgpt-mcp'},
-                'protocolVersion': '2025-11-25', 'capabilities': {'tools': {}}}
+                'protocolVersion': '2025-11-25', 'capabilities': {'tools': {'listChanged': False}}}
         results = {'initialize': init, 'tools/list': {'tools': tools()},
                    'tools/call': {'isError': False, 'structuredContent': status()}}
         sequence = ['initialize', 'notifications/initialized', 'tools/list', 'tools/call']
@@ -462,7 +486,7 @@ class ProcessProbeTests(unittest.TestCase):
     def test_nonfinite_json_literals_refuse_at_each_rpc_step(self):
         results = {
             'initialize': {'serverInfo': {'name': 'orrery-chatgpt-mcp'},
-                           'protocolVersion': '2025-11-25', 'capabilities': {'tools': {}}},
+                           'protocolVersion': '2025-11-25', 'capabilities': {'tools': {'listChanged': False}}},
             'tools/list': {'tools': tools()},
             'tools/call': {'isError': False, 'structuredContent': status()},
         }
@@ -484,7 +508,7 @@ class ProcessProbeTests(unittest.TestCase):
     def test_json_exponent_overflow_refuses_at_every_rpc_step(self):
         results = {
             'initialize': {'serverInfo': {'name': 'orrery-chatgpt-mcp'},
-                           'protocolVersion': '2025-11-25', 'capabilities': {'tools': {}}},
+                           'protocolVersion': '2025-11-25', 'capabilities': {'tools': {'listChanged': False}}},
             'tools/list': {'tools': tools()},
             'tools/call': {'isError': False, 'structuredContent': status()},
         }
@@ -507,7 +531,7 @@ class ProcessProbeTests(unittest.TestCase):
 
     def test_normal_finite_json_exponent_remains_accepted(self):
         init = {'serverInfo': {'name': 'orrery-chatgpt-mcp'},
-                'protocolVersion': '2025-11-25', 'capabilities': {'tools': {}}}
+                'protocolVersion': '2025-11-25', 'capabilities': {'tools': {'listChanged': False}}}
         wire = json.dumps({'jsonrpc': '2.0', 'id': 1,
                            'result': {**init, 'unused': 0.0}})
         wire = wire.replace('"unused": 0.0', '"unused": 1e2')
@@ -521,7 +545,7 @@ class ProcessProbeTests(unittest.TestCase):
 
     def test_overdeep_json_is_reported_as_probe_refusal(self):
         init = {'serverInfo': {'name': 'orrery-chatgpt-mcp'},
-                'protocolVersion': '2025-11-25', 'capabilities': {'tools': {}}}
+                'protocolVersion': '2025-11-25', 'capabilities': {'tools': {'listChanged': False}}}
         wire = json.dumps({'jsonrpc': '2.0', 'id': 1,
                            'result': {**init, 'unused': 0}})
         wire = wire.replace('"unused": 0', '"unused": ' + '[' * 20000 + '0' + ']' * 20000)
@@ -536,7 +560,7 @@ class ProcessProbeTests(unittest.TestCase):
     def test_duplicate_jsonrpc_id_is_rejected_even_when_values_match(self):
         # Duplicate JSON object members are ambiguous across clients.
         result = {'serverInfo': {'name': 'orrery-chatgpt-mcp'},
-                  'protocolVersion': '2025-11-25', 'capabilities': {'tools': {}}}
+                  'protocolVersion': '2025-11-25', 'capabilities': {'tools': {'listChanged': False}}}
         wire = ('{"jsonrpc":"2.0","id":1,"id":1,"result":'
                 + json.dumps(result) + '}')
         with server(wire_responses={'initialize': wire}) as (port, observed):
