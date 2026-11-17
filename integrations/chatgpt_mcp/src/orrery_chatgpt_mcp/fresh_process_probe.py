@@ -48,6 +48,73 @@ READ_TOOLS = frozenset({"orrery_status", "orrery_list_agents", "orrery_get_agent
 MESSAGE_TOOLS = frozenset({"orrery_message_preview", "orrery_message_commit", "orrery_message_status"})
 
 
+def _schema(properties: dict, required: tuple[str, ...] = ()) -> dict:
+    return {"type": "object", "properties": properties, "required": list(required),
+            "additionalProperties": False}
+
+
+_KEY = {"type": "string", "pattern": r"^[A-Za-z0-9_.:-]{1,128}$"}
+_PREVIEW = {
+    "idempotency_key": _KEY,
+    "mail_instance_id": {"type": "string", "pattern": r"^[0-9a-f]{32}$"},
+    "target_agent_id": {"type": "integer", "minimum": 1},
+    "expected_target_name": {"type": "string"},
+    "subject": {"type": "string", "maxLength": 200},
+    "body_md": {"type": "string", "maxLength": 65536},
+}
+# This is a pinned public contract, not a copy of the remote tools/list result.
+# Any change to the advertised authority requires an explicit reviewed update.
+_EXPECTED_SCHEMAS = {
+    "orrery_status": _schema({}),
+    "orrery_list_agents": _schema({"running_only": {"type": "boolean", "default": False}}),
+    "orrery_get_agent": _schema({
+        "name": {"type": "string", "pattern": r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$"},
+        "mail_instance_id": {"type": "string"},
+        "mail_agent_id": {"type": "integer", "minimum": 1},
+    }),
+    "orrery_message_preview": _schema(_PREVIEW, tuple(_PREVIEW)),
+    "orrery_message_commit": _schema({
+        "idempotency_key": _KEY, "preview_id": {"type": "string"},
+        "content_digest": {"type": "string"},
+    }, ("idempotency_key", "preview_id", "content_digest")),
+    "orrery_message_status": _schema({"idempotency_key": _KEY}, ("idempotency_key",)),
+}
+
+
+def _verified_tools(result: dict) -> list[dict]:
+    """Require a complete discovery page and the fixed six-tool public contract."""
+    tools = result.get("tools")
+    if ("nextCursor" in result or type(tools) is not list
+            or len(tools) != len(_EXPECTED_SCHEMAS)):
+        raise ProbeError("MCP_TOOL_CONTRACT_UNVERIFIED")
+    seen = set()
+    for tool in tools:
+        if type(tool) is not dict or type(tool.get("name")) is not str:
+            raise ProbeError("MCP_TOOL_CONTRACT_UNVERIFIED")
+        name = tool["name"]
+        if name not in _EXPECTED_SCHEMAS or name in seen:
+            raise ProbeError("MCP_TOOL_CONTRACT_UNVERIFIED")
+        seen.add(name)
+        read_only = name in READ_TOOLS or name == "orrery_message_status"
+        expected = {
+            "inputSchema": _EXPECTED_SCHEMAS[name],
+            "annotations": {
+                "readOnlyHint": read_only,
+                "destructiveHint": name == "orrery_message_commit",
+                "idempotentHint": True, "openWorldHint": False,
+            },
+            "securitySchemes": [{"type": "noauth"}],
+        }
+        actual = {key: tool.get(key) for key in expected}
+        try:
+            if json.dumps(actual, sort_keys=True, allow_nan=False) != json.dumps(
+                    expected, sort_keys=True, allow_nan=False):
+                raise ProbeError("MCP_TOOL_CONTRACT_UNVERIFIED")
+        except (TypeError, ValueError, OverflowError, RecursionError):
+            raise ProbeError("MCP_TOOL_CONTRACT_UNVERIFIED") from None
+    return tools
+
+
 def job_pid(label: str, plist_path: str, *, runner: Callable = subprocess.run) -> int:
     """Bind the expected LaunchAgent's loaded plist to its current PID."""
     if (not re.fullmatch(r"[A-Za-z0-9_.-]{3,128}", label)
@@ -244,7 +311,7 @@ def probe(*, label: str, plist_path: str, port: int, pairing_secret: str,
                 or not isinstance(init.get("capabilities", {}).get("tools"), dict)):
             raise ProbeError("MCP_IDENTITY_UNVERIFIED")
         _initialized(conn, pinned_sock, pairing_secret)
-        tools = _request(conn, pinned_sock, pairing_secret, "tools/list", 2).get("tools")
+        tools = _verified_tools(_request(conn, pinned_sock, pairing_secret, "tools/list", 2))
         status = _request(conn, pinned_sock, pairing_secret, "tools/call", 3,
                           {"name": "orrery_status", "arguments": {}})
         if status.get("isError") is not False or not _consistent_status_content(status):

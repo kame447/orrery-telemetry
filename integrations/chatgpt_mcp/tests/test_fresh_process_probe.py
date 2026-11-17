@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import copy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import json
@@ -16,6 +17,9 @@ import sys
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
 spec.loader.exec_module(module)
+sys.path.insert(0, str(SOURCE.parents[1]))
+from orrery_chatgpt_mcp.model import TOOL_DEFINITIONS as READ_DEFINITIONS
+from orrery_chatgpt_mcp.fresh_messages import TOOL_DEFINITIONS as MESSAGE_DEFINITIONS
 
 INSTANCE = '0123456789abcdef0123456789abcdef'
 SECRET = 'a' * 43
@@ -39,7 +43,7 @@ def status():
 
 
 def tools():
-    return [{'name': n} for n in sorted(module.READ_TOOLS | module.MESSAGE_TOOLS)]
+    return copy.deepcopy([*READ_DEFINITIONS, *MESSAGE_DEFINITIONS])
 
 
 @contextmanager
@@ -272,6 +276,49 @@ class ProcessProbeTests(unittest.TestCase):
             with self.assertRaises(module.ProbeError):
                 module.probe(label=LABEL, plist_path=PLIST, port=port,
                              pairing_secret=SECRET, expected=AUTH, runner=fake)
+
+    def test_discovery_cursor_cannot_hide_extra_tools(self):
+        for cursor in ('another-page', None):
+            with self.subTest(cursor=cursor):
+                result = {'tools': tools(), 'nextCursor': cursor}
+                wire = json.dumps({'jsonrpc': '2.0', 'id': 2, 'result': result})
+                with server(wire_responses={'tools/list': wire}) as (port, observed):
+                    fake = runner()
+                    fake.state['port'] = port
+                    with self.assertRaises(module.ProbeError):
+                        module.probe(label=LABEL, plist_path=PLIST, port=port,
+                                     pairing_secret=SECRET, expected=AUTH, runner=fake)
+                    self.assertEqual([name for _, name in observed],
+                                     ['initialize', 'notifications/initialized', 'tools/list'])
+
+    def test_discovery_must_not_advertise_extra_send_arguments(self):
+        altered = tools()
+        commit = next(tool for tool in altered if tool['name'] == 'orrery_message_commit')
+        commit['inputSchema']['properties']['shell_command'] = {'type': 'string'}
+        self.call(tool_list=altered)
+
+    def test_discovery_rejects_weakened_preview_argument_constraints(self):
+        altered = tools()
+        preview = next(tool for tool in altered if tool['name'] == 'orrery_message_preview')
+        preview['inputSchema']['properties']['body_md'].pop('maxLength')
+        self.call(tool_list=altered)
+
+    def test_discovery_rejects_misleading_capability_annotations(self):
+        for field in ('annotations', 'securitySchemes'):
+            with self.subTest(field=field):
+                altered = tools()
+                commit = next(tool for tool in altered if tool['name'] == 'orrery_message_commit')
+                if field == 'annotations':
+                    commit['annotations']['readOnlyHint'] = True
+                else:
+                    commit['securitySchemes'] = [{'type': 'oauth2'}]
+                self.call(tool_list=altered)
+
+    def test_discovery_rejects_read_schema_with_unbounded_parameters(self):
+        altered = tools()
+        listing = next(tool for tool in altered if tool['name'] == 'orrery_list_agents')
+        listing['inputSchema']['additionalProperties'] = True
+        self.call(tool_list=altered)
 
     def test_wrong_sender_fails(self):
         broken = status()
