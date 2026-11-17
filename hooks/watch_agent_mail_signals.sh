@@ -726,9 +726,9 @@ deliver_worker() {
     if [[ -n "$body_snippet" && "$body_truncated" == "0" ]]; then
         prompt="ORRERY Mail notification: message from ${from} [${importance}]: ${subject}. Body (complete; no inbox fetch needed): ${body_snippet}"
     elif [[ -n "$body_snippet" ]]; then
-        prompt="ORRERY Mail notification: message from ${from} [${importance}]: ${subject}. Body preview: ${body_snippet} ... Fetch inbox to read the rest."
+        prompt="ORRERY Mail notification: message from ${from} [${importance}]: ${subject}. Body preview: ${body_snippet} ... Fetch inbox to read the rest (pass include_bodies=true when the tool accepts it; legacy Mail omits bodies by default)."
     else
-        prompt="ORRERY Mail notification: message from ${from} [${importance}]: ${subject}. Please call fetch_inbox to read it."
+        prompt="ORRERY Mail notification: message from ${from} [${importance}]: ${subject}. Please call fetch_inbox to read it (pass include_bodies=true when the tool accepts it; legacy Mail omits bodies by default)."
     fi
 
     # 本文は bracketed paste で渡す。send-keys -l は 1 文字ずつの打鍵として届くため、
