@@ -163,6 +163,25 @@ def _recipients(value: object) -> set[tuple[int, str, str]]:
     return set(actual)
 
 
+def _consistent_status_content(result: dict) -> bool:
+    """Both MCP client-facing representations must describe the same authority."""
+    structured = result.get("structuredContent")
+    content = result.get("content")
+    if (type(structured) is not dict or type(content) is not list or len(content) != 1
+            or type(content[0]) is not dict or content[0].get("type") != "text"
+            or type(content[0].get("text")) is not str):
+        return False
+    try:
+        textual = json.loads(content[0]["text"], object_pairs_hook=_unique_object,
+                             parse_constant=_invalid_json_constant,
+                             parse_float=_finite_json_float)
+        return (type(textual) is dict
+                and json.dumps(textual, sort_keys=True, allow_nan=False)
+                == json.dumps(structured, sort_keys=True, allow_nan=False))
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return False
+
+
 def validate_effective_status(status: dict, tools: list, expected: Authority) -> dict:
     """Compare effective RPC results, not persisted launchd environment values."""
     try:
@@ -228,7 +247,7 @@ def probe(*, label: str, plist_path: str, port: int, pairing_secret: str,
         tools = _request(conn, pinned_sock, pairing_secret, "tools/list", 2).get("tools")
         status = _request(conn, pinned_sock, pairing_secret, "tools/call", 3,
                           {"name": "orrery_status", "arguments": {}})
-        if status.get("isError") is not False:
+        if status.get("isError") is not False or not _consistent_status_content(status):
             raise ProbeError("MCP_STATUS_UNVERIFIED")
         effective = validate_effective_status(status["structuredContent"], tools, expected)
         # A verified socket is not proof that launchd still owns the same PID

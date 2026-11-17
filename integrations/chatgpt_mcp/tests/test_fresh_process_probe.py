@@ -69,7 +69,8 @@ def server(*, status_body=None, tool_list=None, close_after_initialize=False,
             elif packet['method'] == 'tools/list':
                 result = {'tools': current_tools}
             else:
-                result = {'isError': False, 'structuredContent': current_status}
+                result = {'isError': False, 'structuredContent': current_status,
+                          'content': [{'type': 'text', 'text': json.dumps(current_status, ensure_ascii=False)}]}
             data = json.dumps({'jsonrpc': '2.0', 'id': packet['id'], 'result': result}).encode()
             if wire_responses and packet['method'] in wire_responses:
                 data = wire_responses[packet['method']].encode()
@@ -232,6 +233,45 @@ class ProcessProbeTests(unittest.TestCase):
         broken['message_authority']['recipients'].append(
             {'target_agent_id': 99, 'expected_target_name': 'OtherAgent', 'kind': 'to'})
         self.call(status_body=broken)
+
+    def test_status_text_and_structured_content_must_agree(self):
+        safe = status()
+        misleading = status()
+        misleading['adapter']['spawn_enabled_on_server'] = True
+        for content in (
+            [{'type': 'text', 'text': json.dumps(misleading)}],
+            [{'type': 'text', 'text': json.dumps(safe).replace('"fresh"', '"legacy"')}],
+            [{'type': 'text', 'text': 'not JSON'}],
+            [{'type': 'text', 'text': json.dumps(safe)}, {'type': 'text', 'text': json.dumps(safe)}],
+            [],
+        ):
+            with self.subTest(content=content):
+                wire = json.dumps({'jsonrpc': '2.0', 'id': 3, 'result': {
+                    'isError': False, 'structuredContent': safe, 'content': content,
+                }})
+                with server(wire_responses={'tools/call': wire}) as (port, observed):
+                    fake = runner()
+                    fake.state['port'] = port
+                    with self.assertRaises(module.ProbeError):
+                        module.probe(label=LABEL, plist_path=PLIST, port=port,
+                                     pairing_secret=SECRET, expected=AUTH, runner=fake)
+                    self.assertEqual([method for _, method in observed],
+                                     ['initialize', 'notifications/initialized', 'tools/list', 'tools/call'])
+
+    def test_status_content_must_not_hide_invalid_types(self):
+        safe = status()
+        textual = status()
+        textual['adapter']['message_enabled_on_server'] = 1
+        wire = json.dumps({'jsonrpc': '2.0', 'id': 3, 'result': {
+            'isError': False, 'structuredContent': safe,
+            'content': [{'type': 'text', 'text': json.dumps(textual)}],
+        }})
+        with server(wire_responses={'tools/call': wire}) as (port, observed):
+            fake = runner()
+            fake.state['port'] = port
+            with self.assertRaises(module.ProbeError):
+                module.probe(label=LABEL, plist_path=PLIST, port=port,
+                             pairing_secret=SECRET, expected=AUTH, runner=fake)
 
     def test_wrong_sender_fails(self):
         broken = status()
