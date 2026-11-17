@@ -88,8 +88,12 @@ def _verified_tools(result: dict) -> list[dict]:
             or len(tools) != len(_EXPECTED_SCHEMAS)):
         raise ProbeError("MCP_TOOL_CONTRACT_UNVERIFIED")
     seen = set()
+    public_fields = {"name", "title", "description", "inputSchema", "annotations", "securitySchemes"}
     for tool in tools:
-        if type(tool) is not dict or type(tool.get("name")) is not str:
+        if (type(tool) is not dict or set(tool) != public_fields
+                or type(tool.get("name")) is not str
+                or any(type(tool.get(field)) is not str or not tool[field]
+                       for field in ("title", "description"))):
             raise ProbeError("MCP_TOOL_CONTRACT_UNVERIFIED")
         name = tool["name"]
         if name not in _EXPECTED_SCHEMAS or name in seen:

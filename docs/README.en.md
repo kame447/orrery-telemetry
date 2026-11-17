@@ -35,6 +35,7 @@ Overview: the cockpit is the screen for operating terminals; Telemetry is the da
 - [Read-only fresh send receipts](fresh-message-receipts.en.md) — Fork contract for authenticated sender-owned receipt lookup without replay; not_observed never authorizes resending.
 - [Complete fresh MCP tool contract attestation](mcp-fresh-tool-contract.en.md) — Stage 38 rejects hidden discovery pages and mismatched input schemas or security annotations.
 - [Fresh MCP initialization capability attestation](mcp-fresh-initialize-capabilities.en.md) — Stage 39 rejects extra advertised surfaces and changing tool inventory.
+- [Fresh MCP tool metadata attestation](mcp-fresh-tool-metadata.en.md) — Stage 40 rejects extra public tool fields and malformed presentation metadata.
 - [Agreement between fresh MCP status representations](mcp-fresh-status-dual-content.en.md) — Stage 37 refuses conflicting `content` and `structuredContent` authority.
 - [Reject out-of-range fresh MCP JSON numbers](mcp-fresh-json-number-bounds.en.md) — Stage 36 refuses exponent overflow and excessive nesting in live-process attestation.
 - [Pin system launchctl in fresh MCP process verification](mcp-fresh-system-launchctl.en.md) — Stage 35 avoids a PATH-based executable substitution before pairing-secret disclosure.

@@ -320,6 +320,29 @@ class ProcessProbeTests(unittest.TestCase):
         listing['inputSchema']['additionalProperties'] = True
         self.call(tool_list=altered)
 
+    def test_discovery_rejects_undocumented_tool_metadata(self):
+        for extra, value in (
+            ('outputSchema', {'type': 'object', 'additionalProperties': True}),
+            ('execution', {'taskSupport': 'required'}),
+            ('_meta', {'untrusted': True}),
+            ('icons', [{'src': 'https://other.example/icon.png'}]),
+            ('unrecognized', 'extra client-visible contract'),
+        ):
+            with self.subTest(extra=extra):
+                altered = tools()
+                altered[0][extra] = value
+                self.call(tool_list=altered)
+
+    def test_discovery_requires_textual_tool_metadata(self):
+        for field, value in (
+            ('title', None), ('description', []),
+            ('title', ''), ('description', ''),
+        ):
+            with self.subTest(field=field, value=value):
+                altered = tools()
+                altered[0][field] = value
+                self.call(tool_list=altered)
+
     def test_wrong_sender_fails(self):
         broken = status()
         broken['message_authority']['sender_agent_id'] = 12
