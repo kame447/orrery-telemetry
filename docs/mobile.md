@@ -8,6 +8,28 @@
 
 ORRERYのcockpitがあれば、**Settings → Phone**からオン・オフできます（[次節](#cockpitのsettingsからオンにする)）。その下の表と[手動で有効にする](#手動で有効にする)は、cockpitを使わずに手で設定する場合の手順です。
 
+## スマホへ通知する（Android Chrome・任意）
+
+通知は既定でオフです。Phone accessの本人確認とpolicy確認を済ませた後、正規installerでoptional依存を用意します。まず `bash scripts/install.sh --with-mobile-push --dry-run` で計画を確認し、同じinstall先への `--with-mobile-push` 付きinstallを通常の承認手順で実行します。通常のinstallにはこの依存を追加しません。productionのPythonへ手でpipを実行しないでください。
+
+既にPhone accessを使っている場合は、`printf '%s\n' '{"access":true}' | agentstack-mobile apply` で同じ設定を再適用します。これにより管理対象の通知用Pythonをphone jobが選びます。依存だけを用意しても、通知の許可や購読は作られません。手動でrelayを起動する場合は、optional依存の入ったPythonと `--enable-push`、確認済みのhistory設定が必要です。
+
+スマホのReaderの上の**ベル**を押し、**Enable on this phone**を押してChromeの許可を与えます。許可を求めるのはこの操作だけです。設定は端末ごとに保存します。
+
+- **Reply needed**: 全agentの質問・承認待ち。既存Readerと同じask/questionを観測します。
+- **Work finished**: このagentだけ。新しい作業の後に待機となり、新しいassistantの返答が記録された「ターンの終わり」です。タスク全体の達成やプロセス終了を表しません。オンにしたagentのベルに印が付きます。
+- **Message previews**: 端末ごとに1つ、既定はオフです。オフならagent名と種類だけ。オンなら質問や最終返答の先頭を最大600文字まで表示します。コード・画像・token等の疑いがある本文・絶対pathを含む本文はpreviewを隠します。承認の具体文や検証済みの新しい質問文が取れない場合は、種類だけを表示します。
+
+Demo mode中も通知を送りますが、端末の設定にかかわらず本文のプレビューは送信直前に隠し、種類だけを表示します。名前はスマホ画面と同じ規則で、ホスト名や追加の伏せる単語に一致した部分だけを隠します。ベルでは有効化と通知種類の変更ができ、**Message previews**は一時的にオフ表示で操作できません。保存済みの値は変えず、Demoを切ると元に戻ります。Demoのオン・オフだけではbaselineや送信待ちを捨てません。
+
+**Disable on this phone**はサーバーの購読を消してからブラウザの購読を解除します。再有効化には同じベルを使います。Chromeで拒否した場合はChromeのsite settingsでORRERYの通知を許可し直します。最初の対象はAndroid Chromeです。iOS/Safariはこの版の対象外です。
+
+送信はMacからGoogleのPush serviceへの外向きHTTPSで行います。本文は標準Web Pushの暗号化を使いますが、Googleには配送先と時刻等のmetadata、およびVAPIDの連絡先として設定済みowner loginのメールアドレスが渡ります（メール形式のloginが必要です）。Funnelや公開の着信口は追加しません。通知を押すと同じoriginを開き、Readerの起動完了と最新名簿を待って、そのagentを開きます。Freshでは名簿のMail identityも入力先へ渡します。本文を受け取るたびにTailscale内の会話を取得する仕組みではありません。Reader閲覧にはTailscaleと起きているMacが必要です。
+
+鍵・購読・送信済みの印は `~/.agentstack/runtime/mobile-push/` に0700/0600で保存し、VAPID鍵は有効化時に1回だけ作ります。endpointと鍵はログへ出しません。Demo状態が不明・未対応の場合や、切断・unknownでは送信せず、初回起動や30秒を超える観測中断からの復帰はbaselineだけを取り直します。取得や送信の途中で30秒を超えて中断した場合も、その観測と未送信の通知を捨てます。Macのsleep中は新しい通知を送れません。履歴は1巡8件まで取得し、作業開始・完了確認・質問previewを共通の最終取得試行時刻が古い順に回します。取得の失敗も時刻を更新し、取り切れなかった作業開始の履歴は作業中の次巡へ持ち越します。画面を閉じてもrelayが5秒間隔で観測しますが、観測間の短い作業や、記録が取れないターンの完了通知は届かないことがあります。
+
+連打を抑えるため返事待ちを2回の観測で確定し、同じ状態を繰り返し通知しません。購読8端末・完了の選択は端末ごと128agent・pending64件・1巡4送信・最大3試行・120秒の期限を設けます。配送中に設定を切っても、既に受理された通知を取り消せるとは限りません。HTTP受理と端末表示は別で、OSの省電力・通知制限等による遅延や欠落があり、exactly-onceは保証しません。
+
 ## cockpitのSettingsからオンにする
 
 cockpitの**Settings**に**Phone**の節があり、スイッチは2つです。
@@ -68,10 +90,18 @@ badgeが**ON**になり、Setupの手順は消えます。**自分で確かめ�
 
 ### スマホで会話を見る
 
+Claude・Codex の会話には、PC の Reader と同じ **Agent steps** を表示します。記録された完了操作を段で追加し、作業中は **Working…** と経過時間、終了後は **Worked for … · N steps** に畳みます。押すと開き、過去のターンは最初は畳んで表示します。明示された失敗だけを **Failed**、結果が記録されないものを **Observed** とします。Codex の実行途中の内側の操作は推測せず、完了記録が届いてから追加します。狭い画面では対象の要約を1行に省略します。
+
+段になった道具のラベルは重ねず、ファイル・画像・Mail と未対応の道具のまとまりは残します。古いページで Claude の対応する要求が見つからない場合は **Load earlier** の説明を表示します。段に必要な短い道具名・対象の要約・時刻・状態・opaque ID とターン区切りだけを中継し、生の引数や出力、path、cockpit の参照 ID は追加しません。ページ数・bytes 上限は同じです。Demo でも動作し、対象は他の本文と同じ既存の規則で伏せます。背景化で動き・時計を止め、Close で解除します。OS の reduced motion に従います。動きは [kokonutUI AI Loading](https://kokonutui.com/)（MIT）の PC 版を流用し、ライセンスを source に保持しています。
+
 スマホで、手順2の**Address on the phone**（`https://…:9443/`）を開き、agentを開きます。最初のHTTPSは、証明書の発行で数秒かかることがあります。**Conversation** tabが出れば、会話の記録まで届いています（[会話の記録を読む](#スマホでagentの会話の記録を読む)）。
 
 
 ### demo modeのとき
+
+更新済みのcockpitで**Demo mode**を有効にすると、スマホも自動でユーザー名・機械名・追加した語を伏せます。画面を再読み込みせず約4秒以内（前面で接続できるとき）に追従し、書きかけの文章と画像を保持します。**Settings**のスイッチを切るとスマホ側も解除します。デスクトップを閉じても最後の状態を保持し、URLの`?demo=0`だけではスマホを解除しません。コピーや送信は伏せる前の値を使います。
+
+最初の表示前にもDemo状態を確認します。通信エラーでは画面を隠して**Retry**を出します。同じブラウザにDemo状態が残っている間は、cockpitの停止や旧版への切替だけでは実名表示に戻りません。cockpit未導入・未起動、または未対応の旧版で、Demoを受け取った履歴もない場合は従来の閲覧表示を続けます。両方を更新して、Demo中のデスクトップとスマホを一度再読み込みしてください。
 
 loginとaddressをまだ設定していない状態でdemo modeのまま**Phone access**を押すと、スイッチのすぐ下に「Turn off demo mode to set up phone access (once). After that you can switch it on and off in demo mode.」と出ます。**Turn off demo mode**を押すと、demo modeを切ってpageを開き直します。Settingsは閉じるので、もう一度**Settings**を開いて**Phone access**を押し、上の手順を進めます。
 
@@ -129,7 +159,9 @@ Tailscaleを接続し、Android ChromeでreaderのHTTPSのServeアドレスを�
 <img src="images/mobile-home.png" width="300" alt="スマホ幅の画面。上に要確認のagent、下にGraphのFocus表示">
 
 - **Activity**: 一覧は差出人、宛先、時刻、To/Ccだけです。Mailを1件タップすると、その件名と本文を開きます。taskや私有パスを別途取得しませんが、Mail本文に書かれた内容は表示されます。Statusは、このreaderを起動した後に観測した変化です。実際に変化した時刻とは区別します。
-- **Graph**: 既定は直近24時間に活動が確認されたagentです。Focusはその中の選択agentと関連の強い最大5体、Allは選択期間内の全体です。Findで名前を選び、ピンチで拡大、ドラッグで移動、Fitで収めます。大きなgraphで全名前を同時に読めることは保証しません。
+- **Graph**: 既定は直近24時間に活動が確認されたagentです。Focusはその中の選択agentと関連の強い最大5体、Allは選択期間内の全体です。**Find an agent**で名前またはRoleを検索できます。結果の名前を押すとReaderが開き、横の**Focus**はそのagentを中心にGraphを絞ります。Focus表示では周りのagentをタップすると中心を切り替えてFitし、中心のagentをタップするとReaderが開きます。All表示ではどのagentもタップでReaderが開きます。Enter・Spaceも同じ動きです。Roleは既存の注釈に登録された短い表示名だけを名前の下に表示し、未設定なら補いません。ピンチで拡大、ドラッグで移動、Fitで収めます。大きなgraphで全名前を同時に読めることは保証しません。
+- Graphのagentや検索結果の名前から開いたReaderを**×**や**Back**で閉じると、最後に読んでいたagentと関連の強い最大5体をFocusで表示してFitします。Activityなどから開いた場合は元の画面へ戻ります。
+- Focus・Allとも、75%以上の拡大率では全agentの肖像の下に名前、その下に登録済みのRoleを表示します。選択中の名前は従来の大きさを保ち、それ以外は小さく表示します。75%未満では名前とRoleを隠します。
 - 線の太さと矢印の大きさは選択期間のMail件数に対応します。件数は方向・To/Ccごとの**宛先行数**で、未読数や一意の送信数ではありません。親子の破線はMailとは別です。
 - 文脈残量弧とWorkingの動きはPCと共通です。文脈の取得時刻は不明なまま扱い、未知値には弧を描きません。アカウント利用枠はUnavailableで、更新要求もしません。
 - **Tune graph**の6設定はこのブラウザ内の表示調整だけです。agentの起動・停止・Mail返信はありません。Activityの絞込も閲覧だけです。会話の記録は下のpolicyの確認の後に、ターミナルの表示と送信はさらにその設定を有効にした場合だけ使えます。
@@ -139,6 +171,8 @@ Tailscaleを接続し、Android ChromeでreaderのHTTPSのServeアドレスを�
 GraphのMail線をタップすると、その2体間の選択期間の一覧が開きます。初期表示は**Both**（両方向）で、差出人→宛先のボタンで方向を絞れます。親子線はMail一覧を開きません。一覧の1件をタップして本文を開き、**Back**で一覧、**Done**でGraphへ戻ります。選択と拡大率は保持します。
 
 Graphを前面で見ている間は、約10秒ごとのsnapshotでMailの線の件数が増えると、差出人から宛先へ光が飛び、増加分を**+N**で示します。同じ2体へのTo/Ccはまとめます。光のタップでも既存の2体間の一覧が開き、件名・本文は1件を選んだときだけ取得します。初回、期間変更、背景からの復帰、取得の中断後には過去分を流しません。表示範囲外の線は対象外で、件数が上限で欠けているsnapshotでは出しません。同時表示は最大12本です。期間内の件数の差なので、その間に古いMailが期間外へ出ると、新着数と一致しないことがあります。動きを減らす設定では、飛ぶ光の代わりに線の中央へ静止した印を出します。
+
+Contextや状態・Roleだけが変わった場合は該当ノードの表示だけを更新し、位置・手動の拡大率と他ノードの肖像を保持します。ノードや線、Focus対象が変わった場合は通常どおり配置を計算します。ロゴ・書体・グラフの描画は既存のものを使います。
 
 Graph右上の**Expand**でGraphを画面いっぱいに広げます。ブラウザの全画面機能が使えない場合も、同じページ内で全面表示します。Find・Focus/All・Fit・ピンチ・ドラッグ、Mail線の一覧やTerminal sheetはそのまま使えます。**Close**で通常表示へ戻ります。戻る／Escapeは手前のsheetを先に閉じ、次にGraphの全画面表示を終了します。OSやブラウザが全画面を終了した場合は通常表示へ戻り、開いていたsheetも閉じます。縦横の切替に追従し、選択と手動の拡大率を保ちます。実スマホでの全画面・戻るジェスチャー・キーボード動作は別途確認してください。
 
@@ -265,7 +299,7 @@ PY
 
 `enabled:false`やエラーの場合は有効化済みとせず、版・設定・管理元を確認します。readerの`--check`は形式検査だけで、policyや実端末の受入ではありません。どちらかの有効化が無い、版が合わない、既存target guardやOS確認が失敗した場合はUnavailableになります。
 
-有効時はheaderが**Terminal enabled**になります。Graphでagentを選んだパネル、ActivityのStatus行、要確認行、Mail詳細のFrom/Toにある**Terminal**から同じsheetを開きます。Graphの選択やMail本文を開く操作はそのままです。複数paneなら自分で選び、不明な対応を名前から補いません。legacyの対象はPCの既存managerが扱う同じtransport内で、既存保護が許すpaneです。agentの種類や現在の表示期間は起動許可には使わず、別socket/global対象へ迂回しません。paneのsessionは現在のmetadata project外にある場合もあります。freshは下の明示I/Aの手順を使います。
+有効時はheaderが**Terminal enabled**になります。Graphのagent、検索結果の名前、ActivityのStatus行・要確認行・Mail詳細のFrom/Toにある**Terminal**から同じsheetを開きます。Graphの下に選択agent用の別カードは出しません。Mail本文を開く操作はそのままです。複数paneなら自分で選び、不明な対応を名前から補いません。legacyの対象はPCの既存managerが扱う同じtransport内で、既存保護が許すpaneです。agentの種類や現在の表示期間は起動許可には使わず、別socket/global対象へ迂回しません。paneのsessionは現在のmetadata project外にある場合もあります。freshは下の明示I/Aの手順を使います。
 
 選択paneの末尾120行、UTF-8で12KiBまでを文字として表示します。Conversationも有効な画面では、端末本文を全面の下端へ寄せ、長い行は折り返し、続きの行にも元の字下げを残します（深い字下げは画面幅の40%まで）。罫線だけの行は折らず、幅で切ります。枠は出さず、取得上限・更新間隔・Shownの時刻を本文の下の小さな1行に出します。切詰め・制御文字の除去や読み返しの停止は必要なときだけ下に示します。更新の印は小さな点で、読み返しによる停止と取得失敗は画面上に残します。前面で開いている1paneだけ約3秒ごとに更新し、失敗時は6、12、最大24秒へ間隔を延ばします。制御文字の除去・表示の切詰めを明示し、画像、HTML、リンクを実行しません。既存recorderや復元history全体は送りません。検証済みの会話の記録だけを見る[History](#スマホでagentの会話の記録を読む)は別です。**画面にはキーや私的文章が含まれ得ます。** 誰かへ見せる前に内容を確かめてください。
 
@@ -283,7 +317,9 @@ Conversationの本文で左へ、Terminalの本文で右へ、はっきり横に
 
 ConversationとTerminalの下には宛先chipと丸い入力欄を常に表示します。UTF-8で4KiB以内の1行を書き、**↑（Review input）**で同じ欄を確認へ切り替えます。宛先agent・window・pane、まだ送信していないこと、全文と続くEnterを確認し、**Send once**を1回押します。**Edit**で文面を保持して入力に戻れます。確認は30秒で失効し、出力更新で本文や宛先・期限を差し替えません。paneの交換や取得失敗後は再確認が必要です。送信後も前面で開いていれば同じpaneの応答を見られます。**Received by terminal**はtmuxの受理までで、agentの実行やタスク完了を意味しません。**Outcome unknown**では一部だけ届いた可能性があり、自動再送しません。**Check receipt**は受理状態の照会だけです。
 
-**画像の添付:** 選んだpaneの作業folderを検証でき、bridgeにPillowがあるときだけ、**＋**でスマホのfile pickerを開けます。JPEG・PNG・静止WebPを1枚、10MiB・2400万画素まで選べます。thumbnailは手元で選んだ画像で、**×**で添付を外すと、確認用の全文にもpathを含めなくなります。HEIC・動画やアニメーション画像は対象外です。uploadだけでは入力を送りません。bridgeは向きを直し、EXIF/GPS等の元のメタデータを含めず画素を描き直して、agentの作業folderの`.orrery-input-images/<乱数>.jpg|png`へ保存します。編集欄には利用者の文とthumbnailだけを出し、↑で文に`[image: '<絶対path>']`を足した全文を組み立てます。普段と同じReview input・Send onceでその全文を確認し、Editでは利用者の文だけに戻ります。bytes表示と4KiBの上限は、pathを含む全文で数えます。agentはnativeの画像toolでそのpathを開くため、modelも画像入力に対応している必要があります。dashboardのAPIや、文字だけの送信経路は変えません。
+入力の末尾にある連続したCR/LFは送信文から除き、Reviewと送信には同じ1行を使います。途中の改行・4096 bytes超・使えない文字があるときは入力欄の近くに理由を表示します。
+
+**画像の添付:** 選んだpaneの作業folderを検証でき、bridgeにPillowがあるときだけ、**＋**でスマホのfile pickerを開けます。JPEG・PNG・静止WebPを合計10枚まで複数選択でき、＋で後から追加できます。1枚ごとの上限は10MiB・2400万画素です。thumbnail一覧で各画像の**×**を押すと、その画像だけを外し、確認用の全文にもそのpathを含めなくなります。一覧は高さを抑えてスクロールできます。HEIC・動画やアニメーション画像は対象外です。uploadは選んだ順に1枚ずつ行い、それだけでは入力を送りません。途中で保存に失敗したら残りのuploadを止め、保存して添付できた画像と文面を残します。確認画面で添付内容を確かめてから送信してください。bridgeは向きを直し、EXIF/GPS等の元のメタデータを含めず画素を描き直して、agentの作業folderの`.orrery-input-images/<乱数>.jpg|png`へ保存します。編集欄には利用者の文とthumbnail一覧を出し、↑で文に各画像の`[image: '<絶対path>']`を足した全文を組み立てます。普段と同じReview input・Send onceでその全文を確認し、Editでは文と添付一覧を保持して編集へ戻ります。bytes表示と4KiBの上限は、すべてのpathを含む全文で数えます。agentはnativeの画像toolでそのpathを開くため、modelも画像入力に対応している必要があります。dashboardのAPIや、文字だけの送信経路は変えません。
 
 専用folderに`*`だけの`.gitignore`を置きます。次の画像を保存するときに7日より古い生成画像を掃除し、folderあたり現在の画像を50枚まで保持します。thumbnailの削除・取消・Closeでは保存物をすぐ消さず、古い会話に残ったpathは掃除後に読めなくなることがあります。同期・backupは作業folderの方針のままです。MacとWindowsの**WSL2**で同じ実装を使い、relay・bridge・ローカルのharnessが同じLinux/POSIXのpathを読みます。WSLのLinux側の作業folderを推奨します。`/mnt/c/...`もWSLのpathのまま扱いますが、WindowsのACL・DrvFSの設定によっては指定した`0700`/`0600`が効かず、Windowsから共有されたfolderを非公開にする保証にはなりません。同じpathを読めないWindows nativeのprocess・remote/containerのharnessは対象外です。Pillow・使える作業folder・新しいbridgeが無ければ＋を出さず、文字だけの送信は引き続き使えます。
 
@@ -320,6 +356,7 @@ Terminalだけを戻す場合は共有設定を`false`にするか項目を除�
 - 送信は既存のTerminal経路のままです。Terminalが有効でpaneを選んだら、両タブ共通の常設欄で**↑（Review input）→ Send once**の確認・上限・受領を使います。Reviewは現在のタブの入力欄内で行い、送り先・送る文面・その後のEnterを確認します。確認欄に端末の末尾は出しません。送り先の行を押すとpaneを選び直せ、そのとき元の確認と下書きは破棄します。共通のpane確認の更新は続き、対象の変更や取得失敗があれば送信前に再確認が必要です。Terminalから入力を始めた場合も、送信後はConversationへ戻って送った文の吹き出しを末尾に出します。受領は小さな表示で残し、結果不明時のCheck receiptは自動再送せず照会だけを行います。送信・準備中と結果不明時は、宛先の変更や新しい入力で受領情報を捨てません。**Received by terminal**の後の仮の行は、送信後の記録に同じ文が届けば消え、**Dismiss**で閉じるか、最長3分で消えます。`!`は対応するSHELLの記録と照合します。この行は画面内だけの表示で、agentの受領の証明ではありません。
 - ORRERY Mail の `show_files` で明示した画像は、tool の折りたたみの外にも小さく表示します。元の chip は折りたたみの中に残ります。小さい画像をタップすると既存の拡大 preview が開き、閉じると元の画像へ focus が戻ります。画像以外は名前だけを表示します。本文に書いた path や、参照の無い画像を自動で開くことはありません。PC が記録から許可した参照だけを、同じ preview の経路で取得するため、見られる範囲は変わりません。
 - 一覧の画像は画面付近だけを同時に2枚まで取得します。reader に Pillow があれば最大320pxの PNG へ縮小し、無ければ既存の PNG を使います。拡大時は通常の preview を取得します。スクロール中に保持する縮小画像は原則24枚までで、画面外の古いものから解放します。背景では取得を止め、復帰時は中断したものを取り直し、Close・別agent・ページの離脱では画像と遅れた応答を破棄します。
+- **Reply with reference:** 本文を長押しで選択すると、選択範囲の下にボタンを表示します。1つの発言の本文だけを対象にし、発言をまたぐ選択は参照にしません。押すと入力欄の上に発言者・時刻・引用のカードを置き、**×**で外しても書いた返信は残します。選択中はタブをスワイプで切り替えず、通常の履歴更新でも本文の選択を保ちます。Reviewには `Reference: <agent> · <role> · <ts> | Recorded message: <id> | Quote: "<引用>" | Reply: <返信>` の1行を表示します。引用の改行は空白に畳み、4096 bytesは参照・返信・画像のpathを含む合計です。上限を超えたら理由を出してReviewを無効にし、引用を黙って切りません。宛先agent・paneの選択やReaderのmount/resetが変わった参照では送らず、外して選び直す必要があります。Claudeの本文全体が同じidの単独`pasted_content`で包まれていた場合は中身を表示・照合し、id不一致や混在した本文はそのままにします。
 - Close・別agentへの切替・ページの離脱で更新を止め、スマホから記録・pageの印・参照のID・開いていたpreview（画像のdataを含む）・仮の行を消します。遅れた応答で復活させません。背景では取得を止め、画面と読む位置をメモリに残します。読み込み中に中断したpreviewは復帰時に同じ参照で取り直し、表示済みのpreviewはそのまま残します。再読込み用にagent名・タブと選択時に得たMailの識別IDだけをsessionStorageに残し、記録の本文・下書き・previewはURL・log・browser storageへ残しません。reader側で発行済みの印は期限まで残りますが、本文を含まず、同じagentにしか使えません。
 
 **伏せる処理はありません。** 名前で隠したり、中身を伏せたりはしません。表示は記録とfileのままで、何を出してよいかは持ち主が判断します。会話の本文・Mailの本文・fileのtext・画像の中の鍵、promptに貼った秘密、私的な文章は、書かれたままスマホに届きます。名前が秘密らしいfile（`credentials.yaml`・`api_key.md`など）も、作業folderの中で種類と大きさが合えば開けます（拡張子の無い`.env`や鍵のfileなど、previewする種類に無いものは開けません）。toolの出力は送りませんが、agentがそこから書き写したものは届きます。それでよいagentと端末に限ってHistoryを有効にしてください。
