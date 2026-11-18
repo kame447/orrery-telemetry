@@ -861,6 +861,10 @@ GEMINI_MODEL_SETTING="${AGENTSTACK_GEMINI_MODEL:-}"
 GEMINI_EFFORT_SETTING="${AGENTSTACK_GEMINI_EFFORT:-}"
 resolve_setting GEMINI_MODEL_SETTING AGENTSTACK_GEMINI_MODEL
 resolve_setting GEMINI_EFFORT_SETTING AGENTSTACK_GEMINI_EFFORT
+# Pass the new settings as data, never interpolate them into Python source.
+export AGENTSTACK_CLAUDE_MODELS="$CLAUDE_MODELS_SETTING"
+
+HOOKS_DIR="$INSTALL_DIR/hooks"
 if [[ -n "$GEMINI_MODEL_SETTING" && ! "$GEMINI_MODEL_SETTING" =~ ^gemini-[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
   printf "error: AGENTSTACK_GEMINI_MODEL must be an unqualified gemini-* model ID\n" >&2
   exit 2
@@ -869,11 +873,6 @@ case "$GEMINI_EFFORT_SETTING" in
   ""|low|medium|high|xhigh) ;;
   *) printf "error: AGENTSTACK_GEMINI_EFFORT must be low, medium, high, or xhigh\n" >&2; exit 2 ;;
 esac
-
-# Pass the new settings as data, never interpolate them into Python source.
-export AGENTSTACK_CLAUDE_MODELS="$CLAUDE_MODELS_SETTING"
-
-HOOKS_DIR="$INSTALL_DIR/hooks"
 SKILLS_DIR="$INSTALL_DIR/skills"
 DASHBOARD_DIR="$INSTALL_DIR/dashboard"
 BIN_DIR="$INSTALL_DIR/bin"
