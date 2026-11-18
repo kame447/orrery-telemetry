@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from dashboard.mobile_relay import static_assets
+from dashboard.mobile_relay import CSP, static_assets
 from test_dashboard_help_map import _WebSocket
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +43,7 @@ def phone(request):
                 data = json.dumps(data,ensure_ascii=False).encode()
             self.send_response(status)
             self.send_header('Content-Type', mime)
+            self.send_header('Content-Security-Policy', CSP)
             self.send_header('Content-Length', str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -50,6 +51,12 @@ def phone(request):
         def do_GET(self):
             path = self.path.split('?')[0]
             state['get_calls'].append(self.path)
+            if path == '/view/demo':
+                if state.get('demo_delay'):time.sleep(state['demo_delay'])
+                return self.send(state.get('demo',dict(version=1,supported=True,on=False,words=[],identity=None)), status=503 if state.get('demo_error') else 200)
+            if path in {'/demo-mask.js','/demo-mode.js'} and os.environ.get('ORRERY_DEMO_BRIDGE_ROOT'):
+                filename={'/demo-mask.js':'demo_mask.js','/demo-mode.js':'demo_mode.js'}[path]
+                return self.send((Path(os.environ['ORRERY_DEMO_BRIDGE_ROOT'])/filename).read_bytes(),'text/javascript')
             if path == '/view/message' and state['mail']:
                 return self.send(dict(event=state['mail'], subject='Fixture subject', body='Fixture message body', subject_truncated=False, body_truncated=False))
             if path == '/view/mail' and state['mail']:
@@ -60,7 +67,7 @@ def phone(request):
                 return self.send(snapshot)
             if path == '/view/conversation':
                 agent=parse_qs(urlsplit(self.path).query).get('name',['SampleAgent'])[0]
-                return self.send(dict(ok=False, error=state['error']) if state['error'] else dict(ok=True, agent=agent, events=state['events'], older=None, limited=False, tail_only=False))
+                return self.send(dict(ok=False, error=state['error']) if state['error'] else dict(ok=True, agent=agent, provider=state.get('provider', ''), events=state['events'], older=None, limited=False, tail_only=False))
             if path == '/view/terminal':
                 return self.send(dict(contract, api=31, supported='legacy-managed-pane', enabled=True, ack='tmux-command-accepted'))
             if path == '/view/conversation/preview':
@@ -90,9 +97,12 @@ def phone(request):
             if operation == 'image':
                 if payload.get('image') is None:
                     return self.send(dict(contract,target=selected,enabled=state.get('images',False)))
-                if state.get('image_error'):
+                attempt = sum(op == 'image' and body.get('image') is not None for op, body in state['calls'])
+                if state.get('image_error') and attempt == state.get('image_error_at', attempt):
                     return self.send(dict(error=state['image_error']),status=403)
-                return self.send(dict(contract,target=selected,enabled=True,path='/workspace/.orrery-input-images/'+'a'*32+'.png'))
+                paths = state.get('image_paths')
+                path = paths[attempt - 1] if paths else '/workspace/.orrery-input-images/'+'a'*32+'.png'
+                return self.send(dict(contract,target=selected,enabled=True,path=path))
             if operation == 'prepare':
                 state['draft'] = payload['text']
                 state['prepared_target'] = selected

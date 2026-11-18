@@ -6,15 +6,24 @@ window.AGENTSTACK_DEMO={assetURL:n=>'/assets/'+n+'.svg',portraitURL:n=>'/view/po
 const $=s=>document.querySelector(s),node=(tag,cls,text)=>{const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;};
 let snapshot=null,kind='all',agentFilter='',desiredWindow='day',timer=0,active=null,pending=false,receivedAt=0,lastNotices=[];
 const mailRef=a=>a&&/^[a-f0-9]{32}$/.test(a.mail_instance_id)&&Number.isSafeInteger(a.mail_agent_id)&&a.mail_agent_id>0?{mail_instance_id:a.mail_instance_id,mail_agent_id:a.mail_agent_id}:null;
-function markRef(element,value){const ref=mailRef(value);if(ref){element.dataset.mailInstanceId=ref.mail_instance_id;element.dataset.mailAgentId=String(ref.mail_agent_id);}}
+function markRef(element,value){if(typeof value?.name==='string')element.dataset.agentName=value.name;const ref=mailRef(value);if(ref){element.dataset.mailInstanceId=ref.mail_instance_id;element.dataset.mailAgentId=String(ref.mail_agent_id);}}
 window.OrreryMobileAgent={forName(name){const rows=(snapshot?.agents||[]).filter(a=>a.name===name);return rows.length===1?{state:rows[0].act_state,running:rows[0].running,workDisplay:typeof rows[0].work_disp==='string'?rows[0].work_disp:'',stale:snapshot.sources.agents.status!=='available'||snapshot.sources.agents.age_seconds===null||snapshot.sources.agents.age_seconds+(performance.now()-receivedAt)/1000>30}:null;}};
-window.OrreryMobileIdentity={forName(name){const rows=(snapshot?.agents||[]).filter(a=>a.name===name);return rows.length===1?mailRef(rows[0]):null;}};
+window.OrreryMobileIdentity={forName(name){const rows=(snapshot?.agents||[]).filter(a=>a.name===name);return rows.length===1?mailRef(rows[0]):null;},roster(){const source=snapshot?.sources.agents;return source?.status==='available'&&source.age_seconds!==null&&source.age_seconds+(performance.now()-receivedAt)/1000<=30?snapshot.agents:null;}};
 let mailPage=null,mailPositions=[null],mailPosition=0,mailController=null,mailGeneration=0;
 let pair=null,pairController=null,pairGeneration=0,detailController=null,detailGeneration=0;
 const minutesAt=position=>Math.max(15,Math.min(43200,Math.round(Math.exp(Math.log(15)+position/1000*Math.log(43200/15))/15)*15));
 const duration=seconds=>seconds===null?'All history':seconds<3600?'Last '+Math.round(seconds/60)+' min':seconds<=86400?'Last '+(seconds/3600).toLocaleString('en-GB',{maximumFractionDigits:2})+'h':'Last '+(seconds/86400).toLocaleString('en-GB',{maximumFractionDigits:2})+'d';
 window.OrreryMobileWindow={duration};
-const network=new window.OrreryMobileNetwork(null,(a,b)=>openPair(a,b));
+const network=new window.OrreryMobileNetwork(null,(a,b)=>openPair(a,b),openGraphAgent);
+function openGraphAgent(name){
+ const terminal=window.OrreryMobileTerminal,status=$('#graph-reader-status');
+ status.hidden=terminal?.available()===true;
+ if(!status.hidden){status.textContent='Reader is unavailable. Check Phone access on the desktop.';return;}
+ terminal.open(name,window.OrreryMobileIdentity?.forName(name),null,closedName=>{
+  network.focus(closedName);
+  if(network.svg.contains(document.activeElement))document.activeElement.blur();
+ });
+}
 let graphFullscreen=null;
 const time=ts=>typeof ts==='number'?new Date(ts*1000).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}):'Unknown';
 function face(a,initialLength=2){
@@ -98,6 +107,7 @@ function showNotices(notices,data,label){
 function render(data){
  if(snapshot?.timeline.scope&&snapshot.timeline.scope!==data.timeline.scope){clearDetail();clearPair();resetMail();}
  snapshot=data;receivedAt=performance.now();
+ window.OrreryMobileTerminal?.restore?.();
  // The displayed roster is the projection's graph.nodes + agents union.
  // Mail success cannot establish an empty roster or working/waiting counts.
  const rosterSources=[data.sources.agents,data.sources.graph],mail=data.sources.mail;
@@ -431,8 +441,23 @@ const fresh=()=>capability?.api===34;
 const ref=value=>value&&/^[a-f0-9]{32}$/.test(value.mail_instance_id)&&Number.isSafeInteger(value.mail_agent_id)&&value.mail_agent_id>0?{mail_instance_id:value.mail_instance_id,mail_agent_id:value.mail_agent_id}:null;
 const rowRef=row=>ref({mail_instance_id:row.dataset.mailInstanceId,mail_agent_id:Number(row.dataset.mailAgentId)});
 const sameTarget=value=>!fresh()||!!ref(value)&&!!selector&&value.mail_instance_id===selector.mail_instance_id&&value.mail_agent_id===selector.mail_agent_id;
-let generation=0,previewController=null,operationController=null,pollTimer=0,expiryTimer=0,failures=0,prepared=null,receipt=null,previousFocus=null;
-let imageAvailable=false,imageProbe='',imageController=null,imageProbeController=null,attachment=null;
+let generation=0,previewController=null,operationController=null,pollTimer=0,expiryTimer=0,failures=0,prepared=null,receipt=null,previousFocus=null,afterClose=null;
+let replyReference=null,preparedReference=null;
+const referenceTarget=()=>target?JSON.stringify([name,capability?.epoch,target.choice,target.revision,selector?.mail_instance_id,selector?.mail_agent_id]):'';
+const referenceCurrent=value=>!value||value.target===referenceTarget()&&value.value.isCurrent();
+const referenceError=()=>replyReference&&!referenceCurrent(replyReference)?'Target or conversation changed. Remove this reference and select again.':'';
+function addReference(value){
+ if(phase!=='editing'||!previewOK||!target||value.agent!==name||!value.isCurrent())return false;
+ replyReference={value:{...value,text:value.text.replace(/\s+/gu,' ').trim()},target:referenceTarget()};
+ render();q('#terminal-text')?.focus({preventScroll:true});return true;
+}
+function refreshReference(){
+ if(replyReference&&phase==='review'&&!referenceCurrent(preparedReference)){cancelIntent();phase='editing';message='';render();return;}
+ q('#terminal-input-error')?.refresh?.();
+ const review=q('#terminal-review');if(review&&replyReference)review.disabled=phase!=='editing'||!previewOK||!!imageController||!inputValid();
+}
+const MAX_ATTACHED_IMAGES=10;
+let imageAvailable=false,imageProbe='',imageController=null,imageProbeController=null,attachments=[];
 let paused=false,checkingView=false,resumeController=null,reviewUntil=0,startupReady=false;
 const viewKey='orrery-mobile-view-v1';
 function savedView(){try{const v=JSON.parse(window.sessionStorage.getItem(viewKey));return v&&(Object.keys(v).length===2||Object.keys(v).length===4&&ref(v))&&Object.keys(v).every(k=>['agent','tab','mail_instance_id','mail_agent_id'].includes(k))&&/^[A-Za-z][A-Za-z0-9_-]{0,95}$/.test(v.agent)&&['conversation','terminal'].includes(v.tab)?v:null;}catch(_){return null;}}
@@ -440,7 +465,16 @@ let restoreView=savedView();
 function rememberView(){if(!sheet.open||!name)return;const identity=ref(selector);try{window.sessionStorage.setItem(viewKey,JSON.stringify({agent:name,tab,...identity}));}catch(_){}}
 function forgetView(){try{window.sessionStorage.removeItem(viewKey);}catch(_){}}
 function restoreSavedView(){
- if(!startupReady||!restoreView||sheet.open||document.hidden||!(enabled||history))return;
+ if(!startupReady||document.hidden||!(enabled||history))return;
+ const notification=/^#notify=([A-Za-z][A-Za-z0-9_-]{0,95})$/.exec(window.location?.hash||'');
+ if(notification){
+  const rows=window.OrreryMobileIdentity?.roster();if(!rows)return;
+  const found=rows.filter(a=>a.name===notification[1]&&!a.retired);
+  if(found.length!==1){const status=q('#graph-reader-status');status.hidden=false;status.textContent='That agent is no longer available.';return;}
+  const identity=ref(found[0]);if(fresh()&&!identity)return;
+  open(found[0].name,identity);return;
+ }
+ if(!restoreView||sheet.open)return;
  const identity=window.OrreryMobileIdentity?.forName(restoreView.agent);
  const saved=ref(restoreView);
  if(saved){
@@ -464,15 +498,23 @@ async function request(operation,payload,controller,timeout=3000){
  }finally{clearTimeout(timer);}
 }
 function cancelIntent(){
+ preparedReference=null;
  const old=prepared||receipt;prepared=null;receipt=null;reviewUntil=0;clearTimeout(expiryTimer);
  if(!old||!enabled)return;
  const controller=new AbortController();
  // Best effort cancellation never retries commit, and keeps no text or preview.
  request('cancel',{epoch:old.epoch,intent:old.intent},controller,2000).catch(()=>{});
 }
-function stop(){clearTimeout(pollTimer);pollTimer=0;previewController?.abort();previewController=null;operationController?.abort();operationController=null;resumeController?.abort();resumeController=null;imageController?.abort();imageController=null;imageProbeController?.abort();imageProbeController=null;imageAvailable=false;imageProbe='';attachment=null;paused=false;checkingView=false;generation++;}
-function clear(){inputObserver?.disconnect();inputObserver=null;readerSwipe=null;composer=false;stop();cancelIntent();conversation()?.unmount();tab='terminal';name='';selector=null;choices=[];choice=null;target=null;text='';output='';preview=null;previewOK=false;message='';phase='loading';failures=0;sheet.replaceChildren();}
-function close(fromBack=false,keepView=false){if(!keepView){restoreView=null;forgetView();}const remove=backEntry&&window.history.state?.orreryConversation===true;backEntry=false;const restore=previousFocus;previousFocus=null;clear();if(sheet.open)sheet.close();if(!document.hidden&&restore?.isConnected)restore.focus({preventScroll:true});if(remove&&fromBack!==true){backClosing=true;window.history.back();}}
+function stop(){clearTimeout(pollTimer);pollTimer=0;previewController?.abort();previewController=null;operationController?.abort();operationController=null;resumeController?.abort();resumeController=null;imageController?.abort();imageController=null;imageProbeController?.abort();imageProbeController=null;imageAvailable=false;imageProbe='';clearAttachments();paused=false;checkingView=false;generation++;}
+function clear(){window.OrreryMobilePush?.close();replyReference=preparedReference=null;inputObserver?.disconnect();inputObserver=null;readerSwipe=null;composer=false;stop();cancelIntent();conversation()?.unmount();tab='terminal';name='';selector=null;choices=[];choice=null;target=null;text='';output='';preview=null;previewOK=false;message='';phase='loading';failures=0;sheet.replaceChildren();}
+function close(fromBack=false,keepView=false){
+ if(!keepView){restoreView=null;forgetView();}
+ const remove=backEntry&&window.history.state?.orreryConversation===true,closedName=name,finished=afterClose,restore=previousFocus;
+ backEntry=false;previousFocus=afterClose=null;clear();if(sheet.open)sheet.close();
+ if(!document.hidden&&!keepView&&finished)finished(closedName);
+ else if(!document.hidden&&restore?.isConnected)restore.focus({preventScroll:true});
+ if(remove&&fromBack!==true){backClosing=true;window.history.back();}
+}
 window.addEventListener('popstate',event=>{if(backClosing){backClosing=false;event.stopImmediatePropagation();return;}if(sheet.open&&backEntry){event.stopImmediatePropagation();if(dismissLayer()){window.history.pushState({orreryConversation:true},'');return;}backEntry=false;close(true);}},true);
 const entryLabel=()=>history?'History':'Terminal';
 function entry(n,cls='',identity=null){
@@ -480,24 +522,29 @@ function entry(n,cls='',identity=null){
  b.setAttribute('aria-label','Open '+entryLabel()+' for '+n);b.disabled=!(enabled||history);b.title=history?'Read this agent’s verified conversation record':enabled?'View this agent’s selectable cockpit panes':'Terminal is off. Designated-phone policy acceptance and explicit opt-in are required.';
  b.onclick=()=>open(n,identity);return b;
 }
-const graphEntry=entry('','terminal-graph-entry');graphEntry.id='terminal-graph-entry';q('.selected-agent').after(graphEntry);
 function entries(){
- const selected=q('#selected-name').textContent;graphEntry.replaceChildren(make('span','',selected==='None'?'Select an agent':selected),make('strong','',entryLabel()+' ⌁'));graphEntry.disabled=!(enabled||history)||selected==='None';graphEntry.onclick=()=>open(selected,window.OrreryMobileIdentity?.forName(selected));
- q('#attention').querySelectorAll(':scope > .attention-row').forEach(row=>{const n=row.querySelector('.name')?.textContent;if(!n)return;const wrap=make('div','terminal-attention');row.replaceWith(wrap);wrap.append(row,entry(n,'',rowRef(row)));});
- q('#events').querySelectorAll('.status-line').forEach(row=>{const n=row.querySelector('.name')?.textContent;if(n&&!row.querySelector('.terminal-entry'))row.append(entry(n,'',rowRef(row)));});
+ q('#attention').querySelectorAll(':scope > .attention-row').forEach(row=>{const n=row.dataset.agentName;if(!n)return;const wrap=make('div','terminal-attention');row.replaceWith(wrap);wrap.append(row,entry(n,'',rowRef(row)));});
+ q('#events').querySelectorAll('.status-line').forEach(row=>{const n=row.dataset.agentName;if(n&&!row.querySelector('.terminal-entry'))row.append(entry(n,'',rowRef(row)));});
  document.querySelectorAll('.terminal-entry:not(#terminal-graph-entry)').forEach(b=>{b.disabled=!(enabled||history);b.textContent=entryLabel();b.setAttribute('aria-label','Open '+entryLabel()+' for '+b.dataset.terminalName);});
  restoreSavedView();
 }
-new MutationObserver(entries).observe(q('#selected-name'),{childList:true,subtree:true});
 new MutationObserver(entries).observe(q('#attention'),{childList:true});new MutationObserver(entries).observe(q('#events'),{childList:true});
 function mail(event){
  q('.terminal-mail-people')?.remove();const people=make('div','terminal-mail-people');
  for(const [label,n,id]of[['From',event.source,event.source_agent_id],['To',event.target,event.target_agent_id]]){const row=make('div','terminal-mail-person');row.append(make('span','',label+' '+n),entry(n,'',ref({mail_instance_id:event.mail_instance_id,mail_agent_id:id})));people.append(row);}
  q('#message-route').after(people);
 }
-async function open(n,identity=null,initialTab=null){
- if(busy()||sheet.open&&phase==='unknown'||!(enabled||history)||document.hidden)return;previousFocus=sheet.open?previousFocus:document.activeElement;clear();name=n;selector=ref(identity);window.scrollTo({top:0,behavior:'instant'});
- if(!sheet.open){sheet.showModal();if(history){window.history.pushState({orreryConversation:true},'');backEntry=true;}}
+async function open(n,identity=null,initialTab=null,onClose=null){
+ if(busy()||sheet.open&&phase==='unknown'||!(enabled||history)||document.hidden)return;
+ const opening=!sheet.open;
+ // Keep the entry route while navigating to another agent within this sheet.
+ if(opening){previousFocus=document.activeElement;afterClose=onClose;}
+ clear();name=n;selector=ref(identity);window.scrollTo({top:0,behavior:'instant'});
+ if(opening)sheet.showModal();
+ // Consume only after the Reader accepts the target, before adding its Back
+ // entry so Back cannot resurrect the same notification link.
+ if(window.location?.hash==='#notify='+n)window.history.replaceState(window.history.state,'',window.location.pathname+window.location.search);
+ if(opening&&history){window.history.pushState({orreryConversation:true},'');backEntry=true;}
  if(history){tab=initialTab==='terminal'&&enabled?'terminal':'conversation';conversation().mount(n);}
  if(!enabled){phase='history-only';render();return;}
  if(fresh()&&!selector){phase='unavailable';message='A unique Mail identity is required. Refresh the agent list or open a Mail participant.';render();return;}
@@ -626,7 +673,8 @@ function refreshOutput(){
  const terminalState=q('.reader-terminal-state');if(terminalState)terminalState.textContent=previewOK?(pending?'New output · paused':reading?'Reading earlier output':''):'';
  const terminalMeta=q('.reader-terminal-meta');if(terminalMeta)terminalMeta.textContent=limits?'Latest '+(limits.max_lines||120)+' lines · up to '+((limits.max_bytes||12288)/1024)+' KiB · every 3s'+(shown?' · '+age.textContent:''):'Waiting for a verified terminal snapshot.';
  const dot=q('.reader-state');if(tab==='terminal'&&dot){dot.dataset.state=previewOK?'work':'unknown';dot.title=previewOK?'Terminal updating every 3s':'Terminal preview unavailable';dot.setAttribute('aria-label',dot.title);}
- const review=q('#terminal-review');if(review)review.disabled=phase!=='editing'||!previewOK||!!imageController||!validText(inputText());
+ const review=q('#terminal-review');if(review)review.disabled=phase!=='editing'||!previewOK||!!imageController||!inputValid();
+ refreshReference();
  refreshImageControls();
  const status=q('.terminal-message');if(status)status.textContent=message;
  // Metadata below the terminal can reflow after following was sampled above.
@@ -666,12 +714,29 @@ function invalidate(reason){
  if(receipt&&['sending','unknown'].includes(phase)){previewOK=false;message=reason+' Receipt retained; check its status before writing again.';refreshOutput();return;}
  stop();cancelIntent();text='';output='';preview=null;previewOK=false;target=null;phase='changed';message=reason;render();
 }
-function validText(value){return typeof value==='string'&&value.trim()&&new TextEncoder().encode(value).length<=4096&&!/[\p{Cc}\p{Cs}\u2028\u2029\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u.test(value);}
-const inputText=()=>text+(attachment?(text?' ':'')+attachment.marker:'');
+function inputError(value){
+ if(/[\r\n]/u.test(value))return 'Line breaks cannot be sent. Use one line.';
+ if(new TextEncoder().encode(value).length>4096)return 'Input exceeds 4096 bytes. Shorten the text or remove an image.';
+ if(/[\p{Cc}\p{Cs}\u2028\u2029\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u.test(value))return 'Unsupported characters. Remove control characters before reviewing.';
+ return '';
+}
+function validText(value){return typeof value==='string'&&value.trim()&&!inputError(value);}
+function clearAttachments(){for(const attachment of attachments)URL.revokeObjectURL(attachment.url);attachments=[];}
+const draftText=()=>[text.replace(/[\r\n]+$/u,''),...attachments.map(attachment=>attachment.marker)].filter(Boolean).join(' ');
+const inputText=()=>{
+ if(!replyReference)return draftText();
+ const r=replyReference.value;
+ return 'Reference: '+r.agent+' · '+r.role+' · '+r.ts+' | Recorded message: '+r.eventId+' | Quote: '+JSON.stringify(r.text)+' | Reply: '+draftText();
+};
+const inputValid=()=>validText(draftText())&&validText(inputText())&&referenceCurrent(replyReference);
+function inputErrorNote(){
+ const note=make('p','terminal-input-error');note.id='terminal-input-error';note.setAttribute('role','status');
+ note.refresh=()=>{note.textContent=referenceError()||inputError(inputText());note.hidden=!note.textContent;};note.refresh();return note;
+}
 function refreshImageControls(){
  const add=q('#terminal-image-add');if(!add)return;
  add.hidden=!imageAvailable;
- add.disabled=!previewOK||!!imageController||!!attachment||!['editing','accepted','refused'].includes(phase);
+ add.disabled=!previewOK||!!imageController||attachments.length>=MAX_ATTACHED_IMAGES||!['editing','accepted','refused'].includes(phase);
  const panel=add.closest('.reader-input-bar');if(panel)layoutInputBar(panel);
 }
 async function probeImages(){
@@ -685,50 +750,70 @@ async function probeImages(){
  finally{if(imageProbeController===controller)imageProbeController=null;}
 }
 function imageThumbnail(panel,removable){
- if(!attachment)return;
- const box=make('div','reader-image'),image=make('img','reader-image-thumb');image.src=attachment.url;image.alt='Attached image';
- box.append(image,make('span','','Image attached'));
- if(removable){const remove=action('×','reader-image-remove',()=>{attachment=null;render();});remove.setAttribute('aria-label','Remove attached image');remove.disabled=!!imageController;box.append(remove);}
- panel.append(box);
+ if(!attachments.length)return;
+ const list=make('div','reader-images');list.setAttribute('aria-label','Attached images');
+ for(const [index,attachment] of attachments.entries()){
+  const box=make('div','reader-image'),image=make('img','reader-image-thumb');image.src=attachment.url;image.alt='Attached image '+(index+1);
+  box.append(image,make('span','','Image '+(index+1)+' of '+attachments.length));
+  if(removable){const remove=action('×','reader-image-remove',()=>{attachments=attachments.filter(value=>value!==attachment);URL.revokeObjectURL(attachment.url);render();});remove.setAttribute('aria-label','Remove attached image '+(index+1));remove.disabled=!!imageController;box.append(remove);}
+  list.append(box);
+ }
+ panel.append(list);
 }
-async function uploadImage(file){
- if(!file||!target||!previewOK||!imageAvailable||imageController||attachment||!['editing','accepted','refused'].includes(phase))return;
- if(file.size>10*1024*1024||!['image/jpeg','image/png','image/webp'].includes(file.type)){
-  message=file.size>10*1024*1024?'Choose an image up to 10 MiB.':'Choose a JPEG, PNG or WebP image.';render();return;
+async function uploadImages(files){
+ const selected=Array.from(files||[]);
+ if(!selected.length||!target||!previewOK||!imageAvailable||imageController||!['editing','accepted','refused'].includes(phase))return;
+ if(attachments.length+selected.length>MAX_ATTACHED_IMAGES){message='Attach up to '+MAX_ATTACHED_IMAGES+' images per input.';render();return;}
+ for(const file of selected){
+  if(file.size>10*1024*1024||!['image/jpeg','image/png','image/webp'].includes(file.type)){
+   message=file.size>10*1024*1024?'Choose an image up to 10 MiB.':'Choose a JPEG, PNG or WebP image.';render();return;
+  }
  }
  if(phase!=='editing'){cancelIntent();phase='editing';}
- const g=generation,t=target,controller=new AbortController();imageController=controller;message='Uploading image…';render();
+ const g=generation,t=target,controller=new AbortController();imageController=controller;
  try{
-  const url=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(Error('image_invalid'));controller.signal.addEventListener('abort',()=>{reader.abort();reject(Error('cancelled'));},{once:true});reader.readAsDataURL(file);});
-  if(g!==generation||controller.signal.aborted)return;
-  const result=await request('image',{epoch:capability.epoch,choice:t.choice,revision:t.revision,image:url.slice(url.indexOf(',')+1)},controller,30000);
-  if(g!==generation||!sheet.open||document.hidden)return;
-  if(result.enabled!==true||result.target?.choice!==t.choice||result.target?.revision!==t.revision||!sameTarget(result.target)||typeof result.path!=='string'||!result.path.startsWith('/'))throw Error('unavailable');
-  const quoted="'"+result.path.replaceAll("'","'\\''")+"'",marker='[image: '+quoted+']',final=text+(text?' ':'')+marker;
-  if(!validText(final))throw Error('image_text_too_large');
-  attachment={url,marker};message='';
+  for(const [index,file] of selected.entries()){
+   if(g!==generation||controller.signal.aborted)return;
+   message='Uploading image '+(index+1)+' of '+selected.length+'…';render();
+   const url=await new Promise((resolve,reject)=>{
+    const reader=new FileReader(),cleanup=()=>controller.signal.removeEventListener('abort',abort);
+    const abort=()=>{reader.abort();cleanup();reject(Error('cancelled'));};
+    reader.onload=()=>{cleanup();resolve(reader.result);};reader.onerror=()=>{cleanup();reject(Error('image_invalid'));};
+    controller.signal.addEventListener('abort',abort,{once:true});reader.readAsDataURL(file);
+   });
+   if(g!==generation||controller.signal.aborted)return;
+   const result=await request('image',{epoch:capability.epoch,choice:t.choice,revision:t.revision,image:url.slice(url.indexOf(',')+1)},controller,30000);
+   if(g!==generation||!sheet.open||document.hidden)return;
+   if(result.enabled!==true||result.target?.choice!==t.choice||result.target?.revision!==t.revision||!sameTarget(result.target)||typeof result.path!=='string'||!result.path.startsWith('/'))throw Error('unavailable');
+   const quoted="'"+result.path.replaceAll("'","'\\''")+"'",marker='[image: '+quoted+']',final=[inputText(),marker].filter(Boolean).join(' ');
+   if(!validText(final))throw Error('image_text_too_large');
+   attachments.push({url:URL.createObjectURL(file),marker});
+  }
+  message='';
  }catch(error){
-  if(g===generation){const reasons={image_folder_full:'This workspace already has 50 images. Remove older files before attaching another.',image_too_large:'Choose an image up to 10 MiB.',image_pixels_too_large:'Choose an image up to 24 megapixels.',image_format_unsupported:'Choose a static JPEG, PNG or WebP image.',image_text_too_large:'The image path and text exceed 4096 bytes. Shorten the text and attach again.'};message=reasons[error.message]||'Image could not be saved. No input was sent. Choose the image again.';}
+  if(g===generation){const reasons={image_folder_full:'This workspace already has 50 images. Remove older files before attaching another.',image_too_large:'Choose an image up to 10 MiB.',image_pixels_too_large:'Choose an image up to 24 megapixels.',image_format_unsupported:'Choose a static JPEG, PNG or WebP image.',image_text_too_large:'The image paths and text exceed 4096 bytes. Shorten the text or remove an image.'};message=(attachments.length?attachments.length+' image(s) attached. ':'')+(reasons[error.message]||'Image could not be saved. No input was sent. Choose the image again.');}
  }finally{if(g===generation&&imageController===controller){imageController=null;render();}}
 }
 async function reviewInput(){
- if(phase!=='editing'||imageController||!target||!choice||!previewOK||!validText(inputText()))return;
+ if(phase!=='editing'||imageController||!target||!choice||!previewOK||!inputValid())return;
  composer=false;
  clearTimeout(pollTimer);previewController?.abort();previewController=null;
- const g=generation,t=target,draft=inputText(),controller=new AbortController();operationController=controller;phase='preparing';render();
+ const g=generation,t=target,draft=inputText(),reference=replyReference,controller=new AbortController();operationController=controller;phase='preparing';render();
  try{
   const data=await request('prepare',{epoch:capability.epoch,choice:t.choice,revision:t.revision,text:draft},controller);
   if(g!==generation||!sheet.open||document.hidden)return;
   if(data.state!=='prepared'||data.text!==draft||data.expires_in!==30||data.target?.revision!==t.revision||data.target?.choice!==t.choice||data.target?.name!==name||!sameTarget(data.target))throw Error('unavailable');
-  prepared=Object.freeze({...data,target:Object.freeze({...data.target})});reviewUntil=Date.now()+data.expires_in*1000;receipt=null;phase='review';message='';render();
+  if(!referenceCurrent(reference))throw Error('reference_changed');
+  preparedReference=reference;prepared=Object.freeze({...data,target:Object.freeze({...data.target})});reviewUntil=Date.now()+data.expires_in*1000;receipt=null;phase='review';message='';render();
   const identity=prepared;expiryTimer=setTimeout(()=>{if(prepared!==identity||document.hidden)return;cancelIntent();phase='editing';message='Confirmation expired. Review again.';render();},data.expires_in*1000);
  }catch(_){if(g===generation&&sheet.open){prepared=null;phase='editing';message='Could not prepare this input. Refresh the pane and review again.';render();}}
  finally{if(g===generation){operationController=null;if(!document.hidden&&sheet.open)pollTimer=setTimeout(poll,3000);}}
 }
 async function send(){
  if(phase!=='review'||!prepared||!previewOK)return;
+ if(!referenceCurrent(preparedReference)){cancelIntent();phase='editing';message='';render();return;}
  const sentText=prepared.text,p={epoch:prepared.epoch,intent:prepared.intent,confirmation:prepared.confirmation,target:prepared.target};
- prepared=null;receipt=p;text='';attachment=null;clearTimeout(expiryTimer);clearTimeout(pollTimer);previewController?.abort();previewController=null;
+ prepared=null;preparedReference=replyReference=null;receipt=p;text='';clearAttachments();clearTimeout(expiryTimer);clearTimeout(pollTimer);previewController?.abort();previewController=null;
  const g=generation,controller=new AbortController();operationController=controller;phase='sending';message='';render();
  try{
   const result=await request('commit',{epoch:p.epoch,intent:p.intent,confirmation:p.confirmation},controller,7000);
@@ -775,6 +860,7 @@ function readerBar(){
   if(['conversation','terminal'].includes(value)){b.setAttribute('aria-pressed',String(tab===value));b.disabled=busy();}
   bar.append(b);
  }
+ const bell=window.OrreryMobilePush?.button(name);if(bell){bell.disabled=busy();bar.insertBefore(bell,bar.lastElementChild);}
  sheet.append(bar);queueMicrotask(()=>{conversation()?.refreshActivity?.();refreshOutput();});
 }
 function fitInput(field){
@@ -789,9 +875,18 @@ function layoutInputBar(panel){
 }
 function readerInputBar(){
  const panel=make('div','reader-composer reader-input-bar'+(phase==='review'?' reader-review':''));panel.setAttribute('role','region');panel.setAttribute('aria-label',phase==='review'?'Review input':'Write input');
+ panel.classList.toggle('has-reference',!!replyReference);
  const shown=phase==='review'?prepared.target:choice;
  const destination=paneButton((shown?shown.name+' · '+shown.pane_label:'Choose pane')+' ⌄');destination.className+=' reader-input-target';destination.setAttribute('aria-label','Change pane for '+name+(shown?' · '+shown.pane_label:''));
  panel.append(destination);
+ if(replyReference&&phase!=='review'){
+  const r=replyReference.value,card=make('section','reader-reference-card');card.setAttribute('aria-label','Reply reference');
+  const at=new Date(r.ts),clock=Number.isFinite(at.getTime())?at.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}):'';
+  const label=make('div','reader-reference-label',r.agent+' · Selected text'+(clock?' · '+clock:''));
+  const quote=make('blockquote','reader-reference-quote',r.text);quote.title=r.text;
+  const remove=action('×','reader-reference-remove',()=>{replyReference=null;render();q('#terminal-text')?.focus({preventScroll:true});});remove.setAttribute('aria-label','Remove reference');remove.disabled=busy();
+  card.append(label,quote,remove);panel.append(card);
+ }
  if(phase==='review'){
   panel.append(make('h3','',prepared.target.name+' — send this input?'),make('p','reader-not-sent','Not sent yet'),make('pre','terminal-exact',prepared.text));
   imageThumbnail(panel,false);
@@ -802,19 +897,20 @@ function readerInputBar(){
   if(['sending','accepted','unknown','refused'].includes(phase))readerReceipt(panel);
   const available=!!choice&&['editing','accepted','refused'].includes(phase),label=make('label','reader-input-label','Your input');label.htmlFor='terminal-text';
   const row=make('div','reader-input-row'),field=make('textarea','terminal-text');field.id='terminal-text';field.rows=1;field.value=text;field.placeholder=choice?'Write one line…':'Choose a pane first';field.autocomplete='off';field.spellcheck=false;field.disabled=!available;
-  const file=make('input');file.type='file';file.id='terminal-image-file';file.accept='image/jpeg,image/png,image/webp';file.hidden=true;file.onchange=()=>uploadImage(file.files?.[0]);
-  const add=action('+','reader-image-add',()=>file.click());add.id='terminal-image-add';add.title='Attach image';add.setAttribute('aria-label','Attach image');add.hidden=!imageAvailable;add.disabled=!available||!previewOK||!!imageController||!!attachment;
-  const review=action(phase==='preparing'?'…':'↑','terminal-primary reader-input-send',reviewInput);review.id='terminal-review';review.title='Review input';review.setAttribute('aria-label','Review input');review.disabled=!available||!previewOK||!!imageController||!validText(inputText());
+  const file=make('input');file.type='file';file.id='terminal-image-file';file.accept='image/jpeg,image/png,image/webp';file.multiple=true;file.hidden=true;file.onchange=()=>uploadImages(file.files);
+  const add=action('+','reader-image-add',()=>file.click());add.id='terminal-image-add';add.title='Attach images';add.setAttribute('aria-label','Attach images');add.hidden=!imageAvailable;add.disabled=!available||!previewOK||!!imageController||attachments.length>=MAX_ATTACHED_IMAGES;
+  const review=action(phase==='preparing'?'…':'↑','terminal-primary reader-input-send',reviewInput);review.id='terminal-review';review.title='Review input';review.setAttribute('aria-label','Review input');review.disabled=!available||!previewOK||!!imageController||!inputValid();
   const count=make('span','reader-input-count',new TextEncoder().encode(inputText()).length+' / 4096 bytes');count.hidden=!inputText();
+  const error=inputErrorNote();field.setAttribute('aria-describedby','terminal-input-error');
   field.onfocus=()=>{composer=true;};field.onblur=()=>{composer=false;};
   field.oninput=()=>{
    if(!['editing','accepted','refused'].includes(phase))return;
    if(['accepted','refused'].includes(phase)){cancelIntent();phase='editing';panel.querySelector('.reader-receipt')?.remove();}
-   text=field.value;count.textContent=new TextEncoder().encode(inputText()).length+' / 4096 bytes';count.hidden=!inputText();review.disabled=!previewOK||!!imageController||!validText(inputText());fitInput(field);layoutInputBar(panel);
+   text=field.value;count.textContent=new TextEncoder().encode(inputText()).length+' / 4096 bytes';count.hidden=!inputText();review.disabled=!previewOK||!!imageController||!inputValid();refreshReference();fitInput(field);layoutInputBar(panel);
   };
   field.onkeydown=e=>{if(e.key==='Enter')e.preventDefault();};
   if(!choice)panel.append(make('p','terminal-help','Choose a verified pane in Terminal to write.'));
-  imageThumbnail(panel,true);row.append(add,field,review);panel.append(label,file,row,count);
+  imageThumbnail(panel,true);row.append(add,field,review);panel.append(label,file,row,count,error);
  }
  sheet.append(panel);layoutInputBar(panel);
  if(typeof ResizeObserver!=='undefined'){inputObserver=new ResizeObserver(()=>layoutInputBar(panel));inputObserver.observe(panel);}
@@ -827,6 +923,7 @@ function readerReceipt(host=sheet){
  host.append(box);
 }
 function render(){
+ conversation()?.dismissReferenceSelection?.();
  rememberView();
  inputObserver?.disconnect();inputObserver=null;
  const focus=document.activeElement,hadFocus=focus&&sheet.contains?.(focus);if(hadFocus){sheet.tabIndex=-1;sheet.focus({preventScroll:true});}
@@ -903,10 +1000,11 @@ function render(){
  }
  if(['editing','preparing'].includes(phase)){
   const label=make('label','terminal-compose-label','Your input');label.htmlFor='terminal-text';const field=make('textarea','terminal-text');field.id='terminal-text';field.rows=2;field.value=text;field.placeholder='Write one line…';field.autocomplete='off';field.spellcheck=false;field.disabled=phase==='preparing';
-  const count=make('span','',new TextEncoder().encode(text).length+' / 4096 bytes'),meta=make('div','terminal-input-meta');meta.append(make('span','','One line + Enter'),count);
-  scroll.append(label,field,meta,make('p','terminal-help',reading?'Sends to '+choice.pane_label+'. Review the destination and exact text before sending.':'Check the terminal above before sending.'));
-  const actions=make('div','terminal-actions'),review=action(phase==='preparing'?'Preparing…':'Review input','terminal-primary',reviewInput);review.id='terminal-review';review.disabled=phase==='preparing'||!previewOK||!validText(text);
-  field.oninput=()=>{text=field.value;count.textContent=new TextEncoder().encode(text).length+' / 4096 bytes';review.disabled=!previewOK||!validText(text);};field.onkeydown=e=>{if(e.key==='Enter')e.preventDefault();};actions.append(action('Cancel','',close),review);actionsHost.append(actions);
+  const count=make('span','',new TextEncoder().encode(inputText()).length+' / 4096 bytes'),meta=make('div','terminal-input-meta');meta.append(make('span','','One line + Enter'),count);
+  const error=inputErrorNote();field.setAttribute('aria-describedby','terminal-input-error');
+  scroll.append(label,field,meta,error,make('p','terminal-help',reading?'Sends to '+choice.pane_label+'. Review the destination and exact text before sending.':'Check the terminal above before sending.'));
+  const actions=make('div','terminal-actions'),review=action(phase==='preparing'?'Preparing…':'Review input','terminal-primary',reviewInput);review.id='terminal-review';review.disabled=phase==='preparing'||!previewOK||!validText(inputText());
+  field.oninput=()=>{text=field.value;count.textContent=new TextEncoder().encode(inputText()).length+' / 4096 bytes';review.disabled=!previewOK||!validText(inputText());error.refresh();};field.onkeydown=e=>{if(e.key==='Enter')e.preventDefault();};actions.append(action('Cancel','',close),review);actionsHost.append(actions);
  }else if(phase==='review'){
   scroll.append(make('p','terminal-compose-label','Exact text to '+prepared.target.name),make('pre','terminal-exact',prepared.text));const enter=make('div','terminal-enter');enter.append(make('span','','After this text'),make('kbd','','Enter ↵'));scroll.append(enter,make('p','terminal-help','Sends once to this pane. It may be a shell. Existing terminal input may be combined with it.'));
   const actions=make('div','terminal-actions');actions.append(action('Edit','',()=>{cancelIntent();phase='editing';render();}),action('Send once','terminal-primary',send));actionsHost.append(actions);
@@ -956,7 +1054,7 @@ async function resumeView(){
 }
 document.addEventListener('visibilitychange',()=>{if(document.hidden)pauseView();else if(paused){paused=false;resumeView();}else restoreSavedView();});
 window.addEventListener('pagehide',()=>{rememberView();close(true,true);},true);
-window.OrreryMobileTerminal={open,close,mail};entries();
+window.OrreryMobileTerminal={open,close,mail,restore:restoreSavedView,available:()=>enabled||history,reference:addReference,refreshReference,canReference:()=>phase==='editing'&&tab==='conversation'&&previewOK&&!!target};entries();
 const historyChecked=window.OrreryMobileConversation?window.OrreryMobileConversation.enabled():Promise.resolve(false);
 historyChecked.then(value=>{if(value!==true)return;history=true;const mode=document.querySelector('body>header>span');if(mode)mode.textContent=enabled?'History · Terminal':'History enabled';entries();});
 const controller=new AbortController();const terminalChecked=request('',null,controller).then(value=>{if(((value.api===31&&value.supported==='legacy-managed-pane')||(value.api===34&&value.supported==='fresh-managed-pane'))&&value.enabled===true&&value.ack==='tmux-command-accepted'){capability=Object.freeze({...value});enabled=true;const mode=document.querySelector('body>header>span');if(mode)mode.textContent=history?'History · Terminal':'Terminal enabled';entries();}}).catch(()=>{});

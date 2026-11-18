@@ -92,6 +92,9 @@ def test_owner_and_outer_authority_accept_originless_get_and_assets(reader):
     assert status==200 and store.calls==['day']
     assert headers['Cache-Control']=='no-store'
     assert "connect-src 'self'" in headers['Content-Security-Policy']
+    directives = dict(part.strip().split(' ', 1) for part in headers['Content-Security-Policy'].split(';') if part.strip())
+    assert set(directives['img-src'].split()) == {"'self'", 'data:', 'blob:'}
+    assert directives['script-src'] == directives['connect-src'] == "'self'"
     status,_,body=request(port,'/network_node.js')
     assert status==200 and b'OrreryNetworkNode' in body
     status,_,css=request(port,'/network.css')
@@ -570,7 +573,8 @@ class Element{
  showModal(){this.open=true;}close(){this.open=false;}
 }
 const q=s=>{if(!elements.has(s))elements.set(s,new Element());return elements.get(s);};
-q('#selected-name').textContent='Alpha';
+q('#selected-name').textContent='Masked display name';
+q('#agent-picker').value='Alpha';
 const doc={querySelector:q,querySelectorAll:()=>[],createElement:t=>new Element(t),addEventListener(){},hidden:false,activeElement:new Element()};
 const timers=new Map();let timer=0;
 function target(){return {name:'Alpha',pane_label:'Window 0 · pane 0',choice:'c'.repeat(64),revision:'d'.repeat(64),...(kind==='legacy'?{}:ids)};}
@@ -590,8 +594,8 @@ vm.runInNewContext(source,context);
 const settle=async()=>{for(let i=0;i<15;i++)await new Promise(resolve=>setImmediate(resolve));};
 function button(label){const visit=n=>{if(n.tag==='button'&&n.textContent===label)return n;for(const child of n.children||[]){const found=visit(child);if(found)return found;}};return visit(q('#terminal-sheet'));}
 (async()=>{await settle();
- // The existing graph button calls the real entry/open/list code.
- await q('#terminal-graph-entry').onclick();await settle();
+ // The graph/search callback supplies the raw name and current Mail identity.
+ await context.OrreryMobileTerminal.open('Alpha',context.OrreryMobileIdentity.forName('Alpha'));await settle();
  const selected=calls.find(c=>c.operation==='targets').payload;
  assert.equal(selected.name,'Alpha');assert.equal('owner' in selected,false);
  if(kind!=='legacy'){assert.equal(selected.mail_instance_id,ids.mail_instance_id);assert.equal(selected.mail_agent_id,ids.mail_agent_id);}
