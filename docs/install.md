@@ -414,6 +414,10 @@ export AGENTSTACK_TCC_DIRS="$HOME/Desktop:$HOME/Documents:$HOME/Downloads"
 
 ## Upgrade
 
+Gemini用のCLI既定モデルとeffortを保存する場合は、[Antigravity設定](antigravity.md)の `AGENTSTACK_GEMINI_MODEL` / `AGENTSTACK_GEMINI_EFFORT` を参照してください。core更新でも設定を引き継ぎます。
+
+
+
 保護設定の更新前に作業を完了するか active file reservation を解放し、更新後に影響する session をまとめて再起動してください。先に選択される root を preview します。
 
 ```bash
