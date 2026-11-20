@@ -314,6 +314,11 @@ class ProcessProbeTests(unittest.TestCase):
                     commit['securitySchemes'] = [{'type': 'oauth2'}]
                 self.call(tool_list=altered)
 
+        altered = tools()
+        status = next(tool for tool in altered if tool['name'] == 'orrery_message_status')
+        status['annotations']['readOnlyHint'] = True
+        self.call(tool_list=altered)
+
     def test_discovery_rejects_read_schema_with_unbounded_parameters(self):
         altered = tools()
         listing = next(tool for tool in altered if tool['name'] == 'orrery_list_agents')

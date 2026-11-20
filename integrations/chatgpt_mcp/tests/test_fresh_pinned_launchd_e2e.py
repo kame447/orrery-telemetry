@@ -19,6 +19,7 @@ from fastmcp import Client
 from agentstack_mail.fresh_client import FreshBoundClient
 import pytest
 
+from fresh_launchd_cleanup import cleanup_launchagent
 from orrery_chatgpt_mcp import service
 from orrery_chatgpt_mcp.fresh_dependency_attest import verify as verify_dependency
 from orrery_chatgpt_mcp.fresh_process_probe import Authority, probe
@@ -54,6 +55,7 @@ def test_pinned_fresh_launchagent_pid_effective_grants_sdk_and_mail(live, tmp_pa
             live.root / "pinned-launchagent-state",
         )
         pair(config)
+        secret = read_secret(config)
         plan = replace(
             plan, label=label, port=port, state_dir=config.state_dir,
             policy_path=live.policy, mail_instance_id=live.instance,
@@ -102,6 +104,7 @@ def test_pinned_fresh_launchagent_pid_effective_grants_sdk_and_mail(live, tmp_pa
 
         attempted = False
         started_pid = None
+        observed_pids: set[int] = set()
         try:
             attempted = True
             assert _launchctl("bootstrap", domain, str(plist)).returncode == 0
@@ -117,6 +120,7 @@ def test_pinned_fresh_launchagent_pid_effective_grants_sdk_and_mail(live, tmp_pa
                 if observed.returncode == 0:
                     started_pid = _pid(observed.stdout) or started_pid
                 if started_pid:
+                    observed_pids.add(started_pid)
                     try:
                         with socket.create_connection(("127.0.0.1", port), timeout=0.2):
                             break
@@ -206,20 +210,9 @@ def test_pinned_fresh_launchagent_pid_effective_grants_sdk_and_mail(live, tmp_pa
             assert _pid(confirmation.stdout) == started_pid
             assert f"path = {plist.resolve()}" in confirmation.stdout
         finally:
-            if attempted:
-                # Never target another label or retry a possibly completed bootout.
-                stopped = _launchctl("bootout", target)
-                assert stopped.returncode == 0, "fixture shutdown unverified"
-            assert _launchctl("print", target).returncode != 0
-            if started_pid:
-                deadline = time.monotonic() + 10
-                while time.monotonic() < deadline and _exists(started_pid) is True:
-                    time.sleep(0.1)
-                assert _exists(started_pid) is False
-            with socket.socket() as client:
-                client.settimeout(0.5)
-                assert client.connect_ex(("127.0.0.1", port)) != 0
-            log = output.read_text()
-            assert read_secret(config) not in log
-            assert live.args["body_md"] not in log
-            assert "registration_token" not in log
+            cleanup_launchagent(
+                target=target, attempted=attempted, observed_pids=observed_pids,
+                launchctl=_launchctl, pid_exists=_exists, port=port, log_path=output,
+                forbidden=(secret, live.args["body_md"], "registration_token"),
+                body_error=sys.exception(),
+            )

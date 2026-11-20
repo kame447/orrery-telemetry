@@ -6,4 +6,6 @@
 
 隔離loopbackの疑似MCPで、変更前に7ケースの誤受理を再現しました。新しい試験は未取得ページ、送信toolへの余分なシェル引数、previewの長さ制約欠落、書込みtoolの読取り誤表示、認証方式の変化、読取りtoolの任意プロパティ許容を拒否します。通常の公式tool定義では検証を通過し、実サービスの送信設定・許可リストには触れません。秘密情報、送信本文、pairing情報は結果に含めません。
 
+送信結果の照合toolである`orrery_message_status`も、Mailの受付記録を読み取った結果をローカル台帳へ保存するため、期待する`readOnlyHint`はfalseです。trueとする誤表示は拒否します。後続の[表示文言固定照合](mcp-fresh-tool-text-contract.md)では、このローカル保存を明記したtitle・descriptionと共通の注意文も、サーバー定義とは独立した固定値として照合します。
+
 本段階のPRは前提となるfork Draft #93に積み、既存本番Gateway/Mail/Tunnel/稼働agentを変更せず、upstreamやfork masterへ取り込みません。実ChatGPTのfresh専用Tunnel、実agentの処理開始・完了、upstream受入、本番identity/allowlist承認は依然として未検証です。無効化は本変更一式のrevertですが、公開契約の変質を検出できない旧挙動に戻ります。

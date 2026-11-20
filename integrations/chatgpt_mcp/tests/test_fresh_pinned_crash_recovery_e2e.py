@@ -19,6 +19,7 @@ from uuid import uuid4
 from fastmcp import Client
 import pytest
 
+from fresh_launchd_cleanup import cleanup_launchagent
 from orrery_chatgpt_mcp import service
 from orrery_chatgpt_mcp.fresh_process_probe import Authority, probe
 from orrery_chatgpt_mcp.fresh_runtime_command import build_command
@@ -37,13 +38,15 @@ pytestmark = pytest.mark.skipif(
 
 
 def _await_attested(target: str, label: str, plist: Path, port: int,
-                    secret: str, expected: Authority, *, previous: int | None = None) -> int:
+                    secret: str, expected: Authority, *, observed_pids: set[int],
+                    previous: int | None = None) -> int:
     deadline = time.monotonic() + 35
     while time.monotonic() < deadline:
         record = _launchctl("print", target)
         if record.returncode == 0:
             pid = _pid(record.stdout)
             if pid is not None and pid != previous:
+                observed_pids.add(pid)
                 assert f"path = {plist.resolve()}" in record.stdout
                 if _exists(pid) is True:
                     try:
@@ -129,14 +132,16 @@ def test_private_pinned_release_crash_then_explicit_restart_preserves_receipt(li
         assert plist.stat().st_mode & 0o777 == 0o600
         assert not definition["RunAtLoad"] and not definition["KeepAlive"]
 
-        registered = False
+        attempted = False
         observed_pids: set[int] = set()
         try:
+            attempted = True
             assert _launchctl("bootstrap", domain, str(plist)).returncode == 0
-            registered = True
             assert _launchctl("kickstart", target).returncode == 0
-            first_pid = _await_attested(target, label, plist, port, secret, expected)
-            observed_pids.add(first_pid)
+            first_pid = _await_attested(
+                target, label, plist, port, secret, expected,
+                observed_pids=observed_pids,
+            )
             url = f"http://127.0.0.1:{port}/mcp/{secret}"
 
             async def send_once():
@@ -180,8 +185,8 @@ def test_private_pinned_release_crash_then_explicit_restart_preserves_receipt(li
             assert _launchctl("kickstart", target).returncode == 0
             second_pid = _await_attested(
                 target, label, plist, port, secret, expected, previous=first_pid,
+                observed_pids=observed_pids,
             )
-            observed_pids.add(second_pid)
             assert second_pid != first_pid
             assert _exists(first_pid) is False
 
@@ -200,17 +205,9 @@ def test_private_pinned_release_crash_then_explicit_restart_preserves_receipt(li
             asyncio.run(reconcile())
             assert len(stored(live)[0]) == 1, "crash recovery duplicated Mail delivery"
         finally:
-            if registered:
-                assert _launchctl("bootout", target).returncode == 0, (
-                    "fixture-only bootout failed; do not operate another service"
-                )
-            assert _launchctl("print", target).returncode != 0
-            for pid in observed_pids:
-                _await_gone(pid)
-            with socket.socket() as client:
-                client.settimeout(0.5)
-                assert client.connect_ex(("127.0.0.1", port)) != 0
-            output = log.read_text(errors="replace")
-            assert secret not in output
-            assert live.args["body_md"] not in output
-            assert "registration_token" not in output
+            cleanup_launchagent(
+                target=target, attempted=attempted, observed_pids=observed_pids,
+                launchctl=_launchctl, pid_exists=_exists, port=port, log_path=log,
+                forbidden=(secret, live.args["body_md"], "registration_token"),
+                body_error=sys.exception(),
+            )
