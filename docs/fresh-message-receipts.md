@@ -13,3 +13,5 @@
 応答に本文、資格、ローカルパス、storage project、自由記述エラーは含めません。照会に必要なhashは機密本文から計算されるため、一般公開するメタデータとして扱わないでください。protected clientの保存済みrequestが欠落・不正・別contextの場合や、instance・資格・保存内容が一致しない場合は拒否します。
 
 既存のreplayは別の明示操作として残ります。receiptはreplayを呼ばず、not_observedやエラーを理由に自動送信しません。本変更は既存のfresh Mailサービスを再起動・切替しません。新操作を使うには、そのサービスがこのfork版の契約に対応している必要があります。
+
+配布物の検査では `fresh_message_receipts.py` を `packages/agentstack_mail/tests/verify_artifact.py` の必須ランタイムモジュール一覧に含める。`tests/test_agentstack_mail_contract.py` と `tests/test_fresh_install_payload.py` が実ファイル一覧との差異を拒否する。これは配布の整合性検査であり、Mail受理やagent受信のE2E成功を意味しない。

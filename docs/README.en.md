@@ -31,8 +31,41 @@ Overview: the cockpit is the screen for operating terminals; Telemetry is the da
 
 ## Candidate switch to empty Mail
 
+See [current fork integration status](../integrations/chatgpt_mcp/README.en.md#current-fork-integration-status) for the current MCP implementation and verification scope. The stage guides below, including their unverified statements, record the state when each stage was written.
+
 - [Fresh migration, shutdown and recovery](fresh-global-update.en.md) — Explicit steps for a new empty instance. Private startup/shutdown from saved settings is covered. Ordinary updates do not switch it; real OS managers/Finder GUI, real providers/trust/installation, final CI and an attended cutover remain unaccepted. Reactivation and App foregrounding are outside this cutover scope.
 - [Read-only fresh send receipts](fresh-message-receipts.en.md) — Fork contract for authenticated sender-owned receipt lookup without replay; not_observed never authorizes resending.
+- [Complete fresh MCP tool contract attestation](mcp-fresh-tool-contract.en.md) — Stage 38 rejects hidden discovery pages and mismatched input schemas or security annotations.
+- [Fresh MCP initialization capability attestation](mcp-fresh-initialize-capabilities.en.md) — Stage 39 rejects extra advertised surfaces and changing tool inventory.
+- [Bound live fresh MCP JSON response depth](mcp-fresh-json-depth-attestation.en.md) — Stage 42 rejects excessively nested JSON independently of Python's parser limits.
+- [Pin client-visible fresh MCP tool text](mcp-fresh-tool-text-contract.en.md) — Stage 41 rejects unreviewed changes to all six tool titles/descriptions.
+- [Fresh MCP tool metadata attestation](mcp-fresh-tool-metadata.en.md) — Stage 40 rejects extra public tool fields and malformed presentation metadata.
+- [Agreement between fresh MCP status representations](mcp-fresh-status-dual-content.en.md) — Stage 37 refuses conflicting `content` and `structuredContent` authority.
+- [Reject out-of-range fresh MCP JSON numbers](mcp-fresh-json-number-bounds.en.md) — Stage 36 refuses exponent overflow and excessive nesting in live-process attestation.
+- [Pin system launchctl in fresh MCP process verification](mcp-fresh-system-launchctl.en.md) — Stage 35 avoids a PATH-based executable substitution before pairing-secret disclosure.
+- [Pinned fresh MCP fixture recipient read/ack](mcp-fresh-pinned-recipient-observation.en.md) — Stage 34 observes authenticated test-recipient fetch/read/ack without claiming real-agent execution.
+- [Strict JSON media type and finite values for fresh MCP](mcp-fresh-json-media-attestation.en.md) — Stage 33 refuses non-JSON response media types and nonstandard JSON numeric constants.
+- [Reject contradictory live fresh MCP JSON-RPC responses](mcp-fresh-rpc-envelope.en.md) — Stage 32 refuses simultaneous success result and error in live authority attestation.
+- [Strict fresh MCP authority flag types](mcp-fresh-strict-adapter-flags.en.md) — Stage 31 rejects numeric `0` / `1` instead of boolean adapter permissions.
+- [Unambiguous fresh MCP JSON-RPC attestation](mcp-fresh-unambiguous-rpc.en.md) — Stage 30 rejects duplicate JSON members and boolean RPC IDs during live authority verification.
+- [Post-RPC fresh MCP PID recheck](mcp-fresh-post-rpc-pid.en.md) — Stage 29 refuses changed or unverifiable LaunchAgent ownership after status RPC; does not guarantee future uptime.
+- [Live fresh MCP process verification](mcp-fresh-process-probe.en.md) — Fork verification component for the loaded LaunchAgent PID, listener and effective delegated grant; service integration remains pending.
+- [Pinned fresh MCP release preflight](mcp-fresh-release-preflight.en.md) — A fork-only read-only gate for a dedicated service, private policy and pinned release; no live service acceptance is implied.
+- [Fresh MCP live service attestation](mcp-fresh-live-service-status.en.md) — Fork stage 6 checks pinned plist, release and responding PID/authority; installation and macOS acceptance remain pending.
+- [Stage a dedicated fresh MCP LaunchAgent plist](mcp-fresh-service-staging.en.md) — Create one approved inactive service configuration without activating or replacing any running service.
+- [Offline fresh MCP import attestation](mcp-fresh-import-attestation.en.md) — Fork stage 8 checks pinned first-party imports with real Python; third-party dependencies remain unpinned and no service is started.
+- [Stage an attested fresh MCP LaunchAgent without starting it](mcp-fresh-attested-stage.en.md) — Bind pinned in-process verification to an approved, non-overwriting inactive plist; no launchctl activation.
+- [Explicit crash recovery for isolated pinned fresh MCP](mcp-fresh-pinned-crash-recovery.en.md) — Stage 28 verifies Mac fixture SIGKILL, explicit restart, re-attested PID/grants, persistent receipts and no duplicate Mail send; not production recovery or agent execution.
+- [Bounded fresh MCP CI subprocess readiness](mcp-fresh-ci-process-readiness.en.md) — Stage 27 bounds private-process startup to 60 seconds and emits only redacted boolean diagnostics for two outstanding macOS CI failures; resolution unverified.
+- [Pinned fresh MCP in a real macOS LaunchAgent](mcp-fresh-pinned-launchd-sdk-e2e.en.md) — Stage 26 verifies pinned serving imports, launchd PID/socket ownership, SDK/Mail acceptance and private teardown; no live agent or Tunnel.
+- [Pinned-release fresh MCP SDK E2E](mcp-fresh-fixed-release-sdk-e2e.en.md) — Stage 25 exercises fixed gateway/dependency verification in the serving process, real SDK and private Mail plus tamper refusal; no production launchd/Tunnel or agent processing.
+- [Isolated Dashboard target for fresh MCP](mcp-fresh-dashboard-loopback.en.md) — Stage 24 pins a dedicated loopback Dashboard URL across the runtime, plist and approval digest; live acceptance remains pending.
+- [Isolated Python for fresh MCP CI](mcp-fresh-ci-venv.en.md) — Use a per-job venv and verify import origins for parent and isolated child processes; not release pinning or production acceptance.
+- [Read-only status of the attested fresh MCP process](mcp-fresh-attested-status.en.md) — Verify staged bytes, loaded PID, and effective MCP authority; it does not start or deliver messages.
+- [Approved start of an isolated fresh MCP fixture](mcp-fresh-attested-start.en.md) — Stage 13 offers guarded bootstrap/kickstart with PID/grant attestation; live macOS and recovery acceptance remain pending.
+- [Approved stop of an isolated fresh MCP fixture](mcp-fresh-attested-stop.en.md) — Stage 14 requires a live pinned PID and stop-only approval before a one-shot bootout; real macOS stopping and recovery remain unverified.
+- [Read-only recovery observation after uncertain fixture operations](mcp-fresh-fixture-recovery.en.md) — Stage 15 reconciles a pinned job and previous PID, never authorizing retries; real Mac recovery remains unverified.
+- [Real macOS launchd smoke for an isolated fixture](mcp-fresh-launchd-smoke.en.md) — Stage 18 opt-in OS lifecycle test, not real fresh MCP acceptance.
 
 ## Install and update
 
@@ -96,3 +129,7 @@ Documents without a translation are labelled with their original language. Image
 
 - [Native context and helper models](native-capabilities.md) — dsh / Hermes context observations and per-model capabilities.
 - [Native catalog and effort capabilities](managed-catalog.en.md)
+- [Isolated fresh MCP subprocess, SDK and Mail acceptance](mcp-fresh-process-sdk-mail-e2e.en.md) — Real HTTP acceptance with fictitious agents.
+- [Real macOS LaunchAgent with isolated fresh MCP SDK/Mail](mcp-fresh-launchd-sdk-e2e.en.md) — Stage 20 opt-in PID, SDK, Mail acceptance, and cleanup test.
+- [Durable receipt after isolated real LaunchAgent restart](mcp-fresh-launchd-restart-receipt.en.md) — Stage 21 orderly stop/restart, SDK receipt persistence and no replay.
+- [Isolated fresh MCP recipient-owned inbox and ACK](mcp-fresh-recipient-owner-receipt.en.md) — Stage 22 protected synthetic recipient fetch/read/ack and restart durability; not actual agent processing.

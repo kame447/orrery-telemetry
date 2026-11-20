@@ -1,0 +1,17 @@
+# Read-only reconciliation for uncertain isolated fresh MCP results (fork stage 15, Draft)
+
+This operator-only helper observes the dedicated fixture LaunchAgent introduced by stages 13 and 14 after an uncertain start or stop. It never retries bootstrap, kickstart, bootout, kill, restart or Mail delivery. It is not a public MCP tool or Dashboard endpoint.
+
+`fresh_fixture_recovery.inspect(..., fixture_mode=True, previous_pid=...)` requires trusted, read-only launchd state and plist-path callbacks, existing pinned-source verification, and a real PID/MCP authority probe. A real isolated HOME, DB, Mail instance and fictional agent identity must be established independently before any live acceptance test.
+
+For a loaded job it returns `running_attested` only after checking the exact staged plist, verified PID and effective grants, then re-attesting the same PID and permissions near the end of the observation. A PID replacement under the same label, a failed second probe, or a later plist/job-state change is rejected. This bounded double-check does not guarantee continuous operation after the observation. When a verified live PID differs from the previously observed PID, the old PID must also be observed absent twice, before and after re-attesting the new process. A still-alive, unknown, or reappearing old PID is rejected instead of reporting `running_attested`. Only successful checks set `previous_pid_absent_observed=true`. PID-number equality and momentary absence do not establish process lifetime identity or guarantee future safety. For an unloaded job it returns `job_unloaded_observed`, optionally requiring two negative existence checks on a previously observed PID. Unknown state, foreign plist, unverified PID, changed source and a still-existing old PID are rejected with fixed non-sensitive errors.
+
+Every successful observation returns `restart_authorized=false`, `stop_authorized=false`, and `service_recovered=false`. An absent PID or unloaded job does not prove that a message was never sent, nor does it authorize restart. Mail acceptance, notification dispatch, agent receipt, processing start and completion are separate events. Unknown send results must use the authenticated read-only receipt path, never resend.
+
+## Stage 16: refuse an unaccounted former PID
+
+Stage 15 could report `running_attested` after seeing a different verified live PID without checking whether the previously observed process remained alive. Stage 16 performs two read-only former-PID absence checks in this situation and refuses an alive, unknown, or reappearing old PID. It does not retry Mail or mutate launchd. Three new regression cases and an updated existing expectation are committed, but repository-venv, real Mac and CI results have not been established. This does not prove that HOME, DB, Mail instance, or fictional agent identities are isolated, or that any agent received a message.
+
+## Evidence and limits
+
+The original 15 tests succeeded in isolated Python in normal and `python -O` modes with launchd/PID/probe dependencies stubbed. Four additional double-probe regression tests were pushed but have not yet run because the Mac connection is unavailable and CI is queued. These are not full repository/venv or live macOS tests. The Mac Desktop Commander connection failed and all four read retries terminated; therefore real launchd, MCP SDK/Tunnel and Mail/agent E2E remain untested. CI and independent review still require verification. No production service or upstream state is changed.

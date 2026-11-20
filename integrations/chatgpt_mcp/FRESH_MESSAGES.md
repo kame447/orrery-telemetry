@@ -68,3 +68,5 @@ statusは確定済みのローカル記録を返し、unknown/sendingの場合�
 既定の読み取り入口またはENABLE_MESSAGE=0の入口では、`orrery_status.adapter` の `read_only=true`、`spawn_enabled_on_server=false`、`message_enabled_on_server=false`を確認します。tools/listは読み取り3件だけで、commitの直接呼出しはunknown_toolです。秘密なし404やhealthzだけでは権限の証明になりません。有効な入口はstatusに委任方式・送信者・宛先範囲を明示し、healthzのread_onlyもfalseです。spawnは常にfalseです。
 
 テストは一時fresh root、専用動的port、合成登録、隔離HOMEを使用します。実fresh HTTP送信、ORMの本文と宛先保存、request UUID、再起動、応答消失、退役、contact拒否、identity破損時のfail-closed、既存読み取り・Host/Origin/path保護を検査します。製品設定や本番エージェントを触りません。MCP SDKによる初期化・ツール発見・preview/commit/statusも隔離HTTPで検査します。実ChatGPT/ホストされたTunnelからの送信や、実エージェントによる処理開始を証明するものではありません。
+
+実launchdを使う隔離試験は、停止の失敗やタイムアウトがあっても、専用ジョブの解除と観測済みの各PIDを独立に確認します。待受ポートやログがある試験では、それらの閉鎖と秘密情報の非出力も確認します。不明な停止を再試行せず、本体の失敗理由を保って固定の確認失敗コードを追記します。この異常系の回帰試験はmacOSの実起動を必要とせず、通常のCIでも実行します。実launchdでの確認は引き続き明示opt-inの別試験です。

@@ -13,3 +13,5 @@ Status is accepted, refused or not_observed. Accepted proves stored Mail accepta
 The response omits bodies, credentials, local paths, storage projects and free-form errors. Content-derived hashes are not intended as publicly shareable metadata. Missing/invalid/foreign local requests, changed authority or inconsistent stored results fail closed.
 
 Existing replay remains a separate explicit operation. Receipt never invokes it or automatically resends after an error or not_observed result. This patch does not restart or convert existing fresh Mail services; the selected service must explicitly support this fork contract.
+
+Distribution verification must include `fresh_message_receipts.py` in the required runtime-module inventory in `packages/agentstack_mail/tests/verify_artifact.py`. `tests/test_agentstack_mail_contract.py` and `tests/test_fresh_install_payload.py` reject discrepancies with the actual source files. This is package inventory verification, not proof of Mail acceptance or agent receipt in an end-to-end run.

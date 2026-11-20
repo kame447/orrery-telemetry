@@ -1,0 +1,9 @@
+# fresh MCP のCI用Python実行環境
+
+forkのmacOS CIで実行するfresh MCPのimport attestationと別プロセスMCP・SDK試験は、通常のPythonプロセスと、資格情報やHOMEを隔離した子Pythonの両方で同じ依存パッケージを利用する必要があります。
+
+GitHub Actionsの従来のグローバルPythonへのpip installでは、ユーザー別site-packagesが使われる場合がありました。テストは親のimportに成功しても、`-I -S`を使うattestation子プロセスは指定した`sysconfig.get_path("purelib")`にパッケージを見つけられず拒否します。さらに専用HOMEで起動する実MCP子プロセスが依存を解決できず、待受を開始しない場合があります。
+
+forkのmacOSテストジョブは、選択したPython 3.11・3.12・3.14それぞれで`$RUNNER_TEMP/orrery-ci-venv`を作り、同じvenvへ依存・テストツールを導入します。後続ステップの`python3`はこのvenvを使用し、依存のimport元がvenvのsite-packages内であることを事前に検査します。既存の本番Python・Mail・MCPには変更しません。検査に失敗した場合は実MCPを起動せずCIを失敗にします。
+
+これはCIのテスト環境の修正であり、依存の固定releaseや署名検証を追加するものではありません。CIの全ジョブ完走・独立レビューと本番受入は別に確認が必要です。ロールバックは本PRのworkflow変更のみ戻します。

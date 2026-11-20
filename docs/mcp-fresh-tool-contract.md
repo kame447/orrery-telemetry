@@ -1,0 +1,11 @@
+# fresh MCPの公開ツール契約と完全な発見結果の照合（fork段階38）
+
+従来の実プロセス照合は`tools/list`の名前6件だけを検証していました。そのため、同じ名前でも送信用toolが追加の任意引数を受理するかのように公開したり、本文長の制限を外したり、書込みtoolを`readOnlyHint=true`と誤表示しても成功扱いできました。また、`nextCursor`がある応答で、未取得の後続ページに追加toolが残る可能性も検査していませんでした。
+
+この段階では、既存の6 toolについて`inputSchema`（許されるプロパティ、必須プロパティ、型、値の範囲、`additionalProperties=false`）、書込み/読取りのannotations、公開`securitySchemes`を、fork内で固定した期待値と照合します。JSONオブジェクトの順序や説明文など権限に無関係なメタデータは照合対象外です。発見結果に`nextCursor`が存在すれば、たとえ`null`でも完全なツール集合を証明できないものとして拒否します。これはページング機能を無効化する変更ではなく、権限を検証する専用probeだけをfail-closedにする変更です。
+
+隔離loopbackの疑似MCPで、変更前に7ケースの誤受理を再現しました。新しい試験は未取得ページ、送信toolへの余分なシェル引数、previewの長さ制約欠落、書込みtoolの読取り誤表示、認証方式の変化、読取りtoolの任意プロパティ許容を拒否します。通常の公式tool定義では検証を通過し、実サービスの送信設定・許可リストには触れません。秘密情報、送信本文、pairing情報は結果に含めません。
+
+送信結果の照合toolである`orrery_message_status`も、Mailの受付記録を読み取った結果をローカル台帳へ保存するため、期待する`readOnlyHint`はfalseです。trueとする誤表示は拒否します。後続の[表示文言固定照合](mcp-fresh-tool-text-contract.md)では、このローカル保存を明記したtitle・descriptionと共通の注意文も、サーバー定義とは独立した固定値として照合します。
+
+本段階のPRは前提となるfork Draft #93に積み、既存本番Gateway/Mail/Tunnel/稼働agentを変更せず、upstreamやfork masterへ取り込みません。実ChatGPTのfresh専用Tunnel、実agentの処理開始・完了、upstream受入、本番identity/allowlist承認は依然として未検証です。無効化は本変更一式のrevertですが、公開契約の変質を検出できない旧挙動に戻ります。

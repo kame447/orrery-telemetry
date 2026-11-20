@@ -1,0 +1,13 @@
+# 隔離fresh MCPのLaunchAgent起動（fork段階13、Draft）
+
+段階12の実稼働照合を利用し、明示承認した専用fixtureのLaunchAgentだけをlaunchctl bootstrapとkickstartで起動する運用者専用APIを追加する。ChatGPTに公開するMCPツールではない。既存の本番MCP、Mail、Tunnel、agentは操作しない。
+
+orrery_chatgpt_mcp.fresh_attested_start.preview は固定release、依存、private policy、plistのバイト列を照合し、起動専用の承認digestを返す。読み取りのみで起動しない。start は別途そのdigestとfixture_mode=Trueが明示され、専用labelがorg.agentstack.chatgpt-mcp-fresh.fixture...であり、信頼済みlaunchd照会で未ロードを確認でき、loopback portが空いている場合にのみ一度だけbootstrapする。
+
+bootstrap後は信頼済み照会が同一label・正確なplist pathを返す場合に限り、killを伴わないkickstartを一度行う。その後、段階12のcheck_runningで実PID・MCPの6ツール・権限を照合できた場合にのみ起動成功を報告する。is_loadedとloaded_plist_pathは信頼済みの読み取り専用実装を呼び手が用意する。未確認・照会失敗は拒否する。ポート空き確認は予約ではなく、競合の可能性をなくさないため実接続のPID照合が必須である。
+
+bootstrap・kickstart開始後は、失敗・timeout・途中停止の結果を「未起動」と推測しない。自動再試行、bootout、kill、他labelの修復を行わず、結果をFRESH_START_OUTCOME_UNKNOWNとして手動調査に委ねる。この段階では停止・再起動・rollbackは実装しない。start成功後も稼働Pythonのimport元、Mail配送、agent受信・処理開始を直接観測したと主張しない。
+
+fixture labelは本番からの隔離を単独で証明しない。運用者が専用一時HOME・state/DB・固定release・承認済みの架空instance/agent ID・未使用port・専用service labelを確認してから実接続試験を行うこと。upstreamの正式受入と利用者のidentity/allowlist再承認まで本番のfresh起動は禁止する。
+
+新規テストはすべてlaunchctlとport/PID照会をmockする。Macの実launchd起動・停止、専用Mail E2E、Tunnel/ChatGPT受入は別段階の未実施項目とする。[段階12の実稼働照合](mcp-fresh-attested-status.md)を参照。
