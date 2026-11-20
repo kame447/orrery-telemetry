@@ -26,6 +26,7 @@ class FakeMail:
         self.fail = False
         self.response = None
         self.changed = False
+        self.receipt_response = None
 
     def check(self):
         if self.changed:
@@ -42,6 +43,12 @@ class FakeMail:
         return {'mail_instance_id': INSTANCE, 'message_id': 15, 'sender_id': 1, 'thread_id': '15',
                 'created_ts': '2026-11-15T00:00:00+00:00', 'decision_only': False,
                 'delivery_status': 'notification_pending', 'recipients': [{'agent_id': 7, 'kind': 'to'}]}
+
+    def receipt(self, request_id, expected):
+        self.calls.append(('get_message_receipt', deepcopy(expected), request_id))
+        if self.receipt_response is None:
+            raise TimeoutError('receipt temporarily unavailable')
+        return self.receipt_response
 
 
 @pytest.fixture
@@ -146,8 +153,10 @@ def test_timeout_is_durable_unknown_and_never_replayed(setup):
     assert result['status']=='unknown' and result['receipt'] is None
     assert 'DO_NOT_EXPOSE' not in json.dumps(result)
     restarted=messages.FreshMessages(path,manager.state.root.parent)
-    assert status(restarted,args)==result and commit(restarted,args,first)==result
-    assert restarted.mail.calls==[]
+    checked=status(restarted,args)
+    assert checked['status']=='unknown' and checked['receipt_observation']=='unavailable'
+    assert commit(restarted,args,first)==checked
+    assert all(call[0]=='get_message_receipt' for call in restarted.mail.calls)
 
 
 def test_crash_after_claim_never_replays(setup):
@@ -158,7 +167,7 @@ def test_crash_after_claim_never_replays(setup):
     restarted=messages.FreshMessages(path,manager.state.root.parent)
     assert status(restarted,args)['status']=='unknown'
     assert commit(restarted,args,first)['status']=='unknown'
-    assert restarted.mail.calls==[]
+    assert all(call[0]=='get_message_receipt' for call in restarted.mail.calls)
 
 
 @pytest.mark.parametrize('changed', [{}, {'decision_only':True}, {'mail_instance_id':'f'*32},
@@ -253,7 +262,7 @@ def test_receipt_persistence_failure_does_not_reopen_claim(setup,monkeypatch):
     restarted=messages.FreshMessages(path,manager.state.root.parent)
     assert status(restarted,args)['status']=='unknown'
     assert commit(restarted,args,first)['status']=='unknown'
-    assert restarted.mail.calls==[]
+    assert all(call[0]=='get_message_receipt' for call in restarted.mail.calls)
     assert [c[0] for c in manager.mail.calls]==['whois','send_message']
 
 
@@ -293,3 +302,54 @@ def test_fresh_optin_never_enables_spawn(setup):
          'ORRERY_MCP_STATE_DIR':str(manager.state.root.parent),'ORRERY_MCP_FRESH_MESSAGE_POLICY':str(path),
          'ORRERY_MCP_ENABLE_SPAWN':'1'}
     with pytest.raises(ConfigurationError):enabled_config(env)
+
+
+def receipt_result(manager, first, *, state='accepted'):
+    receipt=manager.mail.call('send_message',first['message'],first['request_id'])
+    manager.mail.calls.pop()
+    return {'contract':'orrery-fresh-message-receipt-v1','mail_instance_id':INSTANCE,'sender_id':1,
+            'request_id':first['request_id'],'status':state,'receipt':receipt if state=='accepted' else None,
+            'refusal_code':'TARGET_RETIRED' if state=='refused' else None}
+
+
+@pytest.mark.parametrize('outcome',['accepted','refused','not_observed'])
+def test_status_reconciles_without_any_second_send(setup,outcome):
+    manager,args,_,_=setup;first=preview(manager,args)
+    result=receipt_result(manager,first,state=outcome)
+    manager.mail.fail=True
+    assert commit(manager,args,first)['status']=='unknown'
+    manager.mail.receipt_response=result
+    checked=status(manager,args)
+    assert checked['status']==('unknown' if outcome=='not_observed' else outcome)
+    assert checked['receipt_observation']==outcome and checked['automatic_resend'] is False
+    assert sum(c[0]=='send_message' for c in manager.mail.calls)==1
+    assert commit(manager,args,first)==checked
+    assert sum(c[0]=='send_message' for c in manager.mail.calls)==1
+
+
+@pytest.mark.parametrize('bad',[{'mail_instance_id':'f'*32},{'sender_id':True},{'request_id':'different'},
+    {'contract':'other'},{'status':'completed'},{'receipt':{}},{'status':'refused','refusal_code':'private\ntext'}])
+def test_unverified_receipt_lookup_never_resolves_unknown(setup,bad):
+    manager,args,_,_=setup;first=preview(manager,args)
+    result=receipt_result(manager,first);manager.mail.fail=True;commit(manager,args,first)
+    manager.mail.receipt_response={**result,**bad}
+    checked=status(manager,args)
+    assert checked['status']=='unknown' and checked['receipt_observation']=='unavailable'
+    assert checked['receipt'] is None and sum(c[0]=='send_message' for c in manager.mail.calls)==1
+
+
+def test_concurrent_send_completion_cannot_downgrade_reconciled_acceptance(setup):
+    manager,args,path,_=setup;first=preview(manager,args)
+    other=messages.FreshMessages(path,manager.state.root.parent)
+    other.mail.receipt_response=receipt_result(manager,first)
+    entered=threading.Event();release=threading.Event()
+    def lost(*a,**kw):
+        entered.set();assert release.wait(5);raise TimeoutError('response lost')
+    manager.mail.call=lost
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        pending=pool.submit(commit,manager,args,first)
+        assert entered.wait(5)
+        accepted=status(other,args)
+        assert accepted['status']=='accepted'
+        release.set();assert pending.result()==accepted
+    assert status(manager,args)==accepted

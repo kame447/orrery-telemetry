@@ -57,9 +57,9 @@ commitは同じ `idempotency_key`、`preview_id`、`content_digest` の3項目�
 
 acceptedにするのは、正規clientの送信応答に実message ID、対応するinstance・送信者・宛先、`decision_only=false`、`delivery_status=notification_pending`、thread・作成時刻が揃う場合だけです。empty応答やdecision-onlyの応答は受理済みと扱いません。freshの正規sendは本文・宛先・request receiptを同じtransactionで保存します。応答に本文自体が含まれなくても、この保存を行う正規sendの確かな応答と、本文を保存していないdecision-onlyの応答は区別します。受理はエージェントの処理開始ではなく、`execution_status=unobserved`のままです。
 
-statusはローカルの永続記録だけを読み、Mailへの照会・replay・再送を行いません。受理後の応答消失、timeout、途中終了、曖昧な拒否や不完全な応答はunknownとして残します。送信後の例外を「未送信なので再試行可能」とは解釈しません。unknownを解消するために別keyを発行する操作も自動化しません。
+statusは確定済みのローカル記録を返し、unknown/sendingの場合だけ[本人の受付記録読取りAPI](../../docs/fresh-message-receipts.md)で照合します。protected clientの保存済みrequestがpreview全文と一致することを先に確認し、別本文の古い受付記録を新しい指示の成功と取り違えません。照会結果と確認できた状態をアダプター自身のSQLite台帳へ保存するため、このツールのreadOnlyHintはfalseです。accepted/refusedへの確定には確かな証拠を要求し、not_observed/unavailableの観測も保存します。同時進行の送信処理が確定済みの状態を後からunknownで上書きすることも防ぎます。Mailには読取り以外の操作をせず、replay・再送はしません。
 
-現行upstreamのfresh clientには、request UUIDだけで受領記録を読む公開操作がありません。`replay`は未受理だった場合に新たに送信し得るため、読み取り専用statusの中では呼びません。unknownの自動照合は未実装であり、独立した読取り用receipt契約をupstreamと合意する必要があります。previewは期限切れでも更新せず、新しい操作は運用者が内容と既存状態を確認して扱います。台帳は最大10000要求で新規previewを拒否し、unknown/acceptedの履歴を自動削除しません。
+受付記録の照会はfork拡張です。対応しない旧サーバー、通信不能、資格失効、保存内容の不一致ではunknownを維持します。not_observedは照会時点で記録が見つからないという意味だけで、並行中の送信が後で保存される可能性を否定せず、再送の許可にはしません。receipt_observationで照会結果を区別します。エージェントによる処理開始は依然としてunobservedです。previewは期限切れでも更新せず、別keyの発行による再送も自動化しません。台帳は最大10000要求で新規previewを拒否し、unknown/accepted/refusedの履歴を自動削除しません。
 
 台帳と正規fresh clientのrequestsには本文が保存されます。directory/fileは0700/0600で、資格は台帳へコピーしません。state・context・requestsは機密データとして保全し、共有や安易な削除をしないでください。status/commitの応答には本文とローカルパスを返しません。
 
@@ -67,4 +67,4 @@ statusはローカルの永続記録だけを読み、Mailへの照会・replay�
 
 既定の読み取り入口またはENABLE_MESSAGE=0の入口では、`orrery_status.adapter` の `read_only=true`、`spawn_enabled_on_server=false`、`message_enabled_on_server=false`を確認します。tools/listは読み取り3件だけで、commitの直接呼出しはunknown_toolです。秘密なし404やhealthzだけでは権限の証明になりません。有効な入口はstatusに委任方式・送信者・宛先範囲を明示し、healthzのread_onlyもfalseです。spawnは常にfalseです。
 
-テストは一時fresh root、専用動的port、合成登録、隔離HOMEを使用します。実fresh HTTP送信、ORMの本文と宛先保存、request UUID、再起動、応答消失、退役、contact拒否、identity破損時のfail-closed、既存読み取り・Host/Origin/path保護を検査します。製品設定や本番エージェントを触りません。実ChatGPT/Tunnelからの送信、実エージェントによる処理開始、未知結果のサーバー照合を証明するものではありません。
+テストは一時fresh root、専用動的port、合成登録、隔離HOMEを使用します。実fresh HTTP送信、ORMの本文と宛先保存、request UUID、再起動、応答消失、退役、contact拒否、identity破損時のfail-closed、既存読み取り・Host/Origin/path保護を検査します。製品設定や本番エージェントを触りません。MCP SDKによる初期化・ツール発見・preview/commit/statusも隔離HTTPで検査します。実ChatGPT/ホストされたTunnelからの送信や、実エージェントによる処理開始を証明するものではありません。

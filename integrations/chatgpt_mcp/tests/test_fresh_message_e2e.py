@@ -171,7 +171,11 @@ def test_real_response_loss_keeps_unknown_without_resend(live):
     assert len(stored(live)[0])==1
     again=restart_process(live,'orrery_message_commit',commit_args(live,preview))
     assert again.returncode==0 and json.loads(again.stdout)['status']=='unknown'
-    assert unwrap(live.rpc('orrery_message_status',{'idempotency_key':'real-1'}))==unknown
+    live.gateway.messages.mail.client.dispatch=real
+    recovered=unwrap(live.rpc('orrery_message_status',{'idempotency_key':'real-1'}))
+    assert recovered['status']=='accepted' and recovered['receipt_observation']=='accepted'
+    assert recovered['request_id']==preview['request_id']
+    assert recovered['execution_status']=='unobserved'
     assert len(stored(live)[0])==1
 
 
@@ -193,6 +197,9 @@ def test_server_transaction_rejects_target_change_after_preview(live,change):
     result=unwrap(live.rpc('orrery_message_commit',commit_args(live,preview)))
     assert result['status']=='unknown' and result['receipt'] is None
     assert stored(live)==([],[])
+    reconciled=unwrap(live.rpc('orrery_message_status',{'idempotency_key':'real-1'}))
+    assert reconciled['status']==('unknown' if change=='identity_corruption' else 'refused')
+    assert stored(live)==([],[])
 
 
 def test_new_adapter_state_uses_same_upstream_id_for_same_intent(live):
@@ -203,3 +210,29 @@ def test_new_adapter_state_uses_same_upstream_id_for_same_intent(live):
     assert again['request_id']==preview['request_id']
     second=separate.invoke('orrery_message_commit',commit_args(live,again))
     assert second['receipt']==first['receipt'] and len(stored(live)[0])==1
+
+
+def test_absent_receipt_is_not_permission_to_retry(live):
+    preview=unwrap(live.rpc('orrery_message_preview',live.args))
+    real=live.gateway.messages.mail.client.dispatch
+    async def lose_before_delivery(*a,**kw):raise RuntimeError('fixture loss before delivery')
+    live.gateway.messages.mail.client.dispatch=lose_before_delivery
+    assert unwrap(live.rpc('orrery_message_commit',commit_args(live,preview)))['status']=='unknown'
+    live.gateway.messages.mail.client.dispatch=real
+    checked=unwrap(live.rpc('orrery_message_status',{'idempotency_key':'real-1'}))
+    assert checked['status']=='unknown' and checked['receipt_observation']=='not_observed'
+    assert unwrap(live.rpc('orrery_message_commit',commit_args(live,preview)))==checked
+    assert stored(live)==([],[])
+
+
+def test_other_saved_body_under_same_uuid_cannot_be_claimed_accepted(live):
+    preview=unwrap(live.rpc('orrery_message_preview',live.args))
+    assert unwrap(live.rpc('orrery_message_commit',commit_args(live,preview)))['status']=='accepted'
+    other=FreshMessages(live.policy,live.root/'other-state')
+    changed={**live.args,'body_md':'different intent under same key'}
+    next_preview=other.invoke('orrery_message_preview',changed)
+    assert next_preview['request_id']==preview['request_id']
+    assert other.invoke('orrery_message_commit',commit_args(live,next_preview))['status']=='unknown'
+    checked=other.invoke('orrery_message_status',{'idempotency_key':'real-1'})
+    assert checked['status']=='unknown' and checked['receipt_observation']=='unavailable'
+    assert len(stored(live)[0])==1 and stored(live)[0][0][-1]==live.args['body_md']
