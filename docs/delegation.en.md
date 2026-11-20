@@ -59,7 +59,9 @@ Run `agentstack-selftest` immediately after installation. It verifies **function
 
 ## Codex children and MCP approvals
 
-Codex children default to `--ask-for-approval never` because they run unattended. MCP tools have an approval setting separate from shell-command approvals, so calling an inherited server without an explicit allow rule immediately fails with `MCP tool call requires approval, but approval policy is never`. To give every Codex child the same rule, create a TOML fragment and persist it with installer flag `--codex-child-overlay /absolute/path/to/overlay.toml`.
+Parented Codex children default to `--ask-for-approval never` because they run unattended. `AGENTSTACK_CODEX_CHILD_APPROVAL` can override this value. Standalone NEW AGENT starts and resumes with a recorded standalone start omit approval arguments. Codex uses `approval_policy` from its effective `config.toml`, including any configured overlay, or its built-in default when unset. Resuming sessions without that record uses the existing child approval setting.
+
+MCP tools have an approval setting separate from shell-command approvals. Under `never`, calling an inherited server without an explicit allow rule immediately fails with `MCP tool call requires approval, but approval policy is never`. To give every Codex child the same rule, create a TOML fragment and persist it with installer flag `--codex-child-overlay /absolute/path/to/overlay.toml`.
 
 The minimal server-wide approval is:
 
@@ -252,9 +254,11 @@ What a screen selection exposes and approves is decided by the classification ta
 
 ### Installer defaults
 
-`--child-default-tools 'browser,screen:operate'` writes `AGENTSTACK_CHILD_DEFAULT_TOOLS` into env.sh, the service definition and install-state. The default is empty. The launcher uses it only when none of `--base`, `--tools` or `--codex-mcp` is explicit; `--base default` clears the installer choice for that launch.
+`--child-default-tools 'mcp:cua-driver'` writes `AGENTSTACK_CHILD_DEFAULT_TOOLS` into env.sh, the service definition and install-state. The default is empty. Standard new launches of Claude, Codex, dsh and Hermes use it when the CLI omits `--base`, `--tools` and `--codex-mcp`, or when `/api/spawn` (including NEW AGENT) omits both `base` and `tools`.
 
-Defaults are checked for the provider and final directory, one item at a time. An unavailable item is omitted while applicable items remain; the omission appears in spawn output and the child's first instructions. Explicit base/tools/MCP profiles take precedence over defaults; output and the first instruction also state when defaults were not applied. Explicit selections keep failing closed. Mail proxy, authentication and startup failures are outside per-item default omission and stop a selected launch. The effective selection is saved in the existing Claude launch record or Codex tools record, so resume uses that selection instead of current installer defaults. On macOS Codex, `screen:operate` without a named server is omitted and node_repl is not automatically approved.
+Append `;claude=SPEC`, `;codex=SPEC`, `;dsh=SPEC` or `;hermes=SPEC` after the common list to replace that provider's defaults. Each list uses the `--tools` grammar. Providers without an override use the common list. An empty override clears the installer defaults for that provider. For example, `--child-default-tools 'mcp:cua-driver;dsh='` gives `cua-driver` to Claude, Codex and Hermes and clears the installer defaults for dsh.
+
+Defaults are checked for the provider and final directory, one item at a time. Applicable items remain, and omissions appear in spawn output and the child's first instructions. Explicit base/tools/MCP profiles take precedence. To suppress installer defaults, pass `--base default` on the CLI, or `base: "default"` or `tools: {}` in the API. Unavailable explicit tools and Mail proxy, authentication or startup failures stop the launch. Resume uses the selection recorded at launch and does not add current installer defaults. On macOS Codex, `screen:operate` without a named server is omitted and node_repl is not automatically approved.
 
 ### Approval
 
@@ -333,7 +337,7 @@ How each launch path is affected:
 | Path | What reaches it |
 |---|---|
 | `/delegate` child | `--tools`, `--claude-chrome(-device)` and the overlay apply |
-| NEW AGENT (no parent, `--standalone`) | Codex builds the same generated home with the same approval policy as a child, so the overlay and a `--tools` record apply. Claude uses only what the NEW AGENT form says and ignores the `AGENTSTACK_CLAUDE_CHILD_CHROME` environment default. NEW AGENT has no `--tools` field yet |
+| NEW AGENT (no parent, `--standalone`) | Codex builds the same generated home as a child, so the overlay and a `--tools` record apply. The approval policy comes from Codex configuration. Claude uses only what the NEW AGENT form says and ignores the `AGENTSTACK_CLAUDE_CHILD_CHROME` environment default. NEW AGENT has no `--tools` field yet |
 | resume | Codex rebuilds the home on every launch and resume, so the overlay applies. Claude restores the same settings from the launch record (a child without a record gets no ORRERY selection restored and simply inherits the user's Claude settings; that does not mean browser or computer use is absent) |
 | `claude` / `codex` a person starts directly in a terminal | Out of scope. Only the real `~/.claude` and `~/.codex` settings decide, and ORRERY does not change them |
 

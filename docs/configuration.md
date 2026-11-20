@@ -293,7 +293,7 @@ cutover 前に作業を完了するか active reservation を解放してくだ�
 | `AGENTSTACK_CLAUDE_MODEL` | `claude-code` | Claude 登録 model label。子と dashboard から resume した session は、その session の model（`CLAUDE_CHILD_MODEL`）を優先します。子の tmux session に開いた新しい window はこの値を継ぐので、そこで別の agent を `AGENT_NAME=<name> claude --resume` で開くときは、先に `unset CLAUDE_CHILD_MODEL` してください（しないと子の model で登録されます） |
 | `AGENTSTACK_CODEX_BIN` | install 時に operator の shell で解決した、`--version` に答える `codex`（WSL では `/mnt/<drive>/` 配下の Windows 版を除く。`--codex-bin` で明示可） | Codex CLI。dashboard は launchd / systemd の最小 PATH で動くので、nvm / nodebrew / `~/.npm-global` の codex はこの値で届く |
 | `AGENTSTACK_CODEX_MODEL` | launcher / bootstrap の既定 | Codex 登録 model |
-| `AGENTSTACK_CODEX_SANDBOX` | `workspace-write` | Codex `--sandbox` |
+| `AGENTSTACK_CODEX_SANDBOX` | `workspace-write` | `danger-full-access` で legacy mode の Codex CLI を Full Access にする。対象は `agent-start-codex`、`/delegate`、親なしの NEW AGENT と dashboard からの再開。直接の `agent-start-codex` では `read-only` も指定可 |
 | `AGENTSTACK_CODEX_APPROVAL` | `on-request` | `agent-start-codex`（利用者自身の対話 session）の `--ask-for-approval`。spawn される child は `AGENTSTACK_CODEX_CHILD_APPROVAL`（Child spawn 参照） |
 | `AGENTSTACK_VAULT` | 未設定 | Codex へ追加する writable `--add-dir` |
 | `AGENTSTACK_MCP_URL` | `http://127.0.0.1:18765/mcp` | registration / hook endpoint |
@@ -313,6 +313,9 @@ namespace を使います。この分離は namespace の選択を変えず、in
 
 `AGENTSTACK_TCC_DIRS` は空白を含む path も保持できる `:` 区切りが正本です。colon を含まない旧 whitespace 区切りも legacy compatibility として解釈します。
 
+Full Access を使うには、`~/.agentstack/env.sh` に `export AGENTSTACK_CODEX_SANDBOX=danger-full-access` を設定します。通常の再インストールでもこの値を引き継ぎます。
+Full Access では Codex の sandbox とコマンド承認が無効になり、OS が許す任意の場所への書き込みや削除、認証済みのリモートへの `git push` が可能になります。
+
 `AGENTSTACK_RESERVED_IDENTITY`、proxy token path、child token などは spawner が session ごとに設定する内部値です。top-level launcher へ手動で設定しないでください。
 
 ## Child spawn
@@ -325,17 +328,17 @@ namespace を使います。この分離は namespace の選択を変えず、in
 | `AGENTSTACK_FOCUS_CHILD` | 未設定 | 自動表示が有効な場合、`1` で前面に出す。単独では自動表示を有効にしない |
 | `AGENTSTACK_STRICT_AGENT_NAMES` | 未設定 | `1` で off-list な child 名を警告ではなくエラーにする |
 | `AGENTSTACK_MONITOR_DANGER_CHECK` | `0` | `1` で monitor の危険コマンド検知を有効にする。既定は passive |
-| `AGENTSTACK_CODEX_CHILD_APPROVAL` | `never` | Codex child の `--ask-for-approval`。installer の `--codex-approval` で永続化 |
+| `AGENTSTACK_CODEX_CHILD_APPROVAL` | `never` | `workspace-write` で親付きの Codex child に渡す `--ask-for-approval`。installer の `--codex-approval` で永続化。親なしの NEW AGENT は Codex の設定に従う。Full Access は常に `never` |
 | `AGENTSTACK_CODEX_CHILD_CONFIG_OVERLAY` | 未設定 | macOS/Linux の全 Codex child の `config.toml` に重ねる TOML fragment の絶対 path。installer の `--codex-child-overlay <path>` で永続化 |
 | `AGENTSTACK_CODEX_NETWORK` | `on` | Codex child の sandbox network（`-c sandbox_workspace_write.network_access=true`）。`--codex-network off` で切る |
-| `AGENTSTACK_CHILD_DEFAULT_TOOLS` | 空 | installer で選ぶ子の道具。`--tools` と同じ文法。明示の base/tools/MCP profile が優先し、不適用の既定項目は通知して外す |
+| `AGENTSTACK_CHILD_DEFAULT_TOOLS` | 空 | Claude・Codex・dsh・Hermes の CLI／標準 `/api/spawn` の新規起動に使う道具。共通の一覧に `;dsh=` などの provider 別上書きを追加できる。明示の base/tools/MCP profile が優先する。[既定の道具](delegation.md#installer-の既定の道具) |
 | `AGENTSTACK_CODEX_ADD_DIRS` | 未設定 | Codex child に追加で書込を許す root（`:` 区切り）。`--codex-add-dirs` で永続化 |
 | `AGENTSTACK_WORKTREE_ROOT` | `$AGENTSTACK_HOME/worktrees` | 新規 isolated worktree の永続 root。installer 実行時の環境変数で上書き・永続化 |
 | `AGENTSTACK_CLAUDE_CHILD_CHROME` | 未設定 | `1` で `spawn_child.sh` が起動する Claude child に `--chrome` を付ける（Claude in Chrome）。未設定・`0` は inherit（起動コマンドを変えない）。CLI の `--claude-chrome` が優先。Codex child では無視。[詳細](delegation.md#claude-child-とブラウザ操作claude-in-chrome) |
 | `AGENTSTACK_CLAUDE_CHILD_CHROME_DEVICE` | 未設定 | Claude child に使わせるブラウザの deviceId。設定すると `AGENTSTACK_CLAUDE_CHILD_CHROME=1` と同じ。CLI の `--claude-chrome-device` が優先。技術的な隔離ではなく child への指示 |
 | `AGENTSTACK_CHILD_RESUME_RETENTION_DAYS` | `30` | 正常終了した Claude / Codex child の再開用 state / credential を保持する日数。installer の `--child-resume-retention-days DAYS` で永続化。`0` は従来どおり cleanup 時に全削除 |
 
-Codex child の起動フラグは製品が組み立てます。`~/.codex/bin/` にある利用者側の launcher は参照しません（参照すると、その launcher の既定 `on-request` に静かに置き換わり、network flag と追加 root も落ちます）。child は無人で動くので既定は approval `never`・network on です。書込を許す root は「project、`AGENTSTACK_SPAWN_DIRS` / `AGENTSTACK_SPAWN_ROOTS`、install dir、`AGENTSTACK_WORKTREE_ROOT`、`~/.claude`、`~/.codex`、child 専用 `CODEX_HOME`、`AGENTSTACK_CODEX_ADD_DIRS`」で、存在しない directory は黙って外します。dashboard の Codex resume も同じ値を使います。これらは dashboard service の環境なので、shell で `export` しても届きません。installer に渡してください。config overlay は現在 `spawn_child.sh` を使う macOS/Linux（Windows では WSL2 を含む）だけに適用され、native Windows launcher には適用されません。
+Codex child の起動フラグは製品が直接組み立てます。親付きの起動と、親なし起動の記録がないセッションの dashboard からの再開では、承認方針の既定値は `never` です。ネットワークアクセスの既定値は on です。書込を許す root は project、`AGENTSTACK_SPAWN_DIRS` / `AGENTSTACK_SPAWN_ROOTS`、install dir、`AGENTSTACK_WORKTREE_ROOT`、`~/.claude`、`~/.codex`、child 専用 `CODEX_HOME`、`AGENTSTACK_CODEX_ADD_DIRS` のうち実在する directory です。dashboard service のこれらの値は installer に渡してください。config overlay は macOS と Linux（WSL2 を含む）で `spawn_child.sh` を経由して適用されます。
 
 製品が起動する Codex（child・dashboard の再開・`agent-start-codex`・Windows の launcher）には、`-c check_for_update_on_startup=false` を必ず付けます。Codex の起動時の更新案内は既定の選択が `npm install -g @openai/codex` で、無人の child では断る人がいません。更新の途中で child が止められると、機体の `codex` が旧版も新版も使えない状態で残ります（#60）。Codex の更新は `npm install -g @openai/codex@latest` などで利用者が行ってください。
 
