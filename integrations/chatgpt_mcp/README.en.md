@@ -1,6 +1,24 @@
 # Optional ORRERY MCP adapter (read only)
 
+For pinned-release acceptance in a real Mac LaunchAgent, see the [isolated E2E guide](../../docs/mcp-fresh-pinned-launchd-sdk-e2e.en.md). Pairing credentials are sent only after PID and socket ownership verification. This is not a production deployment.
+
+The [isolated CI venv](../../docs/mcp-fresh-ci-venv.en.md) keeps test parent and child dependencies in the same interpreter; it does not change production.
+
+For third-party dependency pinning, see [operator-approved bundle manifests and verification limits](DEPENDENCY_BUNDLE.en.md). This is an offline preflight, not service launch or supply-chain provenance.
+
 Phase-two fresh sends coexist with the existing fork gateway and read-only entrypoint as a separate opt-in. See [fresh instruction authority, limits and manual verification](FRESH_MESSAGES.en.md).
+
+## Current fork integration status
+
+As of November 20, 2026, the fresh entrypoint is `orrery_chatgpt_mcp.fresh_server`. It exposes three read tools and, only when explicitly enabled, three instruction tools. This entrypoint does not expose spawn. See [FRESH_MESSAGES](FRESH_MESSAGES.en.md) for current send authority, duplicate prevention and result reconciliation. Reconciliation updates the local ledger, so its published `readOnlyHint` is false.
+
+Operator components cover pinned gateway, Mail and third-party verification, approval-bound plist staging, live PID and public authority checks, and explicit fixture start, stop and uncertain-state reconciliation. Verified package parents are excluded from the import path, and dependency-manifest verification precedes adding the selected site directory. Inactive plists require `RunAtLoad=false` and `KeepAlive=false`.
+
+Isolated Mac tests verified SDK connections through real launchd and pinned releases, Mail acceptance, test-recipient fetch/read/ACK, duplicate prevention across restart and crashes, and fixture teardown. Acceptance does not cover a live ChatGPT connection through the dedicated Tunnel, real LLM-agent processing or completion, or production identity and recipient cutover.
+
+Stage guides record the implementation and verification scope at the time they were written. Earlier unverified claims and test counts are historical records; use this section and [FRESH_MESSAGES](FRESH_MESSAGES.en.md) for the current contract, and the corresponding PR for current test evidence.
+
+## Phase-one read-only entrypoint
 
 In this fork the read-only adapter is invoked with python3 -m orrery_chatgpt_mcp.readonly_server; python3 -m orrery_chatgpt_mcp remains the existing optional local gateway. Phase 1 of upstream Issue #395 exposes exactly orrery_status, orrery_list_agents and orrery_get_agent. There is no spawning, messaging, OAuth or service installation. The regular installer, service startup configuration, UI, hooks and Mail operations are unchanged. Dashboard calls are limited to GET /api/version, fresh GET /api/agents, and legacy GET /api/agents?days=30.
 
@@ -127,3 +145,17 @@ ORRERY_MCP_TEST_TUNNEL_CLIENT="$(command -v tunnel-client)" \
 Real Dashboard builder/HTTP-handler tests use temporary SQLite registrations and fake tmux observations, including mixed projects, ambiguous names, stopped/retired records and the 30-day boundary. The real tunnel-client dev proxy test uses an isolated local-only control plane and temporary secret URL to verify initialization, discovery, status, unknown-tool rejection and Host/Origin/path protection. It uses no hosted tunnel or real account key and changes no production service. Without an explicit binary path, only that test is skipped.
 
 Forwarding was verified with tunnel-client 0.0.17+a248b7f725fc989c1eb26680cf4351ee33421f61. This does not verify hosted tunnel ACLs, a ChatGPT connection, message delivery or actual agent execution. Check validates the Dashboard contract, not all access policies or live process existence.
+
+For the next step, see [the same-process attested runtime command](../../docs/mcp-fresh-import-attestation.en.md#phase-10-a-command-that-verifies-imports-in-the-serving-interpreter). This is a preparation API and does not start a service.
+
+Phase 11 is documented in [staging the attested Python command in an inactive LaunchAgent](../../docs/mcp-fresh-attested-stage.en.md). It disables RunAtLoad/KeepAlive and never replaces existing plists; activation remains unimplemented.
+
+Phase 12 adds [read-only live PID and MCP authority checks](../../docs/mcp-fresh-attested-status.en.md) for the attested plist. It does not activate, send, or observe agent processing.
+
+Stage 13 adds an [operator-only isolated fixture start](../../docs/mcp-fresh-attested-start.en.md), still pending live Mac verification. Stage 14 adds an [operator-only fixture stop](../../docs/mcp-fresh-attested-stop.en.md) bound to a live PID and explicit approval; real macOS stop and recovery have not been accepted.
+Stage 15 adds [read-only observation of uncertain fixture operations](../../docs/mcp-fresh-fixture-recovery.en.md). It never retries launchctl or messages and has not passed real Mac recovery acceptance.
+Stage 18 adds an [opt-in real macOS launchd fixture smoke](../../docs/mcp-fresh-launchd-smoke.en.md); it does not validate a live fresh MCP process or mail delivery.
+Stage 19 adds [isolated live fresh MCP subprocess and SDK/Mail acceptance](../../docs/mcp-fresh-process-sdk-mail-e2e.en.md). Pinned releases, hosted Tunnel, and agent receipt remain unverified.
+Stage 20 adds [real macOS LaunchAgent fresh MCP SDK/Mail acceptance](../../docs/mcp-fresh-launchd-sdk-e2e.en.md). Fixture lifecycle and Mail acceptance are tested; production, Tunnel, and agent receipt remain unverified.
+Stage 21 adds [durable receipt after a private real LaunchAgent restart](../../docs/mcp-fresh-launchd-restart-receipt.en.md). Crash recovery, real Tunnel, agent reception and production cutover remain unverified.
+Stage 22 verifies [protected recipient inbox/read/ack and persistence](../../docs/mcp-fresh-recipient-owner-receipt.en.md) across a private macOS LaunchAgent restart. It does not prove actual agent processing or completion.

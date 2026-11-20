@@ -1,0 +1,13 @@
+# fresh MCPの第三者依存パッケージ固定検査（fork 第9段階）
+
+専用fresh MCPを常駐起動する前に、Pythonの第三者ライブラリが運用者の承認したファイル集合と完全一致するか、読み取り専用で検査する部品です。本番MCP・Mail・Tunnel・launchd・agentを変更せず、インストールやサービス起動も行いません。
+
+専用site-packages配下の全ファイルを、相対パス・種別・権限・サイズ・全バイトでSHA-256ハッシュ化し、配布物のName/Version一覧とともに事前承認のmanifestと照合します。同名の重複配布物、.pth、egg-link、pyc、cache、symlink、hardlink、異なる所有者、書込み可能なファイルやディレクトリ、予期しない特殊ファイル、容量・件数上限超過は拒否します。FastMCPとMCP SDKの配布メタデータが最低限必要です。
+
+inspect(site) は読取りのみで承認候補digestと配布物一覧を返します。運用者が信頼できる配布元・ロックファイル・インストール記録と独立して照合した後、kind、site_packages、sha256、distributionsの4キーだけを持つJSON manifestを0600のowner-privateな通常ファイルとして作成します。自動承認や資格の取得は行いません。verify(manifest_path, expected_site) はmanifestと実ファイルを再照合し、完全一致しない場合は固定コードで拒否します。
+
+この検査はファイルの保存時点での固定を意味するだけです。第三者配布物の供給元真正性、起動したプロセスのimport元、実際のMail配送・agent処理開始までは証明しません。応答には第三者コードを固定済みであることと併せて、live_process_verified=false、origin_authenticity_verified=false、service_started=falseを返します。
+
+開発用venvにはeditable .pthや書込み可能なライブラリがあり得ます。そのため基準を緩めず、別の読取り専用bundleを必要とします。PR #63の固定gateway/Mailコードの隔離import検査との統合、固定Pythonの実プロセス内での再照合、安全な起動停止は後続PRに分けます。試験では完全に合成した一時site-packagesだけを使用します。
+
+固定した依存ツリーを隔離importの前後に再検証する[統合手順](../../docs/mcp-fresh-import-attestation.md)も用意しています。単独のat-rest検査とは区別します。

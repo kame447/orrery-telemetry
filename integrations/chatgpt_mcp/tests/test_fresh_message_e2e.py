@@ -20,6 +20,7 @@ import pytest
 from sqlalchemy import select
 
 from agentstack_mail.fresh_client import FreshBoundClient
+from agentstack_mail.storage_origin_contract import B1Error
 from agentstack_mail.fresh_runtime import FreshRuntime
 from agentstack_mail.models import Agent, Message, MessageRecipient
 from orrery_chatgpt_mcp.fresh_messages import FreshMessages
@@ -159,6 +160,46 @@ def test_real_send_storage_request_uuid_and_restart(live):
     finally:conn.close()
 
 
+
+def test_recipient_owner_fetch_read_ack_are_distinct_from_mcp_acceptance(live):
+    async def recipient():
+        return await FreshBoundClient.prepare(
+            live.root / 'mail/config.json', live.people[1]['binding_path'],
+            live.client.context['endpoint'], client_id=str(uuid4()),
+        )
+
+    client = asyncio.run(recipient())
+    assert asyncio.run(client.call('fetch_inbox', {})) == []
+    preview = unwrap(live.rpc('orrery_message_preview', live.args))
+    accepted = unwrap(live.rpc('orrery_message_commit', commit_args(live, preview)))
+    message_id = accepted['receipt']['message_id']
+    assert accepted['execution_status'] == 'unobserved'
+    inbox = asyncio.run(client.call('fetch_inbox', {}))
+    assert len(inbox) == 1
+    assert (inbox[0]['id'], inbox[0]['sender_id'], inbox[0]['subject'], inbox[0]['body_md']) == (
+        message_id, live.people[0]['agent_id'], live.args['subject'], live.args['body_md'],
+    )
+    assert inbox[0]['read_ts'] is None and inbox[0]['ack_ts'] is None
+
+    # An authenticated sender cannot mark the recipient's message as read.
+    async def wrong_owner():
+        with pytest.raises(B1Error, match='NOT_A_RECIPIENT'):
+            await live.client.call('mark_message_read', {'message_id': message_id})
+
+    asyncio.run(wrong_owner())
+    read = asyncio.run(client.call('mark_message_read', {'message_id': message_id}))
+    assert read['message_id'] == message_id and read['agent_id'] == live.people[1]['agent_id']
+    assert read['read_ts'] and read['ack_ts'] is None
+    acknowledged = asyncio.run(client.call('acknowledge_message', {'message_id': message_id}))
+    assert acknowledged['read_ts'] == read['read_ts'] and acknowledged['ack_ts']
+    again = asyncio.run(client.call('fetch_inbox', {}))
+    assert len(again) == 1
+    assert again[0]['read_ts'] == read['read_ts']
+    assert again[0]['ack_ts'] == acknowledged['ack_ts']
+    # Receipt does not claim that a real agent began processing the instruction.
+    assert unwrap(live.rpc('orrery_message_status', {'idempotency_key': live.args['idempotency_key']})) == accepted
+    assert len(stored(live)[0]) == 1
+
 def test_real_response_loss_keeps_unknown_without_resend(live):
     preview=unwrap(live.rpc('orrery_message_preview',live.args))
     real=live.gateway.messages.mail.client.dispatch
@@ -171,7 +212,11 @@ def test_real_response_loss_keeps_unknown_without_resend(live):
     assert len(stored(live)[0])==1
     again=restart_process(live,'orrery_message_commit',commit_args(live,preview))
     assert again.returncode==0 and json.loads(again.stdout)['status']=='unknown'
-    assert unwrap(live.rpc('orrery_message_status',{'idempotency_key':'real-1'}))==unknown
+    live.gateway.messages.mail.client.dispatch=real
+    recovered=unwrap(live.rpc('orrery_message_status',{'idempotency_key':'real-1'}))
+    assert recovered['status']=='accepted' and recovered['receipt_observation']=='accepted'
+    assert recovered['request_id']==preview['request_id']
+    assert recovered['execution_status']=='unobserved'
     assert len(stored(live)[0])==1
 
 
@@ -193,6 +238,9 @@ def test_server_transaction_rejects_target_change_after_preview(live,change):
     result=unwrap(live.rpc('orrery_message_commit',commit_args(live,preview)))
     assert result['status']=='unknown' and result['receipt'] is None
     assert stored(live)==([],[])
+    reconciled=unwrap(live.rpc('orrery_message_status',{'idempotency_key':'real-1'}))
+    assert reconciled['status']==('unknown' if change=='identity_corruption' else 'refused')
+    assert stored(live)==([],[])
 
 
 def test_new_adapter_state_uses_same_upstream_id_for_same_intent(live):
@@ -203,3 +251,29 @@ def test_new_adapter_state_uses_same_upstream_id_for_same_intent(live):
     assert again['request_id']==preview['request_id']
     second=separate.invoke('orrery_message_commit',commit_args(live,again))
     assert second['receipt']==first['receipt'] and len(stored(live)[0])==1
+
+
+def test_absent_receipt_is_not_permission_to_retry(live):
+    preview=unwrap(live.rpc('orrery_message_preview',live.args))
+    real=live.gateway.messages.mail.client.dispatch
+    async def lose_before_delivery(*a,**kw):raise RuntimeError('fixture loss before delivery')
+    live.gateway.messages.mail.client.dispatch=lose_before_delivery
+    assert unwrap(live.rpc('orrery_message_commit',commit_args(live,preview)))['status']=='unknown'
+    live.gateway.messages.mail.client.dispatch=real
+    checked=unwrap(live.rpc('orrery_message_status',{'idempotency_key':'real-1'}))
+    assert checked['status']=='unknown' and checked['receipt_observation']=='not_observed'
+    assert unwrap(live.rpc('orrery_message_commit',commit_args(live,preview)))==checked
+    assert stored(live)==([],[])
+
+
+def test_other_saved_body_under_same_uuid_cannot_be_claimed_accepted(live):
+    preview=unwrap(live.rpc('orrery_message_preview',live.args))
+    assert unwrap(live.rpc('orrery_message_commit',commit_args(live,preview)))['status']=='accepted'
+    other=FreshMessages(live.policy,live.root/'other-state')
+    changed={**live.args,'body_md':'different intent under same key'}
+    next_preview=other.invoke('orrery_message_preview',changed)
+    assert next_preview['request_id']==preview['request_id']
+    assert other.invoke('orrery_message_commit',commit_args(live,next_preview))['status']=='unknown'
+    checked=other.invoke('orrery_message_status',{'idempotency_key':'real-1'})
+    assert checked['status']=='unknown' and checked['receipt_observation']=='unavailable'
+    assert len(stored(live)[0])==1 and stored(live)[0][0][-1]==live.args['body_md']

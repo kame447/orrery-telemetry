@@ -1,6 +1,24 @@
 # ORRERY ChatGPT MCP（読み取り専用・任意導入）
 
+固定releaseを実Mac LaunchAgentで起動する検証は[隔離受入手順](../../docs/mcp-fresh-pinned-launchd-sdk-e2e.md)を参照してください。接続所有者の照合後にのみpairing secretを送ります。本番や実agentへの導入ではありません。
+
+Mac CIの依存import元の分離は[CI用の専用venv](../../docs/mcp-fresh-ci-venv.md)に記載します。テスト用のPythonのみを変更します。
+
+第三者Python依存の固定チェックについては[承認manifestと検証範囲](DEPENDENCY_BUNDLE.md)を参照してください。これは起動前の読取り専用部品であり、本番起動や第三者配布元の真正性を証明しません。
+
 第2段階のfresh送信は、既存fork gatewayと読み取り専用入口を維持した独立opt-inです。[fresh追加指示の設計・制限・手動検証](FRESH_MESSAGES.md)を参照してください。
+
+## 現在のfork統合状態
+
+2026年11月20日時点のfresh入口は`orrery_chatgpt_mcp.fresh_server`です。読み取り3ツールに加え、明示的に有効化した場合にだけ追加指示の3ツールを公開します。この入口にspawnはありません。現在の送信権限、重複防止、結果照合の契約は[FRESH_MESSAGES](FRESH_MESSAGES.md)を参照してください。結果照合はローカル台帳を更新するため、公開する`readOnlyHint`はfalseです。
+
+運用者向けの部品は、固定gateway・Mail・第三者依存の検証、承認内容に結び付けたplist準備、実PIDと公開権限の照合、隔離fixtureの明示起動・停止・不明状態の照合までを含みます。検証済みpackageの親directoryをimport経路に加えず、依存manifestの検証を対象siteの追加より先に行います。非起動plistでは`RunAtLoad=false`・`KeepAlive=false`を要求します。
+
+隔離Macでは、実launchdと固定releaseを使うSDK接続、Mail受理、試験用受信者のfetch/read/ACK、再起動・異常終了後の二重送信防止、試験後の解除を確認しました。ChatGPTの専用Tunnel経由での実接続、実LLM agentの処理開始・完了、本番identityと宛先の切替は、この試験の受入範囲に含みません。
+
+段階別guideは作成当時の実装・検証範囲を記録しています。過去の「未実施」や試験件数は履歴として読み、現在の契約はこの節と[FRESH_MESSAGES](FRESH_MESSAGES.md)、今回の実行結果は対応PRを確認してください。
+
+## 第1段階の読み取り専用入口
 
 upstream Issue #395 の第1段階です。このforkでは既存の任意MCPゲートウェイ（通常の python3 -m orrery_chatgpt_mcp）と競合しないよう、読み取り専用版だけ python3 -m orrery_chatgpt_mcp.readonly_server で起動します。公開ツールは `orrery_status`、`orrery_list_agents`、`orrery_get_agent` の3個だけです。spawn・追加指示・Mail送信・OAuth・常駐化は実装しません。通常のinstaller・サービスの起動設定・UI・hook・Mail操作は変えません。Dashboardの呼び出しは `GET /api/version`、freshの `GET /api/agents`、legacyの `GET /api/agents?days=30` だけです。
 
@@ -127,3 +145,17 @@ ORRERY_MCP_TEST_TUNNEL_CLIENT="$(command -v tunnel-client)" \
 実DashboardのbuilderとHTTP handlerを、一時SQLite登録と架空tmux観測へ接続して検査します。別project・同名の曖昧な登録・終了/退役・30日境界を含みます。実物のtunnel-client dev proxyでも、ローカルだけのcontrol planeと一時秘密URLで初期化・一覧・status・未知tool拒否・Host/Origin/path保護を検証します。外部Tunnelや実アカウントのkeyは使わず、実サービスも変更しません。実バイナリを指定しない場合、この1件だけは明示的にskipします。
 
 転送は `tunnel-client 0.0.17+a248b7f725fc989c1eb26680cf4351ee33421f61` で検証しています。ホストされたTunnelのACL・ChatGPT接続・実送信・エージェントの処理開始を検証したという意味ではありません。checkもDashboard互換性の検査であり、アクセス権限全体やプロセスの実在を保証しません。
+
+追加の第10段階は[隔離した同一Pythonで検証後にserveするコマンドの構成](../../docs/mcp-fresh-import-attestation.md#第10段階同じ隔離python内で検証してからserveするコマンド構成)を参照してください。現段階では起動しない準備APIです。
+
+第11段階は[検証済み隔離Python起動コマンドを非起動LaunchAgent設定に組み込む手順](../../docs/mcp-fresh-attested-stage.md)を参照してください。RunAtLoad/KeepAliveは無効で、既存のplistは上書きしません。起動・停止は未実装です。
+
+第12段階は[実稼働PID・MCP権限の読み取り専用照合](../../docs/mcp-fresh-attested-status.md)です。新plistとの一致を確認できますが、起動、送信、受信・処理開始は実証しません。
+
+段階13では[隔離fixture専用の明示承認付き起動](../../docs/mcp-fresh-attested-start.md)を追加しました。Mac実機での起動受入は未実施です。段階14の[停止専用の承認付きAPI](../../docs/mcp-fresh-attested-stop.md)は起動中の専用fixtureだけを対象とし、実Macでの停止・復旧はまだ実証していません。
+段階15では[不明結果の読み取り専用観測](../../docs/mcp-fresh-fixture-recovery.md)を追加しました。起動・停止の自動再試行は行いません。Mac実機の復旧と配送は未検証です。
+段階18では[Mac実launchdの隔離fixtureスモーク](../../docs/mcp-fresh-launchd-smoke.md)を追加しました。実行は明示opt-in、実fresh MCP/送受信の検証は別です。
+段階19では[隔離fresh MCP別プロセスと実SDK/Mail受入](../../docs/mcp-fresh-process-sdk-mail-e2e.md)を追加しました。固定releaseや実Tunnel/agent受信は未検証です。
+段階20では[Mac実LaunchAgentのfresh MCP・SDK・Mail受入](../../docs/mcp-fresh-launchd-sdk-e2e.md)を追加しました。fixtureの実起動・停止とMail受理を検証しますが、本番常駐化・Tunnel・agent受信は未検証です。
+段階21では[専用LaunchAgent再起動後のreceiptと冪等性](../../docs/mcp-fresh-launchd-restart-receipt.md)を実Macで検証します。異常終了からの復旧、本番Tunnel・agent受信は未検証です。
+段階22では[専用recipientの正規Mail受信・既読・ACK](../../docs/mcp-fresh-recipient-owner-receipt.md)をMac実機の隔離LaunchAgent再起動まで検証します。実エージェントの処理開始・完了を実証するものではありません。

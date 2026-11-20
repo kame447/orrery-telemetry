@@ -1,0 +1,11 @@
+# Post-RPC LaunchAgent PID recheck for fresh MCP (fork stage 29)
+
+Even when the process owning a private MCP socket was attested before pairing, the LaunchAgent may exit or restart while `orrery_status` is being read. Previously the probe returned the verified RPC result without establishing that the originally attested PID was still the loaded job after the response.
+
+After the final `tools/call(orrery_status)` and effective-grant validation, `fresh_process_probe.probe` now checks `launchctl print` again for the exact original label and plist path. A different PID produces `SERVICE_PROCESS_CHANGED`; a missing or indeterminate launchctl result produces `SERVICE_PROCESS_UNVERIFIED`. Only fixed error codes are surfaced; pairing secrets, message bodies and raw responses are withheld. This read-only operation never restarts, resends or changes a service.
+
+This is only a point-in-time check, not a guarantee of continued uptime or in-process import provenance. The initial pre-pairing listener-owner proof and use of one pinned TCP socket remain intact.
+
+Synthetic loopback HTTP and mocked launchctl/lsof tests now include a PID replacement after the final MCP response and a launchctl timeout at that point. The former failed against the old code and succeeds with the fix. The focused Mac Python run passed 51 related tests and 30 subtests; the expanded suite including documentation/link checks passed 134 tests and 30 subtests. The separate opt-in isolated real Mac LaunchAgent crash/restart acceptance also passed (`1 passed, 5 warnings`), including fixture teardown and secret-log checks. Complete GitHub CI and independent review are not covered by these results. Production MCP/Mail/Tunnel, active agents, fork master and upstream are unchanged.
+
+Test using the repository development venv with `PYTHONPATH=integrations/chatgpt_mcp/src:packages/agentstack_mail/src .venv/bin/python -m pytest -q integrations/chatgpt_mcp/tests/test_fresh_process_probe.py integrations/chatgpt_mcp/tests/test_fresh_attested_status.py integrations/chatgpt_mcp/tests/test_fresh_service_status.py`. Revert the additional check, tests, bilingual docs and changelog fragment to roll back this stage. API generation is unchanged.

@@ -1,0 +1,7 @@
+# fresh MCPのLaunchAgent照合における実行ファイル固定（fork段階35）
+
+実行中のfresh MCPへpairing secretを渡す前のプロセス所有者検証で、`launchctl`を`PATH`から探していた実装を修正しました。任意の作業環境から呼ばれる可能性がある検証処理では、同名の別プログラムがPATH上に存在すると、偽のPID・plist情報に基づいて秘密を送ってしまう危険があります。
+
+`fresh_process_probe.job_pid()`はOS付属の`/bin/launchctl print`を絶対パスで実行します。既存の`/usr/sbin/lsof`による同一TCP接続の所有者証明、前後のPID確認、照合失敗時の秘密非送信は維持します。回帰テストはコマンド引数先頭が絶対パスであることを検査し、既存の異常PID・偽plist・タイムアウト・不正RPC試験もその経路で動作します。
+
+これは検証部品のコマンド探索を固定する変更であり、Mac本番LaunchAgentの設定、Tunnel、Mail、稼働agentには変更を加えません。稼働中コードの同一プロセスimport provenance、専用TunnelのChatGPT接続、実agentの受信・処理開始・完了、upstream受入と本番identity/allowlist承認は別の未達条件です。旧挙動へのロールバックは本PRのコード・テスト・文書・索引・changelogの取り消しですが、PATHに依存する旧実装は推奨しません。

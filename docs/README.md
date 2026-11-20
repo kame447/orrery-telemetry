@@ -31,8 +31,41 @@ Telemetry 自体の操作は、header の `HELP MAP`（NETWORK では `SETTINGS`
 
 ## 空のMailへの切替候補
 
+MCPの現在の実装・検証範囲は[現在のfork統合状態](../integrations/chatgpt_mcp/README.md#現在のfork統合状態)を参照してください。以下の段階別guideと「未実施」等の記述は、各段階を作成した時点の記録です。
+
 - [fresh移行・停止復旧](fresh-global-update.md) — 新しい空instanceを使う明示手順。通常設定からの私有起動・停止は確認済み。通常updateでは切り替わらず、実OS manager/Finder GUI・実provider/trust/導入・最終CIと本人在席の切替は未受入。復帰・App前面化は今回の対象外。
 - [fresh送信受付の読取り照合](fresh-message-receipts.md) — 本人の受付記録を再送せず照合するfork契約。未観測を再送許可にしません。
+- [fresh MCP公開ツール契約の完全照合](mcp-fresh-tool-contract.md) — 段階38。隠れたページとschema/annotationsの変化を検出し、6ツールの権限を厳密に照合。
+- [fresh MCP初期化capabilitiesの照合](mcp-fresh-initialize-capabilities.md) — 段階39。追加機能の宣言やツール一覧変更通知を拒否。
+- [fresh MCPのJSON応答深度を固定制限](mcp-fresh-json-depth-attestation.md) — 段階42。Python 3.14等での過深JSON誤受理を防ぎ、status二形式の深度も確認。
+- [fresh MCPツールの表示文言固定照合](mcp-fresh-tool-text-contract.md) — 段階41。6ツールのtitle/description改変による未承認の操作案内を拒否。
+- [fresh MCP公開ツールの追加メタデータ拒否](mcp-fresh-tool-metadata.md) — 段階40。未知の公開フィールドと不正な説明メタデータを拒否。
+- [fresh MCPのstatus本文二形式の一致検証](mcp-fresh-status-dual-content.md) — 段階37。statusの`content`と`structuredContent`が異なる権限を示す場合は拒否。
+- [fresh MCPのJSON数値範囲と深い応答の拒否](mcp-fresh-json-number-bounds.md) — 段階36。指数表記のオーバーフローと解析限界を安全に拒否する。
+- [fresh MCPプロセス証明でシステムlaunchctlを固定](mcp-fresh-system-launchctl.md) — 段階35。PATH上の同名実行ファイルによるPID・plist偽装を避ける。
+- [fresh MCP固定releaseで隔離受信者のread/ack確認](mcp-fresh-pinned-recipient-observation.md) — 段階34。認証済み試験用受信者による正規Mail受信とread/ackを確認し、実agent処理とは区別する。
+- [fresh MCP応答のメディア種別・非有限JSON値の検証](mcp-fresh-json-media-attestation.md) — 段階33。実プロセス応答をJSONとして厳密に検証する。
+- [fresh MCPの矛盾したJSON-RPC成功/失敗応答の拒否](mcp-fresh-rpc-envelope.md) — 段階32。success resultとerrorが共存する応答を実プロセス検証で受理しない。
+- [fresh MCP実効権限フラグの厳密型照合](mcp-fresh-strict-adapter-flags.md) — 段階31。数値 `0` / `1` を真偽値の権限として誤認しない。
+- [fresh MCP実プロセス検証のJSON応答一意性](mcp-fresh-unambiguous-rpc.md) — 段階30。重複JSONキーと真偽値RPC IDを拒否し、権限照合の曖昧さを防ぐ。
+- [fresh MCP応答後のPID再照合](mcp-fresh-post-rpc-pid.md) — 段階29。最終RPC後のPID変化・判定不能を成功と誤認しない。観測時点の検証であり継続稼働の保証ではない。
+- [fresh MCPの実プロセス照合](mcp-fresh-process-probe.md) — 現在のLaunchAgent PID、接続先、送信権限を照合するforkの検証部品。常駐化やMac本番受入は未完了。
+- [fresh MCP固定releaseの事前検査](mcp-fresh-release-preflight.md) — 専用service ID・権限・private policy・固定digestを起動前に検査するfork部品。実起動や本番受入は対象外。
+- [fresh MCP実プロセス・設定の照合](mcp-fresh-live-service-status.md) — 固定plist・releaseと稼働PID・実効送信権限を照合するfork段階6。常駐化とMac受入は未実施。
+- [fresh MCPのLaunchAgent設定を安全に準備](mcp-fresh-service-staging.md) — 本人が確認した固定設定を新規plistとして一度だけ保存。サービス起動と既存環境の変更は行いません。
+- [fresh MCPの固定コード・依存import検査](mcp-fresh-import-attestation.md) — 常駐起動前に読取り専用Mail配布物とgatewayを実Pythonで照合するfork段階8。第三者依存は未固定、サービスは起動しません。
+- [fresh MCPの検証済みLaunchAgent非起動設定](mcp-fresh-attested-stage.md) — 固定gateway・Mail・依存importを同じPython内で検証してからserveする実行引数を承認digestに固定し、安全にplistを新規作成します。起動はしません。
+- [固定release fresh MCPの異常終了と明示復旧](mcp-fresh-pinned-crash-recovery.md) — 段階28。Mac専用fixtureのSIGKILL後、再起動時のPID/権限/receipt永続性と二重送信防止を受入検証。本番復旧や実agent処理は未検証。
+- [fresh MCPのCI子プロセス待受診断](mcp-fresh-ci-process-readiness.md) — 段階27。macOS CIで残る隔離子プロセス2件の起動失敗に対し、60秒の有限待機と秘密非露出の真偽値診断を追加。CI解消は未確認。
+- [Mac実LaunchAgentでの固定release MCP受入](mcp-fresh-pinned-launchd-sdk-e2e.md) — 段階26。固定source/依存を実LaunchAgentで実行し、PID/接続所有者・SDK・Mail受理・安全な解除を確認。実agent処理やTunnelは未検証。
+- [固定releaseのfresh MCP実SDK受入](mcp-fresh-fixed-release-sdk-e2e.md) — 段階25。固定source/第三者依存を同一プロセスで照合した実MCPへSDK接続し、Mail受理と改変拒否を隔離確認。launchd本番切替・Tunnel/実agent処理開始は対象外。
+- [fresh MCPの隔離Dashboard接続先](mcp-fresh-dashboard-loopback.md) — 専用loopback Dashboardをplan/固定release起動/承認digestで一致させ、本番Dashboardへの誤接続を防ぐ段階24。実接続受入ではありません。
+- [fresh MCPのCI用Pythonを隔離](mcp-fresh-ci-venv.md) — Mac CIで親・隔離子の依存解決を同じvenvに固定し、実import元を検査。固定releaseや本番受入ではありません。
+- [fresh MCP検証済みplistの実稼働照合](mcp-fresh-attested-status.md) — plistの全バイトと稼働PID・有効なMCP権限を読み取り専用で照合する段階12。プロセス起動や配送の実証は対象外。
+- [隔離fresh MCPの明示承認付き起動](mcp-fresh-attested-start.md) — 専用fixtureに限りbootstrap/kickstartし、実PID・権限を照合する段階13。Mac実接続と停止・復旧は未実証。
+- [隔離fresh MCPの明示承認付き停止](mcp-fresh-attested-stop.md) — 実PIDとplistの確認・停止専用承認digestを伴う段階14。Mac実停止と復旧は未実証。
+- [隔離fresh MCPの不明結果の読み取り照合](mcp-fresh-fixture-recovery.md) — 段階15。実PIDとジョブ状態を安全に観測しますが、自動再起動や実Mac復旧を保証しません。
+- [macOS実launchdの隔離fixtureスモーク](mcp-fresh-launchd-smoke.md) — 段階18の明示opt-in試験。起動・PID観測・解除のみ実証し、fresh本体の受入ではない。
 
 ## install・update
 
@@ -96,3 +129,7 @@ Telemetry 自体の操作は、header の `HELP MAP`（NETWORK では `SETTINGS`
 
 - [Native context と helper model](native-capabilities.md) — dsh / Hermes の context 読取とモデル別の能力。
 - [Native catalog and effort capabilities](managed-catalog.md)
+- [隔離fresh MCPの実プロセス・SDK・Mail受入](mcp-fresh-process-sdk-mail-e2e.md) — 独立Pythonと架空agentの実HTTP受入。
+- [Mac実LaunchAgentでのfresh MCP・SDK・Mail受入](mcp-fresh-launchd-sdk-e2e.md) — 段階20。隔離fixtureで実サービスのPID・SDK通信・Mail受理・停止を検証。
+- [Mac実LaunchAgent再起動後のfresh受付記録と冪等性](mcp-fresh-launchd-restart-receipt.md) — 段階21。専用fixtureの正常停止・再起動後もSDKでreceiptと再送防止を検証。
+- [隔離fresh MCP宛先本人の受信・既読・ACK](mcp-fresh-recipient-owner-receipt.md) — 段階22。架空recipientの本人bindingで実Mailのinbox・既読・ACKと再起動後の永続性を検証。実agent処理開始は未検証。

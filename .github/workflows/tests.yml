@@ -113,8 +113,26 @@ jobs:
       # uv: the installer provisions ORRERY Mail with it and fails preflight without it.
       - name: Install tmux and uv
         run: brew install tmux uv
-      - name: Install test and package-build tools
-        run: python3 -m pip install pytest pytest-timeout pytest-xdist build -e ./packages/agentstack_mail
+      - name: Install test and package-build tools into a private interpreter
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/orrery-ci-venv"
+          "$RUNNER_TEMP/orrery-ci-venv/bin/python3" -m pip install pytest pytest-timeout pytest-xdist build -e ./packages/agentstack_mail
+          echo "$RUNNER_TEMP/orrery-ci-venv/bin" >> "$GITHUB_PATH"
+      - name: Verify subprocess dependencies stay in the selected test venv
+        run: |
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          import sys
+          import sysconfig
+          import fastmcp
+          import mcp
+          import pydantic
+          assert sys.prefix != sys.base_prefix, "test interpreter is not isolated"
+          site = Path(sysconfig.get_path("purelib")).resolve()
+          for module in (fastmcp, mcp, pydantic):
+              assert Path(module.__file__).resolve().is_relative_to(site), module.__name__
+          PYTHON
       # `tests/` だけを指定していた間、integrations/codex_app/tests/ の 111 件は
       # 一度も CI で実行されていなかった。テストの置き場所が増えるたびに黙って
       # 対象から外れるので、ディレクトリは明示して数を数えられるようにする。
