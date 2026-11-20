@@ -12,6 +12,8 @@ from uuid import uuid4
 
 import pytest
 
+from fresh_launchd_cleanup import cleanup_launchagent
+
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "darwin" or os.environ.get("MCP_LAUNCHD_E2E") != "1",
@@ -69,7 +71,6 @@ def test_dedicated_launchagent_bootstrap_kickstart_bootout(tmp_path: Path) -> No
 
     bootstrapped = False
     previous_pid = None
-    cleanup = None
     try:
         # A timeout or failure after invocation is inconclusive; do not retry.
         bootstrapped = True
@@ -94,14 +95,9 @@ def test_dedicated_launchagent_bootstrap_kickstart_bootout(tmp_path: Path) -> No
         assert previous_pid is not None, "isolated launchctl job PID not observed"
         assert _pid_exists(previous_pid) is True
     finally:
-        if bootstrapped:
-            # Exactly one teardown for this random fixture label, never other jobs.
-            cleanup = _launchctl("bootout", target)
-
-    assert cleanup is not None and cleanup.returncode == 0, "fixture bootout unverified"
-    assert _launchctl("print", target).returncode != 0
-    assert previous_pid is not None
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and _pid_exists(previous_pid) is True:
-        time.sleep(0.1)
-    assert _pid_exists(previous_pid) is False, "old fixture PID remains or is unknown"
+        cleanup_launchagent(
+            target=target, attempted=bootstrapped,
+            observed_pids=() if previous_pid is None else (previous_pid,),
+            launchctl=_launchctl, pid_exists=_pid_exists,
+            body_error=sys.exception(),
+        )

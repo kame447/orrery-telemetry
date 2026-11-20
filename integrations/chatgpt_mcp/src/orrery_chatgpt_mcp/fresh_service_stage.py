@@ -51,8 +51,8 @@ def _spec(plan: Plan) -> dict:
             "ORRERY_MCP_FRESH_MESSAGE_POLICY": str(plan.policy_path),
             "ORRERY_MCP_DASHBOARD_URL": plan.dashboard_url,
         },
-        "RunAtLoad": True,
-        "KeepAlive": True,
+        "RunAtLoad": False,
+        "KeepAlive": False,
         "Umask": 0o077,
     }
 

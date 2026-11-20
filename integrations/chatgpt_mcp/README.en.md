@@ -8,6 +8,18 @@ For third-party dependency pinning, see [operator-approved bundle manifests and 
 
 Phase-two fresh sends coexist with the existing fork gateway and read-only entrypoint as a separate opt-in. See [fresh instruction authority, limits and manual verification](FRESH_MESSAGES.en.md).
 
+## Current fork integration status
+
+As of November 20, 2026, the fresh entrypoint is `orrery_chatgpt_mcp.fresh_server`. It exposes three read tools and, only when explicitly enabled, three instruction tools. This entrypoint does not expose spawn. See [FRESH_MESSAGES](FRESH_MESSAGES.en.md) for current send authority, duplicate prevention and result reconciliation. Reconciliation updates the local ledger, so its published `readOnlyHint` is false.
+
+Operator components cover pinned gateway, Mail and third-party verification, approval-bound plist staging, live PID and public authority checks, and explicit fixture start, stop and uncertain-state reconciliation. Verified package parents are excluded from the import path, and dependency-manifest verification precedes adding the selected site directory. Inactive plists require `RunAtLoad=false` and `KeepAlive=false`.
+
+Isolated Mac tests verified SDK connections through real launchd and pinned releases, Mail acceptance, test-recipient fetch/read/ACK, duplicate prevention across restart and crashes, and fixture teardown. Acceptance does not cover a live ChatGPT connection through the dedicated Tunnel, real LLM-agent processing or completion, or production identity and recipient cutover.
+
+Stage guides record the implementation and verification scope at the time they were written. Earlier unverified claims and test counts are historical records; use this section and [FRESH_MESSAGES](FRESH_MESSAGES.en.md) for the current contract, and the corresponding PR for current test evidence.
+
+## Phase-one read-only entrypoint
+
 In this fork the read-only adapter is invoked with python3 -m orrery_chatgpt_mcp.readonly_server; python3 -m orrery_chatgpt_mcp remains the existing optional local gateway. Phase 1 of upstream Issue #395 exposes exactly orrery_status, orrery_list_agents and orrery_get_agent. There is no spawning, messaging, OAuth or service installation. The regular installer, service startup configuration, UI, hooks and Mail operations are unchanged. Dashboard calls are limited to GET /api/version, fresh GET /api/agents, and legacy GET /api/agents?days=30.
 
 ## Compatibility and exposed scope

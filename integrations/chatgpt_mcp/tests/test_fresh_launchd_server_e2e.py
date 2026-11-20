@@ -20,6 +20,7 @@ from fastmcp import Client
 from agentstack_mail.fresh_client import FreshBoundClient
 import pytest
 
+from fresh_launchd_cleanup import cleanup_launchagent
 from orrery_chatgpt_mcp.readonly_server import Config, pair, read_secret
 from test_fresh_message_e2e import live, stored
 from test_fresh_server_process_e2e import _dashboard, _unused_port
@@ -127,6 +128,7 @@ def test_fresh_mcp_real_launchagent_sdk_mail_and_teardown(live, tmp_path: Path):
                 observed = _launchctl("print", target)
                 if observed.returncode == 0 and _pid(observed.stdout):
                     old_pid = _pid(observed.stdout)
+                    observed_pids.add(old_pid)
                     assert f"path = {plist.resolve()}" in observed.stdout
                     assert "state = running" in observed.stdout
                     try:
@@ -139,7 +141,6 @@ def test_fresh_mcp_real_launchagent_sdk_mail_and_teardown(live, tmp_path: Path):
                 pytest.fail("fresh LaunchAgent did not listen with an attested PID")
 
             assert old_pid is not None and _exists(old_pid) is True
-            observed_pids.add(old_pid)
 
             async def check():
                 async with Client(url) as client:
@@ -199,9 +200,9 @@ def test_fresh_mcp_real_launchagent_sdk_mail_and_teardown(live, tmp_path: Path):
 
             # First remove the exact fixture job, then verify its old PID is gone.
             # Do not restart when the outcome of bootout is uncertain.
+            attempted = False
             first_stop = _launchctl("bootout", target)
             assert first_stop.returncode == 0
-            attempted = False
             assert _launchctl("print", target).returncode != 0
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline and _exists(old_pid) is True:
@@ -266,21 +267,12 @@ def test_fresh_mcp_real_launchagent_sdk_mail_and_teardown(live, tmp_path: Path):
             asyncio.run(check_after_restart())
             assert len(stored(live)[0]) == 1, "restart replayed a Mail message"
         finally:
-            # If bootstrap timed out, its outcome may be unknown: do not repeat.
-            # One exact-label teardown is required before declaring this fixture safe.
-            if attempted:
-                stopped = _launchctl("bootout", target)
-                assert stopped.returncode == 0, "fixture cleanup uncertain: bootout failed"
-            assert _launchctl("print", target).returncode != 0
-            for pid in observed_pids:
-                deadline = time.monotonic() + 10
-                while time.monotonic() < deadline and _exists(pid) is True:
-                    time.sleep(0.1)
-                assert _exists(pid) is False, "fresh fixture PID still exists or is unknown"
-            output = log.read_text()
-            assert secret not in output
-            assert live.args["body_md"] not in output
-            assert "registration_token" not in output
+            cleanup_launchagent(
+                target=target, attempted=attempted, observed_pids=observed_pids,
+                launchctl=_launchctl, pid_exists=_exists, port=port, log_path=log,
+                forbidden=(secret, live.args["body_md"], "registration_token"),
+                body_error=sys.exception(),
+            )
 
         messages, recipients = stored(live)
         assert len(messages) == 1

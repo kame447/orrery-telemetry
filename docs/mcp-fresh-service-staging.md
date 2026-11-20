@@ -6,7 +6,7 @@
 
 `stage(plan, home, approval_digest, *, verify_release, read_release, is_loaded)` は同じpreflightと設定生成を再実行し、承認したdigestが同一であることを確認します。このdigestはplistだけでなく、source commit、release digest、Mail instance、sender ID、recipient ID・期待名称、private policyの内容（context参照先を含む）にも紐付けています。設定の変更には新しいpreviewが必要です。`is_loaded` は信頼済みhost側の読取り用関数で、正確にFalseと確認できた場合に限り先へ進めます。確認不能、例外、既存のlabel、既存plistを「未起動」と推測して書き換えることはありません。
 
-出力先は運用者が指定した正規のhome直下の `Library/LaunchAgents/<専用label>.plist` のみです。homeとLibrary/LaunchAgentsまでの実directoryを確認し、symlink、別owner、group/worldの書込み許可を拒否します。tempfileへ書込・fsyncした後、同directoryで `os.link` により一度だけ新しいファイルを公開するため、競合する既存ファイルを置き換えません。plistは0644、`Umask=0077`、`RunAtLoad=true`、`KeepAlive=true`で、正規のfresh entrypointと固定した9個の環境変数以外を設定しません。
+出力先は運用者が指定した正規のhome直下の `Library/LaunchAgents/<専用label>.plist` のみです。homeとLibrary/LaunchAgentsまでの実directoryを確認し、symlink、別owner、group/worldの書込み許可を拒否します。tempfileへ書込・fsyncした後、同directoryで `os.link` により一度だけ新しいファイルを公開するため、競合する既存ファイルを置き換えません。plistは0644、`Umask=0077`、`RunAtLoad=false`、`KeepAlive=false`で、正規のfresh entrypointと固定した9個の環境変数以外を設定しません。ログイン時の自動起動と自動再起動を無効にし、起動には別途検証した明示的な手順を必要とします。
 
 このAPIはPythonを操作する信頼済み運用者向けです。MCP toolにも、通常のlegacy gatewayにも追加しません。`verify_release`・`read_release`・`is_loaded` は本番環境では既存の `service` の正規実装に固定する必要があります。テスト用スタブを実運用の証明として使うことはできません。stageは起動操作をしないため、ポートの未使用、Python依存とimport元、Mail client実到達性、実プロセスの権限・配送・エージェント実行を証明しません。静的preflightでも `dependencies_verified=false` のままです。
 

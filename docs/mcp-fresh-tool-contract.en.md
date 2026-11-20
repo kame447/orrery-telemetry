@@ -6,4 +6,6 @@ The probe now compares the pinned, fork-defined public contract of all six tools
 
 An isolated synthetic MCP reproduced seven previously accepted invalid cases before the fix, covering hidden discovery pages, extra shell arguments, weakened preview bounds, misleading read-only annotations, changed security schemes, and unbounded read arguments. Official tool definitions remain accepted. The probe exposes no pairing secret, message body, or private credentials, and does not modify production settings.
 
+The reconciliation tool `orrery_message_status` also has an expected `readOnlyHint=false`: it reads Mail receipts and persists the observations in its local ledger. Advertising true is rejected. The later [tool text attestation](mcp-fresh-tool-text-contract.en.md) also pins the title, description and shared note that describe these local writes, independently of the server definitions.
+
 This fork-only stage is stacked on Draft PR #93. Production Gateway, Mail, Tunnel, agents, fork master and upstream remain unchanged. A dedicated fresh ChatGPT Tunnel, real-agent processing start/completion, upstream acceptance and explicit production identity/allowlist approval remain outside this stage. Reverting restores the earlier weaker public-contract check.

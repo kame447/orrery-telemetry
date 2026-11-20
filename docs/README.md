@@ -31,6 +31,8 @@ Telemetry 自体の操作は、header の `HELP MAP`（NETWORK では `SETTINGS`
 
 ## 空のMailへの切替候補
 
+MCPの現在の実装・検証範囲は[現在のfork統合状態](../integrations/chatgpt_mcp/README.md#現在のfork統合状態)を参照してください。以下の段階別guideと「未実施」等の記述は、各段階を作成した時点の記録です。
+
 - [fresh移行・停止復旧](fresh-global-update.md) — 新しい空instanceを使う明示手順。通常設定からの私有起動・停止は確認済み。通常updateでは切り替わらず、実OS manager/Finder GUI・実provider/trust/導入・最終CIと本人在席の切替は未受入。復帰・App前面化は今回の対象外。
 - [fresh送信受付の読取り照合](fresh-message-receipts.md) — 本人の受付記録を再送せず照合するfork契約。未観測を再送許可にしません。
 - [fresh MCP公開ツール契約の完全照合](mcp-fresh-tool-contract.md) — 段階38。隠れたページとschema/annotationsの変化を検出し、6ツールの権限を厳密に照合。

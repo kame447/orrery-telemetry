@@ -31,6 +31,8 @@ Overview: the cockpit is the screen for operating terminals; Telemetry is the da
 
 ## Candidate switch to empty Mail
 
+See [current fork integration status](../integrations/chatgpt_mcp/README.en.md#current-fork-integration-status) for the current MCP implementation and verification scope. The stage guides below, including their unverified statements, record the state when each stage was written.
+
 - [Fresh migration, shutdown and recovery](fresh-global-update.en.md) — Explicit steps for a new empty instance. Private startup/shutdown from saved settings is covered. Ordinary updates do not switch it; real OS managers/Finder GUI, real providers/trust/installation, final CI and an attended cutover remain unaccepted. Reactivation and App foregrounding are outside this cutover scope.
 - [Read-only fresh send receipts](fresh-message-receipts.en.md) — Fork contract for authenticated sender-owned receipt lookup without replay; not_observed never authorizes resending.
 - [Complete fresh MCP tool contract attestation](mcp-fresh-tool-contract.en.md) — Stage 38 rejects hidden discovery pages and mismatched input schemas or security annotations.
