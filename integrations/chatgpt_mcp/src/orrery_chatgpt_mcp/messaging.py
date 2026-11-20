@@ -325,10 +325,10 @@ class MessageTools:
         return [
             {
                 "name": "orrery_message_status",
-                "title": "ORRERY message status",
-                "description": "Recorded outcome of a message commit (by its idempotency_key) and what Mail shows about it: accepted, read, acknowledged. Use it for any commit whose outcome was unknown; never commit again instead. " + TURN_NOTE,
+                "title": "Reconcile ORRERY message status",
+                "description": "Read Mail evidence for a message commit (by its idempotency_key): accepted, read, acknowledged. Exact delivery evidence may update the gateway's local outcome ledger. This does not send a message or change the recipient's inbox. Use it for any commit whose outcome was unknown; never commit again instead. " + TURN_NOTE,
                 "inputSchema": _schema({"idempotency_key": key_prop}, ["idempotency_key"]),
-                "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False, "idempotentHint": True},
+                "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": False, "idempotentHint": True},
                 "securitySchemes": _security(self._config, SCOPE_READ),
             },
             {

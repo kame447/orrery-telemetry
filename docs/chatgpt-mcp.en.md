@@ -106,17 +106,43 @@ So that you do not have to start `serve` by hand after every login, the gateway 
 ~/orrery-telemetry/bin/orrery-chatgpt-mcp service status
 ```
 
-- Messaging existing agents is OFF by default. It can be enabled only after the operator creates an approved sender and explicit recipient allowlist on the Mac; see [launchd messaging opt-in](chatgpt-mcp-message.en.md#explicit-opt-in-for-the-launchd-service). The service never enables spawning.
+- Starting agents and messaging existing agents are independently OFF by default. Use `--spawn-dirs` below to enable launches; prepare a dedicated sender and explicit recipient allowlist before using the [launchd messaging opt-in](chatgpt-mcp-message.en.md#explicit-opt-in-for-the-launchd-service).
 - `service install` copies the gateway package read-only into `~/.agentstack/runtime/chatgpt-mcp/releases/<content hash>/` and runs that copy. Switching branches in the checkout does not change the running code; to update, run `service install` again at the commit you want. `--from <src>` takes another checkout's `integrations/chatgpt_mcp/src` (for example one exported with `git archive` at a specific commit). `--source-commit` is a note for the record, not proof of where the files came from.
 - It starts as `python -I -S -B`: no `PYTHON*` variables, site-packages, `.pth` files or `sitecustomize`, and no bytecode writes. On every start it checks that the release holds only the package's `.py` files and RELEASE.json, with no caches, no symlinks, nothing writable and everything owned by you, and that it matches the content hash written in the plist, before importing anything. Otherwise it does not start (exit code 78).
 - The LaunchAgent (`~/Library/LaunchAgents/org.agentstack.chatgpt-mcp.plist`) holds no secret. The gateway reads it at start from the 0600 `pairing.json`, as before.
-- The service is fixed to **127.0.0.1 and no launch tools** (`ORRERY_MCP_ENABLE_SPAWN=0`). Messaging is also off by default and requires an explicit local operator opt-in. To use launches, stop the service (`service uninstall`) and run `serve` with settings as in step 2.
+- The service listens only on 127.0.0.1. Enabled launches retain the manual `serve` restrictions: registered directory aliases only, `claude` / `codex` providers, no parent, and worktree isolation by default.
 - As a per-user LaunchAgent it runs **while you are logged in**. After the Mac starts, it starts when you log in, and it is restarted at most every 30 seconds if it exits. It does not run while logged out or before login. Log: `~/.agentstack/runtime/chatgpt-mcp/gateway.log` (0600).
 - It uses the Python path you give (default `AGENTSTACK_PYTHON`, for example Homebrew's `/opt/homebrew/opt/python@3.13/libexec/bin/python3`) as is. The gateway needs only the standard library, so it follows Homebrew patch updates. If that path disappears (a minor version removed), the service cannot start; install again with `--python`.
-- Installation refuses when not paired, a non-loopback dashboard, Python older than 3.11, a port in use, a modified or unsafe release, an existing plist this command did not write, or a job with the same label loaded from elsewhere. It ends by calling `orrery_status` over loopback and checking the answer and its settings (pairing, no launches). A request carrying the secret is sent only after `lsof` shows that the launchd job's process accepted that very connection, so a program that grabbed the port never receives it.
+- Installation refuses when not paired, a non-loopback dashboard, Python older than 3.11, a port in use, a modified or unsafe release, an existing plist this command did not write, or a job with the same label loaded from elsewhere. It ends by calling `orrery_status` over loopback and checking pairing plus the requested launch and messaging settings. Enabled launches also require the expected approval mode and exposed directory aliases. A request carrying the secret is sent only after `lsof` shows that the launchd job's process accepted that very connection, so a program that grabbed the port never receives it.
 - `service status` never prints the secret and does not probe when the job is not running.
 - `service uninstall` checks the plist, and that launchd loaded the job from that plist, before stopping anything. It removes the plist only after launchd answers that the job no longer exists. If the job cannot be stopped, or launchd cannot be inspected, it reports a failure and keeps the plist. Pairing, approvals and the ledger stay.
 - It does not touch tunnel-client, API keys or ChatGPT settings.
+
+#### Enabling launches in the service
+
+Explicit working directories enable launch tools in the same pinned-release service.
+
+```sh
+~/orrery-telemetry/bin/orrery-chatgpt-mcp service install \
+  --source-commit "$(git -C ~/orrery-telemetry rev-parse HEAD)" \
+  --spawn-dirs 'orrery=/Users/you/orrery-telemetry,notes=/Users/you/notes' \
+  --spawn-approval chat
+~/orrery-telemetry/bin/orrery-chatgpt-mcp service status
+```
+
+`--spawn-dirs` is the opt-in. It accepts comma-separated `alias=/absolute/path` entries; replace the examples with your existing working directories. The initial approval mode is `local`. The explicit `--spawn-approval chat` above uses ChatGPT's preview confirmation and skips returning to the Mac for each approval. Both modes retain preview, committing the approved content, and protection against duplicate launches.
+
+Repeat `--spawn-dirs` when updating. If launches are already enabled and only `--spawn-approval` is omitted, the existing approval mode is retained. Moving from `local` to `chat` requires an explicit value. Reinstalling without `--spawn-dirs` disables launches. To keep messaging too, include `--message-profile` and `--message-helper-from` in that same `service install` command. The two opt-ins are independent; specifying only one does not preserve the other.
+
+#### Coordinating tunnel startup
+
+Separate gateway and tunnel LaunchAgents have no guaranteed startup order at login. Add the supported `tunnel-client` startup-wait option to the tunnel's existing `run` command.
+
+```sh
+tunnel-client run --profile orrery --mcp.startup-wait-timeout 120s
+```
+
+This delays the first poll and OAuth discovery until the HTTP MCP initialization probe completes. Keep the existing dedicated profile, runtime key and secret URL. If the gateway stays unavailable beyond 120 seconds, the tunnel remains non-ready; this setting does not guarantee indefinite recovery. `/healthz` only establishes process liveness, so also check the tunnel's `/readyz` and an actual `orrery_status` call. See the official [configuration reference](https://github.com/openai/tunnel-client/blob/master/docs/configuration.md) and [startup supervision guidance](https://github.com/openai/tunnel-client/blob/master/docs/health.md#supervising-startup).
 
 ### Checking on the Mac alone (before the tunnel)
 

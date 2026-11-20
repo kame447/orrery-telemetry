@@ -188,6 +188,7 @@ export AGENTSTACK_DELIVERABLE_ROOTS="$HOME/project-a/logs:$HOME/shared logs"
 | `AGENTSTACK_MAIL_SERVICE_VENV` | candidate ID から導出 | 検証済み candidate venv を明示的に再利用する場合の path |
 | `AGENTSTACK_MAIL_ENROLL_BIN` | 採用した Mail deployment から導出 | installer が `env.sh` に保存する対応済み `agentstack-enroll`。通常は手動設定しない |
 | `AGENTSTACK_MAIL_HTTP_BEARER_MODE` | `disabled` | legacy HTTP bearer を使用しない |
+| `AGENTSTACK_MAIL_TOOLS_LOG_ENABLED` | `true` | legacy runtime の Mail のツール引数・結果のログ。`true` / `false` のみ。`env.sh` に保存し、Mail の次回起動時に適用 |
 | `AGENTSTACK_PROJECT_KEY` | 再 install 時は既存 `env.sh`、初回は必須 | project human key。`--project-key` が最優先 |
 | `AGENTSTACK_EXTRA_PROTECTED_ROOTS` | process の値（空も含む）→ installed extras（空も含む）→ installed legacy roots を一度だけ → 空 | 永続する順序付き追加 reservation root。下記の自動移行を参照 |
 | `AGENTSTACK_PROTECTED_ROOTS` | managed 起動ごとに計算 | runtime 出力: 追加 root、次に実 workspace。installed の旧値は direct/unmanaged hook 互換のためだけに保持 |
@@ -231,6 +232,28 @@ key を使い、同時に `env.sh` 内の任意 shell code は実行されませ
 installer は `AGENTSTACK_MAIL_DB`、`AGENTSTACK_MAIL_ENV`、`AGENTSTACK_SIGNALS_DIR`
 を state / render から導出し、`env.sh` へ state root と
 `AGENTSTACK_MAIL_HTTP_BEARER_MODE=disabled` を一緒に保存します。
+
+## Mail のツールログ
+
+以下の保存・再起動手順は、legacy runtime の標準 Mail service 向けです。
+
+`AGENTSTACK_MAIL_TOOLS_LOG_ENABLED=false` で、Mail のツール呼び出しの引数・結果をログへ出す処理を無効にします。メッセージ本文が含まれるため、ChatGPT MCP の追加指示を使う構成では false にします。Mail が保存するメッセージや archive は維持します。
+
+この値は通常の installer 設定として、明示値、前回の `env.sh`、既定の true の順で解決します。再インストール時も選択を保持し、空文字の明示または `--reset-settings` では通常の設定規則に従って既定へ戻します。true / false 以外は書き込み前に拒否します。変更不能な candidate、`service.env`、runner は編集しません。
+
+```sh
+AGENTSTACK_MAIL_TOOLS_LOG_ENABLED=false ./scripts/install.sh --keep-mail --dry-run
+AGENTSTACK_MAIL_TOOLS_LOG_ENABLED=false ./scripts/install.sh --keep-mail
+```
+
+`--keep-mail` は稼働中の Mail を再起動しません。Mail は起動時に設定を保持するため、現在のプロセスで既に false が適用されている場合は再起動不要です。今回値を変える場合は、設定保存後に同じインストール先の controller で一度再起動します。標準のインストール先では次のコマンドです。
+
+```sh
+~/.agentstack/bin/agentstack-mailctl restart
+~/.agentstack/bin/agentstack-mailctl status
+```
+
+再起動するのは Mail サービスで、エージェントのプロセスは終了しません。Mail への接続は一時的に切れるため、再起動後に接続の復旧を確認します。次回ログインの自動起動も同じ controller が `env.sh` を読むので、保存した設定が使われます。稼働プロセスの値を確認する際はこの設定名だけを抽出し、他の環境変数や本文を含むログ全体を表示しないでください。
 
 ## Reservation の保護範囲と移行
 

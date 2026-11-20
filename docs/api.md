@@ -72,7 +72,7 @@ curl -s http://127.0.0.1:8770/api/version
 ```
 
 ```json
-{"name":"orrery-telemetry","version":"2026.09.16.1","api":40}
+{"name":"orrery-telemetry","version":"2026.09.16.1","api":41}
 ```
 
 version の解決順は [インストール](install.md#version)を参照してください。
@@ -501,7 +501,9 @@ curl -s 'http://127.0.0.1:8770/api/edge-messages?a=Parent&b=WindyFermi&limit=60'
 - `a`, `b`: agent 名
 - `limit`: 既定 `60`
 
-response は `{ok, messages}` です。message item は direction、subject、body、importance、timestamp を含み、NETWORK の edge drawer が使います。
+response は `{ok,a,b,count,messages}` です。設定されたproject内の二者間メッセージだけを双方向に返し、`limit` は1〜200に制限します。各行は `id`、`sender`、`recipient`、`subject`、`body`、`thread_id`、`importance`、`ts`、`ts_unix`、`read_ts`、`ack_ts` などを含み、NETWORKのedge drawerが使います。読むだけで既読・ACKは変更しません。
+
+API 41からlegacy modeの各行に、保存済みMail instance UUIDの `mail_instance_id` と、送信者・宛先の数値IDである `sender_agent_id`・`recipient_agent_id` を追加します。instanceとメッセージ・agent行は同じ読み取りtransactionから取り、名前の一致だけで別の登録を同じ相手とみなさないために使います。旧DBに `mail_instances` tableがない場合、instance行がない場合、UUIDの形式が不正な場合、agent IDが正の整数でない場合は、この3欄をすべて省略し、従来の表示を維持します。その他のschema・DB読取エラーは成功扱いにしません。呼出し側は3欄が揃って期待する値と一致した場合だけ、該当instance・送信者・宛先の既読/ACKとして照合できます。fresh modeの別の読取契約は変わりません。
 
 ## GET `/api/messages-since`
 

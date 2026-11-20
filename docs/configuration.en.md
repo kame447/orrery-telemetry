@@ -181,6 +181,7 @@ export AGENTSTACK_DELIVERABLE_ROOTS="$HOME/project-a/logs:$HOME/shared logs"
 | `AGENTSTACK_MAIL_SERVICE_VENV` | derived from candidate ID | Path used to explicitly reuse a verified candidate virtual environment |
 | `AGENTSTACK_MAIL_ENROLL_BIN` | derived from the adopted Mail deployment | Matching `agentstack-enroll` saved by the installer in `env.sh`; normally not set by hand |
 | `AGENTSTACK_MAIL_HTTP_BEARER_MODE` | `disabled` | Do not use the legacy HTTP bearer |
+| `AGENTSTACK_MAIL_TOOLS_LOG_ENABLED` | `true` | Legacy runtime Mail tool argument/result logging. Accepts only `true` / `false`; saved in `env.sh` and applied when Mail next starts |
 | `AGENTSTACK_PROJECT_KEY` | existing `env.sh` on reinstall; required initially | Human project key. `--project-key` has highest priority |
 | `AGENTSTACK_EXTRA_PROTECTED_ROOTS` | process value (including empty) → installed extras (including empty) → installed legacy roots once → empty | Persistent ordered additional reservation roots; see automatic migration below |
 | `AGENTSTACK_PROTECTED_ROOTS` | computed at every managed launch | Runtime output: extras, then the actual workspace. Installed legacy value is retained only for direct/unmanaged-hook compatibility |
@@ -208,6 +209,28 @@ The installer's project-key precedence is `--project-key` / process `AGENTSTACK_
 At hook and helper runtime the precedence is `AGENTSTACK_PROJECT_KEY` → `PROJECT_KEY` → `${AGENTSTACK_HOME:-$HOME/.agentstack}/env.sh` → current cwd. The shared resolvers read project and extra-root settings from installed `env.sh` literally, without sourcing shell code. Direct/unmanaged hooks may still read the retained legacy `AGENTSTACK_PROTECTED_ROOTS`; managed launches ignore it as configuration. Thus an installed editor started from another directory uses the same project key for reservation and registration without executing arbitrary shell code from `env.sh`.
 
 The installer derives `AGENTSTACK_MAIL_DB`, `AGENTSTACK_MAIL_ENV`, and `AGENTSTACK_SIGNALS_DIR` from state / render and stores the state root together with `AGENTSTACK_MAIL_HTTP_BEARER_MODE=disabled` in `env.sh`.
+
+## Mail tool logging
+
+These save/restart instructions apply to the standard Mail service in the legacy runtime.
+
+`AGENTSTACK_MAIL_TOOLS_LOG_ENABLED=false` disables logging of Mail tool arguments and results. These can include message bodies, so use false for the ChatGPT MCP additional-instruction setup. Stored messages and the Mail archive remain intact.
+
+This is a normal installer setting, resolved from an explicit value, the previous `env.sh`, then the default true. Reinstallation preserves the choice; an explicit empty value or `--reset-settings` restores the default under the normal setting rules. Values other than true / false are rejected before writes. Do not edit immutable candidates, `service.env`, or runners.
+
+```sh
+AGENTSTACK_MAIL_TOOLS_LOG_ENABLED=false ./scripts/install.sh --keep-mail --dry-run
+AGENTSTACK_MAIL_TOOLS_LOG_ENABLED=false ./scripts/install.sh --keep-mail
+```
+
+`--keep-mail` does not restart the running Mail server. Mail caches settings at startup, so no restart is needed if false is already effective in that process. When changing the value, restart once after saving it, using the controller from the same installation. For the standard installation directory:
+
+```sh
+~/.agentstack/bin/agentstack-mailctl restart
+~/.agentstack/bin/agentstack-mailctl status
+```
+
+This restarts the Mail service without terminating agent processes. Mail connections are briefly interrupted; verify that they recover afterward. Login autostart uses the same controller, which reads `env.sh`, so it uses the saved setting. When checking the running process, extract only this setting; do not display other environment variables or entire logs containing message bodies.
 
 ## Reservation protection and migration
 

@@ -54,6 +54,7 @@ INSTALL_DIR="${AGENTSTACK_HOME:-$HOME/.agentstack}"
 MAIL_DB_EXPLICIT="${AGENTSTACK_MAIL_DB+x}"
 MAIL_ENV_EXPLICIT="${AGENTSTACK_MAIL_ENV+x}"
 MAIL_HTTP_BEARER_MODE="disabled"
+MAIL_TOOLS_LOG_ENABLED_SETTING="${AGENTSTACK_MAIL_TOOLS_LOG_ENABLED:-}"
 # Explicit values only; the rest come from the previous env.sh or the defaults
 # once the options are parsed (see "setting resolution" below). Options record
 # the env.sh name they set in OPTION_GIVEN, so an empty option value counts too.
@@ -722,6 +723,14 @@ resolve_setting LABEL_PREFIX AGENTSTACK_LABEL_PREFIX org.agentstack kept
 LABEL_PREFIX_SOURCE="$SETTING_SOURCE"
 resolve_setting TERMINAL AGENTSTACK_TERMINAL auto
 resolve_setting MCP_URL AGENTSTACK_MCP_URL http://127.0.0.1:18765/mcp kept
+resolve_setting MAIL_TOOLS_LOG_ENABLED_SETTING AGENTSTACK_MAIL_TOOLS_LOG_ENABLED true
+case "$MAIL_TOOLS_LOG_ENABLED_SETTING" in
+  true|false) ;;
+  *) echo "error: AGENTSTACK_MAIL_TOOLS_LOG_ENABLED must be true or false" >&2; exit 2 ;;
+esac
+# The canonical Mail controller reads env.sh before starting its runner.
+# Keep this setting outside the immutable per-build service render.
+export AGENTSTACK_MAIL_TOOLS_LOG_ENABLED="$MAIL_TOOLS_LOG_ENABLED_SETTING"
 resolve_setting PATH_VALUE AGENTSTACK_PATH /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 # An explicit AGENTSTACK_PYTHON must work or the install stops; one recorded
 # before is only tried first, and select_python searches again without it.
@@ -3111,6 +3120,7 @@ values = {
     "AGENTSTACK_DASHBOARD_RESTART_DELAY": "$DASHBOARD_RESTART_DELAY",
     "AGENTSTACK_VAULT": "$VAULT_SETTING",
     "AGENTSTACK_PYTHON": "$PYTHON_BIN",
+    "AGENTSTACK_MAIL_TOOLS_LOG_ENABLED": "$MAIL_TOOLS_LOG_ENABLED_SETTING",
     "AGENTSTACK_RUNTIME_MODE": "${AGENTSTACK_RUNTIME_MODE:-legacy}",
     "AGENTSTACK_GLOBAL_SERVER_CONFIG": "${AGENTSTACK_GLOBAL_SERVER_CONFIG:-}",
     "AGENTSTACK_PATH": "$PATH_VALUE",
@@ -3798,6 +3808,7 @@ verify_native_mail_candidate_offline() {
   else
     say "verifying candidate $NATIVE_MAIL_VENV on scratch port $port in $scratch (waits up to ${timeout}s)"
     env -i HOME="$scratch/home" PATH=/usr/bin:/bin AGENTSTACK_MAIL_ENV_FILE="$scratch/service.env" \
+      AGENTSTACK_MAIL_TOOLS_LOG_ENABLED="$MAIL_TOOLS_LOG_ENABLED_SETTING" \
       "$NATIVE_MAIL_VENV/bin/agentstack-mail" > "$scratch/server.log" 2>&1 &
     MAIL_VERIFY_SERVER_PID=$!
     # In the background and collected with `wait`: bash runs a trap only after
@@ -5515,6 +5526,7 @@ main() {
   say "label prefix: $LABEL_PREFIX"
   say "terminal: $TERMINAL"
   say "ORRERY Mail MCP URL: $MCP_URL"
+  say "legacy Mail tool logging setting: $MAIL_TOOLS_LOG_ENABLED_SETTING (applies when Mail starts; --keep-mail does not restart it)"
   say "spawn dirs: ${SPAWN_DIRS_SETTING:-(default: the project key, then ~)}"
   say "spawn roots: ${SPAWN_ROOTS_SETTING:-(default: \$HOME)}"
   say "worktree root: $WORKTREE_ROOT_SETTING"
