@@ -966,6 +966,7 @@ prepare_codex_child_resume_state() {
         --runtime-dir "$RUNTIME_DIR" \
         --agent-name "$agent_name" \
         --project-key "$PROJECT_KEY" \
+        --codex-standalone "$STANDALONE" \
         --mcp-profile "$mcp_profile" --program codex --parent-agent "$(recordable_parent_name)" ${generation_args[@]+"${generation_args[@]}"}
 }
 
@@ -1301,13 +1302,12 @@ cleanup_worktree() {
 # the child's login shell can word-split it (unquoted command substitution,
 # which zsh and bash both expand).
 #
-# The policy comes from AGENTSTACK_CODEX_CHILD_APPROVAL (installer setting,
-# default `never`): a spawned child works unattended, so every "may I run this"
-# prompt is a stall nobody is watching. The probe resolves the binary the same
-# way the child will (PATH plus ~/.local/bin, or AGENTSTACK_CODEX_BIN); when
-# the dashboard's minimal launchd PATH cannot find codex at all, the modern flag
-# is emitted instead of nothing — an empty result silently reverted every child
-# to Codex's own `on-request` default (2026-09-04).
+# A standalone Codex uses its configured approval policy. A parented Codex
+# uses AGENTSTACK_CODEX_CHILD_APPROVAL (installer setting, default `never`)
+# because an unattended child has nobody to answer prompts. The probe resolves
+# it the same way as the child (PATH plus ~/.local/bin or AGENTSTACK_CODEX_BIN).
+# If the dashboard's minimal launchd PATH cannot find Codex, the launcher emits
+# the modern flag to preserve the child policy (2026-09-04).
 # The child's tmux session runs `<shell> -lc '<launch>'`. This used to be a
 # hard-coded zsh path, which does not exist on a stock Ubuntu (WSL2 included):
 # the session died two seconds after spawn with nothing in the pane. Prefer zsh
@@ -1436,6 +1436,9 @@ resolve_codex_bin() {
 }
 
 codex_approval_flags() {
+    if [[ "${USE_CODEX:-false}" == true && "${STANDALONE:-false}" == true ]]; then
+        return 0
+    fi
     local help_text codex_bin policy
     policy="${AGENTSTACK_CODEX_CHILD_APPROVAL:-never}"
     codex_bin="$(find_codex_bin)"
@@ -1465,6 +1468,18 @@ codex_approval_flags() {
     fi
     # Help answered and names neither flag: emit nothing and let codex use its
     # own defaults rather than passing an argument this build will reject.
+}
+
+codex_permission_flags() {
+    local sandbox approval
+    sandbox="$(agentstack_resolve_setting AGENTSTACK_CODEX_SANDBOX \
+        "${AGENTSTACK_CODEX_SANDBOX:-}" workspace-write "${AGENTSTACK_HOME_DIR:-$HOME/.agentstack}/env.sh")"
+    if [[ "$sandbox" == danger-full-access ]]; then
+        printf '%s\n' '--sandbox danger-full-access --ask-for-approval never'
+    else
+        approval="$(codex_approval_flags)"
+        printf '%s\n' "--sandbox workspace-write${approval:+ $approval}"
+    fi
 }
 
 # Writable roots for a Codex child, ':'-separated, handed to the child through
@@ -3494,7 +3509,13 @@ PY
     if [[ -n "$HARNESS" ]]; then
         TMUX_ENV_ARGS=(-e "AGENT_NAME=$CHILD_NAME" -e "CLAUDECODE=1" -e "AGENTSTACK_RESERVED_IDENTITY=1" -e "PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_HOOKS_DIR=$HOOKS_DIR" -e "AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR" -e "AGENTSTACK_MCP_URL=$MCP_URL" -e "AGENTSTACK_MAIL_ENV=$MAIL_ENV" -e "AGENTSTACK_MAIL_HTTP_BEARER_MODE=$HTTP_BEARER_MODE" -e "AGENTSTACK_CHILD_RESUME_RETENTION_DAYS=$CHILD_RESUME_RETENTION_DAYS")
     else
-    TMUX_ENV_ARGS=(-e "CLAUDECODE=1" -e "AGENTSTACK_RESERVED_IDENTITY=1" -e "AGENT_NAME=$CHILD_NAME" -e "PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_HOOKS_DIR=$HOOKS_DIR" -e "AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR" -e "AGENTSTACK_MCP_URL=$MCP_URL" -e "AGENTSTACK_MAIL_ENV=$MAIL_ENV" -e "AGENTSTACK_MAIL_HTTP_BEARER_MODE=$HTTP_BEARER_MODE" -e "AGENTSTACK_CHILD_RESUME_RETENTION_DAYS=$CHILD_RESUME_RETENTION_DAYS" -e "AGENTSTACK_TERMINAL=$TERMINAL_SETTING" -e "AGENTSTACK_AUTO_OPEN_CHILD=$AUTO_OPEN_CHILD" -e "AGENTSTACK_CODEX_APPROVAL=$(codex_approval_flags)" -e "AGENTSTACK_CODEX_NETWORK_FLAGS=$(codex_network_flags)")
+        TMUX_ENV_ARGS=(-e "CLAUDECODE=1" -e "AGENTSTACK_RESERVED_IDENTITY=1" -e "AGENT_NAME=$CHILD_NAME" -e "PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_HOOKS_DIR=$HOOKS_DIR" -e "AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR" -e "AGENTSTACK_MCP_URL=$MCP_URL" -e "AGENTSTACK_MAIL_ENV=$MAIL_ENV" -e "AGENTSTACK_MAIL_HTTP_BEARER_MODE=$HTTP_BEARER_MODE" -e "AGENTSTACK_CHILD_RESUME_RETENTION_DAYS=$CHILD_RESUME_RETENTION_DAYS" -e "AGENTSTACK_TERMINAL=$TERMINAL_SETTING" -e "AGENTSTACK_AUTO_OPEN_CHILD=$AUTO_OPEN_CHILD")
+        if [[ "$USE_CODEX" == true ]]; then
+            TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_PERMISSION_FLAGS=$(codex_permission_flags)")
+        else
+            TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_APPROVAL=$(codex_approval_flags)")
+        fi
+        TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_NETWORK_FLAGS=$(codex_network_flags)")
     fi
     append_child_workspace_environment
     if [[ "$STANDALONE" != true ]]; then
@@ -3580,11 +3601,8 @@ ${TASK}"
                 # The child never sources a user-side bootstrap: identity comes
                 # from the reserved name and token file, and a failing script
                 # under set -e would take the whole session with it (2026-09-03).
-                # The product decides sandbox, approval, network and writable
-                # roots itself; a user-side launcher (~/.codex/bin/...) is never
-                # consulted. Handing off to one silently replaced `never` with
-                # its `on-request` default and dropped the network flag and the
-                # extra roots (2026-09-04).
+                # The product supplies sandbox, network, writable roots and any
+                # parented approval flag without consulting a user-side launcher.
                 # Claude in Chrome defaults are for Claude children; do not hand them on
                 # through a Codex child (the tmux server env may carry them).
                 unset AGENTSTACK_CLAUDE_CHILD_CHROME AGENTSTACK_CLAUDE_CHILD_CHROME_DEVICE
@@ -3614,7 +3632,7 @@ ${TASK}"
                     exit 1
                 fi
                 rm -f "$AGENTSTACK_CODEX_PROMPT_FILE"
-                env -u OPENAI_API_KEY "$AGENTSTACK_CODEX_BIN" -C "$PWD" --sandbox workspace-write $(printf "%s" "$AGENTSTACK_CODEX_APPROVAL") $(printf "%s" "$AGENTSTACK_CODEX_NETWORK_FLAGS") -c check_for_update_on_startup=false \
+                env -u OPENAI_API_KEY "$AGENTSTACK_CODEX_BIN" -C "$PWD" $(printf "%s" "$AGENTSTACK_CODEX_PERMISSION_FLAGS") $(printf "%s" "$AGENTSTACK_CODEX_NETWORK_FLAGS") -c check_for_update_on_startup=false \
                     "${EXTRA_ARGS[@]}" --model "$AGENTSTACK_CODEX_MODEL" -- "$AGENTSTACK_CODEX_TASK"
                 /bin/bash "$AGENTSTACK_HOOKS_DIR/cleanup-child-agent.sh"
             '"'"''
@@ -4394,7 +4412,13 @@ if [[ -z "$HARNESS" ]]; then prime_codex_bin; fi
 if [[ -n "$HARNESS" ]]; then
     TMUX_ENV_ARGS=(-e "AGENT_NAME=$CHILD_NAME" -e "CLAUDECODE=1" -e "AGENTSTACK_RESERVED_IDENTITY=1" -e "PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_HOOKS_DIR=$HOOKS_DIR" -e "AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR" -e "AGENTSTACK_MCP_URL=$MCP_URL" -e "AGENTSTACK_MAIL_ENV=$MAIL_ENV" -e "AGENTSTACK_MAIL_HTTP_BEARER_MODE=$HTTP_BEARER_MODE" -e "AGENTSTACK_CHILD_RESUME_RETENTION_DAYS=$CHILD_RESUME_RETENTION_DAYS")
 else
-TMUX_ENV_ARGS=(-e "CLAUDECODE=1" -e "AGENTSTACK_RESERVED_IDENTITY=1" -e "AGENT_NAME=$CHILD_NAME" -e "PARENT_AGENT=$PARENT_NAME" -e "PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_HOOKS_DIR=$HOOKS_DIR" -e "AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR" -e "AGENTSTACK_MCP_URL=$MCP_URL" -e "AGENTSTACK_MAIL_ENV=$MAIL_ENV" -e "AGENTSTACK_MAIL_HTTP_BEARER_MODE=$HTTP_BEARER_MODE" -e "AGENTSTACK_CHILD_RESUME_RETENTION_DAYS=$CHILD_RESUME_RETENTION_DAYS" -e "AGENTSTACK_TERMINAL=$TERMINAL_SETTING" -e "AGENTSTACK_AUTO_OPEN_CHILD=$AUTO_OPEN_CHILD" -e "AGENTSTACK_CODEX_APPROVAL=$(codex_approval_flags)" -e "AGENTSTACK_CODEX_NETWORK_FLAGS=$(codex_network_flags)")
+    TMUX_ENV_ARGS=(-e "CLAUDECODE=1" -e "AGENTSTACK_RESERVED_IDENTITY=1" -e "AGENT_NAME=$CHILD_NAME" -e "PARENT_AGENT=$PARENT_NAME" -e "PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_HOOKS_DIR=$HOOKS_DIR" -e "AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR" -e "AGENTSTACK_MCP_URL=$MCP_URL" -e "AGENTSTACK_MAIL_ENV=$MAIL_ENV" -e "AGENTSTACK_MAIL_HTTP_BEARER_MODE=$HTTP_BEARER_MODE" -e "AGENTSTACK_CHILD_RESUME_RETENTION_DAYS=$CHILD_RESUME_RETENTION_DAYS" -e "AGENTSTACK_TERMINAL=$TERMINAL_SETTING" -e "AGENTSTACK_AUTO_OPEN_CHILD=$AUTO_OPEN_CHILD")
+    if [[ "$USE_CODEX" == true ]]; then
+        TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_PERMISSION_FLAGS=$(codex_permission_flags)")
+    else
+        TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_APPROVAL=$(codex_approval_flags)")
+    fi
+    TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_NETWORK_FLAGS=$(codex_network_flags)")
 fi
 append_child_workspace_environment
 if [[ -n "$AGENTSTACK_HOME_DIR" ]]; then
@@ -4505,7 +4529,7 @@ elif [[ "$USE_CODEX" == true ]]; then
                 exit 1
             fi
             rm -f "$AGENTSTACK_CODEX_PROMPT_FILE"
-            env -u OPENAI_API_KEY "$AGENTSTACK_CODEX_BIN" -C "$PWD" --sandbox workspace-write $(printf "%s" "$AGENTSTACK_CODEX_APPROVAL") $(printf "%s" "$AGENTSTACK_CODEX_NETWORK_FLAGS") -c check_for_update_on_startup=false \
+            env -u OPENAI_API_KEY "$AGENTSTACK_CODEX_BIN" -C "$PWD" $(printf "%s" "$AGENTSTACK_CODEX_PERMISSION_FLAGS") $(printf "%s" "$AGENTSTACK_CODEX_NETWORK_FLAGS") -c check_for_update_on_startup=false \
                 "${EXTRA_ARGS[@]}" --model "$AGENTSTACK_CODEX_MODEL" -- "$AGENTSTACK_CODEX_TASK"
             /bin/bash "$AGENTSTACK_HOOKS_DIR/cleanup-child-agent.sh"
         '"'"''

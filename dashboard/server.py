@@ -4070,16 +4070,23 @@ def _codex_child_add_dirs(extra: list[str] | None = None) -> list[str]:
     return seen
 
 
-def _codex_child_launch_flags(extra_dirs: list[str] | None = None) -> str:
+def _codex_child_launch_flags(extra_dirs: list[str] | None = None, *, standalone: bool = False) -> str:
     """Sandbox / approval / network / --add-dir flags for a product-launched Codex.
 
-    Same policy as spawn_child.sh: AGENTSTACK_CODEX_CHILD_APPROVAL (default
-    `never` — an unattended agent has nobody to answer prompts),
-    AGENTSTACK_CODEX_NETWORK (default on; workspace-write blocks the network
-    otherwise and every curl / git fetch becomes a prompt or a failure)."""
+    Full Access uses approval policy `never`. With workspace-write, a recorded
+    standalone start uses Codex configuration. Other resumes use
+    AGENTSTACK_CODEX_CHILD_APPROVAL (default `never`). Network access follows
+    AGENTSTACK_CODEX_NETWORK (default on)."""
     approval = os.environ.get("AGENTSTACK_CODEX_CHILD_APPROVAL", "").strip() or "never"
     network = os.environ.get("AGENTSTACK_CODEX_NETWORK", "").strip().lower() or "on"
-    parts = [f"--sandbox workspace-write --ask-for-approval {shlex.quote(approval)}"]
+    sandbox = codex_models.read_launcher_setting(
+        "AGENTSTACK_CODEX_SANDBOX", install_home=os.path.dirname(HERE)
+    )
+    parts = ["--sandbox workspace-write"]
+    if sandbox == "danger-full-access":
+        parts = ["--sandbox danger-full-access --ask-for-approval never"]
+    elif not standalone:
+        parts.append(f"--ask-for-approval {shlex.quote(approval)}")
     # No update screen in a product-launched Codex: its default choice runs
     # `npm install -g`, and nobody is there to decline it (#60).
     parts.append("-c check_for_update_on_startup=false")
@@ -4224,8 +4231,8 @@ def _private_file_capability(
 
 def _codex_resume_child_home(
     session: str, registration: dict
-) -> tuple[str, str]:
-    """Verify retained state and return the fresh-home target plus saved profile."""
+) -> tuple[str, str, bool]:
+    """Verify retained state and return the home target, profile and standalone flag."""
 
     if not _valid(session):
         raise _ResumeCapabilityError(
@@ -4301,7 +4308,7 @@ def _codex_resume_child_home(
                 "config_unrestorable",
                 f"the tools this Codex child was started with cannot be restored: {exc}",
             ) from exc
-    return child_home, state["codex_mcp_profile"]
+    return child_home, state["codex_mcp_profile"], state.get("codex_standalone") is True
 
 
 def _validate_codex_standalone_credential(session: str) -> None:
@@ -5099,7 +5106,7 @@ def _resume_capability(
     launch_origin = provenance.get("launch_origin") if provenance else None
     if launch_origin == "child":
         try:
-            child_home, child_profile = _codex_resume_child_home(
+            child_home, child_profile, _ = _codex_resume_child_home(
                 session, registration
             )
         except _ResumeCapabilityError as exc:
@@ -5294,7 +5301,7 @@ def _do_resume_codex(session: str, *, open_terminal: bool | None = None) -> dict
     child_profile = ""
     try:
         if launch_origin == "child":
-            child_home, child_profile = _codex_resume_child_home(
+            child_home, child_profile, codex_standalone = _codex_resume_child_home(
                 session, registration
             )
             _rebuild_codex_child_home(
@@ -5354,7 +5361,7 @@ def _do_resume_codex(session: str, *, open_terminal: bool | None = None) -> dict
             f'if {src}; then '
             f'env -u OPENAI_API_KEY codex resume {sid} '
             f'-C {shlex.quote(cwd)} '
-            f'{_codex_child_launch_flags([child_home])}; '
+            f'{_codex_child_launch_flags([child_home], standalone=codex_standalone)}; '
             'CODEX_STATUS=$?; '
             f'/bin/bash {shlex.quote(cleanup)}; CLEANUP_STATUS=$?; '
             '[[ "$CODEX_STATUS" -ne 0 ]] && exit "$CODEX_STATUS"; '
@@ -6703,15 +6710,22 @@ _WIN_TRUNC_RE = re.compile(
 #   まで openai に化けた（ProOpus が cockpit で Codex 表示になった実害）。
 #   同時に、ctx 表示と同じ行（= statusline）を最優先で読むようにし、会話中の
 #   モデル名（"gpt-5.6-sol に委任"）を statusline より先に拾わないようにする。
+_CODEX_EFFORT = r"(?:low|medium|high|xhigh|max|ultra)"
+# Codex shows an ID ("gpt-5.6-terra medium · ~/dir") or a display name
+# ("GPT-6.1 Terra max · ~/dir"); an effort word must never be the variant.
+_CODEX_MODEL_FOOTER_RE = re.compile(
+    rf"^\s*gpt-\S+(?: (?!{_CODEX_EFFORT}\b)[a-z0-9_]+(?:-[a-z0-9_]+)*)?"
+    rf"\s+{_CODEX_EFFORT}\s+[·•]", re.IGNORECASE)
 _MODEL_PANE_RE = re.compile(
     r"\b(Opus|Sonnet|Haiku|Fable|Mythos)\s+(\d+(?:\.\d+)?)\b"
-    r"|\b(gpt-\d+(?:\.\d+)?)(?:-([a-z0-9_]+(?:-[a-z0-9_]+)*))?\b",
+    r"|\b(gpt-\d+(?:\.\d+)?)(?:-([a-z0-9_]+(?:-[a-z0-9_]+)*)"
+    rf"| (?!{_CODEX_EFFORT}\b)([a-z0-9_]+(?:-[a-z0-9_]+)*)(?=\s+{_CODEX_EFFORT}\s+[·•]))?\b",
     re.IGNORECASE,
 )
 _STATUSLINE_HINT_RE = re.compile(
     r"ctx:\s*\d+%\s*used|Context\s+\d+%\s*(?:left|used)"
     # Codex footer before any context is used: "gpt-5.6-terra medium · ~/dir"
-    r"|^\s*gpt-\S+\s+(?:low|medium|high|xhigh|max|ultra)\s+[·•]"
+    r"|" + _CODEX_MODEL_FOOTER_RE.pattern +
     # Claude's /model or /status line: "Model: Default (Opus 5 with 1M context)"
     r"|^\s*Model:\s",
     re.IGNORECASE)
@@ -6725,13 +6739,19 @@ def _pane_model_from(tail: str) -> str | None:
     の子に委任」と話しただけで、末尾全体フォールバックが gpt-5.6 を実モデルと
     誤読し、cockpit で Codex 表示になった。statusline が無いペインは None を
     返し、ORRERY Mail の登録（program / model）に判断を委ねる。"""
-    for src in (ln for ln in tail.splitlines() if _STATUSLINE_HINT_RE.search(ln)):
+    # Prefer the actual footer below the unindented Codex composer. Quoted
+    # footer-shaped text in an unsent draft must not override the real model.
+    for src in reversed(tail.splitlines()):
+        if re.fullmatch(r"›(?:\s+.*)?", src):
+            break
+        if not _STATUSLINE_HINT_RE.search(src):
+            continue
         mm = _MODEL_PANE_RE.search(src)
         if not mm:
             continue
         if mm.group(1):  # Claude family
             return f"{mm.group(1).title()} {mm.group(2)}"
-        base, variant = mm.group(3), mm.group(4)
+        base, variant = mm.group(3), mm.group(4) or mm.group(5)
         return f"{base}-{variant}" if variant else base
     return None
 
@@ -6997,7 +7017,8 @@ def _runtime_activity(text: str) -> tuple[str, str]:
     # choices use the same pointer, but are not an ordinary input prompt.
     composer = None
     for index in range(len(lines) - 1, max(-1, len(lines) - 17), -1):
-        prompt = re.fullmatch(r"\s*[❯›](?:\s+(.*))?", lines[index])
+        # Draft lines are indented, even when they quote a Claude or Codex prompt.
+        prompt = re.fullmatch(r"[❯›](?:\s+(.*))?", lines[index])
         if prompt is None or re.match(r"\d+\.\s", prompt.group(1) or ""):
             continue
         suffix = lines[index + 1:]
@@ -7006,14 +7027,32 @@ def _runtime_activity(text: str) -> tuple[str, str]:
                 for row in suffix) and all(chrome(row) for row in suffix)):
             composer = index
             break
-    codex_composer = (composer is not None and lines[composer].lstrip().startswith('›')
+    codex_composer = (composer is not None and lines[composer].startswith('›')
         and any(_CTX_CODEX_LEFT_RE.search(row) or _CTX_CODEX_USED_RE.search(row)
-            or re.match(r'^\s*gpt-\S+\s+(?:low|medium|high|xhigh|max|ultra)\s+[·•]',
-                        row, re.IGNORECASE)
+            or _CODEX_MODEL_FOOTER_RE.match(row)
             for row in lines[composer + 1:]))
     current = lines[:composer] if composer is not None else lines[:]
     while current and (not current[-1].strip() or rule(current[-1])):
         current.pop()
+
+    # Only complete native queue chrome may expose the work block above it.
+    queue_removed = False
+    if codex_composer and current and current[-1].rstrip() == '    ⇧← edit last queued message':
+        start = len(current) - 2
+        while start >= 0 and current[start].startswith('  '):
+            start -= 1
+        queued = current[start + 1:-1]
+
+        def queue_item(row):
+            return row.startswith('  ↳ ') and bool(row[4:].strip())
+
+        if (start >= 0 and current[start].rstrip() == '• Queued follow-up inputs'
+                and queued and queue_item(queued[0])
+                and all(queue_item(row) or (row.startswith('    ') and row.strip()) for row in queued)):
+            del current[start:]
+            while current and not current[-1].strip():
+                current.pop()
+            queue_removed = True
 
     # The work marker must reach the end of this block, rather than merely
     # occur somewhere in the capture. A single exact interrupt hint remains a
@@ -7033,6 +7072,9 @@ def _runtime_activity(text: str) -> tuple[str, str]:
     for start in range(len(current) - 1, max(-1, len(current) - 26), -1):
         block = current[start:]
         if not block[0].strip() or not all(continuation(row) for row in block[1:]):
+            continue
+        # Removing queue chrome must not revive an indented quoted spinner.
+        if queue_removed and block[0][:1].isspace():
             continue
         for width in range(1, min(3, len(block)) + 1):
             label = block[:width]
@@ -7060,6 +7102,16 @@ def _runtime_activity(text: str) -> tuple[str, str]:
                 return "work", "\n".join(label)
     if composer is not None:
         return "wait", ""
+
+    # Claude wraps the permission modal before tmux captures it. Its heading
+    # can be above the 16-line window, while the menu must end the capture.
+    permission = " ".join(" ".join(current[-32:]).split()).replace("❯ ", "")
+    # The menu lists only the permissions still missing, so after one is
+    # granted it shrinks to that setting and "Try again".
+    if ("Computer use needs macOS permissions " in permission
+            and " Open System Settings → " in permission
+            and permission.endswith(" Try again Enter to confirm · Esc to cancel")):
+        return "ask", ""
 
     # These footer controls must still be current. Looking at the last control
     # rather than reversing work/ask priority also preserves new work after an

@@ -247,7 +247,7 @@ Before cutover, finish work or release active reservations. Older relative reser
 | `AGENTSTACK_CLAUDE_MODEL` | `claude-code` | Claude registration model label. Children and dashboard-resumed sessions use their own model (`CLAUDE_CHILD_MODEL`) first. A new window in a child's tmux session inherits that value, so `unset CLAUDE_CHILD_MODEL` before opening another agent there with `AGENT_NAME=<name> claude --resume`; otherwise it registers with the child's model |
 | `AGENTSTACK_CODEX_BIN` | `codex` resolved in the operator's shell at install time that answers `--version` (under WSL, a Windows install under `/mnt/<drive>/` is skipped; `--codex-bin` to override) | Codex CLI. The dashboard runs under launchd / systemd with the minimal PATH, so a codex under nvm / nodebrew / `~/.npm-global` is reachable only through this value |
 | `AGENTSTACK_CODEX_MODEL` | launcher / bootstrap default | Codex registration model |
-| `AGENTSTACK_CODEX_SANDBOX` | `workspace-write` | Codex `--sandbox` |
+| `AGENTSTACK_CODEX_SANDBOX` | `workspace-write` | Set to `danger-full-access` for Codex CLI Full Access in legacy mode. Applies to `agent-start-codex`, `/delegate`, standalone NEW AGENT, and dashboard resumes. Direct `agent-start-codex` also supports `read-only` |
 | `AGENTSTACK_CODEX_APPROVAL` | `on-request` | `--ask-for-approval` for `agent-start-codex`, the user's own interactive session. Spawned children use `AGENTSTACK_CODEX_CHILD_APPROVAL`; see Child spawn |
 | `AGENTSTACK_VAULT` | unset | Additional writable `--add-dir` passed to Codex |
 | `AGENTSTACK_MCP_URL` | `http://127.0.0.1:18765/mcp` | Registration / hook endpoint |
@@ -262,6 +262,9 @@ The launchers (`agent-start`, `agent-start-codex`, `agent-start-gemini`) load `e
 
 The canonical `AGENTSTACK_TCC_DIRS` syntax is colon-separated so paths may contain spaces. Legacy whitespace-separated values without a colon are also interpreted for compatibility.
 
+To enable Full Access, set `export AGENTSTACK_CODEX_SANDBOX=danger-full-access` in `~/.agentstack/env.sh`. A normal reinstall preserves the setting.
+Full Access disables the Codex sandbox and command approvals. Codex can write and delete files anywhere the OS permits and run `git push` to authenticated remotes.
+
 `AGENTSTACK_RESERVED_IDENTITY`, proxy-token paths, child tokens, and similar values are internal values set per session by the spawner. Do not set them manually for a top-level launcher.
 
 ## Child spawn
@@ -274,7 +277,7 @@ These variables change `spawn_child.sh` and `agentstack-preregister-child` behav
 | `AGENTSTACK_FOCUS_CHILD` | unset | When automatic opening is enabled, `1` brings the window forward. It does not enable automatic opening on its own |
 | `AGENTSTACK_STRICT_AGENT_NAMES` | unset | Set to `1` to make an off-list child name an error instead of a warning |
 | `AGENTSTACK_MONITOR_DANGER_CHECK` | `0` | Set to `1` to enable dangerous-command detection in the monitor. Passive by default |
-| `AGENTSTACK_CODEX_CHILD_APPROVAL` | `never` | Codex child `--ask-for-approval`, persisted by installer `--codex-approval` |
+| `AGENTSTACK_CODEX_CHILD_APPROVAL` | `never` | `--ask-for-approval` for parented Codex children under `workspace-write`, persisted by installer `--codex-approval`. Standalone NEW AGENT starts follow Codex configuration. Full Access always uses `never` |
 | `AGENTSTACK_CODEX_CHILD_CONFIG_OVERLAY` | unset | Absolute path to a TOML fragment overlaid on every macOS/Linux Codex child's `config.toml`, persisted by installer `--codex-child-overlay <path>` |
 | `AGENTSTACK_CODEX_NETWORK` | `on` | Codex child sandbox network (`-c sandbox_workspace_write.network_access=true`). Disable with `--codex-network off` |
 | `AGENTSTACK_CHILD_DEFAULT_TOOLS` | empty | Installer-selected child tools, using the `--tools` grammar; explicit base/tools/MCP profile wins. Unavailable defaults are omitted with a notice |
@@ -284,7 +287,7 @@ These variables change `spawn_child.sh` and `agentstack-preregister-child` behav
 | `AGENTSTACK_CLAUDE_CHILD_CHROME_DEVICE` | unset | deviceId of the browser Claude children should use. Setting it implies `AGENTSTACK_CLAUDE_CHILD_CHROME=1`. The CLI `--claude-chrome-device` takes precedence. An instruction to the child, not a technical isolation |
 | `AGENTSTACK_CHILD_RESUME_RETENTION_DAYS` | `30` | Days to retain resume state / credentials for normally completed Claude / Codex children. Persist with installer `--child-resume-retention-days DAYS`; `0` restores full deletion during cleanup |
 
-The product assembles Codex child startup flags. It does not consult user launchers under `~/.codex/bin/`, because doing so can silently substitute that launcher's default `on-request` and drop the network flag and additional roots. Since children run unattended, the defaults are approval `never` and network on. Writable roots are the project, `AGENTSTACK_SPAWN_DIRS` / `AGENTSTACK_SPAWN_ROOTS`, install directory, `AGENTSTACK_WORKTREE_ROOT`, `~/.claude`, `~/.codex`, child-specific `CODEX_HOME`, and `AGENTSTACK_CODEX_ADD_DIRS`; nonexistent directories are silently omitted. Dashboard Codex resume uses the same values. These belong to dashboard service environment, so a shell `export` does not reach them. Pass them to the installer. The config overlay currently applies only to macOS/Linux (including Windows through WSL2) via `spawn_child.sh`; the native-Windows launcher does not apply it.
+The product assembles Codex child startup flags directly. For parented starts and dashboard resumes without a recorded standalone start, approval defaults to `never`. Network access defaults to on. Writable roots are the project, `AGENTSTACK_SPAWN_DIRS` / `AGENTSTACK_SPAWN_ROOTS`, install directory, `AGENTSTACK_WORKTREE_ROOT`, `~/.claude`, `~/.codex`, child-specific `CODEX_HOME`, and `AGENTSTACK_CODEX_ADD_DIRS`. Only existing directories are included. Set these dashboard service values through the installer. The config overlay applies through `spawn_child.sh` on macOS and Linux, including WSL2.
 
 Every Codex the product launches (children, dashboard resume, `agent-start-codex`, the Windows launcher) gets `-c check_for_update_on_startup=false`. Codex's startup update screen defaults to `npm install -g @openai/codex`, and an unattended child has nobody to decline it; if the child is stopped mid-install, the machine's `codex` is left with neither the old nor the new version usable (#60). Update Codex yourself, for example with `npm install -g @openai/codex@latest`.
 

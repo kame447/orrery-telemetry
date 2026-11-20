@@ -213,7 +213,7 @@ def test_claude_auto_mode_without_statusline_keeps_current_work():
     assert server._runtime_activity(text) == (
         'work', '· Effecting… (43s · ↓ 3.4k tokens)')
     parsed = server._parse_runtime(text)
-    assert parsed['work_secs'] == 43
+    assert (parsed['act_state'], parsed['work_secs'], parsed['work_disp']) == ('work', 43, '43s')
     assert parsed['ctx_used'] is None and parsed['pane_model'] is None
 
 
@@ -522,6 +522,84 @@ def test_current_work_after_hook_review_remains_work():
     parsed = server._parse_runtime(_HOOK_REVIEW + "\n• Working (3s • esc to interrupt)\n" + _CODEX_INPUT)
     assert parsed["act_state"] == "work"
     assert parsed["work_disp"] == "3s"
+
+
+_COMPUTER_USE_PERMISSIONS_NARROW = '''\
+──────────────────────────
+  Computer use needs
+  macOS permissions
+
+
+   Accessibility: ✘ not
+   granted
+   Screen Recording: ✘
+   not granted
+
+   Grant the missing
+   permissions in
+   System Settings,
+   then select "Try
+   again". macOS may
+   require you to
+   restart Claude Code
+   after granting
+   Screen Recording.
+
+   ❯ Open System
+     Settings →
+     Accessibility
+     Open System
+     Settings → Screen
+     Recording
+     Try again
+
+
+  Enter to confirm · Esc
+  to cancel
+'''
+
+_COMPUTER_USE_PERMISSIONS_WIDE = '''\
+────────────────────────────────────────────────────────────────────────────────
+  Computer use needs macOS permissions
+
+   Accessibility: ✘ not granted
+   Screen Recording: ✘ not granted
+
+   Grant the missing permissions in System Settings, then select "Try again".
+   macOS may require you to restart Claude Code after granting Screen Recording.
+
+     Open System Settings → Accessibility
+     Open System Settings → Screen Recording
+   ❯ Try again
+
+  Enter to confirm · Esc to cancel
+'''
+
+
+_COMPUTER_USE_SCREEN_RECORDING_ONLY = (
+    _COMPUTER_USE_PERMISSIONS_WIDE
+    .replace("   Accessibility: ✘ not granted\n", "")
+    .replace("     Open System Settings → Accessibility\n", ""))
+
+
+@pytest.mark.parametrize(
+    "screen", [_COMPUTER_USE_PERMISSIONS_NARROW, _COMPUTER_USE_PERMISSIONS_WIDE,
+               _COMPUTER_USE_SCREEN_RECORDING_ONLY],
+    ids=["narrow", "wide", "one-missing"],
+)
+def test_current_claude_computer_use_permissions_is_ask(screen):
+    assert server._parse_runtime(_OLD_WORK + screen)["act_state"] == "ask"
+
+
+def test_quoted_claude_computer_use_permissions_in_scrollback_is_wait():
+    text = ("⏺ Example terminal output:\n```text\n"
+            + _COMPUTER_USE_PERMISSIONS_WIDE + "```\n" + _CLAUDE_INPUT)
+    assert server._parse_runtime(text)["act_state"] == "wait"
+
+
+def test_output_after_claude_computer_use_permissions_is_wait():
+    text = _COMPUTER_USE_PERMISSIONS_WIDE + "⏺ Permissions are now granted.\n"
+    assert server._parse_runtime(text)["act_state"] == "wait"
 
 
 @pytest.mark.parametrize("prefix", ["", "  "])
