@@ -1536,6 +1536,48 @@ def test_gemini_selected_effort_reaches_registration_and_launcher(gemini_env, se
     assert kwargs["env"]["AGENTSTACK_GEMINI_EFFORT"] == effort
 
 
+@pytest.mark.parametrize("selected,effort,resolved", [
+    ("claude-opus-5-5-high", "low", "claude-opus-5-5-low"),
+    ("claude-sonnet-5-5-low", "high", "claude-sonnet-5-5-high"),
+    ("gpt-oss-120b-medium", "medium", "gpt-oss-120b-medium"),
+])
+def test_cli_discovered_external_engine_launches_through_antigravity(
+        gemini_env, monkeypatch, selected, effort, resolved):
+    discovered = (
+        "claude-opus-5-5-low", "claude-opus-5-5-medium", "claude-opus-5-5-high",
+        "claude-sonnet-5-5-low", "claude-sonnet-5-5-medium", "claude-sonnet-5-5-high",
+        "gpt-oss-120b-medium",
+    )
+    monkeypatch.setattr(gemini_runtime, "_discover_models", lambda: discovered)
+    models, error = gemini_runtime._gemini_models(server)
+    assert not error
+    provider = gemini_runtime._catalog_item(models)
+    assert selected in provider["models"]
+    result = server.do_spawn(_gemini_payload(gemini_env, model=selected, effort=effort))
+    assert result["ok"] is True
+    assert result["provider"] == "gemini"
+    assert result["model"] == resolved
+    assert result["effort"] == effort
+    launches = gemini_env.launches.for_script(str(gemini_env.adapter))
+    assert len(launches) == 1
+    args, options = launches[0]
+    assert args[args.index("--model") + 1] == resolved
+    assert options["env"]["AGENTSTACK_GEMINI_MODEL"] == resolved
+
+
+def test_unlisted_external_engines_and_efforts_do_not_launch(gemini_env, monkeypatch):
+    monkeypatch.setattr(gemini_runtime, "_discover_models",
+                        lambda: ("gpt-oss-120b-medium",))
+    unlisted = server.do_spawn(_gemini_payload(
+        gemini_env, model="claude-opus-5-5-high", effort="high"))
+    assert unlisted["error"] == "model not allowed for provider gemini: claude-opus-5-5-high"
+    unsupported = server.do_spawn(_gemini_payload(
+        gemini_env, model="gpt-oss-120b-medium", effort="high"))
+    assert unsupported["error"] == (
+        "model not allowed for provider gemini at effort high: gpt-oss-120b-high")
+    assert not gemini_env.launches.launched
+
+
 def test_gemini_effort_resolution_cannot_bypass_model_allowlist(gemini_env, monkeypatch):
     monkeypatch.setenv("AGENTSTACK_GEMINI_MODELS", "gemini-3.8-flash-high")
     result = server.do_spawn(_gemini_payload(gemini_env, effort="low"))

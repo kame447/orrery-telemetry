@@ -43,7 +43,7 @@ def _fake_cli(monkeypatch, tmp_path: Path, body: str) -> Path:
     return binary
 
 
-def test_cli_adds_argon_without_mixing_other_providers(monkeypatch, tmp_path):
+def test_cli_adds_gemini_claude_and_gptoss_without_inventing_ids(monkeypatch, tmp_path):
     rows = ("gemini-4-argon-medium\tMedium\n"
             "gemini-4-argon-high\tHigh\n"
             "gemini-4-argon-low\tLow\n"
@@ -55,10 +55,13 @@ def test_cli_adds_argon_without_mixing_other_providers(monkeypatch, tmp_path):
     models, error = gemini._gemini_models(BASE)
     assert error == ""
     assert models == FALLBACK + ["gemini-4-argon-medium", "gemini-4-argon-high",
-                                 "gemini-4-argon-low"]
+                                 "gemini-4-argon-low", "claude-opus-5-5-high",
+                                 "gpt-oss-120b-medium"]
     assert gemini._catalog_item(models)["default_model"] == FALLBACK[0]
-    assert gemini._catalog_item(models)["model_efforts"]["gemini-4-argon-medium"] == [
-        "low", "medium", "high"]
+    catalog = gemini._catalog_item(models)
+    assert catalog["model_efforts"]["gemini-4-argon-medium"] == ["low", "medium", "high"]
+    assert catalog["model_efforts"]["claude-opus-5-5-high"] == ["high"]
+    assert catalog["model_efforts"]["gpt-oss-120b-medium"] == ["medium"]
 
 
 def test_single_effort_is_the_only_offered_effort():
@@ -107,7 +110,7 @@ def test_failure_recovers_soon_and_keeps_last_success(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("body", [
     "import sys; sys.exit(1)",
-    "print('claude-opus-5-5-high\\tClaude')",
+    "print('foreign-model\\tUnknown provider')",
     "print('gemini-4-argon-high invalid-no-tab')",
     "import sys; sys.stdout.buffer.write(b'gemini-4-argon-high\\tArgon\\n'*6000)",
     "import sys; sys.stdout.buffer.write(b'\\xff\\xfe')",
