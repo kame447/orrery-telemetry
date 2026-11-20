@@ -15,7 +15,11 @@ def test_sdk_initialize_discover_preview_commit_status(live):
             assert set(tools)=={'orrery_status','orrery_list_agents','orrery_get_agent',
                                'orrery_message_preview','orrery_message_commit','orrery_message_status'}
             assert tools['orrery_message_commit'].annotations.readOnlyHint is False
-            assert tools['orrery_message_status'].annotations.readOnlyHint is True
+            annotations = tools['orrery_message_status'].annotations
+            assert annotations.readOnlyHint is False
+            assert annotations.destructiveHint is False
+            assert annotations.idempotentHint is True
+            assert annotations.openWorldHint is False
             preview=(await client.call_tool('orrery_message_preview',live.args)).data
             assert preview['status']=='previewed' and preview['message']['body_md']==live.args['body_md']
             args={key:preview[key] for key in ('preview_id','content_digest')}
