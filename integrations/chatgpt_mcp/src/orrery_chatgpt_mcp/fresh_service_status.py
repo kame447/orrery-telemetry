@@ -63,7 +63,7 @@ def _match_plist(plan: object, spec: dict) -> None:
              and spec.get("Label") == plan.label
              and spec.get("ProgramArguments") == [str(plan.python), "-m", "orrery_chatgpt_mcp.fresh_server", "serve"]
              and type(env) is dict and set(env) == EXPECTED_ENV and env == required
-             and spec.get("RunAtLoad") is True and spec.get("KeepAlive") is True
+             and spec.get("RunAtLoad") is False and spec.get("KeepAlive") is False
              and type(spec.get("Umask")) is int and spec["Umask"] == 0o077
              and "Program" not in spec and "WatchPaths" not in spec
              and "StartInterval" not in spec and "StartCalendarInterval" not in spec)

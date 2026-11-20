@@ -6,7 +6,7 @@
 
 まずPR #60の`fresh_release_plan.inspect`によるstate/policy/release digestの確認を行います。次に、絶対canonical pathのplistをO_NOFOLLOWで読み、ownerの通常ファイルであること、hardlinkがないこと、group/worldに書込み権限がないこと、64KiB以下であることを検査します。plistはLabel、ProgramArguments、EnvironmentVariables、RunAtLoad、KeepAlive、Umaskの6つのキーだけを許可します。余分なlaunchdのsocket、起動トリガー、別の実行コマンドは拒否します。
 
-固定した実行引数は`[python, "-m", "orrery_chatgpt_mcp.fresh_server", "serve"]`です。環境変数は専用releaseを指定するPYTHONPATH、freshモード、pairing認証、送信有効、spawn無効、専用port/state/policy、loopback Dashboard URLの9項目だけを完全一致で許可します。`RunAtLoad=true`、`KeepAlive=true`、`Umask=0077`以外は拒否します。これらは後続installerのための契約であり、この段階でplistを作るわけではありません。
+固定した実行引数は`[python, "-m", "orrery_chatgpt_mcp.fresh_server", "serve"]`です。環境変数は専用releaseを指定するPYTHONPATH、freshモード、pairing認証、送信有効、spawn無効、専用port/state/policy、loopback Dashboard URLの9項目だけを完全一致で許可します。`RunAtLoad=false`、`KeepAlive=false`、`Umask=0077`以外は拒否します。ログイン時の自動起動と自動再起動を認めず、起動には別途検証した明示的な手順が必要です。これらは後続installerのための契約であり、この段階でplistを作るわけではありません。
 
 静的条件を満たしてからpairing secretを読み、43文字のURL-safe形式だけをPR #59のprobeへ渡します。probeはlaunchctlの実PID、lsofが証明する接続相手、同一ソケット上のMCP初期化・tools/list・orrery_status、Mail instance・sender/recipient・許可ツールと送信権限を検証します。失敗は固定コードで拒否し、秘密URL・資格・任意の応答本文を返しません。
 

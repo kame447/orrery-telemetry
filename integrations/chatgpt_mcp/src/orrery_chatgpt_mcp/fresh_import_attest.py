@@ -65,7 +65,7 @@ def package_digest(package: Path) -> str:
 # Executed by a fresh Python interpreter without importing the gateway or Mail
 # code before checking their entire source payload and the stated path roots.
 PROBE = r'''
-import hashlib, importlib, json, os, pathlib, stat, sys
+import hashlib, importlib, importlib.util, json, os, pathlib, stat, sys
 release, expected_gateway, mail, expected_mail, site = map(pathlib.Path, sys.argv[1:6])
 pin_manifest = pathlib.Path(sys.argv[6]) if sys.argv[6] else None
 expected_pin_hash = sys.argv[7]
@@ -108,8 +108,21 @@ if fingerprint(release / 'orrery_chatgpt_mcp') != expected_gateway:
     fail()
 if fingerprint(mail) != expected_mail or mail.name != 'agentstack_mail':
     fail()
-# Explicit site location, no site initialization, .pth or user directories.
-sys.path[:0] = [str(release), str(mail.parent), str(site)]
+def load_package(name, directory):
+    spec = importlib.util.spec_from_file_location(
+        name, directory / '__init__.py', submodule_search_locations=[str(directory)])
+    if spec is None or spec.loader is None or name in sys.modules:
+        fail()
+    package = importlib.util.module_from_spec(spec)
+    sys.modules[name] = package
+    spec.loader.exec_module(package)
+
+# Load only the hashed package, without making its siblings importable.
+try:
+    load_package('orrery_chatgpt_mcp', release / 'orrery_chatgpt_mcp')
+except Exception:
+    fail()
+# The verifier must use stdlib imports before the selected site is importable.
 if pin_manifest is not None:
     try:
         from orrery_chatgpt_mcp.fresh_dependency_attest import verify
@@ -118,7 +131,10 @@ if pin_manifest is not None:
             fail()
     except Exception:
         fail()
+# Explicit site location, no site initialization, .pth or user directories.
+sys.path.insert(0, str(site))
 try:
+    load_package('agentstack_mail', mail)
     gateway = importlib.import_module('orrery_chatgpt_mcp.fresh_server')
     client = importlib.import_module('agentstack_mail.fresh_client')
     receipts = importlib.import_module('agentstack_mail.fresh_message_receipts')

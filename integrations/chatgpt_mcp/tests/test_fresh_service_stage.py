@@ -74,7 +74,10 @@ class StageTests(unittest.TestCase):
         file=self.target()
         self.assertEqual(file.stat().st_mode & 0o777,0o644)
         _match_plist(self.plan,_read_plist(file))
-        self.assertEqual(plistlib.loads(file.read_bytes())['Label'],self.plan.label)
+        spec = plistlib.loads(file.read_bytes())
+        self.assertEqual(spec['Label'], self.plan.label)
+        self.assertIs(spec['RunAtLoad'], False)
+        self.assertIs(spec['KeepAlive'], False)
         self.assertEqual(set(self.agents.iterdir()),{file})
 
     def test_isolated_dashboard_endpoint_changes_plist_and_approval(self):

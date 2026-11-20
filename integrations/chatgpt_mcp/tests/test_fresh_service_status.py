@@ -47,7 +47,7 @@ class ServiceStatusTests(unittest.TestCase):
         self.spec = {
             'Label':self.plan.label,
             'ProgramArguments':[str(self.plan.python),'-m','orrery_chatgpt_mcp.fresh_server','serve'],
-            'RunAtLoad':True, 'KeepAlive':True, 'Umask':0o077,
+            'RunAtLoad':False, 'KeepAlive':False, 'Umask':0o077,
             'EnvironmentVariables':{
                 'PYTHONPATH':str(self.plan.release_dir), 'ORRERY_MCP_MODE':'fresh',
                 'ORRERY_MCP_AUTH':'pairing', 'ORRERY_MCP_ENABLE_MESSAGE':'1',
@@ -140,8 +140,8 @@ class ServiceStatusTests(unittest.TestCase):
                 with self.assertRaises(StatusError):self.run_check()
                 self.spec['EnvironmentVariables'][key]=original
 
-    def test_no_keepalive_or_invalid_umask_refused(self):
-        for key,value in [('KeepAlive',False),('Umask',0o022),('RunAtLoad',False)]:
+    def test_automatic_start_or_invalid_umask_refused(self):
+        for key,value in [('KeepAlive',True),('Umask',0o022),('RunAtLoad',True)]:
             with self.subTest(key=key):
                 old=self.spec[key];self.spec[key]=value;self._write()
                 with self.assertRaises(StatusError):self.run_check()

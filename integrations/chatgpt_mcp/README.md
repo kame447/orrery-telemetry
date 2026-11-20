@@ -8,6 +8,18 @@ Mac CIの依存import元の分離は[CI用の専用venv](../../docs/mcp-fresh-ci
 
 第2段階のfresh送信は、既存fork gatewayと読み取り専用入口を維持した独立opt-inです。[fresh追加指示の設計・制限・手動検証](FRESH_MESSAGES.md)を参照してください。
 
+## 現在のfork統合状態
+
+2026年11月20日時点のfresh入口は`orrery_chatgpt_mcp.fresh_server`です。読み取り3ツールに加え、明示的に有効化した場合にだけ追加指示の3ツールを公開します。この入口にspawnはありません。現在の送信権限、重複防止、結果照合の契約は[FRESH_MESSAGES](FRESH_MESSAGES.md)を参照してください。結果照合はローカル台帳を更新するため、公開する`readOnlyHint`はfalseです。
+
+運用者向けの部品は、固定gateway・Mail・第三者依存の検証、承認内容に結び付けたplist準備、実PIDと公開権限の照合、隔離fixtureの明示起動・停止・不明状態の照合までを含みます。検証済みpackageの親directoryをimport経路に加えず、依存manifestの検証を対象siteの追加より先に行います。非起動plistでは`RunAtLoad=false`・`KeepAlive=false`を要求します。
+
+隔離Macでは、実launchdと固定releaseを使うSDK接続、Mail受理、試験用受信者のfetch/read/ACK、再起動・異常終了後の二重送信防止、試験後の解除を確認しました。ChatGPTの専用Tunnel経由での実接続、実LLM agentの処理開始・完了、本番identityと宛先の切替は、この試験の受入範囲に含みません。
+
+段階別guideは作成当時の実装・検証範囲を記録しています。過去の「未実施」や試験件数は履歴として読み、現在の契約はこの節と[FRESH_MESSAGES](FRESH_MESSAGES.md)、今回の実行結果は対応PRを確認してください。
+
+## 第1段階の読み取り専用入口
+
 upstream Issue #395 の第1段階です。このforkでは既存の任意MCPゲートウェイ（通常の python3 -m orrery_chatgpt_mcp）と競合しないよう、読み取り専用版だけ python3 -m orrery_chatgpt_mcp.readonly_server で起動します。公開ツールは `orrery_status`、`orrery_list_agents`、`orrery_get_agent` の3個だけです。spawn・追加指示・Mail送信・OAuth・常駐化は実装しません。通常のinstaller・サービスの起動設定・UI・hook・Mail操作は変えません。Dashboardの呼び出しは `GET /api/version`、freshの `GET /api/agents`、legacyの `GET /api/agents?days=30` だけです。
 
 ## 互換性と公開範囲
