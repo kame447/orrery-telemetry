@@ -21,13 +21,17 @@ import dashboard.provider_server as server
 
 
 gemini = sys.modules["_orrery_provider_dashboard_gemini"]
+_REAL_CLI_MODELS = gemini._cli_models
 BASE = SimpleNamespace(_SPAWN_MODELS=(), _codex_models=lambda: ())
 FALLBACK = ["gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low"]
 
 
 @pytest.fixture(autouse=True)
-def _isolated_cache(monkeypatch):
+def _isolated_cache(monkeypatch, tmp_path):
     monkeypatch.setattr(gemini, "_CLI_CATALOG_CACHE", None)
+    monkeypatch.setattr(gemini, "_cli_models", _REAL_CLI_MODELS)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("AGENTSTACK_GEMINI_BIN", str(tmp_path / "missing-agy"))
 
 
 def _fake_cli(monkeypatch, tmp_path: Path, body: str) -> Path:
@@ -39,7 +43,7 @@ def _fake_cli(monkeypatch, tmp_path: Path, body: str) -> Path:
     return binary
 
 
-def test_cli_adds_argon_without_mixing_other_providers(monkeypatch, tmp_path):
+def test_cli_adds_gemini_claude_and_gptoss_without_inventing_ids(monkeypatch, tmp_path):
     rows = ("gemini-4-argon-medium\tMedium\n"
             "gemini-4-argon-high\tHigh\n"
             "gemini-4-argon-low\tLow\n"
@@ -51,10 +55,13 @@ def test_cli_adds_argon_without_mixing_other_providers(monkeypatch, tmp_path):
     models, error = gemini._gemini_models(BASE)
     assert error == ""
     assert models == FALLBACK + ["gemini-4-argon-medium", "gemini-4-argon-high",
-                                 "gemini-4-argon-low"]
+                                 "gemini-4-argon-low", "claude-opus-5-5-high",
+                                 "gpt-oss-120b-medium"]
     assert gemini._catalog_item(models)["default_model"] == FALLBACK[0]
-    assert gemini._catalog_item(models)["model_efforts"]["gemini-4-argon-medium"] == [
-        "low", "medium", "high"]
+    catalog = gemini._catalog_item(models)
+    assert catalog["model_efforts"]["gemini-4-argon-medium"] == ["low", "medium", "high"]
+    assert catalog["model_efforts"]["claude-opus-5-5-high"] == ["high"]
+    assert catalog["model_efforts"]["gpt-oss-120b-medium"] == ["medium"]
 
 
 def test_single_effort_is_the_only_offered_effort():
@@ -63,7 +70,7 @@ def test_single_effort_is_the_only_offered_effort():
     assert catalog["model_efforts"]["gemini-4-argon-high"] == ["high"]
     assert catalog["model_efforts"]["gemini-3.8-flash-high"] == ["low", "medium", "high"]
     assert gemini._catalog_item(["custom-model"])["model_efforts"]["custom-model"] == [
-        "low", "medium", "high"]
+        "low", "medium", "high", "xhigh"]
 
 
 def test_cache_coalesces_concurrent_queries_and_override_skips_cli(monkeypatch, tmp_path):
@@ -103,7 +110,7 @@ def test_failure_recovers_soon_and_keeps_last_success(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("body", [
     "import sys; sys.exit(1)",
-    "print('claude-opus-5-5-high\\tClaude')",
+    "print('foreign-model\\tUnknown provider')",
     "print('gemini-4-argon-high invalid-no-tab')",
     "import sys; sys.stdout.buffer.write(b'gemini-4-argon-high\\tArgon\\n'*6000)",
     "import sys; sys.stdout.buffer.write(b'\\xff\\xfe')",
@@ -231,3 +238,79 @@ def test_successful_catalog_read_does_not_signal_process_group(monkeypatch, tmp_
         pytest.fail("a completed catalog read must not signal a recycled process group")
     monkeypatch.setattr(gemini.os, "killpg", unexpected_group_signal)
     assert gemini._gemini_models(BASE) == (FALLBACK + ["gemini-4-argon-high"], "")
+
+
+def test_discovery_finds_user_local_cli_with_service_path(monkeypatch, tmp_path):
+    local_bin = tmp_path / '.local' / 'bin'
+    local_bin.mkdir(parents=True)
+    _fake_cli(monkeypatch, local_bin,
+              "print('gemini-4-hydrogen-xhigh\\tHydrogen')")
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.setenv('PATH', '/usr/bin:/bin')
+    monkeypatch.delenv('AGENTSTACK_GEMINI_BIN')
+    assert gemini._gemini_models(BASE)[0] == FALLBACK + ['gemini-4-hydrogen-xhigh']
+
+
+def test_missing_explicit_cli_does_not_fall_back_to_user_local(monkeypatch, tmp_path):
+    local_bin = tmp_path / '.local' / 'bin'
+    local_bin.mkdir(parents=True)
+    _fake_cli(monkeypatch, local_bin,
+              "raise AssertionError('must not execute the fallback CLI')")
+    monkeypatch.setenv('HOME', str(tmp_path))
+    monkeypatch.setenv('PATH', '/usr/bin:/bin')
+    monkeypatch.setenv('AGENTSTACK_GEMINI_BIN', str(tmp_path / 'missing-agy'))
+    assert gemini._gemini_models(BASE) == (FALLBACK, '')
+
+
+def test_hydrogen_discovery_offers_xhigh_only_for_supported_families(monkeypatch, tmp_path):
+    models = ['gemini-4-argon-high'] + [
+        f'gemini-4-hydrogen-{effort}' for effort in ('high', 'xhigh', 'medium', 'low')]
+    rows = ''.join(f'{model}\tModel\n' for model in models)
+    _fake_cli(monkeypatch, tmp_path, f'import sys\nsys.stdout.write({rows!r})')
+    found, error = gemini._gemini_models(BASE)
+    assert not error
+    assert found == FALLBACK + models
+    catalog = gemini._catalog_item(found)
+    assert catalog['default_model'] == FALLBACK[0]
+    assert catalog['efforts'] == ['low', 'medium', 'high', 'xhigh']
+    for model in models[1:]:
+        assert catalog['model_efforts'][model] == ['low', 'medium', 'high', 'xhigh']
+    assert catalog['model_efforts']['gemini-4-argon-high'] == ['high']
+    assert catalog['model_efforts'][FALLBACK[0]] == ['low', 'medium', 'high']
+
+
+def test_future_model_and_effort_appear_after_catalog_refresh(monkeypatch, tmp_path):
+    listing = tmp_path / 'models.tsv'
+    listing.write_text('gemini-4-hydrogen-high\tHydrogen\n')
+    _fake_cli(monkeypatch, tmp_path, "raise AssertionError('cache test must not spawn')")
+    calls = []
+    def catalog(_binary):
+        calls.append(_binary)
+        return tuple(line.split('\t')[0] for line in listing.read_text().splitlines())
+    monkeypatch.setattr(gemini, '_cli_models', catalog)
+    first, _ = gemini._gemini_models(BASE)
+    assert first == FALLBACK + ['gemini-4-hydrogen-high']
+    listing.write_text('gemini-4-hydrogen-high\tHydrogen\n'
+                       'gemini-future-example-xhigh\tFuture\n')
+    assert gemini._gemini_models(BASE)[0] == first
+    assert len(calls) == 1
+    key, _, last = gemini._CLI_CATALOG_CACHE
+    monkeypatch.setattr(gemini, '_CLI_CATALOG_CACHE', (key, 0, last))
+    refreshed, _ = gemini._gemini_models(BASE)
+    assert refreshed == first + ['gemini-future-example-xhigh']
+    assert len(calls) == 2
+    catalog = gemini._catalog_item(refreshed)
+    assert catalog['model_efforts']['gemini-future-example-xhigh'] == ['xhigh']
+    assert catalog['model_efforts']['gemini-4-hydrogen-high'] == ['high']
+
+
+def test_discovery_cli_inherits_the_launch_path(monkeypatch, tmp_path):
+    local_bin = tmp_path / '.local' / 'bin'
+    local_bin.mkdir(parents=True)
+    helper = local_bin / 'fixture-catalog-helper'
+    helper.write_text("#!/bin/sh\nprintf 'gemini-4-hydrogen-xhigh\\tHydrogen\\n'\n")
+    helper.chmod(0o755)
+    _fake_cli(monkeypatch, tmp_path,
+              "import subprocess\nsubprocess.run(['fixture-catalog-helper'], check=True)")
+    monkeypatch.setenv('PATH', '/usr/bin:/bin')
+    assert gemini._gemini_models(BASE)[0] == FALLBACK + ['gemini-4-hydrogen-xhigh']

@@ -66,6 +66,22 @@ def test_explicit_effort_provider_displays_model_family_once():
     ]
 
 
+def test_antigravity_claude_and_gptoss_keep_one_row_per_model_family():
+    provider = {
+        "capabilities": {"effort_required": True},
+        "efforts": ["low", "medium", "high", "xhigh"],
+        "models": [{"id": model, "label": model} for model in (
+            "claude-opus-5-5-low", "claude-opus-5-5-medium",
+            "claude-opus-5-5-high", "claude-sonnet-5-5-low",
+            "claude-sonnet-5-5-high", "gpt-oss-120b-medium")],
+    }
+    assert _display_models(provider) == [
+        {"id": "claude-opus-5-5-low", "label": "claude-opus-5-5"},
+        {"id": "claude-sonnet-5-5-low", "label": "claude-sonnet-5-5"},
+        {"id": "gpt-oss-120b-medium", "label": "gpt-oss-120b"},
+    ]
+
+
 def test_engine_note_model_label_does_not_repeat_effort_suffix():
     provider = {
         "capabilities": {"effort_required": True},
@@ -100,3 +116,17 @@ def test_other_provider_model_display_is_unchanged():
     }
     assert _display_models(provider) == original
     assert _display_model_label(provider, "gpt-5.6-sol") == "gpt-5.6-sol"
+
+
+def test_hydrogen_xhigh_is_grouped_with_the_same_model_family():
+    provider = {
+        'capabilities': {'effort_required': True},
+        'efforts': ['low', 'medium', 'high', 'xhigh'],
+        'models': [{'id': model, 'label': model} for model in (
+            'gemini-4-hydrogen-xhigh', 'gemini-4-hydrogen-high',
+            'gemini-4-hydrogen-medium', 'gemini-4-hydrogen-low', 'gemini-4-argon-high')],
+    }
+    assert _display_models(provider) == [
+        {'id': 'gemini-4-hydrogen-xhigh', 'label': 'gemini-4-hydrogen'},
+        {'id': 'gemini-4-argon-high', 'label': 'gemini-4-argon'},
+    ]

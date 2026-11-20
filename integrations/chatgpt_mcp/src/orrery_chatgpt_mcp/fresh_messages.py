@@ -17,7 +17,7 @@ INSTANCE = re.compile(r'[0-9a-f]{32}')
 KEY = re.compile(r'[A-Za-z0-9_.:-]{1,128}')
 PREVIEW_SECONDS = 300
 MAX_INTENTS = 10000
-NOTE = ('Mail acceptance is not proof of agent execution. Unknown results are reconciled read-only and never resent. '
+NOTE = ('Mail acceptance is not proof of agent execution. Unknown results are reconciled by reading Mail receipts and updating the local ledger, never by resending. '
         'Chat confirmation is not server-verified human approval; the operator delegates send authority.')
 
 
@@ -88,10 +88,10 @@ TOOL_DEFINITIONS = [
                              'preview_id': {'type': 'string'}, 'content_digest': {'type': 'string'}},
                             ['idempotency_key', 'preview_id', 'content_digest']),
      'annotations': {'readOnlyHint': False, 'destructiveHint': True, 'idempotentHint': True, 'openWorldHint': False}},
-    {'name': 'orrery_message_status', 'title': 'Read local fresh Mail send evidence',
-     'description': 'Read local evidence and reconcile unknown sends against authenticated Mail receipts; never replay. ' + NOTE,
+    {'name': 'orrery_message_status', 'title': 'Reconcile fresh Mail send evidence',
+     'description': 'Read authenticated Mail receipts for unknown sends and persist reconciliation evidence in the local SQLite ledger; never send or replay. ' + NOTE,
      'inputSchema': _schema({'idempotency_key': PREVIEW_FIELDS['idempotency_key']}, ['idempotency_key']),
-     'annotations': {'readOnlyHint': True, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False}},
+     'annotations': {'readOnlyHint': False, 'destructiveHint': False, 'idempotentHint': True, 'openWorldHint': False}},
 ]
 for definition in TOOL_DEFINITIONS:
     definition['securitySchemes'] = [{'type': 'noauth'}]

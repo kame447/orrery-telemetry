@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import re
 import socket
@@ -23,17 +24,19 @@ try:
     from dashboard.mobile_projection import SnapshotStore, MobileMailStore, WINDOWS, NAME, EVENT_KEY, png_image
     from dashboard import mobile_input
     from dashboard import mobile_history
+    from dashboard import mobile_push
 except ModuleNotFoundError:
     import legacy_http_admission as admission
     from mobile_projection import SnapshotStore, MobileMailStore, WINDOWS, NAME, EVENT_KEY, png_image
     import mobile_input
     import mobile_history
+    import mobile_push
 
 HERE = Path(__file__).resolve().parent
 MAX_UPSTREAM_BYTES = 4 * 1024 * 1024
 UPSTREAM_TIMEOUT = 2
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-       "font-src 'self'; img-src 'self' data:; connect-src 'self'; manifest-src 'self'; "
+       "font-src 'self'; img-src 'self' data: blob:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; "
        "frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
 
 
@@ -47,6 +50,7 @@ class Config:
     phone_policy_reviewed: bool = False
     cockpit_port: int = 8791
     history_enabled: bool = False
+    push_enabled: bool = False
 
     def __post_init__(self):
         if (not self.owner_login or len(self.owner_login)>254 or
@@ -65,6 +69,8 @@ class Config:
         if (type(self.history_enabled) is not bool
                 or self.history_enabled and not self.phone_policy_reviewed):
             raise ValueError('history requires explicit opt-in and --phone-policy-reviewed acknowledgement')
+        if (type(self.push_enabled) is not bool or self.push_enabled and not self.history_enabled):
+            raise ValueError('push requires reviewed conversation history')
         if (type(self.cockpit_port) is not int or not 1<=self.cockpit_port<=65535
                 or (self.input_enabled or self.history_enabled) and self.cockpit_port in {self.listen_port,self.upstream_port}):
             raise ValueError('valid separate cockpit adapter port is required')
@@ -106,7 +112,7 @@ class Upstream:
         query='' if cursor is None else '?'+urlencode({'cursor':cursor})
         return json.loads(self._read('/api/mobile-cache-page'+query,'application/json',MAX_UPSTREAM_BYTES))
 
-    def _read(self,path,mime,limit,*,expired=False):
+    def _read(self,path,mime,limit,*,expired=False,missing=False):
         con = http.client.HTTPConnection('127.0.0.1', self.port, timeout=UPSTREAM_TIMEOUT)
         timer = None
         deadline = time.monotonic() + UPSTREAM_TIMEOUT
@@ -119,11 +125,13 @@ class Upstream:
             timer = threading.Timer(max(0.001,deadline-time.monotonic()),expire)
             timer.daemon = True
             timer.start()
+            types=(mime,) if isinstance(mime,str) else mime
             con.request('GET', path, headers={'Host':f'127.0.0.1:{self.port}',
-                                            'Accept':mime,'Connection':'close'})
+                                            'Accept':', '.join(types),'Connection':'close'})
             response = con.getresponse()
             if expired and response.status==410:raise LookupError('upstream_event_or_cursor_expired')
-            if response.status != 200 or response.getheader('Content-Type','').split(';')[0].strip().lower() != mime:
+            if missing and response.status==404:raise LookupError('upstream_unsupported')
+            if response.status != 200 or response.getheader('Content-Type','').split(';')[0].strip().lower() not in types:
                 raise ValueError('upstream_unavailable')
             if response.getheader('Content-Encoding', 'identity').lower() != 'identity':
                 raise ValueError('upstream_encoding')
@@ -140,6 +148,41 @@ class Upstream:
             con.close()
 
 
+class DemoClient:
+    """Only the desktop's Demo snapshot and its two maintained mask scripts."""
+    ASSETS={'/demo-mask.js':'/demo_mask.js','/demo-mode.js':'/demo_mode.js'}
+
+    def __init__(self,port):
+        self.upstream=Upstream(port)
+
+    def status(self):
+        # Shared preference values are at most 16 Ki characters; allow their
+        # UTF-8 expansion plus the finite user/host identity envelope.
+        try:raw=self.upstream._read('/telemetry/demo','application/json',128*1024,missing=True)
+        except LookupError:return {'version':1,'supported':False,'on':False,'words':[],'identity':None}
+        except ConnectionRefusedError:return {'version':1,'supported':False,'on':False,'words':[],'identity':None}
+        value=json.loads(raw)
+        if (not isinstance(value,dict) or set(value)!={'version','on','words','identity'} or
+                type(value['version']) is not int or value['version']!=1 or type(value['on']) is not bool or
+                not isinstance(value['words'],list) or len(value['words'])>4096 or
+                any(not isinstance(word,str) or not 2<=len(word)<=16384 for word in value['words'])):
+            raise ValueError('demo_schema')
+        identity=value['identity']
+        if value['on']:
+            if (not isinstance(identity,dict) or set(identity)!={'users','hosts'} or
+                    any(not isinstance(identity[key],list) or len(identity[key])>16 or
+                        any(not isinstance(name,str) or not 1<=len(name)<=254 for name in identity[key])
+                        for key in ('users','hosts')) or not any(identity.values())):
+                raise ValueError('demo_identity')
+        elif identity is not None or value['words']:
+            raise ValueError('demo_disabled_state')
+        return dict(value,supported=True)
+
+    def asset(self,path):
+        if path not in self.ASSETS:raise ValueError('demo_asset')
+        return self.upstream._read(self.ASSETS[path],('text/javascript','application/javascript'),128*1024)
+
+
 def static_assets(root=HERE):
     """Fixed bundled files only; no file path, overlay or provider lookup."""
     fixed = {
@@ -147,6 +190,9 @@ def static_assets(root=HERE):
         '/manifest.webmanifest': (root/'mobile/manifest.webmanifest', 'application/manifest+json; charset=utf-8'),
         '/mobile.css': (root/'mobile/mobile.css', 'text/css; charset=utf-8'),
         '/mobile.js': (root/'mobile/mobile.js', 'text/javascript; charset=utf-8'),
+        '/push.js': (root/'mobile/push.js', 'text/javascript; charset=utf-8'),
+        '/push-sw.js': (root/'mobile/push-sw.js', 'text/javascript; charset=utf-8'),
+        '/demo-sync.js': (root/'mobile/demo_sync.js', 'text/javascript; charset=utf-8'),
         '/network_view.js': (root/'mobile/network_view.js', 'text/javascript; charset=utf-8'),
         '/mail_comets.js': (root/'mobile/mail_comets.js', 'text/javascript; charset=utf-8'),
         '/conversation_markdown.js': (root/'mobile/conversation_markdown.js', 'text/javascript; charset=utf-8'),
@@ -242,6 +288,15 @@ class Handler(BaseHTTPRequestHandler):
         if not self._admitted():
             self._send(403,{'ok':False,'error':'request_denied'});return
         parts=urlsplit(self.path)
+        if self.path=='/view/push':
+            self._send(200,self.server.mobile_push.capability());return
+        if self.path=='/view/demo' or self.path in DemoClient.ASSETS:
+            if self.command=='HEAD':self._send(200,b'');return
+            try:
+                if self.path=='/view/demo':self._send(200,self.server.mobile_demo.status())
+                else:self._send(200,self.server.mobile_demo.asset(self.path),'text/javascript; charset=utf-8')
+            except (OSError,ValueError,TypeError):self._send(503,{'ok':False,'error':'demo_unavailable'})
+            return
         if self.path=='/view/terminal':
             if self.command=='HEAD':self._send(200,b'');return
             if not self.server.mobile_config.input_enabled:
@@ -373,6 +428,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self):self.do_GET()
 
     def do_POST(self):
+        if self.path in {'/view/push/key','/view/push/status','/view/push/save','/view/push/remove'}:
+            self._push_post();return
         operation=self.path.removeprefix('/view/terminal/')
         if (not self.server.mobile_config.input_enabled or not self.path.startswith('/view/terminal/')
                 or operation not in mobile_input.OPERATIONS):
@@ -402,6 +459,22 @@ class Handler(BaseHTTPRequestHandler):
             reason=str(error) if operation=='image' and isinstance(error,mobile_input.InputUnavailable) and re.fullmatch(r'image_[a-z_]+',str(error)) else 'input_unavailable'
             self._send(503,{'error':reason,'state':'unknown' if operation=='commit' else 'unavailable'})
 
+    def _push_post(self):
+        self.close_connection=True
+        if not self._admitted(write=True):
+            self._send(403,{'error':'request_denied'});return
+        self.connection.settimeout(5)
+        try:
+            size=int(self.headers['Content-Length']);data=self.rfile.read(size)
+            if len(data)!=size:raise ValueError('request_invalid')
+            value=mobile_input.decode_json(data,max_bytes=mobile_push.MAX_JSON)
+            result=self.server.mobile_push.call(self.path.rsplit('/',1)[-1],value)
+        except mobile_push.PushError as exc:
+            self._send(409,{'error':str(exc)});return
+        except (OSError,ValueError,TypeError):
+            self._send(400,{'error':'request_invalid'});return
+        self._send(200,result)
+
     def _no_method(self):
         self.close_connection=True
         self._send(405,{'ok':False,'error':'method_not_allowed'})
@@ -411,11 +484,12 @@ class Handler(BaseHTTPRequestHandler):
 
 class ReaderServer(ThreadingHTTPServer):
     def server_close(self):
+        if hasattr(self,'mobile_push'):self.mobile_push.close()
         if hasattr(self,'mobile_mail'):self.mobile_mail.close()
         super().server_close()
 
 
-def make_server(config:Config, *, store=None, mail_store=None, input_client=None, history_client=None, root=HERE, test_port=None):
+def make_server(config:Config, *, store=None, mail_store=None, input_client=None, history_client=None, demo_client=None, push_service=None, root=HERE, test_port=None):
     # Tests can request an ephemeral loopback port; CLI has no bind-host option.
     server=ReaderServer(('127.0.0.1',config.listen_port if test_port is None else test_port),Handler)
     server.daemon_threads=True
@@ -423,11 +497,18 @@ def make_server(config:Config, *, store=None, mail_store=None, input_client=None
     server.mobile_store=store if store is not None else SnapshotStore(Upstream(config.upstream_port))
     server.mobile_mail=mail_store if mail_store is not None else MobileMailStore(Upstream(config.upstream_port))
     server.mobile_root=Path(root)
+    server.mobile_demo=demo_client if demo_client is not None else DemoClient(config.cockpit_port)
     server.mobile_assets=static_assets(Path(root))
     server.mobile_input=(input_client if input_client is not None else
                          mobile_input.InputClient(config.cockpit_port,config.owner_login) if config.input_enabled else None)
     server.mobile_history=(history_client if history_client is not None else
                            mobile_history.HistoryClient(config.cockpit_port) if config.history_enabled else None)
+    push_root=Path(os.environ.get('AGENTSTACK_HOME') or Path.home()/'.agentstack')/'runtime/mobile-push'
+    server.mobile_push=push_service if push_service is not None else mobile_push.PushService(
+        push_root,config.owner_login,config.public_origin,
+        lambda:mobile_push.project_roster(Upstream(config.upstream_port)('agents')),
+        lambda name:server.mobile_history.page(name),server.mobile_demo.status,enabled=config.push_enabled)
+    server.mobile_push.start()
     return server
 
 
@@ -444,6 +525,7 @@ def main(argv=None):
                         help='operator acknowledgement of the access policy; does not verify it or enforce a single phone')
     parser.add_argument('--enable-history',action='store_true',
                         help='kept for older launch commands; history is now on whenever --phone-policy-reviewed is given')
+    parser.add_argument('--enable-push',action='store_true',help='opt in to the optional reviewed Web Push observer')
     parser.add_argument('--disable-history',action='store_true',
                         help='keep bound conversation history and file previews off')
     parser.add_argument('--config',default='',
@@ -457,13 +539,14 @@ def main(argv=None):
     if args.enable_history and args.disable_history:parser.error('--enable-history and --disable-history conflict')
     if args.enable_terminal and not (args.enable or args.check):parser.error('--enable-terminal also requires --enable or --check')
     if args.enable_history and not (args.enable or args.check):parser.error('--enable-history also requires --enable or --check')
+    if args.enable_push and not (args.enable or args.check):parser.error('--enable-push also requires --enable or --check')
     if not args.enable and not args.check:
         print('Mobile reader is off. No listener started.');return 0
     # Phone access reads everything, history and previews included, once the
     # operator has acknowledged the access policy; --disable-history opts out.
     history=args.enable_history or (args.phone_policy_reviewed and not args.disable_history)
     try:config=Config(args.owner_login,args.public_origin,args.listen_port,args.upstream_port,
-                      args.enable_terminal,args.phone_policy_reviewed,args.cockpit_port,history)
+                      args.enable_terminal,args.phone_policy_reviewed,args.cockpit_port,history,args.enable_push)
     except ValueError as exc:
         parser.error(str(exc))
     if args.check:

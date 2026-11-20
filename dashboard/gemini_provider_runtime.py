@@ -31,7 +31,10 @@ _DEFAULT_MODELS = (
     "gemini-3.8-flash-medium",
     "gemini-3.8-flash-low",
 )
-_EFFORTS = ("low", "medium", "high")
+_EFFORTS = ("low", "medium", "high", "xhigh")
+# Additional engines are accepted only when an installed agy CLI advertises
+# an effort-qualified ID, never by guessing model names from a provider prefix.
+_CLI_CROSS_PROVIDER_PREFIXES = ("claude-", "gpt-oss-")
 # Dashboard launches require an explicit effort.  The direct CLI launchers keep
 # their historical ``high`` fallback; this declaration does not reach them.
 CAPABILITIES = {
@@ -82,6 +85,7 @@ def _cli_models(binary: str) -> tuple[str, ...]:
         process = subprocess.Popen(
             [binary, "models"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, start_new_session=os.name == "posix",
+            env={**os.environ, "PATH": _launch_path()},
         )
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ)
@@ -127,7 +131,11 @@ def _cli_models(binary: str) -> tuple[str, ...]:
     models: list[str] = []
     for line in decoded.splitlines():
         model, separator, _label = line.partition("\t")
-        if not separator or not model.startswith("gemini-") or not _MODEL_RE.fullmatch(model):
+        if not separator or not _MODEL_RE.fullmatch(model):
+            continue
+        if not (model.startswith("gemini-") or
+                (model.startswith(_CLI_CROSS_PROVIDER_PREFIXES) and
+                 model.rpartition("-")[2] in _EFFORTS)):
             continue
         if model not in models:
             models.append(model)
@@ -137,7 +145,9 @@ def _cli_models(binary: str) -> tuple[str, ...]:
 
 
 def _discover_models() -> tuple[str, ...]:
-    binary = shutil.which(os.environ.get("AGENTSTACK_GEMINI_BIN") or "agy")
+    binary = shutil.which(
+        os.environ.get("AGENTSTACK_GEMINI_BIN") or "agy", path=_launch_path(),
+    )
     if not binary:
         return ()
     try:
@@ -172,6 +182,7 @@ def _gemini_models(base: Any, *, discover: bool = True) -> tuple[list[str], str]
             values.append(value)
     discovered = _discover_models() if discover and not values else ()
     models = values or list(dict.fromkeys((*_DEFAULT_MODELS, *discovered)))
+    trusted_external = set(discovered) if not values else set()
     native = (
         ("claude", set(base._SPAWN_MODELS)),
         ("codex", set(base._codex_models())),
@@ -179,15 +190,16 @@ def _gemini_models(base: Any, *, discover: bool = True) -> tuple[list[str], str]
     for model in models:
         if _MODEL_RE.fullmatch(model) is None:
             return [], f"invalid model id for provider gemini: {model!r}"
-        if model.startswith("gpt-"):
+        # The CLI gives exact effort-qualified IDs. Keep explicit overrides
+        # from stealing Claude/Codex namespaces or shadowing native IDs.
+        trusted = model in trusted_external and model.startswith(_CLI_CROSS_PROVIDER_PREFIXES)
+        if model.startswith("gpt-") and not trusted:
             return [], (
                 "model allow-list for provider gemini collides with "
                 f"provider codex: {model}"
             )
         for provider, ids in native:
-            if model in ids or (provider == "claude" and model.startswith("claude-")):
-                # A shared id would make the model string ambiguous for every
-                # consumer that infers a provider from it.
+            if model in ids or (provider == "claude" and model.startswith("claude-") and not trusted):
                 return [], (
                     "model allow-list for provider gemini collides with "
                     f"provider {provider}: {model}"
@@ -209,7 +221,8 @@ def _catalog_item(models: list[str]) -> dict:
         "program": "antigravity",
         "models": list(models),
         "default_model": models[0],
-        "efforts": list(_EFFORTS),
+        "efforts": [effort for effort in _EFFORTS
+                    if any(effort in levels for levels in model_efforts.values())],
         "model_efforts": model_efforts,
         "effort_default": "" if CAPABILITIES["effort_required"] else "high",
         "provider_key": "google",
@@ -749,16 +762,20 @@ def _install_spawn(base: Any, integration: _Integration) -> None:
             return error
         if request["standalone"] and not CAPABILITIES["standalone"]:
             return {"ok": False, "error": "standalone not supported for provider gemini"}
-        # Explicit spawn IDs, including dry_run, do not need CLI discovery.
-        models, error = integration.availability(discover=False)
+        requested_model = str(payload.get("model") or "").strip()
+        # Native Gemini IDs keep the existing offline-compatible launch path.
+        # Cross-provider agy IDs must still exist in the CLI catalog at launch.
+        needs_discovery = requested_model.startswith(_CLI_CROSS_PROVIDER_PREFIXES)
+        models, error = integration.availability(discover=needs_discovery)
         if error:
             return {"ok": False, "error": f"provider gemini unavailable: {error}"}
-        model = str(payload.get("model") or models[0]).strip()
+        model = requested_model or models[0]
         explicit = bool(os.environ.get("AGENTSTACK_GEMINI_MODELS", "").strip())
 
         def permitted(candidate: str) -> bool:
-            # Discovery offers choices; explicit operator allow-lists restrict them.
-            return (candidate in models if explicit else
+            # Explicit allow-lists and CLI-discovered foreign IDs are exact;
+            # Gemini keeps the existing validated-prefix launch behavior.
+            return (candidate in models if explicit or candidate.startswith(_CLI_CROSS_PROVIDER_PREFIXES) else
                     candidate.startswith("gemini-") and _MODEL_RE.fullmatch(candidate) is not None)
 
         if not permitted(model):

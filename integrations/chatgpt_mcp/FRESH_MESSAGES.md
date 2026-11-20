@@ -57,7 +57,7 @@ commitは同じ `idempotency_key`、`preview_id`、`content_digest` の3項目�
 
 acceptedにするのは、正規clientの送信応答に実message ID、対応するinstance・送信者・宛先、`decision_only=false`、`delivery_status=notification_pending`、thread・作成時刻が揃う場合だけです。empty応答やdecision-onlyの応答は受理済みと扱いません。freshの正規sendは本文・宛先・request receiptを同じtransactionで保存します。応答に本文自体が含まれなくても、この保存を行う正規sendの確かな応答と、本文を保存していないdecision-onlyの応答は区別します。受理はエージェントの処理開始ではなく、`execution_status=unobserved`のままです。
 
-statusは確定済みのローカル記録を返し、unknown/sendingの場合だけ[本人の受付記録読取りAPI](../../docs/fresh-message-receipts.md)で照合します。protected clientの保存済みrequestがpreview全文と一致することを先に確認し、別本文の古い受付記録を新しい指示の成功と取り違えません。accepted/refusedの確かな証拠だけを台帳へ保存し、同時進行の送信処理が後からunknownで上書きすることも防ぎます。Mailには読取り以外の操作をせず、replay・再送はしません。
+statusは確定済みのローカル記録を返し、unknown/sendingの場合だけ[本人の受付記録読取りAPI](../../docs/fresh-message-receipts.md)で照合します。protected clientの保存済みrequestがpreview全文と一致することを先に確認し、別本文の古い受付記録を新しい指示の成功と取り違えません。照会結果と確認できた状態をアダプター自身のSQLite台帳へ保存するため、このツールのreadOnlyHintはfalseです。accepted/refusedへの確定には確かな証拠を要求し、not_observed/unavailableの観測も保存します。同時進行の送信処理が確定済みの状態を後からunknownで上書きすることも防ぎます。Mailには読取り以外の操作をせず、replay・再送はしません。
 
 受付記録の照会はfork拡張です。対応しない旧サーバー、通信不能、資格失効、保存内容の不一致ではunknownを維持します。not_observedは照会時点で記録が見つからないという意味だけで、並行中の送信が後で保存される可能性を否定せず、再送の許可にはしません。receipt_observationで照会結果を区別します。エージェントによる処理開始は依然としてunobservedです。previewは期限切れでも更新せず、別keyの発行による再送も自動化しません。台帳は最大10000要求で新規previewを拒否し、unknown/accepted/refusedの履歴を自動削除しません。
 
