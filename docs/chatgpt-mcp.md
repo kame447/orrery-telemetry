@@ -106,17 +106,43 @@ ChatGPT のプランによって書き込み系 MCP ツールの扱いが違い�
 ~/orrery-telemetry/bin/orrery-chatgpt-mcp service status
 ```
 
-- 既存エージェントへのMail送信は既定OFFです。Mac上で専用senderと宛先許可リストを本人が作成・承認した場合のみ、[追加指示の常駐サービス opt-in](chatgpt-mcp-message.md#launchd-常駐版での明示的な有効化)のオプションで有効にできます。spawn は有効になりません。
+- 新規エージェントの起動と既存エージェントへのMail送信は、それぞれ既定OFFです。起動は下記の `--spawn-dirs`、送信は専用senderと宛先許可リストを用意したうえで[追加指示の常駐サービス opt-in](chatgpt-mcp-message.md#launchd-常駐版での明示的な有効化)を指定します。
 - `service install` はゲートウェイのパッケージを `~/.agentstack/runtime/chatgpt-mcp/releases/<内容のハッシュ>/` に読み取り専用で複製し、そのコピーを動かします。チェックアウトのブランチを切り替えても常駐中のコードは変わりません。更新するときは目的のコミットで `service install` をやり直します。`--from <src>` で別のチェックアウト（例: `git archive` で取り出した特定コミット）の `integrations/chatgpt_mcp/src` を指定できます。`--source-commit` は記録用のメモで、取り出し元の証明ではありません。
 - 起動は `python -I -S -B` です。`PYTHON*` 環境変数、site-packages、`.pth`、`sitecustomize` を読み込まず、バイトコードも書きません。起動のたびに、リリースが「パッケージの `.py` と RELEASE.json だけ・キャッシュなし・シンボリックリンクなし・書き込み不可・自分の所有」であることと、plist に書かれた内容ハッシュを確かめてから読み込みます。合わなければ起動しません（終了コード 78）。
 - LaunchAgent（`~/Library/LaunchAgents/org.agentstack.chatgpt-mcp.plist`）に秘密は入りません。秘密は従来どおり 0600 の `pairing.json` から起動時に読みます。
-- 常駐版は **127.0.0.1 だけ・起動ツールなし** に固定します（`ORRERY_MCP_ENABLE_SPAWN=0`）。Mail送信も既定OFFで、Mac側の明示的な opt-in に限り許可します。起動を使うときは常駐を止めて（`service uninstall`）、手順 2 の `serve` を設定付きで実行します。
+- 常駐版は127.0.0.1だけで待ち受けます。起動を有効にしても、作業フォルダーは登録した別名だけ、providerは `claude` / `codex`、親なし、既定worktree隔離という制約は手動の `serve` と同じです。
 - ユーザーの LaunchAgent なので、**ログインしている間**動きます。Mac の起動後はログインした時点で自動起動し、落ちたら 30 秒間隔で再起動します。ログアウト中やログイン前は動きません。ログは `~/.agentstack/runtime/chatgpt-mcp/gateway.log`（0600）。
 - Python は指定したパス（既定は `AGENTSTACK_PYTHON`、例: Homebrew の `/opt/homebrew/opt/python@3.13/libexec/bin/python3`）をそのまま使います。標準ライブラリだけで動くので Homebrew のパッチ更新には追従します。そのパスが無くなったら（マイナー版の削除など）起動できなくなるので、`--python` を指定して入れ直してください。
-- インストールは、ペアリング前、loopback 以外の dashboard、Python 3.11 未満、ポート使用中、改変・不審なリリース、このコマンドが書いたものではない既存 plist、別の場所から読み込まれた同名ジョブを拒否します。最後に loopback から `orrery_status` を呼んで応答と設定（pairing・起動なし）を確かめます。秘密を含む要求は、`lsof` でその接続を受けたのが launchd のジョブのプロセスだと確かめてから送ります（ポートを横取りした別のプログラムには送りません）。
+- インストールは、ペアリング前、loopback 以外の dashboard、Python 3.11 未満、ポート使用中、改変・不審なリリース、このコマンドが書いたものではない既存 plist、別の場所から読み込まれた同名ジョブを拒否します。最後に loopback から `orrery_status` を呼び、pairingと指定した起動・送信の有効状態を確かめます。起動を有効にした場合は承認方式と公開されたフォルダー別名も照合します。秘密を含む要求は、`lsof` でその接続を受けたのが launchd のジョブのプロセスだと確かめてから送ります（ポートを横取りした別のプログラムには送りません）。
 - `service status` は秘密を表示しません。ジョブが動いていなければ問い合わせません。
 - `service uninstall` は、plist と「launchd がそのジョブをこの plist から読み込んだこと」を確かめてから常駐を止め、launchd が「存在しない」と答えたのを確認してから plist を消します。止められないときや launchd の状態を確認できないときは失敗として報告し、plist は残します。ペアリング・承認・台帳は残します。
 - tunnel-client、API key、ChatGPT 側の設定には触れません。
+
+#### 常駐版で起動を有効にする
+
+作業フォルダーを明示して、同じ固定releaseの常駐サービスで起動ツールを有効にできます。
+
+```sh
+~/orrery-telemetry/bin/orrery-chatgpt-mcp service install \
+  --source-commit "$(git -C ~/orrery-telemetry rev-parse HEAD)" \
+  --spawn-dirs 'orrery=/Users/you/orrery-telemetry,notes=/Users/you/notes' \
+  --spawn-approval chat
+~/orrery-telemetry/bin/orrery-chatgpt-mcp service status
+```
+
+`--spawn-dirs` が有効化の指定です。値は `別名=/絶対パス` をカンマで区切り、実在する本人の作業フォルダーに置き換えます。初回の承認方式は `local` です。上の `--spawn-approval chat` はMacでの毎回承認を省き、ChatGPTでのプレビュー確認を使う明示的な設定です。どちらの方式でも、プレビュー・承認済み内容のコミット・重複起動防止は変わりません。
+
+更新時も `--spawn-dirs` を再指定します。既に起動が有効なサービスで `--spawn-approval` だけを省略すると、現在の承認方式を引き継ぎます。`local` から `chat` への変更には明示指定が必要です。`--spawn-dirs` を省略した再インストールでは起動を無効にします。Mail送信も使う場合は、同じ `service install` に `--message-profile` と `--message-helper-from` を併記してください。起動と送信の有効化指定は独立しており、一方だけを指定しても他方は引き継ぎません。
+
+#### トンネルの起動順をそろえる
+
+ゲートウェイと専用トンネルをそれぞれLaunchAgentにすると、ログイン時の起動順は決まりません。トンネル側の既存 `run` コマンドに、対応する `tunnel-client` の正式な待機オプションを加えます。
+
+```sh
+tunnel-client run --profile orrery --mcp.startup-wait-timeout 120s
+```
+
+この指定はHTTP MCPの初期化が完了するまで、最初のpollとOAuth discoveryを待ちます。既存の専用profile・runtime key・秘密URLはそのまま使います。120秒を超えてゲートウェイが復旧しない場合、トンネルは非readyのままで、無期限の自動復旧を保証する設定ではありません。`/healthz` はプロセスの生存確認なので、トンネルの `/readyz` と実際の `orrery_status` 呼出しまで確認します。詳しくは公式の[設定](https://github.com/openai/tunnel-client/blob/master/docs/configuration.md)と[起動監視](https://github.com/openai/tunnel-client/blob/master/docs/health.md#supervising-startup)を参照してください。
 
 ### Mac だけでの動作確認（トンネル前）
 

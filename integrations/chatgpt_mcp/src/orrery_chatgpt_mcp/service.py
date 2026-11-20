@@ -13,7 +13,9 @@ part of the plist, so the job names the exact code it may run. The pairing
 service needs only the standard library.
 
 The plist holds no secret: the gateway reads the pairing secret from the 0600
-state file at start, exactly as an interactive ``serve`` does. The service never enables spawning: it always sets ``ORRERY_MCP_ENABLE_SPAWN=0``.
+state file at start, exactly as an interactive ``serve`` does. Spawning is
+disabled unless the operator explicitly supplies directory aliases; its
+approval mode defaults to local and survives updates that repeat the aliases.
 Message sending is independently disabled by default. An operator may enable
 only a previously authorized sender/allowlist with a pinned, verified helper
 release; no Mail identity or recipient permissions are created by install.
@@ -39,7 +41,7 @@ import sys
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
 from . import pairing
 from .config import ConfigError, GatewayConfig
@@ -125,6 +127,8 @@ class ServicePlan:
     message_helper_digest: str | None = None
     message_approval: str | None = None
     message_max_per_hour: int | None = None
+    spawn_dirs: Mapping[str, str] | None = None
+    spawn_approval: str | None = None
 
     @property
     def log_path(self) -> Path:
@@ -214,7 +218,7 @@ def program_arguments(plan: ServicePlan) -> list[str]:
 
 
 def render_plist(plan: ServicePlan) -> bytes:
-    """The LaunchAgent: no secrets, no spawn, explicit operator-only message opt-in."""
+    """The LaunchAgent: no secrets, explicit operator-only spawn/message opt-ins."""
     env = {
         "ORRERY_MCP_AUTH": "pairing",
         "ORRERY_MCP_BIND_HOST": "127.0.0.1",
@@ -223,6 +227,12 @@ def render_plist(plan: ServicePlan) -> bytes:
         "ORRERY_MCP_STATE_DIR": str(plan.state_dir),
         "ORRERY_MCP_ENABLE_SPAWN": "0",
     }
+    if plan.spawn_dirs:
+        env.update({
+            "ORRERY_MCP_ENABLE_SPAWN": "1",
+            "ORRERY_MCP_SPAWN_DIRS": ",".join(f"{alias}={path}" for alias, path in sorted(plan.spawn_dirs.items())),
+            "ORRERY_MCP_SPAWN_APPROVAL": plan.spawn_approval or "local",
+        })
     env["ORRERY_MCP_ENABLE_MESSAGE"] = "0"
     if plan.message_profile is not None:
         env.update({
@@ -350,7 +360,9 @@ def _accepted_by(sock: socket.socket, port: int, pid: int, runner: Runner) -> bo
     return False
 
 
-def probe_status(port: int, secret: str, pid: int, runner: Runner = subprocess.run, timeout: float = 5) -> dict:
+def probe_status(port: int, secret: str, pid: int, runner: Runner = subprocess.run, timeout: float = 5,
+                 *, expected_spawn: bool = False, expected_spawn_approval: str | None = None,
+                 expected_spawn_directories: list[str] | None = None) -> dict:
     """Call orrery_status over loopback the way tunnel-client would, after checking who answers.
 
     Raises VerifyError with a fixed label; nothing from the peer or the secret
@@ -374,8 +386,19 @@ def probe_status(port: int, secret: str, pid: int, runner: Runner = subprocess.r
         if resp.status != 200:
             raise VerifyError(f"gateway answered HTTP {int(resp.status)}")
         status = json.loads(data)["result"]["structuredContent"]
+        capabilities = status["capabilities"]
         ok = (status["gateway"]["name"] == "orrery-chatgpt-mcp" and status["connection"]["auth_mode"] == "pairing"
-              and status["capabilities"]["spawn_enabled_on_server"] is False)
+              and capabilities["spawn_enabled_on_server"] is expected_spawn)
+        if expected_spawn:
+            directories = status.get("spawn_directories")
+            ok = (ok and capabilities.get("spawn") is True
+                  and capabilities.get("spawn_approval") == expected_spawn_approval
+                  and isinstance(directories, list)
+                  and directories == sorted(expected_spawn_directories or []))
+        else:
+            ok = (ok and (capabilities.get("spawn") is None or capabilities.get("spawn") is False)
+                  and capabilities.get("spawn_approval") is None
+                  and status.get("spawn_directories") in (None, []))
     except VerifyError:
         raise
     except Exception as exc:  # noqa: BLE001 - anything else becomes a fixed label
@@ -394,7 +417,10 @@ def wait_until_answering(plan: ServicePlan, secret: str, runner: Runner = subpro
         pid = job_pid(plan.label, runner)
         if pid:
             try:
-                return probe_status(plan.port, secret, pid, runner)
+                return probe_status(plan.port, secret, pid, runner,
+                                    expected_spawn=bool(plan.spawn_dirs),
+                                    expected_spawn_approval=(plan.spawn_approval or "local") if plan.spawn_dirs else None,
+                                    expected_spawn_directories=sorted(plan.spawn_dirs or {}))
             except VerifyError as exc:
                 last = exc
         time.sleep(0.5)
@@ -435,6 +461,44 @@ def _resolve_message_controls(plan: ServicePlan, existing: dict | None) -> Servi
     return replace(plan, message_approval=approval, message_max_per_hour=rate)
 
 
+def parse_spawn_dirs(value: str) -> dict[str, str]:
+    """Parse the explicit CLI alias list without silently replacing a duplicate."""
+    directories: dict[str, str] = {}
+    for item in value.split(","):
+        alias, sep, path = item.strip().partition("=")
+        alias, path = alias.strip(), path.strip()
+        if not sep or not alias or not path or alias in directories:
+            raise ConfigError("spawn directories must be unique alias=/absolute/path entries")
+        directories[alias] = path
+    return directories
+
+
+def _resolve_spawn_controls(plan: ServicePlan, existing: dict | None) -> ServicePlan:
+    """Only explicit directories enable spawn; omitted approval preserves the old mode."""
+    if plan.spawn_dirs is None:
+        if plan.spawn_approval is not None:
+            raise ConfigError("spawn approval requires explicit spawn directories")
+        return plan
+    if not isinstance(plan.spawn_dirs, Mapping) or not plan.spawn_dirs:
+        raise ConfigError("spawn needs at least one explicit directory alias")
+    directories = dict(plan.spawn_dirs)
+    for alias, path in directories.items():
+        if not isinstance(alias, str) or re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", alias) is None:
+            raise ConfigError("invalid spawn directory alias")
+        if (not isinstance(path, str) or not os.path.isabs(path) or path != path.strip()
+                or any(char in path for char in (",", "\x00", "\r", "\n"))):
+            raise ConfigError("spawn directories must be absolute paths without commas or control separators")
+        if not Path(path).is_dir():
+            raise ConfigError("spawn directory does not exist or is not a directory")
+    env = (existing or {}).get("EnvironmentVariables", {})
+    if not isinstance(env, dict) or env.get("ORRERY_MCP_ENABLE_SPAWN") != "1":
+        env = {}
+    approval = plan.spawn_approval if plan.spawn_approval is not None else env.get("ORRERY_MCP_SPAWN_APPROVAL", "local")
+    if approval not in ("chat", "local"):
+        raise ConfigError("spawn approval must be chat or local")
+    return replace(plan, spawn_dirs=directories, spawn_approval=approval)
+
+
 def install_service(plan: ServicePlan, *, runner: Runner = subprocess.run, launch_agents: Path | None = None,
                     verify: bool = True) -> dict:
     """Write the LaunchAgent and (re)load it. Refuses instead of repairing a bad setup.
@@ -452,6 +516,10 @@ def install_service(plan: ServicePlan, *, runner: Runner = subprocess.run, launc
         raise ConfigError(f"{plan.release_dir} is not an intact release")
     target = plist_path(plan.label, launch_agents)
     existing = _load_own_plist(target, plan.label)
+    plan = _resolve_spawn_controls(plan, existing)
+    GatewayConfig(pairing_secret=secret, port=plan.port, dashboard_url=plan.dashboard_url,
+                  state_dir=plan.state_dir, spawn_enabled=bool(plan.spawn_dirs),
+                  spawn_dirs=plan.spawn_dirs or {}, spawn_approval=plan.spawn_approval or "local").validate()
     plan = _resolve_message_controls(plan, existing)
     if plan.message_profile is not None:
         if not (plan.release_dir / PACKAGE / "helper_release.py").is_file():
@@ -563,8 +631,19 @@ def service_status(label: str = LABEL, *, runner: Runner = subprocess.run, launc
     if not pid:
         out["answering"] = False
         return out
+    spawn = env.get("ORRERY_MCP_ENABLE_SPAWN") == "1"
     try:
-        status = probe_status(out["port"], pairing.read_secret(Path(env.get("ORRERY_MCP_STATE_DIR", ""))), pid, runner)
+        directories = parse_spawn_dirs(env.get("ORRERY_MCP_SPAWN_DIRS", "")) if spawn else {}
+        approval = env.get("ORRERY_MCP_SPAWN_APPROVAL", "local") if spawn else None
+    except ConfigError:
+        out["answering"] = False
+        out["error"] = "service spawn policy unreadable"
+        return out
+    out.update(spawn_approval=approval, spawn_directories=sorted(directories))
+    try:
+        status = probe_status(out["port"], pairing.read_secret(Path(env.get("ORRERY_MCP_STATE_DIR", ""))), pid, runner,
+                              expected_spawn=spawn, expected_spawn_approval=approval,
+                              expected_spawn_directories=sorted(directories))
         out["answering"] = True
         out["dashboard_reachable"] = bool(status.get("dashboard", {}).get("reachable"))
     except VerifyError as exc:

@@ -73,7 +73,7 @@ curl -s http://127.0.0.1:8770/api/version
 ```
 
 ```json
-{"name":"orrery-telemetry","version":"2026.09.16.1","api":40}
+{"name":"orrery-telemetry","version":"2026.09.16.1","api":41}
 ```
 
 See [Installation](install.en.md#version) for version resolution order.
@@ -500,7 +500,9 @@ curl -s 'http://127.0.0.1:8770/api/edge-messages?a=Parent&b=WindyFermi&limit=60'
 - `a`, `b`: agent names
 - `limit`: default `60`
 
-The response is `{ok, messages}`. Each message includes direction, subject, body, importance, and timestamp and is used by the NETWORK edge drawer.
+The response is `{ok,a,b,count,messages}`. It returns both directions between the two agents within the configured project, with `limit` clamped to 1–200. Rows include `id`, `sender`, `recipient`, `subject`, `body`, `thread_id`, `importance`, `ts`, `ts_unix`, `read_ts` and `ack_ts`, among other fields used by the NETWORK edge drawer. Reading does not mark messages read or acknowledged.
+
+Starting with API 41, legacy-mode rows add the stored Mail instance UUID as `mail_instance_id` and the numeric sender and recipient IDs as `sender_agent_id` and `recipient_agent_id`. Instance identity and message/agent rows come from the same read transaction, allowing callers to distinguish registrations instead of matching names alone. All three fields are omitted when an older DB lacks the `mail_instances` table, its instance row is absent, the UUID has an invalid format, or an agent ID is not a positive integer; existing display data remains available. Other schema or database read failures are not treated as success. Callers may attribute read/ACK evidence to the expected instance, sender and recipient only when all three fields are present and match. The separate fresh-mode read contract is unchanged.
 
 ## GET `/api/messages-since`
 

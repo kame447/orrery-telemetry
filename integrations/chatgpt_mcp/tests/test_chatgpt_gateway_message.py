@@ -160,6 +160,13 @@ def test_registry_with_messages_lists_tools_and_recipients(env, dashboard):
     defs = {t["name"]: t for t in registry.definitions()}
     assert {"orrery_message_preview", "orrery_message_commit", "orrery_message_status"} <= set(defs)
     assert defs["orrery_message_commit"]["annotations"]["destructiveHint"] is True
+    status = defs["orrery_message_status"]
+    assert status["annotations"] == {
+        "readOnlyHint": False, "destructiveHint": False,
+        "openWorldHint": False, "idempotentHint": True,
+    }
+    assert status["title"] == "Reconcile ORRERY message status"
+    assert "local outcome ledger" in status["description"]
     assert "ExampleWorker" in defs["orrery_message_preview"]["description"]
     caps = registry.call(ME, "orrery_status", {})["capabilities"]
     assert caps["message_existing_agent"] is True and caps["message_recipients"] == ["ExampleWorker"]

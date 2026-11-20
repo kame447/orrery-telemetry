@@ -44,7 +44,7 @@ import urllib.request
 from urllib.parse import urlparse, parse_qs
 
 # Public dashboard compatibility generation (docs/tests read this source).
-API_GENERATION = 40
+API_GENERATION = 41
 # Mode admission is shared with hooks and operator/service entry points.
 import runpy as _runtime_runpy
 _MODE_API = _runtime_runpy.run_path(str(Path(__file__).resolve().parents[1] / 'bin/lib/runtime_client.py'))
@@ -6078,11 +6078,26 @@ def edge_messages_payload(a: str, b: str, limit: int = 60) -> dict:
         with _db() as con:
             con.row_factory = sqlite3.Row
             cur = con.cursor()
+            # Keep instance identity and message/agent rows in one read snapshot.
+            cur.execute("BEGIN")
+            mail_instance_id = None
+            if cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mail_instances'"
+            ).fetchone():
+                instance = cur.execute(
+                    "SELECT instance_id FROM mail_instances WHERE id = 1"
+                ).fetchone()
+                if (instance is not None and isinstance(instance[0], str)
+                        and re.fullmatch(
+                            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                            instance[0], re.IGNORECASE)):
+                    mail_instance_id = instance[0]
             cur.execute(
                 """
                 SELECT m.id, m.created_ts, m.subject, m.body_md, m.importance,
                        m.thread_id, m.topic, m.ack_required,
                        sa.name AS sender, ra.name AS recipient,
+                       sa.id AS sender_agent_id, ra.id AS recipient_agent_id,
                        mr.kind, mr.read_ts, mr.ack_ts
                 FROM messages m
                 JOIN projects   p  ON p.id  = m.project_id
@@ -6113,7 +6128,7 @@ def edge_messages_payload(a: str, b: str, limit: int = 60) -> dict:
         if r["id"] in seen:
             continue
         seen.add(r["id"])
-        messages.append({
+        message = {
             "id": r["id"],
             "ts": r["created_ts"],
             "ts_unix": _iso_to_epoch(r["created_ts"]),
@@ -6128,7 +6143,14 @@ def edge_messages_payload(a: str, b: str, limit: int = 60) -> dict:
             "kind": r["kind"],
             "read_ts": r["read_ts"],
             "ack_ts": r["ack_ts"],
-        })
+        }
+        if (mail_instance_id is not None
+                and type(r["sender_agent_id"]) is int and r["sender_agent_id"] > 0
+                and type(r["recipient_agent_id"]) is int and r["recipient_agent_id"] > 0):
+            message.update(mail_instance_id=mail_instance_id,
+                           sender_agent_id=r["sender_agent_id"],
+                           recipient_agent_id=r["recipient_agent_id"])
+        messages.append(message)
     return {"ok": True, "a": a, "b": b, "count": len(messages),
             "messages": messages}
 
