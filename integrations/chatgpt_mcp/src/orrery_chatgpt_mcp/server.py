@@ -469,10 +469,11 @@ USAGE = """usage: orrery-chatgpt-mcp [serve | pair [--rotate] [--quiet] | url | 
   deny CODE      discard one pending launch
 
   service install [--from SRC] [--source-commit SHA] [--python PATH]
+                  [--spawn-dirs ALIAS=/ABS[,ALIAS=/ABS...]] [--spawn-approval local|chat]
                   [--message-profile ABS --message-helper-from ORRERY_ROOT]
                   [--message-approval chat|local] [--message-max-per-hour N]
                  macOS: pin a read-only copy of the gateway and keep it running with launchd
-                 (127.0.0.1 only, launches disabled, restarts after login)
+                 (127.0.0.1 only, launches disabled by default, restarts after login)
   service status show whether the service is loaded and answering (never prints the secret)
   service uninstall
                  stop and remove the service; keeps the pairing and records
@@ -560,14 +561,19 @@ def _service_cli(argv: list[str], state_dir) -> int:
             "--message-helper-from": None,
             "--message-approval": None,
             "--message-max-per-hour": None,
+            "--spawn-dirs": None,
+            "--spawn-approval": None,
         }
         if len(rest) % 2 or any(k not in opts for k in rest[::2]) or len(set(rest[::2])) != len(rest[::2]):
-            raise ConfigError("usage: service install [--from SRC] [--source-commit SHA] [--python PATH] [--message-profile ABS --message-helper-from ORRERY_ROOT]")
+            raise ConfigError("usage: service install [--from SRC] [--source-commit SHA] [--python PATH] [--spawn-dirs ALIAS=/ABS,...] [--spawn-approval local|chat] [--message-profile ABS --message-helper-from ORRERY_ROOT]")
         opts.update(zip(rest[::2], rest[1::2]))
         if bool(opts["--message-profile"]) != bool(opts["--message-helper-from"]):
             raise ConfigError("message service requires both --message-profile and --message-helper-from")
         if opts["--message-profile"] is None and (opts["--message-approval"] is not None or opts["--message-max-per-hour"] is not None):
             raise ConfigError("message controls require --message-profile")
+        if opts["--spawn-dirs"] is None and opts["--spawn-approval"] is not None:
+            raise ConfigError("spawn approval requires --spawn-dirs")
+        spawn_dirs = service.parse_spawn_dirs(opts["--spawn-dirs"]) if opts["--spawn-dirs"] is not None else None
         pairing.read_secret(state_dir)  # refuse before writing anything when unpaired
         release, digest = service.install_release(Path(opts["--from"]), state_dir / "releases",
                                                   source_commit=opts["--source-commit"])
@@ -585,7 +591,8 @@ def _service_cli(argv: list[str], state_dir) -> int:
                                    dashboard_url=os.environ.get("ORRERY_MCP_DASHBOARD_URL", "http://127.0.0.1:8770").strip().rstrip("/"),
                                    message_profile=Path(opts["--message-profile"]) if opts["--message-profile"] else None,
                                    message_helper_root=helper_root, message_helper_digest=helper_digest,
-                                   message_approval=opts["--message-approval"], message_max_per_hour=message_rate)
+                                   message_approval=opts["--message-approval"], message_max_per_hour=message_rate,
+                                   spawn_dirs=spawn_dirs, spawn_approval=opts["--spawn-approval"])
         try:
             status = service.install_service(plan)
         except service.VerifyError as exc:
@@ -593,7 +600,7 @@ def _service_cli(argv: list[str], state_dir) -> int:
                   f"See {plan.log_path} and `service status`", file=sys.stderr)
             return 1
         reachable = bool(status.get("dashboard", {}).get("reachable"))
-        print(f"installed {plan.label}: release {release.name}, 127.0.0.1:{plan.port}, launches disabled, messages {'enabled for operator profile' if plan.message_profile else 'disabled'}")
+        print(f"installed {plan.label}: release {release.name}, 127.0.0.1:{plan.port}, launches {'enabled for explicit directories' if plan.spawn_dirs else 'disabled'}, messages {'enabled for operator profile' if plan.message_profile else 'disabled'}")
         print(f"orrery_status over loopback: answering, dashboard reachable: {str(reachable).lower()}")
         return 0
     if action == "status" and not rest:

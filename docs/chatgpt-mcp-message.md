@@ -28,9 +28,11 @@ ChatGPT ─ Secure MCP Tunnel ─ orrery-chatgpt-mcp（127.0.0.1）
 | --- | --- | --- |
 | `orrery_message_preview` | 準備 | 宛先・件名・本文全文・送信者・Mail ID・`content_sha256` を返します。送信はしません |
 | `orrery_message_commit` | 書き込み | `preview_id`・`idempotency_key`・`content_sha256` が揃ったときだけ 1 回送ります。Mail の受領記録（メッセージ ID、送信者、宛先、プロジェクト、スレッド、件名）が一致したときだけ accepted です |
-| `orrery_message_status` | 読み取り | 記録した結果（accepted / rejected / unknown）と、Mail 上の既読・ACK |
+| `orrery_message_status` | 結果の照合 | 記録した結果（accepted / rejected / unknown）とMail上の既読・ACK。確かな受領記録が見つかるとローカル台帳も更新 |
 
 `orrery_status` の `capabilities.message_recipients` に許可された宛先名が出ます。
+
+`orrery_message_status` はメッセージを再送せず、相手の既読・ACKも変更しません。ただし結果不明だった記録を照合してローカル台帳を更新するため、MCPの `readOnlyHint` はfalseです。
 
 本文は次の形で届きます。宛先は誰からの指示かを末尾で確認できます。
 
@@ -61,7 +63,7 @@ Sent by the operator from ChatGPT through orrery-chatgpt-mcp as <送信者名>. 
 - 記録 `message-ledger.json`（0600、本文なし）は再起動後も有効で、同じ state ディレクトリを使う別プロセスともファイルロックで直列化します。送信者プロファイルのロックは排他なので、同時に 2 つ送ることもありません。
 - プレビューはメモリだけに置きます。ゲートウェイが再起動したら、プレビューからやり直してください（安全側の失敗です）。
 - 送信要求を出した後に応答が失われた場合、Mail の受領記録が想定と違う場合は **unknown** と記録し、成功とは言わず、自動で再送もしません。Mail が保存前に拒否したと明示した場合（ファイル予約の衝突）だけ rejected です。
-- `orrery_message_status` は dashboard の Mail 表示（`/api/edge-messages`）で、送信者・宛先の名前に加えて、このメッセージのスレッド・件名・本文全体（ランダムな参照番号を含む）が完全に一致する行を探します。引用は一致しません。ただし完全な複製は別の Mail ストア（復元や複製）にもありえるため、行がこの送信者プロファイルの Mail インスタンス UUID と送信者・宛先の数値 ID を示すときだけ accepted に更新します。現在の dashboard はこれらを返さないので、見つかっても `copy_seen_identity_unverified`（既読・ACK も未確認扱い）と表示し、unknown のままにします。
+- `orrery_message_status` は dashboard の Mail 表示（`/api/edge-messages`）で、送信者・宛先の名前に加えて、このメッセージのスレッド・件名・本文全体（ランダムな参照番号を含む）が完全に一致する行を探します。引用は一致しません。ただし完全な複製は別の Mail ストア（復元や複製）にもありえるため、行がこの送信者プロファイルの Mail インスタンス UUID と送信者・宛先の数値 ID を示すときだけ accepted に更新します。API 41以降のlegacy dashboardは、DBに正規のinstance情報がある場合にこの3欄を返し、既読・ACKも同じ行として照合できます。古いdashboardやinstance情報のないDBでは、見つかっても `copy_seen_identity_unverified`（既読・ACKも未確認扱い）と表示し、unknownの記録はそのままにします。名前だけの一致や欠けたidentityを補って成功扱いにはしません。
 - Mail が保存した本文が確認済みの本文と違うと受領記録が示した場合は `delivered_with_changes`（再送しないこと）を返します。
 - 送信後に記録の書き込みだけが失敗した場合は `outcome_unrecorded`（再送しないこと）を返します。2 分を過ぎても終わらない送信記録は unknown（`dispatch-unfinished`）として表示します。
 
@@ -110,7 +112,7 @@ Sent by the operator from ChatGPT through orrery-chatgpt-mcp as <送信者名>. 
 
 ### launchd 常駐版での明示的な有効化
 
-`orrery-chatgpt-mcp service install` は今までどおり送信を無効にします。利用者が Mac 上で専用 sender identity と宛先許可リスト（daemon v2 プロファイル）を作成し、内容を確認した場合だけ、次のオプションで明示的に有効化できます。このオプションを指定せず再インストールすると送信は再び無効になります。spawn は常に無効です。
+`orrery-chatgpt-mcp service install` は今までどおり送信を無効にします。利用者が Mac 上で専用 sender identity と宛先許可リスト（daemon v2 プロファイル）を作成し、内容を確認した場合だけ、次のオプションで明示的に有効化できます。このオプションを指定せず再インストールすると送信は再び無効になります。新規起動も使う場合は、同じコマンドに[常駐版の起動設定](chatgpt-mcp.md#常駐版で起動を有効にする)の `--spawn-dirs` と必要な `--spawn-approval` を併記します。送信の有効化だけでは起動は有効になりません。
 
 実行前に、更新済みのORRERY Mailが稼働し、Mail本体に `AGENTSTACK_MAIL_TOOLS_LOG_ENABLED=false` が実際に適用されていることを運用者が確認してください。Mailのログ設定はこのコマンドでは変更しません。送信が受理されても既存Claude/Codexのターン開始は保証されません。
 

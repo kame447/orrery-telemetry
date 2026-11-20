@@ -28,9 +28,11 @@ ChatGPT ─ Secure MCP Tunnel ─ orrery-chatgpt-mcp (127.0.0.1)
 | --- | --- | --- |
 | `orrery_message_preview` | prepare | Returns recipient, subject, full body, sender, Mail IDs and `content_sha256`. Sends nothing |
 | `orrery_message_commit` | write | Sends once, only with `preview_id`, `idempotency_key` and `content_sha256`. It is `accepted` only when Mail's receipt (message ID, sender, recipient, project, thread, subject) matches |
-| `orrery_message_status` | read | The recorded outcome (accepted / rejected / unknown) and read / ACK in Mail |
+| `orrery_message_status` | reconcile | The recorded outcome (accepted / rejected / unknown) and read / ACK in Mail; updates the local ledger when verified receipt evidence is found |
 
 `orrery_status` lists the allowed recipient names in `capabilities.message_recipients`.
+
+`orrery_message_status` does not resend a message or change the recipient's read/ACK state. Its MCP `readOnlyHint` is false because reconciling an unknown outcome can update the local ledger.
 
 The message arrives as follows, so the recipient can see where the instruction came from:
 
@@ -61,7 +63,7 @@ To approve every message on the Mac, set `ORRERY_MCP_MESSAGE_APPROVAL=local`. Th
 - The record, `message-ledger.json` (0600, no bodies), survives restarts and is serialised by a file lock across processes sharing the state directory. The sender profile lock is exclusive, so two sends never run at once.
 - Previews live in memory only. After a gateway restart, preview again (a safe failure).
 - If the answer is lost after the send request went out, or Mail's receipt is not the expected one, the outcome is recorded as **unknown**: it is not reported as success and it is never resent automatically. Only an explicit Mail refusal before storing (a file reservation conflict) is `rejected`.
-- `orrery_message_status` looks in the dashboard's Mail view (`/api/edge-messages`) for a row with the sender and recipient names and exactly this message's thread, subject and whole body (which contains a random reference). A quotation does not match. An exact copy can, however, exist in another Mail store (a restore or clone), so the record becomes `accepted` only when the row also names this sender profile's Mail instance UUID and the sender's and recipient's numeric IDs. The current dashboard does not return those, so a copy it finds is shown as `copy_seen_identity_unverified` (read / ACK unverified as well) and the outcome stays unknown.
+- `orrery_message_status` looks in the dashboard's Mail view (`/api/edge-messages`) for a row with the sender and recipient names and exactly this message's thread, subject and whole body (which contains a random reference). A quotation does not match. An exact copy can, however, exist in another Mail store (a restore or clone), so the record becomes `accepted` only when the row also names this sender profile's Mail instance UUID and the sender's and recipient's numeric IDs. Starting with API 41, the legacy dashboard returns these three fields when the database has valid instance metadata, allowing read/ACK to be matched to the same row. An older dashboard or a database without instance metadata still yields `copy_seen_identity_unverified` (read / ACK also unverified) and leaves unknown records unchanged. Matching names alone or inventing missing identity fields cannot establish success.
 - If Mail's receipt shows a stored body that differs from the confirmed one, the answer is `delivered_with_changes` (do not send again).
 - If only the local record write fails after a send, the answer is `outcome_unrecorded` (do not send again). A send record that has not finished after 2 minutes is shown as unknown (`dispatch-unfinished`).
 
@@ -121,7 +123,7 @@ The gateway's records (ledger, audit, log) contain no bodies. ORRERY Mail's own 
 <ORRERY>/bin/orrery-chatgpt-mcp service status
 ```
 
-Before opting in, verify the updated ORRERY Mail is running with `AGENTSTACK_MAIL_TOOLS_LOG_ENABLED=false` actually applied. This command does not change Mail logging. Reinstalling without the message options disables messaging again; spawning always stays off.
+Before opting in, verify the updated ORRERY Mail is running with `AGENTSTACK_MAIL_TOOLS_LOG_ENABLED=false` actually applied. This command does not change Mail logging. Reinstalling without the message options disables messaging again. To use new-agent launches too, include `--spawn-dirs` and any required `--spawn-approval` in the same command; see [enabling launches in the service](chatgpt-mcp.en.md#enabling-launches-in-the-service). Messaging opt-in alone does not enable launches.
 
 When reinstalling with both message opt-in flags, omitted `--message-approval` and `--message-max-per-hour` values retain the currently enabled service's approval mode and rate limit. Relaxing `local` to `chat` or raising the cap requires an explicit new value. First-time opt-in still defaults to `chat` and 20/hour; omitting all message flags still turns messaging off. A previous gateway release may be started with messaging disabled, but it cannot be enabled for messaging unless it supports the verified helper.
 
