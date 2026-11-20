@@ -12,6 +12,7 @@ from fresh_launchd_cleanup import cleanup_launchagent
 class CleanupTests(unittest.TestCase):
     def setUp(self):
         self.target = 'gui/501/org.agentstack.chatgpt-mcp-fresh.fixture-test-0123456789abcdef'
+        self.secret = 'PRIVATE_SECRET'
         self.launchctl = Mock(side_effect=self.command)
         self.pid_exists = Mock(return_value=False)
         self.log = Mock(spec=Path)
@@ -29,7 +30,7 @@ class CleanupTests(unittest.TestCase):
         cleanup_launchagent(
             target=self.target, attempted=attempted, observed_pids=(111, 222),
             launchctl=self.launchctl, pid_exists=self.pid_exists, port=54321,
-            log_path=self.log, forbidden=('PRIVATE_SECRET',), body_error=body_error,
+            log_path=self.log, forbidden=(self.secret,), body_error=body_error,
         )
 
     def assert_all_observed(self, *, bootout=True):
@@ -60,7 +61,7 @@ class CleanupTests(unittest.TestCase):
     def test_timed_out_bootout_does_not_skip_observations_or_leak_output(self):
         def command(operation, target):
             if operation == 'bootout':
-                raise subprocess.TimeoutExpired('PRIVATE_SECRET', 15, output='PRIVATE_SECRET')
+                raise subprocess.TimeoutExpired(self.secret, 15, output=self.secret)
             return self.command(operation, target)
         self.launchctl.side_effect = command
         try:
@@ -68,7 +69,7 @@ class CleanupTests(unittest.TestCase):
         except AssertionError as error:
             rendered = ''.join(traceback.format_exception(error))
             self.assertIn('BOOTOUT_UNVERIFIED', rendered)
-            self.assertNotIn('PRIVATE_SECRET', rendered)
+            self.assertNotIn(self.secret, rendered)
         else:
             self.fail('unverified bootout was accepted')
         self.assert_all_observed()
