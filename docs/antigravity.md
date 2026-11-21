@@ -66,6 +66,13 @@ installer. The core `scripts/install.sh` does not copy those files, so a core
 install keeps running `dashboard/server.py`; a core reinstall also leaves an
 already-installed provider extension in place.
 
+Gemini CLIの既定モデル・effortを明示指定する場合は
+`AGENTSTACK_GEMINI_MODEL` と `AGENTSTACK_GEMINI_EFFORT` を設定します。
+core installerはこれらを他のユーザー設定と同様に `env.sh` へ保存し、
+以後のcore更新で引き継ぎます（`--reset-settings` で初期化）。
+これらはCLI起動時の既定であり、Dashboard NEW AGENTの既定モデル
+（Flash）や明示effort選択は変更しません。
+
 既存のGemini環境を更新する場合は、coreの更新後、同じ検証済みrevisionから
 この追加インストーラーも再実行し、作業中のエージェントが終了してから
 Dashboardを再起動してください。coreだけの再インストールは既存providerを

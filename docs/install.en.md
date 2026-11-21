@@ -410,6 +410,10 @@ Do not attempt to repair these permission errors only with `chmod`. The deciding
 
 ## Upgrade
 
+For persistent Gemini CLI default model and effort, see `AGENTSTACK_GEMINI_MODEL` / `AGENTSTACK_GEMINI_EFFORT` in [Antigravity setup](antigravity.en.md). Core upgrades preserve these choices.
+
+
+
 Finish work or release active file reservations before updating protection settings; restart affected sessions together after the update. Preview the selected roots first.
 
 ```bash
