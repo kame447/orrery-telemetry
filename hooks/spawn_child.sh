@@ -44,10 +44,11 @@ fi
 #   chrome を要求した子は warm pool を使わず cold start する。
 #
 # 子に渡す道具（base / tools。hooks/child_tools.py が解釈する）:
-#   --base default|mail-only   省略・default は今までと同じ起動。mail-only は ORRERY Mail と
+#   --base default|mail-only   default の明示は installer の既定を抑止。mail-only は ORRERY Mail と
 #                              --tools で選んだものだけを渡す（Claude は --no-chrome も付ける）
 #   --tools SPEC               繰り返し・カンマ区切り可: browser[:deviceId] / screen[:read|:operate]
-#                              / screen:<read|operate>:<server> / mcp:<server>
+#                              / screen:<read|operate>:<server> / mcp:<server> / chrome-extension (Codex)
+#   base・tools・MCP profile の省略時は installer の既定から使える項目を選ぶ。
 #   選択（mail-only かいずれかの tools）がある子は fail closed: Mail の proxy が作れない、
 #   選んだ server を写せない、computer use が有効な project での mail-only などは起動しない。
 #   これは子への方針であって、技術的な隔離ではない。
@@ -545,12 +546,7 @@ fi
 # Tools selection. Parsed here so that an invalid request stops before any
 # registration or tmux work; what can only be checked in the child's final
 # directory (servers, computer use) is checked again just before launch.
-if [[ -n "$HARNESS" && -n "${AGENTSTACK_CHILD_DEFAULT_TOOLS:-}" \
-        && -z "$CHILD_TOOLS_BASE" && ${#CHILD_TOOLS_ARGS[@]} -eq 0 ]]; then
-    echo "Error: native_default_tools_unsupported: choose explicit --base and --tools for this harness" >&2
-    exit 1
-fi
-if [[ -n "${AGENTSTACK_CHILD_DEFAULT_TOOLS:-}" && -z "$HARNESS" ]]; then
+if [[ -n "${AGENTSTACK_CHILD_DEFAULT_TOOLS:-}" ]]; then
     # Resolve defaults only after the final directory is known. Explicit base
     # or tools/profile bypass them entirely, including --base default and the
     # legacy --codex-mcp reduction. Defaults must never widen that reduction.
@@ -966,6 +962,7 @@ prepare_codex_child_resume_state() {
         --runtime-dir "$RUNTIME_DIR" \
         --agent-name "$agent_name" \
         --project-key "$PROJECT_KEY" \
+        --codex-standalone "$STANDALONE" \
         --mcp-profile "$mcp_profile" --program codex --parent-agent "$(recordable_parent_name)" ${generation_args[@]+"${generation_args[@]}"}
 }
 
@@ -1301,13 +1298,12 @@ cleanup_worktree() {
 # the child's login shell can word-split it (unquoted command substitution,
 # which zsh and bash both expand).
 #
-# The policy comes from AGENTSTACK_CODEX_CHILD_APPROVAL (installer setting,
-# default `never`): a spawned child works unattended, so every "may I run this"
-# prompt is a stall nobody is watching. The probe resolves the binary the same
-# way the child will (PATH plus ~/.local/bin, or AGENTSTACK_CODEX_BIN); when
-# the dashboard's minimal launchd PATH cannot find codex at all, the modern flag
-# is emitted instead of nothing — an empty result silently reverted every child
-# to Codex's own `on-request` default (2026-09-04).
+# A standalone Codex uses its configured approval policy. A parented Codex
+# uses AGENTSTACK_CODEX_CHILD_APPROVAL (installer setting, default `never`)
+# because an unattended child has nobody to answer prompts. The probe resolves
+# it the same way as the child (PATH plus ~/.local/bin or AGENTSTACK_CODEX_BIN).
+# If the dashboard's minimal launchd PATH cannot find Codex, the launcher emits
+# the modern flag to preserve the child policy (2026-09-04).
 # The child's tmux session runs `<shell> -lc '<launch>'`. This used to be a
 # hard-coded zsh path, which does not exist on a stock Ubuntu (WSL2 included):
 # the session died two seconds after spawn with nothing in the pane. Prefer zsh
@@ -1436,6 +1432,9 @@ resolve_codex_bin() {
 }
 
 codex_approval_flags() {
+    if [[ "${USE_CODEX:-false}" == true && "${STANDALONE:-false}" == true ]]; then
+        return 0
+    fi
     local help_text codex_bin policy
     policy="${AGENTSTACK_CODEX_CHILD_APPROVAL:-never}"
     codex_bin="$(find_codex_bin)"
@@ -1465,6 +1464,18 @@ codex_approval_flags() {
     fi
     # Help answered and names neither flag: emit nothing and let codex use its
     # own defaults rather than passing an argument this build will reject.
+}
+
+codex_permission_flags() {
+    local sandbox approval
+    sandbox="$(agentstack_resolve_setting AGENTSTACK_CODEX_SANDBOX \
+        "${AGENTSTACK_CODEX_SANDBOX:-}" workspace-write "${AGENTSTACK_HOME_DIR:-$HOME/.agentstack}/env.sh")"
+    if [[ "$sandbox" == danger-full-access ]]; then
+        printf '%s\n' '--sandbox danger-full-access --ask-for-approval never'
+    else
+        approval="$(codex_approval_flags)"
+        printf '%s\n' "--sandbox workspace-write${approval:+ $approval}"
+    fi
 }
 
 # Writable roots for a Codex child, ':'-separated, handed to the child through
@@ -2576,6 +2587,9 @@ write_child_mcp_config() {
     if [[ -n "${CHILD_TOOLS_SPEC:-}" && -z "$HARNESS" ]]; then
         spec_args=(--spec "$CHILD_TOOLS_SPEC")
     fi
+    if [[ -z "$HARNESS" && -n "${CHILD_REGISTRATION_GENERATION:-}" ]]; then
+        spec_args+=(--screen-generation "$CHILD_REGISTRATION_GENERATION")
+    fi
     python3 "$HOOKS_DIR/child_tools.py" claude-config \
         ${spec_args[@]+"${spec_args[@]}"} --cwd "${WORK_DIR:-$PWD}" \
         --chrome "$([[ "${CLAUDE_CHILD_CHROME:-false}" == true ]] && echo 1 || echo 0)" \
@@ -2634,6 +2648,7 @@ write_child_codex_home() {
         --mail-env "$MAIL_ENV" \
         --bearer-mode "$HTTP_BEARER_MODE" \
         --python-bin "${AGENTSTACK_PYTHON:-}" \
+        --screen-generation "${CHILD_REGISTRATION_GENERATION:-}" \
         --mcp-profile "$mcp_profile" \
         --parent-agent "${PARENT_NAME:-}" \
         --work-dir "$WORK_DIR" \
@@ -3008,7 +3023,7 @@ resolve_child_default_tools() {
     local resolved tools_chrome tools_device
     resolved="$(python3 "$HOOKS_DIR/child_tools.py" defaults \
         --selection "$AGENTSTACK_CHILD_DEFAULT_TOOLS" \
-        --provider "$([[ "$USE_CODEX" == true ]] && echo codex || echo claude)" \
+        --provider "${HARNESS:-$([[ "$USE_CODEX" == true ]] && echo codex || echo claude)}" \
         --cwd "$WORK_DIR" \
         --chrome "$([[ "$CLAUDE_CHILD_CHROME" == true ]] && echo 1 || echo 0)" \
         --chrome-device "$CLAUDE_CHILD_CHROME_DEVICE" \
@@ -3017,7 +3032,7 @@ resolve_child_default_tools() {
         --overlay "${AGENTSTACK_CODEX_CHILD_CONFIG_OVERLAY:-}")" || return 1
     IFS='|' read -r CHILD_TOOLS_SPEC tools_chrome tools_device \
         CHILD_TOOLS_RESTRICTIVE CHILD_DEFAULT_TOOLS_NOTICE <<< "$resolved"
-    if [[ "$USE_CODEX" != true ]]; then
+    if [[ "$USE_CODEX" != true && -z "$HARNESS" ]]; then
         CLAUDE_CHILD_CHROME="$([[ "$tools_chrome" == 1 ]] && echo true || echo false)"
         CLAUDE_CHILD_CHROME_DEVICE="$tools_device"
     fi
@@ -3041,7 +3056,7 @@ child_tools_prompt_block() {
     [[ "$CHILD_TOOLS_RESTRICTIVE" == true ]] || return 0
     local text
     text="$(python3 "$HOOKS_DIR/child_tools.py" prompt --spec "$CHILD_TOOLS_SPEC" \
-        --provider "$([[ "$USE_CODEX" == true ]] && echo codex || echo claude)" \
+        --provider "${HARNESS:-$([[ "$USE_CODEX" == true ]] && echo codex || echo claude)}" \
         --standalone "$([[ "$STANDALONE" == true ]] && echo 1 || echo 0)")" || return 1
     printf '\n\n%s' "$text"
 }
@@ -3127,12 +3142,14 @@ prepare_harness_child_state() {
 }
 
 start_harness_child() {
-    local prompt="$TASK" prompt_file command tools_spec="$CHILD_TOOLS_SPEC"
+    local prompt="$TASK" tools_prompt prompt_file command tools_spec="$CHILD_TOOLS_SPEC"
     local native_args=()
     if [[ "$EMBED_TASK" == true ]]; then prompt="$EMBEDDED_TASK_PROMPT"; fi
     if [[ "$STANDALONE" != true && "$EMBED_TASK" != true ]]; then
         prompt="$(build_codex_mail_task_prompt "$CHILD_NAME" "$PARENT_NAME")"
     fi
+    tools_prompt="$(child_tools_prompt_block)" || return 1
+    prompt+="$tools_prompt"
     ensure_child_proxy_parent before claude || return 1
     CHILD_MCP_CONFIG="$(write_child_mcp_config "$CHILD_NAME" "$CHILD_TOKEN_FILE")"
     if [[ -z "$CHILD_MCP_CONFIG" ]]; then
@@ -3473,7 +3490,7 @@ PY
         echo "[spawn_child/pre-reg] WORK_DIR overridden to worktree: $WORK_DIR" >&2
     fi
 
-    if [[ -z "$HARNESS" ]]; then resolve_child_default_tools || exit 1; fi
+    resolve_child_default_tools || exit 1
 
     if ! grep -qxF "$CHILD_NAME" "$MANAGED_FILE" 2>/dev/null; then
         mkdir -p "$(dirname "$MANAGED_FILE")"
@@ -3494,7 +3511,13 @@ PY
     if [[ -n "$HARNESS" ]]; then
         TMUX_ENV_ARGS=(-e "AGENT_NAME=$CHILD_NAME" -e "CLAUDECODE=1" -e "AGENTSTACK_RESERVED_IDENTITY=1" -e "PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_HOOKS_DIR=$HOOKS_DIR" -e "AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR" -e "AGENTSTACK_MCP_URL=$MCP_URL" -e "AGENTSTACK_MAIL_ENV=$MAIL_ENV" -e "AGENTSTACK_MAIL_HTTP_BEARER_MODE=$HTTP_BEARER_MODE" -e "AGENTSTACK_CHILD_RESUME_RETENTION_DAYS=$CHILD_RESUME_RETENTION_DAYS")
     else
-    TMUX_ENV_ARGS=(-e "CLAUDECODE=1" -e "AGENTSTACK_RESERVED_IDENTITY=1" -e "AGENT_NAME=$CHILD_NAME" -e "PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_HOOKS_DIR=$HOOKS_DIR" -e "AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR" -e "AGENTSTACK_MCP_URL=$MCP_URL" -e "AGENTSTACK_MAIL_ENV=$MAIL_ENV" -e "AGENTSTACK_MAIL_HTTP_BEARER_MODE=$HTTP_BEARER_MODE" -e "AGENTSTACK_CHILD_RESUME_RETENTION_DAYS=$CHILD_RESUME_RETENTION_DAYS" -e "AGENTSTACK_TERMINAL=$TERMINAL_SETTING" -e "AGENTSTACK_AUTO_OPEN_CHILD=$AUTO_OPEN_CHILD" -e "AGENTSTACK_CODEX_APPROVAL=$(codex_approval_flags)" -e "AGENTSTACK_CODEX_NETWORK_FLAGS=$(codex_network_flags)")
+        TMUX_ENV_ARGS=(-e "CLAUDECODE=1" -e "AGENTSTACK_RESERVED_IDENTITY=1" -e "AGENT_NAME=$CHILD_NAME" -e "PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_HOOKS_DIR=$HOOKS_DIR" -e "AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR" -e "AGENTSTACK_MCP_URL=$MCP_URL" -e "AGENTSTACK_MAIL_ENV=$MAIL_ENV" -e "AGENTSTACK_MAIL_HTTP_BEARER_MODE=$HTTP_BEARER_MODE" -e "AGENTSTACK_CHILD_RESUME_RETENTION_DAYS=$CHILD_RESUME_RETENTION_DAYS" -e "AGENTSTACK_TERMINAL=$TERMINAL_SETTING" -e "AGENTSTACK_AUTO_OPEN_CHILD=$AUTO_OPEN_CHILD")
+        if [[ "$USE_CODEX" == true ]]; then
+            TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_PERMISSION_FLAGS=$(codex_permission_flags)")
+        else
+            TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_APPROVAL=$(codex_approval_flags)")
+        fi
+        TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_NETWORK_FLAGS=$(codex_network_flags)")
     fi
     append_child_workspace_environment
     if [[ "$STANDALONE" != true ]]; then
@@ -3580,11 +3603,8 @@ ${TASK}"
                 # The child never sources a user-side bootstrap: identity comes
                 # from the reserved name and token file, and a failing script
                 # under set -e would take the whole session with it (2026-09-03).
-                # The product decides sandbox, approval, network and writable
-                # roots itself; a user-side launcher (~/.codex/bin/...) is never
-                # consulted. Handing off to one silently replaced `never` with
-                # its `on-request` default and dropped the network flag and the
-                # extra roots (2026-09-04).
+                # The product supplies sandbox, network, writable roots and any
+                # parented approval flag without consulting a user-side launcher.
                 # Claude in Chrome defaults are for Claude children; do not hand them on
                 # through a Codex child (the tmux server env may carry them).
                 unset AGENTSTACK_CLAUDE_CHILD_CHROME AGENTSTACK_CLAUDE_CHILD_CHROME_DEVICE
@@ -3614,7 +3634,7 @@ ${TASK}"
                     exit 1
                 fi
                 rm -f "$AGENTSTACK_CODEX_PROMPT_FILE"
-                env -u OPENAI_API_KEY "$AGENTSTACK_CODEX_BIN" -C "$PWD" --sandbox workspace-write $(printf "%s" "$AGENTSTACK_CODEX_APPROVAL") $(printf "%s" "$AGENTSTACK_CODEX_NETWORK_FLAGS") -c check_for_update_on_startup=false \
+                env -u OPENAI_API_KEY "$AGENTSTACK_CODEX_BIN" -C "$PWD" $(printf "%s" "$AGENTSTACK_CODEX_PERMISSION_FLAGS") $(printf "%s" "$AGENTSTACK_CODEX_NETWORK_FLAGS") -c check_for_update_on_startup=false \
                     "${EXTRA_ARGS[@]}" --model "$AGENTSTACK_CODEX_MODEL" -- "$AGENTSTACK_CODEX_TASK"
                 /bin/bash "$AGENTSTACK_HOOKS_DIR/cleanup-child-agent.sh"
             '"'"''
@@ -4394,7 +4414,13 @@ if [[ -z "$HARNESS" ]]; then prime_codex_bin; fi
 if [[ -n "$HARNESS" ]]; then
     TMUX_ENV_ARGS=(-e "AGENT_NAME=$CHILD_NAME" -e "CLAUDECODE=1" -e "AGENTSTACK_RESERVED_IDENTITY=1" -e "PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_HOOKS_DIR=$HOOKS_DIR" -e "AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR" -e "AGENTSTACK_MCP_URL=$MCP_URL" -e "AGENTSTACK_MAIL_ENV=$MAIL_ENV" -e "AGENTSTACK_MAIL_HTTP_BEARER_MODE=$HTTP_BEARER_MODE" -e "AGENTSTACK_CHILD_RESUME_RETENTION_DAYS=$CHILD_RESUME_RETENTION_DAYS")
 else
-TMUX_ENV_ARGS=(-e "CLAUDECODE=1" -e "AGENTSTACK_RESERVED_IDENTITY=1" -e "AGENT_NAME=$CHILD_NAME" -e "PARENT_AGENT=$PARENT_NAME" -e "PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_HOOKS_DIR=$HOOKS_DIR" -e "AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR" -e "AGENTSTACK_MCP_URL=$MCP_URL" -e "AGENTSTACK_MAIL_ENV=$MAIL_ENV" -e "AGENTSTACK_MAIL_HTTP_BEARER_MODE=$HTTP_BEARER_MODE" -e "AGENTSTACK_CHILD_RESUME_RETENTION_DAYS=$CHILD_RESUME_RETENTION_DAYS" -e "AGENTSTACK_TERMINAL=$TERMINAL_SETTING" -e "AGENTSTACK_AUTO_OPEN_CHILD=$AUTO_OPEN_CHILD" -e "AGENTSTACK_CODEX_APPROVAL=$(codex_approval_flags)" -e "AGENTSTACK_CODEX_NETWORK_FLAGS=$(codex_network_flags)")
+    TMUX_ENV_ARGS=(-e "CLAUDECODE=1" -e "AGENTSTACK_RESERVED_IDENTITY=1" -e "AGENT_NAME=$CHILD_NAME" -e "PARENT_AGENT=$PARENT_NAME" -e "PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_PROJECT_KEY=$PROJECT_KEY" -e "AGENTSTACK_HOOKS_DIR=$HOOKS_DIR" -e "AGENTSTACK_RUNTIME_DIR=$RUNTIME_DIR" -e "AGENTSTACK_MCP_URL=$MCP_URL" -e "AGENTSTACK_MAIL_ENV=$MAIL_ENV" -e "AGENTSTACK_MAIL_HTTP_BEARER_MODE=$HTTP_BEARER_MODE" -e "AGENTSTACK_CHILD_RESUME_RETENTION_DAYS=$CHILD_RESUME_RETENTION_DAYS" -e "AGENTSTACK_TERMINAL=$TERMINAL_SETTING" -e "AGENTSTACK_AUTO_OPEN_CHILD=$AUTO_OPEN_CHILD")
+    if [[ "$USE_CODEX" == true ]]; then
+        TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_PERMISSION_FLAGS=$(codex_permission_flags)")
+    else
+        TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_APPROVAL=$(codex_approval_flags)")
+    fi
+    TMUX_ENV_ARGS+=(-e "AGENTSTACK_CODEX_NETWORK_FLAGS=$(codex_network_flags)")
 fi
 append_child_workspace_environment
 if [[ -n "$AGENTSTACK_HOME_DIR" ]]; then
@@ -4505,7 +4531,7 @@ elif [[ "$USE_CODEX" == true ]]; then
                 exit 1
             fi
             rm -f "$AGENTSTACK_CODEX_PROMPT_FILE"
-            env -u OPENAI_API_KEY "$AGENTSTACK_CODEX_BIN" -C "$PWD" --sandbox workspace-write $(printf "%s" "$AGENTSTACK_CODEX_APPROVAL") $(printf "%s" "$AGENTSTACK_CODEX_NETWORK_FLAGS") -c check_for_update_on_startup=false \
+            env -u OPENAI_API_KEY "$AGENTSTACK_CODEX_BIN" -C "$PWD" $(printf "%s" "$AGENTSTACK_CODEX_PERMISSION_FLAGS") $(printf "%s" "$AGENTSTACK_CODEX_NETWORK_FLAGS") -c check_for_update_on_startup=false \
                 "${EXTRA_ARGS[@]}" --model "$AGENTSTACK_CODEX_MODEL" -- "$AGENTSTACK_CODEX_TASK"
             /bin/bash "$AGENTSTACK_HOOKS_DIR/cleanup-child-agent.sh"
         '"'"''

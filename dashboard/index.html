@@ -2654,11 +2654,13 @@
 .effort-not-supported{display:block;font:12px/1.5 var(--sans);color:var(--ink-dim);padding:4px 0}
 </style>
 <link rel="stylesheet" href="theme_light.css">
+<link rel="stylesheet" href="mail_markdown.css">
 <link rel="stylesheet" href="help_map.css">
 <script src="network_node.js"></script>
 <script src="network_core.js"></script>
 <script src="theme_core.js"></script>
 <script src="theme_controller.js"></script>
+<script src="conversation_markdown.js" defer></script>
 <script src="help_map.js" defer></script>
 <link rel="stylesheet" href="tour_cue.css">
 <script src="tour_cue.js" defer></script>
@@ -34497,8 +34499,8 @@ function bay(a,i){
     chips.push(`<span class="chip imp" title="${esc(stop.error||'')} · ${esc(stop.notification_status||'')}">MODEL CAPACITY${stop.notification_status==='delivery_unknown'?' · MAIL UNCONFIRMED':''}</span>`);
   }
   if(a.running&&a.act_state){
-    if(a.act_state==='work'&&(a.work_disp||typeof a.ctx_used==='number')){
-      stind=`<div class="stind work" title="working ${esc(a.work_disp||'')}">`+
+    if(a.act_state==='work'){
+      stind=`<div class="stind work" title="Reported or observed work state${a.work_disp?' · '+esc(a.work_disp):''}">`+
         `<span class="led-sq"></span>`+
         `<span class="t">${esc(a.work_disp||'WORKING')}</span></div>`;
     }else if(a.act_state==='question'){
@@ -34526,7 +34528,7 @@ function bay(a,i){
   if(a.live){
     live=`<div class="live" title="${esc(a.live)}"><span>${esc(a.live)}</span></div>`;
   }else{
-    live=`<div class="live standby">— STANDBY · no live activity —</div>`;
+    live=`<div class="live standby">— NO LIVE SUMMARY —</div>`;
   }
 
   const task=a.task
@@ -34577,7 +34579,7 @@ function bay(a,i){
     <div class="foot">
       <div class="foot-left">
         <s>${a.running?'● ONLINE':'○ SHELL'}</s>
-        <span class="dim">LAST ${esc(a.last_active_rel)}</span>
+        <span class="dim" title="Last recorded event; can stay old while working">LAST EVENT ${esc(a.last_active_rel)}</span>
         <span class="dim" title="${esc(a.cmd||'—')}">${esc((a.cmd||'—').slice(0,10))}</span>
         ${a.interaction==='headless'
           ? '<span class="interaction-headless" title="persistent profile interaction">BRIDGE · HEADLESS</span>'
@@ -35042,7 +35044,7 @@ function renderDrawerThread(j){
     const imp=mailImportance(m.importance);
     const ackBadge=m.ack_required && !m.ack_ts ? '<span class="ed-ack">◬ ACK</span>' : '';
     const prev=(m.body||'').trim();
-    return `<div class="ed-msg" onclick="toggleMsg(event)">
+    return `<div class="ed-msg">
       <div class="ed-meta">
         <span class="ed-ts">${esc(ts)}</span>
         <span class="ed-dir">${esc(m.sender)} → ${esc(m.recipient)}</span>
@@ -35050,12 +35052,23 @@ function renderDrawerThread(j){
       </div>
       <div class="ed-subj">${esc(m.subject||'(no subject)')}</div>
       <div class="ed-prev">${esc(prev)}</div>
+      <div class="mail-markdown" hidden></div>
     </div>`;
   }).join('');
   root.innerHTML=html;
-}
-function toggleMsg(ev){
-  ev.currentTarget.classList.toggle('expanded');
+  root.querySelectorAll('.ed-msg').forEach((card,i)=>{
+    const body=card.querySelector('.mail-markdown');
+    card.addEventListener('click',event=>{
+      if(body.contains(event.target))return;
+      const expanded=card.classList.toggle('expanded');
+      if(expanded&&!body.hasChildNodes()){
+        const text=j.messages[i].body||'',markdown=window.OrreryConversationMarkdown;
+        if(markdown)markdown.renderDocument(text,body,{codeControls:true});
+        else body.textContent=text;
+      }
+      body.hidden=!expanded;
+    });
+  });
 }
 // close on ESC / outside-click (network area only — deck の他の UI と干渉しない)
 document.addEventListener('keydown',ev=>{
@@ -35082,8 +35095,13 @@ function tipShow(name,ev){
     : '';
   const ROLE={parent:'parent (delegator)',child:'child (delegated)',
     both:'both',none:'none'};
-  const roleRow=`<div class="gt-row"><b>role</b><span>`+
-    `${ROLE[g.role]||'—'}</span></div>`;
+  // "role" is the role a person assigned (the same one NETWORK shows); the
+  // delegation position (parent/child) is a separate row.
+  const assignedRole=g.annot&&g.annot.role||'';
+  const roleRow=(assignedRole
+    ? `<div class="gt-row"><b>role</b><span>${esc(assignedRole)}</span></div>`
+    : '')+
+    `<div class="gt-row"><b>lineage</b><span>${ROLE[g.role]||'—'}</span></div>`;
   const dv=+g.deliv||0;
   const delivRow=dv>0
     ? `<div class="gt-row"><b>out</b><span>¶ ${dv} logs</span></div>`
@@ -37142,7 +37160,7 @@ function openPanelInner(name){
   T.classList.toggle('s-run',run);
   TM('tm-meta').textContent=
     stat+(a.model?' · '+a.model:'')+(a.ctx_window?' · '+a.ctx_window:'')
-    +(rel?' · last '+rel:'');
+    +(rel?' · last event '+rel:'');
   // The buttons read the newest source from the start, as refreshes do. Before
   // either has arrived (a link opened at start) nothing is known to be gone.
   const now=panelAgentState(name);
@@ -37240,7 +37258,11 @@ function renderPanelSummary(name, a, g){
     rows.push(`<div class="ts-row"><b>mail</b><span>UNAVAILABLE · ${esc(a.mail_reason||g.mail_reason||'')}<br>${esc(a.mail_message||g.mail_message||'This agent cannot send or receive ORRERY Mail')}</span></div>`);
   const ROLE={parent:'parent (delegator)',child:'child (delegated)',
     both:'both',none:'none'};
-  if(role) rows.push(`<div class="ts-row"><b>role</b><span>${ROLE[role]||'—'}</span></div>`);
+  // The assigned role (the one NETWORK shows) first; the delegation position
+  // used to be labelled "role" too and looked like a stale assignment.
+  const assignedRole=(a.annot&&a.annot.role)||(g.annot&&g.annot.role)||'';
+  if(assignedRole) rows.push(`<div class="ts-row"><b>role</b><span>${esc(assignedRole)}</span></div>`);
+  if(role) rows.push(`<div class="ts-row"><b>lineage</b><span>${ROLE[role]||'—'}</span></div>`);
   const resumeCategory=a.category||
     (a.retired?'retired':(a.state||(a.running?'run':a.present?'finished':'gone')));
   if(isResumeCategory(resumeCategory)){

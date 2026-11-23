@@ -67,8 +67,11 @@ Codex 自身が固定エラー文を折り返す場合も検知します。固�
 | `ORD` | そのエージェントに与えられている直近の指示です。 |
 | `RX` | ORRERY Mail で直近に受信した指示です。送信者、件名、重要度が並びます。まだ受信がなければ行自体がありません。 |
 | `● ONLINE` | agent process が稼働中です。**いま仕事を進めているという意味とは限りません**。 |
-| 右上の状態表示 | 黄色の秒数は作業中、薄い `LAST …` は入力待ち、`?` と `APPROVAL` は人の介入待ちです。 |
+| 右上の状態表示 | 黄色の所要時間（不明なら `WORKING`）は provider が報告・観測した作業状態、薄い `LAST …` は入力待ち、`?` と `APPROVAL` は人の介入待ちです。 |
+| footer の `LAST EVENT` | 最後に記録されたイベントの古さです。長い tool 実行中は更新されないことがあり、停止を意味しません。時刻不明は `—` のままです。 |
 | `↩ EXIT` | 稼働中のエージェントへ graceful な `/exit` を送ります。誤操作防止のため二度押しで確定します。 |
+
+`NO LIVE SUMMARY` は表示用の要約が無いことを示し、待機・停止の判定ではありません。現在の状態は右上の表示と分けて読みます。Codex App の登録中も既存の work 分類を表示し、進捗を保証しません。
 
 次の画像では12枚に増え、Warm-Lovelace などのカードに `RX` が現れています。`ORD` と見比べると「担当」と「最後に誰から何を受け取ったか」を分けて読めます。
 
@@ -81,10 +84,12 @@ Codex 自身が固定エラー文を折り返す場合も検知します。固�
 | 表示 | 数えているもの | カードでの見え方 |
 | --- | --- | --- |
 | `NEED YOU` | 人を待っている agent。承認待ち（`APPROVAL`）と、選択肢を聞いている（`?`） | 赤枠、または `?` |
-| `WORKING` | turn が進行中の agent | amber の LED と経過時間 |
+| `WORKING` | turn が進行中の agent | amber の LED と所要時間（不明なら `WORKING`） |
 | `WAITING` | prompt で入力を待っていて、仕事を渡せる agent | `LAST 1M41S` |
 
 Codex の狭い pane で現在の `Working` / `Thinking` 行が `…` に省略されても、作業中として読み取ります。経過時間は見えている単位までを表示し、読めなければ出しません。後の返答や完了表示に置き換わった状態行・本文中の引用は、現在の作業の証拠にしません。
+
+Codex が現在の `Working` 行と入力欄の間に追加指示のキュー（`Queued follow-up inputs`）を表示している間も、作業中として読み取ります。キューだけでは作業中にしません。footer のモデルが `GPT-6.1 Terra max` のように種類を空白で区切る表示名でも入力欄の footer と認め、モデルを `GPT-6.1-Terra` と表示します。
 
 `NEED YOU` は該当する agent がいるときだけ現れ、クリックすると DECK がその agent だけに絞られます（もう一度クリックで戻ります）。process が止まって shell に戻った agent はどの数にも入りません。カードの `○ SHELL` で分かります。active agent の総数は sector 見出しの `ACTIVE AGENTS [ 29 ]` にあります。
 
@@ -345,6 +350,8 @@ Local Qwen は六角形の中に Qwen のロゴを表示し、DeepSeek は接続
 `AGENTSTACK_SPAWN_DIRS` の preset chip と exact path input を表示します。preset は installer の `--spawn-dirs` で永続化します（shell の `export` は service に届きません。[configuration.md](configuration.md) の「Spawn directory」参照）。input は `/api/fs/dirs` の root-scoped typeahead で、arrow key / Enter でも選択できます。最後に使った directory は `localStorage` に保存します。
 
 typeahead は `AGENTSTACK_SPAWN_ROOTS` の外へ出ず、hidden directory、`..`、root 外への symlink を候補にしません。
+
+ORRERY のフォルダ選択画面では、パンくずで検索の起点を選べます。検索欄が空の間はその場所の子フォルダが並び、入力すると配下の一致を現在の場所からの相対パスで表示します。上下キーで移動し、Enter で子フォルダを開くか検索結果を選択します。探索範囲と上限は [フォルダ検索 API](api.md#get-apifsdir-search) を参照してください。
 
 ### Task と ADVANCED
 

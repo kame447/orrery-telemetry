@@ -59,7 +59,7 @@ the final check and a later send.
 
 Additional trusted plumbing and tests are still required before enabling:
 
-- The fork's API 42 now supports an explicit legacy-only `mail_create_only`
+- The fork's API 46 now supports an explicit legacy-only `mail_create_only`
   standalone spawn. It requires the canonical Mail `register_agent.create_only`
   guard, which refuses an existing or concurrently created identity instead of
   claiming or updating it. The registration and ready response carry the

@@ -59,7 +59,9 @@ Codex では `$delegate` でこの skill を呼びます（`/skills` でも選�
 
 ## Codex child と MCP 承認
 
-Codex child は無人実行のため既定で `--ask-for-approval never` です。shell command の承認とは別に MCP tool にも承認設定があり、明示的な許可がない inherited server を呼ぶと `MCP tool call requires approval, but approval policy is never` で直ちに失敗します。全 Codex child に同じ許可を与えるには TOML fragment を用意し、installer の `--codex-child-overlay /absolute/path/to/overlay.toml` で保存します。
+親付きの Codex child は無人実行のため既定で `--ask-for-approval never` です。`AGENTSTACK_CODEX_CHILD_APPROVAL` でこの値を変更できます。NEW AGENT の親なし起動と、その記録があるセッションの再開では承認引数を省略します。Codex は overlay を適用した `config.toml` の `approval_policy` に従い、未設定なら自身の既定値を使います。親なし起動の記録がない既存セッションの再開には、従来の子の承認設定を適用します。
+
+shell command の承認とは別に MCP tool にも承認設定があります。承認方針が `never` のとき、明示的な許可がない inherited server を呼ぶと `MCP tool call requires approval, but approval policy is never` で直ちに失敗します。全 Codex child に同じ許可を与えるには TOML fragment を用意し、installer の `--codex-child-overlay /absolute/path/to/overlay.toml` で保存します。
 
 server 全体を許可する最小例です。
 
@@ -99,7 +101,7 @@ launcher は、子の `CODEX_HOME` の `config.toml` だけに、元の checkout
 
 `/delegate "<task>" --codex --codex-mcp orrery-only` を明示すると、child 専用 `config.toml` は認証済み ORRERY Mail と session-binding に必要な AgentStack plugin だけを残し、それ以外の継承 MCP server と plugin を `enabled = false` にします。shell と file 操作は残りますが、plugin が提供する skill / app tool も無効になるため、それらを使う task には指定しません。
 
-既定は `inherit` で、従来どおり利用者の MCP/plugin 設定を継承します。これは既存 child の能力を黙って削らないためです。maintainer の macOS 実測では、未使用でも起動していた `chrome-devtools`、`node_repl`、Rhino の RSS が合計約 208 MB/child でした。RSS は共有 page を重複計上し、環境ごとに異なるため、これは物理解放量の保証ではなく profile 選択の目安です。
+既定の `inherit` は利用者の MCP/plugin 設定を継承します。Codex child の生成設定では、`chrome-devtools` と `chrome-devtools-mcp` を直接起動する別名の server は、`--tools mcp:chrome-devtools` や `--tools browser` などで選んだ場合だけ有効になります。Chrome 拡張と連携する `chrome@openai-bundled` は `--tools chrome-extension` で選びます。
 
 #### 途中で必要な MCP が増えたとき
 
@@ -168,8 +170,8 @@ scripts/canary-embed-task.sh --models opus,sonnet,haiku --places vault,outside -
 
 `/delegate "<task>" --base mail-only --tools screen:read:windows-mcp` のように、child に渡す道具を起動時に選べます。`/api/spawn` では `base` と `tools` です（[API](api.md#post-apispawn)）。解釈は `hooks/child_tools.py` が一手に行います。
 
-- **`--base` を省く・`default`**: Claude child の MCP は ORRERY Mail だけで、ブラウザ（Claude in Chrome）と Mac の computer use は利用者の Claude 設定と起動ディレクトリしだいで届きます。Codex child は利用者の MCP を継承します。dsh・Hermes child は認証済み Mail に加え、Codex の有効な Chrome MCP 定義だけを継承します（下記）。`--tools` で選んだものはこれに足します
-- **`--base mail-only`**: ORRERY Mail と `--tools` で選んだものだけを渡します。Claude child はブラウザを選ばなければ `--no-chrome` も付けます。Codex child は `--codex-mcp orrery-only` と同じ無効化をしてから、選んだ server だけを有効にします（`--codex-mcp inherit` との併用は拒否します）
+- **`--base` を省く・`default`**: Claude child の MCP は ORRERY Mail だけで、ブラウザ（Claude in Chrome）と Mac の computer use は利用者の Claude 設定と起動ディレクトリしだいで届きます。Codex child は上記の `inherit` に従います。dsh・Hermes child は認証済み Mail に加え、Codex の有効な Chrome MCP 定義だけを継承します（下記）。`--tools` で選んだものはこれに足します
+- **`--base mail-only`**: ORRERY Mail と `--tools` で選んだものだけを渡します。Claude child はブラウザを選ばなければ `--no-chrome` も付けます。Codex child は `--codex-mcp orrery-only` と同じ無効化をしてから、選んだ server や plugin を有効にします（`--codex-mcp inherit` との併用は拒否します）
 
 | `--tools` | Claude child | Codex child |
 |---|---|---|
@@ -178,6 +180,7 @@ scripts/canary-embed-task.sh --models opus,sonnet,haiku --places vault,outside -
 | `screen:<read\|operate>:<server>` | 利用者の画面系 server（WSL の Windows-MCP など）を strict の設定に写します | 子の `config.toml` でその server を有効にします |
 | `mcp:<server>` | 利用者の server の定義を strict の設定に写します（tool は承認しない） | 子の `config.toml` でその server を有効にします（tool は承認しない） |
 | `mcp:<server>:all` | 上に加えて、表で分かる全 tool を承認します | 上に加えて、表で分かる全 tool を tool ごとに承認します |
+| `chrome-extension` | 使えません | `config.toml` で設定済みの `chrome@openai-bundled` を有効にします。`orrery-screen` との併用は拒否します |
 
 ### dsh・Hermes の既定ブラウザ
 
@@ -252,9 +255,11 @@ MCP tool から拒否メッセージが返った場合、子は拒否された�
 
 ### installer の既定の道具
 
-`--child-default-tools 'browser,screen:operate'` は `AGENTSTACK_CHILD_DEFAULT_TOOLS` を env.sh・service 定義・install-state に保存します。既定は空です。launcher が適用するのは `--base`・`--tools`・`--codex-mcp` を明示していないときだけで、`--base default` を明示するとその起動には既定を追加しません。
+`--child-default-tools 'mcp:cua-driver'` は `AGENTSTACK_CHILD_DEFAULT_TOOLS` を env.sh・service 定義・install-state に保存します。既定は空です。Claude・Codex・dsh・Hermes の標準の新規起動に適用します。CLI では `--base`・`--tools`・`--codex-mcp` を、`/api/spawn`（NEW AGENT を含む）では `base`・`tools` を省略した場合が対象です。
 
-provider と最終の作業フォルダで、既定の項目を1つずつ確認します。使えない項目だけを外して使える項目は保ち、外したことを spawn の出力と子の最初の指示に残します。明示した base/tools/MCP profile は既定より優先し、既定を適用しなかった理由も出力と最初の指示に残します。明示指定は従来どおり、適用できなければ起動を止めます。道具以外の Mail proxy・認証・起動の失敗は、この項目別の省略では回避しません。選んだ結果は既存の Claude launch record／Codex tools record に保存し、resume は installer の現在の既定を足さず同じ道具を再構築します。Mac の Codex は server 名なしの `screen:operate` を外し、node_repl を自動承認しません。
+共通の一覧の後に `;claude=SPEC`、`;codex=SPEC`、`;dsh=SPEC`、`;hermes=SPEC` を付けると、該当する provider の一覧を置き換えます。各一覧は `--tools` と同じ文法で、上書きを省略すると共通の一覧を使い、空の上書きは installer の既定を抑止します。たとえば `--child-default-tools 'mcp:cua-driver;dsh='` は dsh 以外に `cua-driver` を渡します。
+
+provider と最終の作業フォルダで、既定の項目を1つずつ確認します。使えない項目だけを外して使える項目は保ち、外したことを spawn の出力と子の最初の指示に残します。明示した base/tools/MCP profile は既定より優先します。`--base default`、API の `base: "default"` や `tools: {}` でも installer の既定を抑止できます。明示した道具を適用できないときや、Mail proxy・認証・起動に失敗したときは起動を止めます。resume は起動時に記録した選択を使い、installer の現在の既定を追加しません。Mac の Codex は server 名なしの `screen:operate` を外し、node_repl を自動承認しません。
 
 ### 承認
 
@@ -296,7 +301,7 @@ WSL から起動した Windows のプロセスは、その WSL が動く Windows
 "${AGENTSTACK_HOME:-$HOME/.agentstack}/bin/agentstack-resume" <NAME> --clear-tools --detached
 ```
 
-`tools` は全置換です。残したい項目もすべて指定し、`--clear-tools`（API の `tools: {}`）で追加の道具を外します。base 省略は既存の base を維持し、`--base` だけの指定は道具を維持します。両方省略すると従来の選択で resume します。installer の既定は追加しません。grammar・provider・cwd・分類表・MCP コピーと既存の Mail 認証を検証し、適用できない明示指定は止めます。変更できるのは retained state がある Claude/Codex CLI child だけで、standalone・古い移行前の子・conversation-only・Codex App は拒否します。
+`tools` は全置換です。残したい項目もすべて指定し、`--clear-tools`（API の `tools: {}`）で追加の道具を外します。base 省略は既存の base を維持し、`--base` だけの指定は道具を維持します。両方省略すると従来の選択で resume します。installer の既定は追加しません。grammar・provider・cwd・分類表・MCP コピーと既存の Mail 認証を検証し、適用できない明示指定は止めます。選択を保持する変更は retained state がある Claude/Codex CLI child が対象です。会話だけで Claude を再開する場合は、`/api/jump` で起動ごとに Chrome と `orrery-screen` を選べます。[再開 API の指定例](api.md#post-apijump)
 
 子ごとの排他と世代を使って候補を準備し、既存 resume の起動成功で確定します。起動失敗はその世代の旧記録・生成設定に戻します。別の登録・変更を古い rollback で上書きしません。Claude の置換記録は version 4 で、空の選択も保存でき、既存 version 2/3 は読めます。API 成功は tmux／terminal が起動を受け付けたことを意味し、shell 内の bootstrap／認証の完了や MCP 呼び出しの成功は待ちません。後から bootstrap が失敗しても新しい道具の記録は確定したまま残り、次の resume にも使います。再開した子から Mail で同じ会話と必要な道具の実呼び出しの報告を受け、受信を確認してください。/delegate の最後の受信確認は省略できません。
 
@@ -333,7 +338,7 @@ ORRERY から起動した agent（child・NEW AGENT）に、ブラウザと comp
 | 経路 | 届き方 |
 |---|---|
 | `/delegate` の child | `--tools`・`--claude-chrome(-device)`・overlay が効く |
-| NEW AGENT（親なし、`--standalone`） | Codex は child と同じ生成 home・同じ承認方針なので、overlay と `--tools` の記録が効く。Claude は NEW AGENT のフォームで指定した値だけを使い、`AGENTSTACK_CLAUDE_CHILD_CHROME` の env は使いません。`--tools` の欄は NEW AGENT にまだありません |
+| NEW AGENT（親なし、`--standalone`） | Codex は child と同じ生成 home を使い、overlay と `--tools` の記録が効きます。承認方針は Codex の設定に従います。Claude は NEW AGENT のフォームで指定した値だけを使い、`AGENTSTACK_CLAUDE_CHILD_CHROME` の env は使いません。`--tools` の欄は NEW AGENT にまだありません |
 | resume | Codex は起動と resume のたびに home を作り直すので overlay が効きます。Claude は起動の記録から同じ設定を復元します（記録が無い child は ORRERY の選択を復元せず、利用者の Claude 設定をそのまま継承します。ブラウザや computer use が付かないことを意味しません） |
 | 人が端末で直接起動した `claude` / `codex` | 対象外です。実際の `~/.claude`・`~/.codex` の設定だけで決まり、ORRERY は変えません |
 
@@ -349,7 +354,7 @@ ORRERY から起動した agent（child・NEW AGENT）に、ブラウザと comp
 - **Claude の computer use（Mac）**: 使いたい project で `/mcp` から有効にします（`~/.claude.json` の `projects[<dir>].enabledMcpServers`）
 - **Windows の computer use（Windows-MCP）**: Windows-MCP は RDP などの対話セッションで動かします。ssh から起動した WSL はセッション 0 で、画面が取れません
 
-承認の入口は 1 つに保ってください。全 Codex child に一括で渡すなら overlay、child ごとに選ぶなら `--tools` です。overlay の `default_tools_approval_mode = "approve"` は、その server の全 tool（chrome-devtools の `evaluate_script` を含む）を承認します。
+共通の承認は overlay で設定し、child に渡す Chrome MCP は `--tools` で選びます。overlay の `default_tools_approval_mode = "approve"` は、その server の全 tool（chrome-devtools の `evaluate_script` を含む）を承認します。
 
 ## 使い分け
 

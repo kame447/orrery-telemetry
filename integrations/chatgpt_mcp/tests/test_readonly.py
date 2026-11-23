@@ -320,7 +320,7 @@ def test_http_legacy_mode_and_mode_mismatch(tmp_path):
             assert response[1]["result"]["structuredContent"]["error"]["code"] == "dashboard_unavailable"
 
 
-@pytest.mark.parametrize("api", [34, 35, 36, 37, 38, 39, 40, 41])
+@pytest.mark.parametrize("api", [34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46])
 def test_supported_fresh_generations_still_require_fresh_contract(api):
     version = {**FRESH, "api": api}
     data = snapshot(FakeDashboard(version, AGENTS_FRESH), "fresh")
@@ -330,7 +330,7 @@ def test_supported_fresh_generations_still_require_fresh_contract(api):
 
 
 @pytest.mark.parametrize("mode", ["legacy", "fresh"])
-@pytest.mark.parametrize("api", [999, 42, 33, True, "39", None])
+@pytest.mark.parametrize("api", [999, 47, 33, True, "39", None])
 def test_unknown_generations_are_rejected_before_roster_read(api, mode):
     version, roster = (LEGACY, AGENTS_LEGACY) if mode == "legacy" else (FRESH, AGENTS_FRESH)
     backend = FakeDashboard({**version, "api": api}, roster)

@@ -12,11 +12,57 @@ from pathlib import Path
 
 import pytest
 
-from dashboard.mobile_relay import CSP, static_assets
+from dashboard.mobile_relay import CSP, PANE_CSP, SHELL_CSP, static_assets
 from test_dashboard_help_map import _WebSocket
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT = '**Benchmark result**\n\nThe larger cache improves throughput on long inputs. The short runs stay stable.\n\n| Input | Small | Large |\n|---|---:|---:|\n| 512 | 151 | 149 |\n| 4K | 573 | 588 |\n| 16K | 996 | 985 |\n\nRun the same inputs with `--repeat 3`:\n\n```sh\npython bench.py --repeat 3\n  --cache 512K\n```'
+
+
+MAIL_MARKDOWN = '''## Release checks
+
+**Ready** for review.
+
+| Check | Previous package | Current signed package | Regression threshold | Follow-up owner |
+| --- | --- | --- | --- | --- |
+| Browser reconnect | 8 of 8 | 8 of 8 | All runs pass | Browser QA |
+| Keyboard focus | Needs review | Verified | Focus restored | Accessibility |
+
+- Confirm the signed archive.
+- Keep the rollout on hold.
+
+```sh
+python verify.py --release staging
+```
+
+[Report](/workspace/release/report.md) and [Release guide](https://example.test/guide).
+
+Literal HTML: <em data-fixture>sample</em>.
+'''
+
+def assert_mail_markdown(js, selector):
+    result = js("""(selector => {
+        const body=document.querySelector(selector), table=body.querySelector('.conversation-table-scroll');
+        const path=body.querySelector('[data-path-candidate="/workspace/release/report.md"]');
+        const link=body.querySelector('a');
+        const width=table.clientWidth;
+        table.scrollLeft=table.scrollWidth;
+        return {
+            heading:body.querySelector('h2').textContent,
+            emphasis:[body.querySelector('strong').textContent,getComputedStyle(body.querySelector('strong')).display],
+            rows:body.querySelectorAll('table tr').length,
+            items:body.querySelectorAll('li').length,
+            code:body.querySelector('pre').textContent,
+            path:[path.textContent,path.tagName,path.getAttribute('href')],
+            link:[link.href,link.rel],
+            literal:body.textContent.includes('<em data-fixture>sample</em>')&&!body.querySelector('[data-fixture]'),
+            contained:table.scrollLeft>0&&table.scrollWidth>width&&body.scrollWidth<=body.clientWidth+1,
+        };
+    })(""" + json.dumps(selector) + ')')
+    assert result == dict(heading='Release checks', emphasis=['Ready', 'inline'], rows=3, items=2,
+                         code='python verify.py --release staging\n', path=['Report', 'SPAN', None],
+                         link=['https://example.test/guide', 'noopener noreferrer'], literal=True,
+                         contained=True), result
 
 
 @pytest.fixture
@@ -43,7 +89,8 @@ def phone(request):
                 data = json.dumps(data,ensure_ascii=False).encode()
             self.send_response(status)
             self.send_header('Content-Type', mime)
-            self.send_header('Content-Security-Policy', CSP)
+            path = urlsplit(self.path).path
+            self.send_header('Content-Security-Policy', {'/': SHELL_CSP, '/reader-pane': PANE_CSP}.get(path, CSP))
             self.send_header('Content-Length', str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -58,11 +105,13 @@ def phone(request):
                 filename={'/demo-mask.js':'demo_mask.js','/demo-mode.js':'demo_mode.js'}[path]
                 return self.send((Path(os.environ['ORRERY_DEMO_BRIDGE_ROOT'])/filename).read_bytes(),'text/javascript')
             if path == '/view/message' and state['mail']:
-                return self.send(dict(event=state['mail'], subject='Fixture subject', body='Fixture message body', subject_truncated=False, body_truncated=False))
+                return self.send(dict(event=state['mail'], subject='Fixture subject', body=state.get('message_body','Fixture message body'), subject_truncated=False, body_truncated=False))
             if path == '/view/mail' and state['mail']:
                 return self.send(dict(window='day', direction='both', events=[state['mail']], next_cursor=None))
             if path == '/view/history':
                 return self.send(dict(enabled=True))
+            if path == '/view/spawn' and state.get('spawn_catalog'):
+                return self.send(state['spawn_catalog'])
             if path == '/view/snapshot':
                 return self.send(snapshot)
             if path == '/view/conversation':
@@ -91,7 +140,10 @@ def phone(request):
             state['calls'].append((operation, payload))
             selected = next((t for t in state.get('targets', [choice]) if t['choice'] == payload.get('choice')), choice)
             if operation == 'targets':
-                return self.send(dict(contract, targets=state.get('targets', [choice])))
+                targets = state.get('targets', [choice])
+                if state.get('workspace'):
+                    targets = [target for target in targets if target['name'] == payload.get('name')]
+                return self.send(dict(contract, targets=targets))
             if operation == 'preview':
                 return self.send(dict(contract, target=selected, text=state.get('preview_text', 'Generated terminal tail\nReady.'), max_lines=state.get('preview_lines',120), max_bytes=state.get('preview_bytes',12288), observed_at=time.time()), status=503 if state['preview_error'] else 200)
             if operation == 'image':
@@ -103,12 +155,22 @@ def phone(request):
                 paths = state.get('image_paths')
                 path = paths[attempt - 1] if paths else '/workspace/.orrery-input-images/'+'a'*32+'.png'
                 return self.send(dict(contract,target=selected,enabled=True,path=path))
+            if operation == 'file':
+                file = payload.get('file')
+                if file is None:
+                    return self.send(dict(contract,target=selected,enabled=state.get('files',False)))
+                if not state.get('files',False):
+                    return self.send(dict(error='file_workspace_unavailable'),status=503)
+                path = '/workspace/.orrery-input-files/'+'b'*32+'.'+file['format']
+                return self.send(dict(contract,target=selected,enabled=True,path=path))
             if operation == 'prepare':
                 state['draft'] = payload['text']
                 state['prepared_target'] = selected
                 return self.send(dict(contract, state='prepared', target=selected, text=payload['text'], expires_in=30, intent='fixture-intent', confirmation='fixture-confirmation'))
             if operation == 'commit':
-                return self.send(dict(contract, state='accepted', target=state.get('prepared_target',choice), intent='fixture-intent'))
+                return self.send(dict(contract, state=state.get('commit_state','accepted'), target=state.get('prepared_target',choice), intent='fixture-intent'))
+            if operation == 'status' and state.get('receipt_state'):
+                return self.send(dict(contract, state=state['receipt_state'], target=state.get('prepared_target',choice), intent='fixture-intent'))
             return self.send(dict(contract, state='cancelled'))
 
     server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
