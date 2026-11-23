@@ -107,7 +107,7 @@ def verify_mcp_spawn(*, enabled: bool, ledger: Mapping, launch: Mapping,
             or not _positive_id(sender.get("agent_id"))):
         raise AdmissionError("sender_binding_changed")
     if (peer.get("name") != name or peer.get("id") != agent_id
-            or peer.get("program") != {"claude": "claude-code", "codex": "codex"}[provider]
+            or peer.get("program") != {"claude": "claude-code", "codex": "codex-cli"}[provider]
             or peer.get("retired") is not False
             or not _positive_id(peer.get("project_id")) or peer.get("project_id") != project_id
             or peer.get("registered_at") != registered_at):
