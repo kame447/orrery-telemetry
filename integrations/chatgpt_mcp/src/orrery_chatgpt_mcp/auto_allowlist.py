@@ -57,6 +57,8 @@ def verify_mcp_spawn(*, enabled: bool, ledger: Mapping, launch: Mapping,
     """
     if enabled is not True:
         raise AdmissionError("opt_in_required")
+    if not all(isinstance(value, Mapping) for value in (ledger, launch, sender, peer)):
+        raise AdmissionError("invalid_attestation")
     if (ledger.get("mcp_authorized") is not True or ledger.get("state") != "accepted"
             or not isinstance(ledger.get("preview_id"), str)
             or not _HEX64.fullmatch(ledger["preview_id"])):
@@ -71,11 +73,15 @@ def verify_mcp_spawn(*, enabled: bool, ledger: Mapping, launch: Mapping,
     agent_id = result.get("mail_agent_id")
     instance = result.get("mail_instance_id")
     project = result.get("mail_project_key")
+    provider = result.get("provider")
+    if provider not in ("claude", "codex"):
+        raise AdmissionError("unattested_spawn")
     if (not _positive_id(agent_id) or not isinstance(instance, str) or not instance
             or not isinstance(project, str) or not Path(project).is_absolute()):
         raise AdmissionError("unattested_spawn")
     if not all((row.get("child_name") == name and row.get("mail_agent_id") == agent_id
-                and row.get("mail_instance_id") == instance and row.get("mail_project_key") == project)
+                and row.get("provider") == provider and row.get("mail_instance_id") == instance
+                and row.get("mail_project_key") == project)
                for row in (result, observed)) or launch.get("name") != name:
         raise AdmissionError("spawn_binding_changed")
     if (sender.get("instance") != instance or sender.get("project_key") != project
@@ -83,6 +89,7 @@ def verify_mcp_spawn(*, enabled: bool, ledger: Mapping, launch: Mapping,
             or not _positive_id(sender.get("agent_id"))):
         raise AdmissionError("sender_binding_changed")
     if (peer.get("name") != name or peer.get("id") != agent_id
+            or peer.get("program") != {"claude": "claude-code", "codex": "codex"}[provider]
             or peer.get("retired") is not False
             or not _positive_id(peer.get("project_id"))
             or not isinstance(peer.get("registered_at"), str)
