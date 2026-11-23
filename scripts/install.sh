@@ -81,6 +81,7 @@ WORKTREE_ROOT_SETTING="${AGENTSTACK_WORKTREE_ROOT:-}"
 # installed env.sh > product default (approval `never`, network on, no extra
 # writable roots). Children run unattended, so the defaults avoid prompts
 # nobody is there to answer.
+CODEX_SANDBOX_SETTING="${AGENTSTACK_CODEX_SANDBOX:-}"
 CODEX_CHILD_APPROVAL_SETTING="${AGENTSTACK_CODEX_CHILD_APPROVAL:-}"
 CODEX_CHILD_CONFIG_OVERLAY_SETTING="${AGENTSTACK_CODEX_CHILD_CONFIG_OVERLAY:-}"
 CODEX_NETWORK_SETTING="${AGENTSTACK_CODEX_NETWORK:-}"
@@ -204,7 +205,8 @@ Options:
                          Absolute path to a TOML fragment merged over every
                          macOS/Linux Codex child's config.toml (default:
                          existing env.sh, else disabled)
-  --child-default-tools SPEC  default child tools (same grammar as --tools; empty by default)
+  --child-default-tools SPEC  default child tools (same grammar as --tools; empty by default).
+                         Append ;claude=SPEC, ;codex=SPEC, ;dsh=SPEC or ;hermes=SPEC to override.
   --codex-network MODE   on or off: sandbox network access for Codex children
                          (default: existing env.sh, else on)
   --codex-bin PATH       Codex CLI executable used by the dashboard and child
@@ -746,6 +748,7 @@ resolve_setting AUTO_OPEN_CHILD_SETTING AGENTSTACK_AUTO_OPEN_CHILD 1
 resolve_setting SPAWN_DIRS_SETTING AGENTSTACK_SPAWN_DIRS
 resolve_setting SPAWN_ROOTS_SETTING AGENTSTACK_SPAWN_ROOTS
 resolve_setting WORKTREE_ROOT_SETTING AGENTSTACK_WORKTREE_ROOT "$INSTALL_DIR/worktrees"
+resolve_setting CODEX_SANDBOX_SETTING AGENTSTACK_CODEX_SANDBOX workspace-write
 resolve_setting CODEX_CHILD_APPROVAL_SETTING AGENTSTACK_CODEX_CHILD_APPROVAL never
 resolve_setting CODEX_CHILD_CONFIG_OVERLAY_SETTING AGENTSTACK_CODEX_CHILD_CONFIG_OVERLAY
 resolve_setting CODEX_NETWORK_SETTING AGENTSTACK_CODEX_NETWORK on
@@ -1070,6 +1073,10 @@ case "$AUTO_OPEN_CHILD_SETTING" in
     exit 2
     ;;
 esac
+case "$CODEX_SANDBOX_SETTING" in
+  read-only|workspace-write|danger-full-access) ;;
+  *) die "AGENTSTACK_CODEX_SANDBOX must be read-only, workspace-write or danger-full-access" ;;
+esac
 case "$CODEX_CHILD_APPROVAL_SETTING" in
   never|on-request|on-failure|untrusted) ;;
   *)
@@ -1339,9 +1346,8 @@ preflight_python() {
     return
   fi
   if [[ -n "$CHILD_DEFAULT_TOOLS_SETTING" ]] && ! "$PYTHON_BIN" \
-      "$REPO_ROOT/hooks/child_tools.py" parse --provider claude \
-      --tools "$CHILD_DEFAULT_TOOLS_SETTING" >/dev/null; then
-    preflight_error "--child-default-tools must use the --tools grammar"
+      "$REPO_ROOT/hooks/child_tools.py" validate-defaults -- "$CHILD_DEFAULT_TOOLS_SETTING"; then
+    preflight_error "--child-default-tools must use the --tools grammar, with optional ;provider=SPEC overrides"
   fi
 }
 
@@ -3085,6 +3091,7 @@ values = {
     "AGENTSTACK_SPAWN_DIRS": "$SPAWN_DIRS_SETTING",
     "AGENTSTACK_SPAWN_ROOTS": "$SPAWN_ROOTS_SETTING",
     "AGENTSTACK_WORKTREE_ROOT": "$WORKTREE_ROOT_SETTING",
+    "AGENTSTACK_CODEX_SANDBOX": "$CODEX_SANDBOX_SETTING",
     "AGENTSTACK_CODEX_CHILD_APPROVAL": "$CODEX_CHILD_APPROVAL_SETTING",
     "AGENTSTACK_CODEX_CHILD_CONFIG_OVERLAY": "$CODEX_CHILD_CONFIG_OVERLAY_SETTING",
     "AGENTSTACK_CODEX_NETWORK": "$CODEX_NETWORK_SETTING",
@@ -5363,6 +5370,7 @@ manifest = {
         "AGENTSTACK_SPAWN_DIRS": "$SPAWN_DIRS_SETTING",
         "AGENTSTACK_SPAWN_ROOTS": "$SPAWN_ROOTS_SETTING",
         "AGENTSTACK_WORKTREE_ROOT": "$WORKTREE_ROOT_SETTING",
+        "AGENTSTACK_CODEX_SANDBOX": "$CODEX_SANDBOX_SETTING",
         "AGENTSTACK_CODEX_CHILD_APPROVAL": "$CODEX_CHILD_APPROVAL_SETTING",
         "AGENTSTACK_CODEX_CHILD_CONFIG_OVERLAY": "$CODEX_CHILD_CONFIG_OVERLAY_SETTING",
         "AGENTSTACK_CODEX_NETWORK": "$CODEX_NETWORK_SETTING",

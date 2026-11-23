@@ -1112,6 +1112,7 @@ REQUIRED_RUNTIME_MODULES = {
     "fresh_end.py",
     "fresh_guard.py",
     "fresh_harness.py",
+    "fresh_hermes_history.py",
     "fresh_launch.py",
     "fresh_message_receipts.py",
     "fresh_notifications.py",
@@ -1123,6 +1124,8 @@ REQUIRED_RUNTIME_MODULES = {
     "fresh_targets.py",
     "local_http.py",
     "show_files.py",
+    "screen_contract.py",
+    "screen_mcp.py",
     "storage_origin_contract.py",
     "storage_origin_directory.py",
     "storage_origin_core.py",
@@ -1203,6 +1206,8 @@ WHEEL_REQUIRED_SUFFIXES = {
     "agentstack_mail/fixtures/global-server-s2c.json",
     "agentstack_mail/fixtures/global-ui.json",
     "agentstack_mail/fixtures/namespace-legacy-delivery-v1.sql",
+    "agentstack_mail/screen_schemas.json",
+    "agentstack_mail/screen_schemas.LICENSE",
 } | {f"agentstack_mail/{module}" for module in REQUIRED_RUNTIME_MODULES}
 
 SDIST_REQUIRED_SUFFIXES = {

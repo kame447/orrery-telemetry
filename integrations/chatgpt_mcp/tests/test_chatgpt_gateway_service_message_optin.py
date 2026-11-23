@@ -54,6 +54,9 @@ def test_helper_release_exact_content_and_isolated_import(helper):
     assert verify_helper_release(root, digest)
     assert stat.S_IMODE(root.stat().st_mode) == 0o555
     assert set(x.name for x in root.iterdir()) == {"integrations", "packages", "bin", "HELPER.json"}
+    mail_package = root / "packages/agentstack_mail/src/agentstack_mail"
+    assert sorted(p.name for p in mail_package.iterdir() if p.suffix != ".py") == [
+        "screen_schemas.LICENSE", "screen_schemas.json"]
     done = subprocess.run([sys.executable, "-I", "-S", "-B", "-c",
                            "import sys;sys.path.insert(0,sys.argv[1]);"
                            "from agentstack_codex_app.daemon_runtime import DaemonRuntime;"
@@ -72,7 +75,7 @@ def test_helper_release_exact_content_and_isolated_import(helper):
     assert done.returncode == 0 and done.stdout.strip() == "DaemonRuntime"
 
 
-@pytest.mark.parametrize("tamper", ["modify", "symlink", "extra", "writable", "manifest"])
+@pytest.mark.parametrize("tamper", ["modify", "symlink", "extra", "writable", "manifest", "schema", "extra-schema"])
 def test_helper_release_rejects_tampering(tmp_path, tamper):
     root, digest = install_helper_release(ROOT, tmp_path / "helpers")
     _writable(root)
@@ -86,6 +89,11 @@ def test_helper_release_rejects_tampering(tmp_path, tamper):
         (root / "integrations/codex_app/src/agentstack_codex_app/unexpected.py").write_text("pass\n")
     elif tamper == "manifest":
         (root / "HELPER.json").write_text("{}")
+    elif tamper == "schema":
+        schema = root / "packages/agentstack_mail/src/agentstack_mail/screen_schemas.json"
+        schema.write_bytes(schema.read_bytes() + b"\n")
+    elif tamper == "extra-schema":
+        (root / "packages/agentstack_mail/src/agentstack_mail/unexpected.json").write_text("{}")
     else:
         module.chmod(0o666)
     for node in [root, *root.rglob("*")]:

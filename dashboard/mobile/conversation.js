@@ -52,44 +52,65 @@ SOFTWARE.
     if(!['Claude','Codex'].includes(provider))return {groups:[],consumed:new Set()};
     const enabled=events.some(e=>e.step||e.step_turn||e.step_boundary);
     if(!enabled)return {groups:[],consumed:new Set()};
-    const groups=new Map(),consumed=new Set(),calls=new Map(),results=new Map();
-    let current=null;
-    function group(id){
-      if(!groups.has(id))groups.set(id,{id,steps:new Map(),started:NaN,ended:NaN,last:NaN,
-        duration:null,closed:false,anchor:null,orphans:0});
-      return groups.get(id);
+    const groups=[],consumed=new Set(),calls=new Map(),results=new Map(),completions=new Map();
+    let current=null,segment='partial',turn=null;
+    function cut(event){
+      if(current)current.closed=true;
+      current=null;segment='after:'+event.id;
     }
-    function active(){return current||(current=group('partial'));}
-    for(const event of events){
-      if(provider==='Claude'&&event.step_boundary){
-        if(current)current.closed=true;
-        current=group('prompt:'+event.id);current.started=time(event.ts);
+    function startTurn(event,id,started){
+      cut(event);segment='turn:'+event.id;turn={id,started,groups:[]};
+    }
+    function active(){
+      if(!current){
+        current={id:segment,steps:new Map(),started:NaN,ended:NaN,duration:null,
+          closed:false,anchor:null,orphans:0};
+        groups.push(current);turn?.groups.push(current);
       }
+      return current;
+    }
+    for(const event of events){
       const boundary=event.step_turn;
       if(provider==='Codex'&&boundary&&key(boundary.id)){
-        current=group(boundary.id);consumed.add(event.id);
-        if(Number.isFinite(time(boundary.started)))current.started=time(boundary.started);
-        if(boundary.phase==='end'){
-          current.closed=true;current.ended=time(boundary.ended)||time(event.ts);
-          if(typeof boundary.duration==='number'){current.duration=boundary.duration/1000;current.explicitDuration=true;}
-        }else if(!Number.isFinite(current.started))current.started=time(event.ts);
+        consumed.add(event.id);
+        if(boundary.phase==='start'){
+          startTurn(event,boundary.id,boundary.started??event.ts);
+        }else if(!turn||turn.id===boundary.id){
+          // Native elapsed time describes the whole turn.
+          if(turn?.groups.length===1){
+            const [only]=turn.groups;
+            only.started=time(boundary.started??turn.started);
+            only.ended=time(boundary.ended??event.ts);
+            if(typeof boundary.duration==='number')only.duration=boundary.duration/1000;
+          }
+          cut(event);turn=null;
+        }
+        continue;
       }
-      if(current&&event.kind==='text'&&event.role==='assistant')current.last=time(event.ts);
       if(provider==='Codex'&&event.step_wrapper===true)consumed.add(event.id);
       const step=event.step;
-      if(!step||!key(step.id))continue;
-      if(step.phase==='call'&&provider==='Claude'){
-        const owner=active();owner.anchor??=event.id;
-        calls.set(step.id,{step,event,owner});
-      }else if(step.phase==='result'&&provider==='Claude'){
-        consumed.add(event.id);
-        results.set(step.id,{step,event,owner:active()});
-      }else if(step.phase==='complete'&&provider==='Codex'){
-        consumed.add(event.id);
-        const owner=key(step.turn)?group(step.turn):active();
-        current=owner;owner.anchor??=event.id;
-        owner.steps.set(step.id,{...step,eventId:event.id});
+      if(step&&key(step.id)){
+        if(step.phase==='call'&&provider==='Claude'){
+          const owner=active();owner.anchor??=event.id;
+          calls.set(step.id,{step,event,owner});
+        }else if(step.phase==='result'&&provider==='Claude'){
+          consumed.add(event.id);
+          results.set(step.id,{step,event,owner:calls.has(step.id)?null:active()});
+        }else if(step.phase==='complete'&&provider==='Codex'){
+          consumed.add(event.id);
+          const id=key(step.turn)?step.turn:turn?.id;
+          const completionKey=(id||'')+':'+step.id;
+          let completion=completions.get(completionKey);
+          if(!completion){
+            if(id&&turn?.id!==id)startTurn(event,id);
+            const owner=active();owner.anchor??=event.id;
+            completion={owner,eventId:event.id};completions.set(completionKey,completion);
+          }
+          completion.owner.steps.set(step.id,{...step,eventId:completion.eventId});
+        }
       }
+      // A tool can also emit a visible Mail card. Assign the step first.
+      if(event.step_boundary||event.kind==='text'||event.kind==='mail'||event.mail?.length)cut(event);
     }
     for(const [id,call] of calls){
       const result=results.get(id);
@@ -102,18 +123,17 @@ SOFTWARE.
     for(const [id,result] of results)if(!calls.has(id)){
       result.owner.orphans++;result.owner.anchor??=result.event.id;
     }
-    const values=[...groups.values()];
-    values.forEach((g,i)=>{
-      if(i<values.length-1)g.closed=true;
+    if(!current&&(provider==='Claude'||turn))active();
+    for(const g of groups){
       g.steps=[...g.steps.values()];
       const starts=g.steps.map(s=>time(s.started)).filter(Number.isFinite);
       const ends=g.steps.map(s=>time(s.ended)).filter(Number.isFinite);
       if(!Number.isFinite(g.started)&&starts.length)g.started=Math.min(...starts);
-      if(!Number.isFinite(g.ended)&&ends.length)g.ended=Math.max(...ends,Number.isFinite(g.last)?g.last:0);
+      if(!Number.isFinite(g.ended)&&ends.length)g.ended=Math.max(...ends);
       if(g.duration===null&&Number.isFinite(g.started)&&Number.isFinite(g.ended)&&g.ended>=g.started)
         g.duration=(g.ended-g.started)/1000;
-    });
-    return {groups:values,consumed};
+    }
+    return {groups,consumed};
   }
 
   function mount({host,mutate=fn=>fn(),onFocusLost=()=>{}}){
@@ -192,7 +212,7 @@ SOFTWARE.
         }
         card.working=working;card.waiting=waiting;
         const compacting=working&&current.reader_phase==='compacting';
-        const finished=g.explicitDuration?g.duration:card.lastWork??g.duration;
+        const finished=g.closed?(g.duration??card.lastWork):(card.lastWork??g.duration);
         title(card,working?(compacting?'Compacting context…':'Working…'):waiting?'Waiting for you':
           finished!==null?'Worked for '+duration(finished):'Recorded work',working&&!compacting);
         changed(card.clock,working&&card.lastWork!==null?duration(card.lastWork):'');
@@ -260,6 +280,7 @@ const WAIT=20000;
 const controllers={poll:null,older:null,preview:null};
 let panel=null,saveUrl='',previewFocus=null,previewRequest=null,previewRetry=false;
 let events=[],seen=new Set(),older=null,pending=[],failures=0,loadingOlder=false,following=true,savedTop=0;
+let lastRecordPoll=null;
 let recordVersion=0,recordConfirmed=false,replySelection=null;
 function dismissReferenceSelection(){replySelection?.remove();replySelection=null;}
 function selectionInRecord(){const selection=window.getSelection?.();return !!(selection?.toString()&&list?.contains(selection.anchorNode));}
@@ -449,6 +470,7 @@ function row(e){
  const command=e.role==='user'&&markdown()?.commandRecord(e.text);
  const r=make('div',command?.shell?'conversation-shell':'conversation-bubble '+(e.role==='user'?'user':'assistant'));r.dataset.id=e.id;
  if(command){if(command.shell)r.append(make('small','conversation-speaker','SHELL'));markdown().renderCommand(e.text,r);}else{if(e.role==='assistant')r.append(speaker(e));r.append(body(e.text,e.role==='assistant'));}
+ if(command||e.role==='assistant')window.OrreryReaderReplyMotion?.enhanceCopies?.(r);
 
  if(Array.isArray(e.mail))e.mail.forEach(m=>r.append(mailCard(m,e.ts)));
  files(e,r);
@@ -697,9 +719,19 @@ function dropEvent(id){
  }
  if(node.contains?.(document.activeElement))list.focus?.({preventScroll:true});node.remove();
 }
-function append(page){
+function append(page,replySince){
  const follow=atBottom()&&!selectionInRecord(),fresh=page.filter(e=>!seen.has(e.id));
- for(const e of fresh){seen.add(e.id);events.push(e);const anchor=list.querySelector(':scope > .conversation-pending');list.insertBefore(row(e),anchor);const shown=shownFiles(e);if(shown)list.insertBefore(shown,anchor);}
+ const motion=follow&&replySince!==null&&window.OrreryReaderReplyMotion;
+ // Use the known tail and the poll time to avoid animating backfilled records.
+ const replies=motion?new Set(page.slice(page.findLastIndex(e=>seen.has(e.id))+1)
+  .filter(e=>e.kind==='text'&&e.role==='assistant'&&Date.parse(e.ts)>=replySince).slice(-3)):null;
+ for(const e of fresh){
+  seen.add(e.id);events.push(e);
+  const anchor=list.querySelector(':scope > .conversation-pending'),node=row(e);
+  list.insertBefore(node,anchor);
+  if(replies?.has(e))motion.revealReply?.(node.querySelector('.conversation-text'));
+  const shown=shownFiles(e);if(shown)list.insertBefore(shown,anchor);
+ }
  let dropped=false;
  while(events.length>MAX_KEPT){const gone=events.shift();seen.delete(gone.id);dropEvent(gone.id);older=null;dropped=true;}
  groupShellRows();
@@ -730,7 +762,7 @@ function prepend(page,omitted){
  list.scrollTop+=list.scrollHeight-before;following=false;savedTop=list.scrollTop;
  loadThumbnails();
 }
-function reset(){stepView?.reset();provider='';recordVersion++;dismissReferenceSelection();closePreview();forgetThumbnails();clearToolGroups();events=[];seen.clear();older=null;list.querySelectorAll(':scope > .conversation-shown-files').forEach(x=>x.remove());list.querySelectorAll(':scope > [data-id]').forEach(x=>x.remove());list.querySelectorAll(':scope > .conversation-omitted').forEach(x=>x.remove());window.OrreryMobileTerminal?.refreshReference?.();}
+function reset(){stepView?.reset();provider='';lastRecordPoll=null;recordVersion++;dismissReferenceSelection();closePreview();forgetThumbnails();clearToolGroups();events=[];seen.clear();older=null;list.querySelectorAll(':scope > .conversation-shown-files').forEach(x=>x.remove());list.querySelectorAll(':scope > [data-id]').forEach(x=>x.remove());list.querySelectorAll(':scope > .conversation-omitted').forEach(x=>x.remove());window.OrreryMobileTerminal?.refreshReference?.();}
 function slow(on){if(retryButton)retryButton.hidden=!on;if(on)setStatus(messages.history_slow);}
 function showError(v){
  const code=typeof v?.error==='string'?v.error:'history_unavailable';
@@ -741,15 +773,18 @@ function showError(v){
 async function poll(){
  const g=gen;clearTimeout(timer);timer=0;
  if(!root||document.hidden)return;
+ const started=Date.now();
  try{
   const v=await request(null,'poll');if(g!==gen)return;
   if(v.ok!==true){
    // A hidden, stale or changed record also hides any file opened from it;
    // a slow answer is only a delay and leaves it open.
-   if(v.error!=='history_slow'){recordConfirmed=false;recordVersion++;dismissReferenceSelection();window.OrreryMobileTerminal?.refreshReference?.();closePreview();}showError(v);if(v.error==='history_changed')reset();}
+   if(v.error!=='history_slow'){recordConfirmed=false;lastRecordPoll=null;recordVersion++;dismissReferenceSelection();window.OrreryMobileTerminal?.refreshReference?.();closePreview();}showError(v);if(v.error==='history_changed')reset();}
   else{
    recordConfirmed=true;provider=({claude:'Claude',codex:'Codex'})[v.provider]||'';
-   failures=0;slow(false);if(!events.length&&v.omitted===true)list.insertBefore(gap(),list.querySelector(':scope > .conversation-pending'));append(v.events);
+   failures=0;slow(false);if(!events.length&&v.omitted===true)list.insertBefore(gap(),list.querySelector(':scope > .conversation-pending'));
+   const replySince=lastRecordPoll===null?null:Math.max(lastRecordPoll,started-2*POLL)-POLL;
+   append(v.events,replySince);lastRecordPoll=started;
    // The latest page's older token stays valid only while the oldest shown
    // message is still in that page; it is renewed on every such poll.
    if(events.length&&v.events.some(e=>e.id===events[0].id))older=v.older;
@@ -793,7 +828,7 @@ function element(){return root;}
 function addPending(text){if(!root||typeof text!=='string'||!text.trim())return;pending.push({text,at:Date.now(),before:new Set(seen)});renderPending();following=true;restore();}
 function unmount(){
  stepView?.reset();stepView=null;provider='';
- recordVersion++;recordConfirmed=false;dismissReferenceSelection();
+ recordVersion++;recordConfirmed=false;lastRecordPoll=null;dismissReferenceSelection();
  gen++;clearTimeout(timer);timer=0;closePreview();forgetThumbnails();for(const k in controllers){controllers[k]?.abort();controllers[k]=null;}
  mailResize?.disconnect();mailResize=null;mailWidth=0;
  clearToolGroups();
@@ -802,6 +837,7 @@ function unmount(){
 }
 document.addEventListener('visibilitychange',()=>{
  if(document.hidden){
+  lastRecordPoll=null;
   stepView?.activity(stepContext(),false);
   gen++;clearTimeout(timer);timer=0;
   if(controllers.preview&&previewRequest)previewRetry=true;

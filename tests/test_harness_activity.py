@@ -8,6 +8,7 @@ import pytest
 
 from dashboard.harness_activity import parse_activity
 from dashboard import server
+from agentstack_mail.fresh_harness import readiness
 
 
 @pytest.mark.parametrize('program,text,state', [
@@ -92,13 +93,15 @@ def test_one_capture_cache_generation_and_unknown_transition(monkeypatch, progra
 
     monkeypatch.setattr(server, '_tmux_run', capture)
     value = server._native_context_runtime('ExampleAgent', 1, '$1', program)
-    assert value == {'ctx_used': 19, 'ctx_window': '128K', 'act_state': 'work'}
+    # dsh also reports the effort from its footer; Hermes does not.
+    extra = {'dsh_card_effort': None} if program == 'dsh' else {}
+    assert value == {'ctx_used': 19, 'ctx_window': '128K', 'act_state': 'work', **extra}
     assert server._native_context_runtime('ExampleAgent', 1, '$1', program) == value
     assert len(calls) == 1
     text[0] = 'status hidden'
     # Same session name, new generation: never reuse the old work observation.
     assert server._native_context_runtime('ExampleAgent', 2, '$2', program) == {
-        'ctx_used': None, 'ctx_window': None, 'act_state': None}
+        'ctx_used': None, 'ctx_window': None, 'act_state': None, **extra}
     text[0] = working
     clock[0] += server._RT_TTL + 1
     assert server._native_context_runtime('ExampleAgent', 2, '$2', program)['act_state'] == 'work'
@@ -144,6 +147,18 @@ def test_hermes_prompt_shape_survives_profile_and_translation_changes(profile):
     busy = (_CAPTURES / 'hermes-work.txt').read_text()
     for placeholder in ('cli.tui.placeholder_busy', 'msg=interrupt', '翻訳した入力の案内', ''):
         assert parse_activity(busy.replace('cli.tui.placeholder_busy', placeholder), 'hermes') == 'work'
+
+
+def test_hermes_ink_ready_requires_a_current_empty_composer():
+    root = Path(__file__).resolve().parents[1]
+    status = ' ─ ready │ model │ 13s │ voice off ─ /workspace'
+    screen = status + '\n ❯ \n'
+    assert parse_activity(screen, 'hermes') == 'wait'
+    assert readiness(root, screen, 'hermes') == {'state': 'idle', 'input_empty': True}
+    for other in (' ❯ ', status, screen + 'new output', status + '\n ❯ a draft',
+                  status + '\n ❯ first draft line\n ❯', screen.replace('ready', 'working'),
+                  status + '\n ⚠️ Dangerous Command\n ❯'):
+        assert readiness(root, other, 'hermes') == {'state': 'unknown', 'input_empty': False}
 
 
 @pytest.mark.parametrize('program,file', [('hermes', 'hermes-idle.txt'), ('dsh', 'dsh-idle.txt')])

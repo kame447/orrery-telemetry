@@ -184,12 +184,16 @@ def project_event(raw, text_limit=MAX_TEXT, mail_limit=MAX_MAIL_BODY, issue=None
         text = _label(text)
     result = {'id': event_id, 'kind': kind, 'role': role, 'text': text,
               'ts': _label(raw.get('ts'), 40), 'truncated': cut or raw.get('truncated') is True}
+    if kind == 'text' and role == 'assistant' and raw.get('variant') == 'update':
+        result['variant'] = 'update'
     if step and kind == 'tool':
         result['step'] = step
     turn = project_step(raw.get('step_turn'), boundary=True)
     if turn and raw.get('kind') == 'system':
         result['step_turn'] = turn
-    if raw.get('step_boundary') is True and kind == 'text' and role == 'user':
+    elif raw.get('kind') == 'system' or (
+            raw.get('step_boundary') is True and kind == 'text' and role == 'user'):
+        # System notices are displayed as tools, so retain their boundary here.
         result['step_boundary'] = True
     if raw.get('step_wrapper') is True and kind == 'tool':
         result['step_wrapper'] = True
@@ -414,8 +418,17 @@ class HistoryClient:
             entry = self._refs.get(ref) if isinstance(ref, str) and TOKEN.fullmatch(ref) else None
         if entry is None or entry[0] != name:
             raise LookupError('preview_expired')
-        status, raw = self._get('/telemetry/conversation/preview?' + urlencode({'ref': entry[1]}),
+        route = '/telemetry/conversation/preview?'
+        query = {'ref': entry[1], 'mobile': '1'}
+        if thumbnail:
+            query['thumbnail'] = '1'
+        status, raw = self._get(route + urlencode(query),
                                 limit=MAX_PREVIEW_UPSTREAM, too_large='preview_too_large')
+        legacy = status == 400 and isinstance(raw, dict) and raw.get('error') == 'invalid_query'
+        if legacy:
+            # Older bridge versions only accept the reference here.
+            status, raw = self._get(route + urlencode({'ref': entry[1]}),
+                                    limit=MAX_PREVIEW_UPSTREAM, too_large='preview_too_large')
         if status != 200 or not isinstance(raw, dict) or raw.get('ok') is not True:
             error = raw.get('error') if isinstance(raw, dict) else None
             if error == 'reference_expired':
@@ -426,7 +439,9 @@ class HistoryClient:
             known = isinstance(error, str) and error in ERRORS and error != 'history_unavailable'
             raise HistoryUnavailable(error if known else 'preview_unavailable')
         preview = project_preview(raw)
-        return thumbnail_preview(preview) if thumbnail else preview
+        if thumbnail and preview['kind'] != 'image':
+            raise HistoryUnavailable('preview_type_denied')
+        return thumbnail_preview(preview) if thumbnail and legacy else preview
 
     def _issue_ref(self, name, cockpit_ref):
         """One phone ID per (agent, cockpit reference), renewed while its

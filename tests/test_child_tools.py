@@ -121,6 +121,7 @@ def test_claude_browser_and_screen_share_one_allowed_flag(tmp_path):
 @pytest.mark.parametrize("values, expected", [
     (["browser"], {"browser": {"device": ""}}),
     (["browser:win-brave"], {"browser": {"device": "win-brave"}}),
+    (["chrome-extension"], {"chrome_extension": True}),
     (["screen"], {"screen": {"access": "operate", "server": None}}),
     (["screen:read:windows-mcp"], {"screen": {"access": "read", "server": "windows-mcp"}}),
     (["mcp:b,mcp:a"], {"mcp": ["a", "b"]}),
@@ -140,6 +141,7 @@ def test_cli_forms(values, expected):
     (None, {"mcp": ["x", "x"]}, "twice"),
     (None, {"screen": {"access": "read", "server": "x"}, "mcp": ["x"]}, "only once"),
     (None, {"browser": {"device": "a b"}}, "must match"),
+    (None, {"chrome_extension": False}, "must be true"),
     (None, {"approve_all": ["x"]}, "also in tools.mcp"),
     (None, {"mcp": ["x"], "approve_all": ["y"]}, "also in tools.mcp"),
 ])
@@ -169,6 +171,17 @@ def test_codex_browser_is_chrome_devtools_and_has_no_device_or_builtin_screen():
         child_tools.check_provider(_spec(None, {"browser": {"device": "d"}}), "codex")
     with pytest.raises(child_tools.ToolsError, match="no built-in screen"):
         child_tools.check_provider(_spec(None, {"screen": "operate"}), "codex")
+
+
+def test_chrome_extension_selection_requires_codex_and_a_configured_plugin():
+    spec = _spec(None, {"chrome_extension": True})
+    for provider in ("claude", "dsh", "hermes"):
+        with pytest.raises(child_tools.ToolsError, match="only for Codex"):
+            child_tools.check_provider(spec, provider)
+    with pytest.raises(child_tools.ToolsError, match="is not in the user's Codex config"):
+        child_tools.codex_apply({}, spec)
+    with pytest.raises(child_tools.ToolsError, match="cannot be combined with orrery-screen"):
+        child_tools.check_provider(_spec(None, {"chrome_extension": True, "mcp": ["orrery-screen"]}), "codex")
 
 
 # --------------------------------------------------------------------------- #
@@ -981,15 +994,53 @@ def test_codex_default_launch_writes_no_record(tmp_path):
     assert "enabled" not in _codex_child_config(env, "CodexPlain")["mcp_servers"]["windows-mcp"]
 
 
+@pytest.mark.parametrize("name", ["chrome-devtools", "custom-chrome"])
+@pytest.mark.parametrize("selected", [False, True])
+def test_codex_chrome_devtools_requires_selection(tmp_path, name, selected):
+    config_text = (f"[mcp_servers.{name}]\ncommand = \"npx\"\n"
+                   'args = ["-y", "chrome-devtools-mcp@latest", "--autoConnect"]\n')
+    env, workdir = _codex_env(tmp_path, config_text)
+    flags = ("--tools", f"mcp:{name}") if selected else ()
+    result = _launch(tmp_path, env, workdir, "CodexChrome", *flags, codex=True)
+    assert result.returncode == 0, result.stderr
+    chrome = _codex_child_config(env, "CodexChrome")["mcp_servers"][name]
+    assert chrome["enabled"] is selected
+    assert chrome["args"] == CHROME_DEVTOOLS["args"]
+    assert chrome.get("required", False) is selected
+    assert "enabled_tools" not in chrome and "tools" not in chrome
+    assert (pathlib.Path(env["CODEX_HOME"]) / "config.toml").read_text() == config_text
+
+
+CHROME_PLUGIN_CONFIG = ('[plugins."chrome@openai-bundled"]\nenabled = true\n'
+                        '[plugins."browser@openai-bundled"]\nenabled = true\n'
+                        '[mcp_servers.node_repl]\ncommand = "node_repl"\nenabled = true\n')
+
+
+@pytest.mark.parametrize("selected", [False, True])
+def test_codex_chrome_extension_requires_selection(tmp_path, selected):
+    env, workdir = _codex_env(tmp_path, CHROME_PLUGIN_CONFIG)
+    flags = ("--tools", "chrome-extension") if selected else ()
+    result = _launch(tmp_path, env, workdir, "CodexChromePlugin", *flags, codex=True)
+    assert result.returncode == 0, result.stderr
+    config = _codex_child_config(env, "CodexChromePlugin")
+    assert config["plugins"]["chrome@openai-bundled"]["enabled"] is selected
+    assert config["plugins"]["browser@openai-bundled"]["enabled"] is True
+    assert config["mcp_servers"]["node_repl"] == {"command": "node_repl", "enabled": True}
+    assert (pathlib.Path(env["CODEX_HOME"]) / "config.toml").read_text() == CHROME_PLUGIN_CONFIG
+    record = pathlib.Path(env["AGENTSTACK_RUNTIME_DIR"]) / "child-agents" / "CodexChromePlugin.tools.json"
+    assert child_tools.read_codex_record(str(record)) == (_spec(None, {"chrome_extension": True}) if selected else None)
+
+
 def test_codex_default_browser_records_effective_selection_and_omission(tmp_path):
-    env, workdir = _codex_env(tmp_path, CODEX_CONFIG + 'args = ["chrome-devtools-mcp@latest"]\n')
+    env, workdir = _codex_env(tmp_path, CODEX_CONFIG + 'args = ["chrome-devtools-mcp@latest"]\n' + CHROME_PLUGIN_CONFIG)
     env["AGENTSTACK_CHILD_DEFAULT_TOOLS"] = "browser,screen:operate"
     result = _launch(tmp_path, env, workdir, "CodexDefaults", codex=True)
     assert result.returncode == 0, result.stderr
     record = pathlib.Path(env["AGENTSTACK_RUNTIME_DIR"]) / "child-agents" / "CodexDefaults.tools.json"
     assert child_tools.read_codex_record(str(record)) == _spec(None, {"browser": True})
-    server_cfg = _codex_child_config(env, "CodexDefaults")["mcp_servers"]["chrome-devtools"]
-    assert len(server_cfg["enabled_tools"]) == 30
+    config = _codex_child_config(env, "CodexDefaults")
+    assert len(config["mcp_servers"]["chrome-devtools"]["enabled_tools"]) == 30
+    assert config["plugins"]["chrome@openai-bundled"]["enabled"] is False
     notice = "Default tool screen:operate is unavailable on this machine and was omitted."
     assert notice in result.stderr and notice in _log_text(env)
 
@@ -1002,8 +1053,7 @@ def test_explicit_codex_profile_wins_over_default_browser(tmp_path, profile):
     assert result.returncode == 0, result.stderr
     config = _codex_child_config(env, "CodexProfile")
     chrome = config["mcp_servers"]["chrome-devtools"]
-    if profile == "orrery-only":
-        assert chrome["enabled"] is False
+    assert chrome["enabled"] is False
     assert "enabled_tools" not in chrome and "tools" not in chrome
     record = pathlib.Path(env["AGENTSTACK_RUNTIME_DIR"]) / "child-agents" / "CodexProfile.tools.json"
     assert not record.exists()
@@ -1080,6 +1130,11 @@ def test_api_explicit_empty_tools_suppresses_installer_defaults(payload):
 
 def test_api_empty_selection_keeps_other_providers_legacy_launcher_arguments():
     assert server._spawn_tools_args({"tools": {}}, "gemini", False, "") == ((), None)
+
+
+def test_api_passes_chrome_extension_selection_to_codex_launcher():
+    payload = {"tools": {"chrome_extension": True}}
+    assert server._spawn_tools_args(payload, "codex", False, "") == (("--tools", "chrome-extension"), None)
 
 
 @pytest.mark.parametrize("payload, message", [
@@ -1275,3 +1330,94 @@ def test_codex_forecast_checks_the_tools_record(monkeypatch, tmp_path):
     with pytest.raises(server._ResumeCapabilityError) as exc:
         server._codex_resume_child_home("CodexCast", registration)
     assert exc.value.code == "config_unrestorable"
+
+
+def test_screen_standard_claude_launch_uses_generated_binding(tmp_path):
+    from hooks import screen_state
+    cj = _claude_json(tmp_path / "settings.json", servers={
+        "cua-driver": {"command": "/fixture/cua-driver"},
+        "orrery-screen": {"command": "/fixture/untrusted", "env": {"INHERITED": "fixture"}},
+    })
+    env, workdir = _env(tmp_path, claude_json=cj)
+    env["AGENTSTACK_SCREEN_PYTHON"] = sys.executable
+    name = "ScreenChild"
+    result = _launch(tmp_path, env, workdir, name, "--tools", "screen:read:orrery-screen")
+    assert result.returncode == 0, result.stderr
+    runtime = pathlib.Path(env["AGENTSTACK_RUNTIME_DIR"])
+    config = json.loads((runtime / "child-agents" / f"{name}.mcp.json").read_text())
+    assert set(config["mcpServers"]) == {"orrery-mail", "orrery-screen"}
+    assert screen_state.Store(runtime).list()[0]["computer_use"] == "view"
+    for tool in screen_state.TOOLS:
+        assert f"mcp__orrery-screen__{tool}" in _inner(env)
+    definition = config["mcpServers"]["orrery-screen"]
+    assert definition["args"] == ["-I", "-m", "agentstack_mail.screen_mcp"]
+    assert set(definition["env"]) == {"AGENTSTACK_SCREEN_BINDING_FILE"}
+
+
+def test_screen_claude_resume_uses_a_new_generation(resume, monkeypatch, tmp_path):
+    from hooks import screen_state
+    runtime, registration, launches, calls = resume
+    monkeypatch.setenv("AGENTSTACK_SCREEN_PYTHON", sys.executable)
+    monkeypatch.setenv("AGENTSTACK_CLAUDE_JSON", _claude_json(
+        tmp_path / "claude.json", servers={"cua-driver": {"command": "/fixture/cua-driver"}}))
+    child(runtime, registration)
+    _bound_tools_record(runtime, _spec(None, {"mcp": ["orrery-screen"]}))
+    store = screen_state.Store(runtime)
+    token = store.launch(registration["project_key"], screen_state.launch_runtime(runtime),
+                         NAME, "a" * 32, "control")
+    result = server.do_resume(NAME)
+    assert result["ok"], result
+    assert "mcp__orrery-screen__get_window_state" in launches[0][-1]
+    settings = json.loads((runtime / "child-agents" / f"{NAME}.mcp.json").read_text())
+    assert set(settings["mcpServers"]) == {"orrery-mail", "orrery-screen"}
+    assert store.list()[0]["generation"] != "a" * 32
+    assert store.list()[0]["computer_use"] == "off"
+    with pytest.raises(screen_state.ScreenStateError, match="SCREEN_CHILD_REQUIRED"):
+        store.child(token)
+
+
+def test_screen_codex_home_filters_source_overlay_and_plugins(tmp_path, monkeypatch):
+    from hooks import child_resume, screen_state
+    monkeypatch.setenv("AGENTSTACK_SCREEN_PYTHON", sys.executable)
+    runtime = tmp_path / "runtime"
+    source = tmp_path / "codex"
+    source.mkdir()
+    config_text = ('[mcp_servers.cua-driver]\ncommand = "/fixture/cua-driver"\n'
+                   '[plugins."third-party@market"]\nenabled = true\n')
+    (source / "config.toml").write_text(config_text)
+    overlay = tmp_path / "overlay.toml"
+    overlay.write_text('[mcp_servers.alias]\ncommand = "/fixture/cua-relay.py"\n')
+    runner = tmp_path / "run-mcp.sh"
+    _executable(runner, "#!/bin/bash\nexit 0\n")
+    name = "ScreenChild"
+    runtime.mkdir()
+    token = runtime / ("agent_token_" + name)
+    token.write_text("synthetic")
+    token.chmod(0o600)
+    record = child_resume.tools_record_path(runtime, name)
+
+    def build(generation):
+        return child_resume.build_home(
+            home=runtime / "child-agents" / (name + ".codex-home"), source=source,
+            runner=runner, child=name, project_key="/fixture/project", token_file=token,
+            mcp_url="http://127.0.0.1:1/mcp", mail_env="", runtime_dir=runtime,
+            bearer_mode="auto", python_bin="", mcp_profile="inherit",
+            overlay_setting=str(overlay), screen_generation=generation)
+
+    child_tools.write_codex_record(str(record), _spec(None, {"mcp": ["orrery-screen"]}))
+    home = build("a" * 32)
+    config = tomllib.loads((home / "config.toml").read_text())
+    screen = config["mcp_servers"]["orrery-screen"]
+    assert screen["required"] and config["plugins"]["third-party@market"]["enabled"] is False
+    assert set(screen["enabled_tools"]) == set(screen_state.TOOLS)
+    assert all(tool["approval_mode"] == "approve" for tool in screen["tools"].values())
+    for alias in ("alias", "cua-driver"):
+        assert config["mcp_servers"][alias]["enabled"] is False
+    record.unlink()
+    home = build("b" * 32)
+    config = tomllib.loads((home / "config.toml").read_text())
+    assert "orrery-screen" not in config["mcp_servers"]
+    assert config["mcp_servers"]["cua-driver"]["enabled"] is False
+    assert config["plugins"]["third-party@market"]["enabled"] is True
+    assert screen_state.Store(runtime).list() == []
+    assert (source / "config.toml").read_text() == config_text

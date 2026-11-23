@@ -10,6 +10,179 @@
 
 ---
 
+## 2026.11.23
+
+### Hermes の常駐 bot が Telegram の入力を TUI に渡せるように修正
+
+Telegram を設定した常駐 bot の起動時に、同梱の Telegram plugin に TUI への入力許可を設定します。
+
+### WSL・Linux で古い Mail の pidfile から復旧する
+
+ORRERY Mail の起動時、管理対象の runner を記録した pidfile よりも後に同じ PID の別プロセスが始まったと確認できれば、古い pidfile を片付けて起動を続ける。稼働中の runner と判別できない場合や、PID の再利用を確認できない場合の起動保護は維持する。
+
+### 画面操作の中継の試験が遅い CI で落ちないように
+
+- 中継が止まって再送しないことを確かめる試験で、偽の driver の起動にかかる時間を制限時間に含めても足りるように、制限時間を延ばしました。
+
+### Fresh Hermes の会話履歴を表示
+
+確認済みの native receipt で選んだ Hermes の TUI 会話を、ダッシュボードの履歴から読めるようにしました。Telegram への返信が tool の記録にだけ残った場合は、成功した送信の本文を会話に表示します。
+
+### 空の Mail へ切り替える手順に常駐 bot を追加
+
+Claude Channels と Hermes Telegram の指揮引継ぎ、試行、新しい登録での起動と受入、失敗時の復旧を[切替手順](docs/fresh-global-update.md)に追加しました。
+
+### Hermes の Telegram bot が管理設定を読めるように修正
+
+Hermes の既定値を含む設定から、常駐 bot の資格参照と許可リストを読み取ります。
+
+### Hermes の常駐 TUI が待機中に Mail を受け取れるように修正
+
+管理 TUI の準備表示と空の入力欄を確認して、待機中の Hermes に通知を届けます。
+
+### Codex child の Chrome MCP を明示選択に変更
+
+Codex child の生成設定では、`chrome-devtools` と `chrome-devtools-mcp` を直接起動する別名の server を、道具として選んだ場合だけ有効にします。
+
+Chrome 拡張と連携する `chrome@openai-bundled` も、`--tools chrome-extension` で選んだ場合だけ有効にします。Dashboard API 世代 44 では `tools.chrome_extension: true` で選択できます。
+
+### doctor のモデル案内の試験を利用者設定から隔離
+
+- 旧版 Codex CLI の代替モデル案内を、一時ホームと試験用 CLI で検証するようにしました。
+
+### doctor が Codex の予約の確認を誤って「不明」と出さないように
+
+doctor は Codex の plugin の状態を、まず既定の手元の marketplace（`agentstack-local`）だけに問い合わせる。全体の一覧は外の marketplace にも問い合わせるので 1 分以上かかることがあり、5 秒の待ち時間を超えて「不明」になっていた。手元で見つからないときだけ、これまでどおり全体の一覧で確かめる。apply_patch の予約の確認も、子と同じ login shell の PATH で Codex を起動する。
+
+### 稼働中の子を保管期限切れの削除から保護
+
+期限切れの一括削除は tmux、lease、端末上のプロセスを確認し、停止を確認できた子だけを対象にする。端末から保持済みの Claude の子を再開する場合も、Mail の退役解除前に再開中の状態を記録する。
+
+### 保管期限切れの Claude を operator の資格復旧後に DECK から再開
+
+保管期限切れのあとに operator が同じ Mail identity の資格を復旧済みなら、対応する Claude の会話を DECK から Mail 付きで再開できる。DECK は期限切れの記録より新しい復旧 receipt と現在の資格を照合する。[復旧手順](docs/persistent-agents.md#期限切れの-claude-を-deck-で再開する)
+
+### スマホ Reader の作業ステップを発言や Mail で区切る
+
+発言、Mail、システム通知の前後にある作業ステップを別々のカードに表示します。履歴を開いたときも、表示中に新着を受け取ったときも同じ順で並びます。
+
+### 作業中の表示と最後の記録時刻を分けて読む
+
+DECK は所要時間や context が取れない作業状態にも `WORKING` を表示します。ライトテーマの作業badge文字は既存の amber token で表示し、背景との区別を保ちます。footer と detail は最後に記録されたイベントを `LAST EVENT` / `last event` と明示し、長い tool 実行中に時刻が古いままでも現在の状態と区別できます。表示用の要約が無い場合は `NO LIVE SUMMARY` と示し、作業中に待機・停止と矛盾する文言を出しません。
+
+既存 provider の状態分類（Codex App の登録中を含む）を表示し、実際の進捗を保証しません。`last_active` の計算・履歴期間・並び順と API 世代34 は変更しません。
+
+### master の試験は連続マージでも実行を継続
+
+- 新しいマージで master の試験が始まっても、実行中の master の試験を中止しません。PR では新しい実行が古い実行を中止します。
+
+### Claude Code の端末再開時にモデルを保持
+
+- 端末で再開したセッションを再登録するとき、起動時のモデル指定が無ければ、SessionStart が報告したモデルか登録済みのモデルを使います。
+
+## 2026.11.21
+
+### Mail を使わずに再開する Claude にブラウザと画面操作を付ける
+
+- API 世代 43 から、`/api/jump` で Claude in Chrome と `orrery-screen` を起動ごとに指定できます。画面操作は新しい起動世代の初期権限を `off`、`view`、`control` から選べます。既定は追加の道具なしで、Mail と hook は無効です。[再開 API](docs/api.md#post-apijump)
+- 会話だけで再開した Claude のカードにブラウザの有無と画面操作の権限を表示します。通常の Claude の子も `orrery-screen` の現在の権限を表示します。
+
+### Mail なしで再開した Claude の会話を Reader で表示
+
+ダッシュボードから会話だけを再開した Claude も、既存の自己登録 receipt と今回の起動が同じ会話を指していれば、Reader で履歴を読めます。
+
+### 子 agent に computer use の権限を設定
+
+- `orrery-screen` を明示した子に、版を照合した Cua Driver の12道具を公開します。起動世代ごとの権限と応答上限を適用し、呼び出しの開始と終了を記録します。
+- API 42 で operator が Off / View / Control を実行中に変更できます。子の資格で読めるのは自分の起動の権限です。 [準備と確認手順](docs/computer-use.md)
+
+### NEW AGENT の作業フォルダ検索
+
+- 作業フォルダ名を、設定済みの検索ルートと明示したプリセットの配下から検索できます。
+- `GET /api/fs/dir-search?q=...` を追加し、公開 API 世代を 40 から 41 に更新しました。任意の `under` を渡すと、許可範囲内の指定フォルダの配下だけを検索できます。探索範囲と件数上限は [API リファレンス](docs/api.md#get-apifsdir-search) を参照してください。
+
+### スマホとiPadの閲覧画面を整理
+
+稼働・待機の件数をGraph内に表示し、検索や調整の操作をアイコン化しました。iPadなどの広い画面ではGraphと要確認・Activityを並べて表示します。デスクトップ版と配色を揃え、ダークを既定にしました。ライトへの切り替えはブラウザに保存されます。
+
+### スマホから新規エージェントを起動
+
+**Send from phone** が有効なとき、Graphから新規エージェントを開き、タスクと起動設定を確認してから起動できます。
+
+### Reading Viewの操作に反応する動き
+
+入力欄はテキストに合わせて伸び、送信結果、コードのコピー、参照の追加、新しく届いた返信が操作後に分かりやすく表示されます。
+
+### 非 Claude の親から起動した Claude による登録の上書きを防止
+
+Antigravity などから補助的に Claude を起動しても、内側の SessionStart は親の ORRERY Mail 登録を書き換えません。稼働中の親は DECK と NETWORK に表示され続けます。
+
+### Codex のフック承認状態を新しい保存形式でも正しく判定
+
+Codex CLI がフック定義とプラグイン内容のハッシュを別々に保存する場合も、承認済みの状態を正しく読み取れるようにしました。両方の値が一致しない場合は従来通り起動を拒否し、以前の単一ハッシュ形式との互換性も維持します。また、有効状態には真偽値の true を必須とし、数値の 1 や 1.0 を有効と誤認しないようにしました。
+
+### エージェント一覧で作業場所と実行情報を取得
+
+legacy dashboard の `GET /api/agents` から、作業ディレクトリ、正式モデル ID、effort、harness、context 上限、画面とブラウザの設定上の権限、親子関係を取得できます。確認できない値は `null` です。互換 API 世代は 41 です。[API の仕様](docs/api.md#get-apiagents)
+
+### スマホの Reader に Claude Code の途中経過を渡す
+
+会話の取得元が Claude Code の途中経過に付けた `variant: "update"` を、スマホの Reader が受け取る assistant のテキストイベントにも保持します。通常の発言と同じ表示で読めます。このフィールドの追加に伴い、API 世代は 41 です。
+
+### NEW AGENT と dsh・Hermes に installer の既定の道具を適用
+
+API 41 から、標準の `/api/spawn`（NEW AGENT）で `base` と `tools` を省略すると、Claude・Codex・dsh・Hermes の子に `AGENTSTACK_CHILD_DEFAULT_TOOLS` を適用します。CLI の dsh・Hermes も同じ設定を使います。明示指定を優先し、使えない既定の項目は通知して外します。resume は起動時に記録した選択を使います。[既定の道具](docs/delegation.md#installer-の既定の道具)
+
+installer の共通の一覧に `;dsh=` などを付けると、provider ごとの一覧を設定できます。`--child-default-tools 'mcp:cua-driver;dsh='` は dsh 以外に `cua-driver` を渡します。
+
+複数行の依頼を `/api/spawn` から送ったとき、依頼メールの件名を1行に整えます。依頼文はメール本文にそのまま載せます。
+
+### 入れ子の Claude 起動から親セッションの登録と履歴を保護
+
+Claude や Codex の中から別の Claude を起動した場合、内側の SessionStart は親の ORRERY Mail 登録、owner token、会話のセッション索引を更新しません。内側の Claude はそのまま利用できます。
+
+### 異常終了した子を再起動せずに再開
+
+終了処理を通らずに停止した子を、マシンの再起動を待たずに dashboard から再開できるようになりました。通常起動中と再開中の異常終了が対象です。dashboard は別の tmux サーバーに子が残っていないかも含めて停止を確認し、保存済みの認証情報が一致した場合に再開状態を修復します。中断された再開の保持期限は引き継ぎます。
+
+### Claude Code の computer use 権限画面を承認待ちとして表示
+
+Claude Code が macOS の computer use 権限を求めている間は、ダッシュボードの一覧と Reader に返事待ちを表示します。狭いペインで見出しや選択肢が折り返されても判定できます。
+
+### ORRERY で起動する Codex の Full Access 設定
+
+`AGENTSTACK_CODEX_SANDBOX=danger-full-access` を設定すると、legacy mode の Codex CLI の新規起動と dashboard からの再開で Full Access を使えます。既定は `workspace-write` です。設定は通常の再インストールで引き継ぎます。[設定ガイド](docs/configuration.md#launcher)
+
+### Legacy watcher が interactive persistent agent に Mail 通知を配送
+
+有効な interactive runtime を確認した場合は、agent 名と一致する tmux session に通知を届けます。headless 配送の失敗、不正な manifest、manifest がある状態での配送 helper 不在は再試行に回します。
+
+### Codex の未送信入力による作業中の誤表示を修正
+
+停止中の Codex で、未送信の下書きに字下げした `❯` と `Working` 行が含まれていても、ダッシュボードは待機中と表示します。
+
+### スマホの会話で大きな写真を開けるようにする
+
+スマホの表示上限に合わせた画像を取得し、会話内のサムネイルと拡大プレビューに表示します。
+
+### スマホ用の画面でも山括弧で囲んだリンク先を読む
+
+スマホ用の画面が同梱する Markdown の描画を本体の最新にそろえました。空白を含むパスを `[名前](</path with spaces/file.png>)` と書いたリンクが、スマホでもリンクとして読まれます。ローカルのパスを開くのは、これまでどおり relay が発行したプレビューの参照だけです。
+
+### NEW AGENT から親なしで立てた Codex は、普段の承認設定で起動・再開
+
+NEW AGENT で親を指定しない起動と、その記録があるセッションを dashboard から再開するときは `--ask-for-approval` を省略します。Codex は有効な設定の `approval_policy` か自身の既定値を使います。親付きの起動（delegate の子など）と、親なし起動の記録がないセッションの再開では、既定の `never` または明示した `AGENTSTACK_CODEX_CHILD_APPROVAL` を使います。詳しくは [delegation](docs/delegation.md) を参照してください。
+
+### Mail 復旧後の Claude 再登録で現在の会話を記録
+
+Mail の起動前などに開始して shell 登録できなかった Claude session は、SessionStart の情報を後続の Bash に引き継ぎ、同じ identity の `agentstack-reregister` 成功時に現在の会話の receipt を保存します。通常起動の追加待機・Mail 呼び出しはありません。他人の代筆・別 project・古い receipt の拒否は維持し、credential がない identity の自動 enroll は行いません。`CLAUDE_ENV_FILE` がない起動や更新前の session は対象外です。詳しくは [hook reference](docs/hooks.md#record-session-indexpy) を参照してください。
+
+### Codex の追加指示キューや表示名の footer があっても作業中と読む
+
+Codex が現在の `Working` 行と入力欄の間に追加指示のキュー（`Queued follow-up inputs`）を表示していると、そのキューを返答の区切りと読み、作業中の agent を入力待ちと表示していました。入力欄の直上にある完全なキュー表示だけを除いてから現在の操作領域を読み、`Working` 行の作業中と経過時間を保ちます。キューだけでは作業中にせず、キューの後の返答・完了表示・承認・質問や、本文の引用は従来どおり作業中にしません。
+
+footer のモデルが `GPT-6.1 Terra max` のように種類を空白で区切る表示名で、`Context` の表示が無い場合も、入力欄の footer と認めずに入力待ちとしていました。この表示名を footer と認め、モデルは `GPT-6.1-Terra` と種類まで読みます。effort（`max` など）はモデル名に含めません。compact の可否判定と API の世代は変えません。
+
 ## 2026.11.16.1
 
 ### statusLine 未設定の Claude Code でも作業中の状態を表示

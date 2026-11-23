@@ -76,3 +76,20 @@ def test_invalid_composite_hash_is_refused(tmp_path, invalid):
     write_state(home, plan, state)
     with pytest.raises(TRUST['TrustUnavailable'], match='invalid reviewed hook hash'):
         TRUST['verify_approved_plan'](plan)
+
+def test_matching_invalid_hook_hash_is_refused(tmp_path):
+    home, plan, state = fixture(tmp_path, False)
+    plan['hooks'][0]['currentHash'] = state['trusted_hash'] = 'sha256:invalid'
+    write_state(home, plan, state)
+    with pytest.raises(TRUST['TrustUnavailable'], match='invalid reviewed hook hash'):
+        TRUST['verify_approved_plan'](plan)
+
+
+def test_numeric_hook_enabled_is_refused(tmp_path):
+    for composite in (False, True):
+        home, plan, state = fixture(tmp_path / str(composite), composite)
+        for enabled in (1, 1.0):
+            state['enabled'] = enabled
+            write_state(home, plan, state)
+            with pytest.raises(TRUST['TrustUnavailable'], match='approved hook trust is not present'):
+                TRUST['verify_approved_plan'](plan)
