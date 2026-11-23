@@ -5,6 +5,7 @@ import copy
 import json
 import os
 import stat
+from pathlib import Path
 
 import pytest
 
@@ -386,3 +387,255 @@ def test_composed_admission_rejects_cross_project_before_profile_write(profile, 
         admit_mcp_spawn(enabled=True, ledger=obs["ledger"], launch=obs["launch"],
                         profile_path=profile, helper_root=profile.parent)
     assert profile.read_bytes() == original
+
+
+def _gateway_fixture(profile, tmp_path, **overrides):
+    from orrery_chatgpt_mcp.config import GatewayConfig
+    from orrery_chatgpt_mcp.tools import ToolRegistry
+    from orrery_chatgpt_mcp.auth import Principal
+    from orrery_chatgpt_mcp.dashboard import DashboardError
+    import time
+
+    class Dashboard:
+        def __init__(self):
+            self.calls = []
+            self.state = "launching"
+            self.supported = True
+            self.drop = False
+            self.binding = observations()["ledger"]["result"]
+
+        def name_status(self, name):
+            return "available"
+
+        def spawn(self, payload):
+            self.calls.append(dict(payload))
+            if payload.get("dry_run"):
+                result = dict(ok=True, dry_run=True, provider=payload["provider"], model="claude-opus")
+                if self.supported and payload.get("mail_create_only"):
+                    result["mail_create_only"] = True
+                return 200, result
+            if self.drop:
+                raise DashboardError("unknown", outcome_unknown=True)
+            return 200, dict(ok=True, pending=True, model="claude-opus", **self.binding)
+
+        def spawn_status(self, name):
+            return 200, dict(name=name, state=self.state, result=self.binding if self.state == "ready" else None)
+
+    connection = Path(json.loads(profile.read_text())["connection"])
+    connection.write_text(json.dumps({"kind": "orrery-mail-connection-v1",
+                                     "expected_server_instance_id": INSTANCE}))
+    connection.chmod(0o600)
+    config = GatewayConfig(pairing_secret="A"*43, state_dir=tmp_path/"gw",
+                           spawn_enabled=True, spawn_dirs={"test": str(tmp_path)}, spawn_approval="chat",
+                           message_enabled=True, message_profile=profile, message_helper_root=tmp_path,
+                           auto_register_spawned=overrides.pop("auto_register_spawned", True),
+                           **overrides).validate()
+    dash = Dashboard()
+    operator = Principal("local-operator", frozenset({"orrery.read", "orrery.spawn", "orrery.message"}), None, 0)
+    return config, dash, operator, ToolRegistry(config, dash, clock=time.time)
+
+
+def _launch(registry, operator, key="spawn-test-001"):
+    preview = registry.call(operator, "orrery_spawn_preview", {
+        "task": "Synthetic test", "directory": "test", "name": "QuartzTesla",
+    })
+    commit = registry.call(operator, "orrery_spawn_commit", {
+        "preview_id": preview["preview_id"], "idempotency_key": key,
+    })
+    return preview, commit
+
+
+def test_gateway_opt_in_persists_private_proof_and_worker_reconciles_after_restart(profile, tmp_path, monkeypatch):
+    from orrery_chatgpt_mcp.tools import ToolRegistry
+    from orrery_chatgpt_mcp import auto_allowlist
+    config, dash, operator, registry = _gateway_fixture(profile, tmp_path)
+    calls = []
+
+    def admit(**kwargs):
+        calls.append(kwargs)
+        assert kwargs["expected_authority"] == auto_allowlist.profile_authority(profile).digest
+        return "registered"
+
+    monkeypatch.setattr(auto_allowlist, "admit_mcp_spawn", admit)
+    preview, commit = _launch(registry, operator)
+    assert preview["launch"]["auto_register_recipient"] is True
+    assert all(p["mail_create_only"] is True for p in dash.calls)
+    assert commit["recipient_registration"]["state"] == "pending"
+    assert not any(field.startswith("mail_") for field in commit["launch"])
+    registry.reconcile_admissions()
+    assert calls == []
+    dash.state = "ready"
+    registry = ToolRegistry(config, dash)
+    assert registry.call(operator, "orrery_spawn_status", {"name": "QuartzTesla"})["recipient_registration"]["state"] == "pending"
+    assert calls == []  # status remains read-only
+    registry.reconcile_admissions()
+    registry.reconcile_admissions()
+    assert len(calls) == 1
+    assert registry.call(operator, "orrery_spawn_status", {"name": "QuartzTesla"})["recipient_registration"]["state"] == "registered"
+    replay = registry.call(operator, "orrery_spawn_commit", {
+        "preview_id": preview["preview_id"], "idempotency_key": "spawn-test-001",
+    })
+    assert replay["recipient_registration"]["state"] == "registered"
+    assert len(dash.calls) == 2
+    assert not any(field.startswith("mail_") for field in replay["result"])
+    dash.binding = dict(dash.binding, mail_agent_id=999)
+    assert "recipient_registration" not in registry.call(operator, "orrery_spawn_status", {"name": "QuartzTesla"})
+
+
+def test_gateway_default_off_does_not_attest_or_admit(profile, tmp_path, monkeypatch):
+    from orrery_chatgpt_mcp import auto_allowlist
+    config, dash, operator, registry = _gateway_fixture(profile, tmp_path, auto_register_spawned=False)
+    monkeypatch.setattr(auto_allowlist, "admit_mcp_spawn", lambda **kw: pytest.fail("unexpected admission"))
+    preview, commit = _launch(registry, operator)
+    assert "auto_register_recipient" not in preview["launch"]
+    assert "recipient_registration" not in commit
+    assert all("mail_create_only" not in p for p in dash.calls)
+    dash.state = "ready"
+    registry.reconcile_admissions()
+
+
+def test_gateway_refuses_old_dashboard_before_real_spawn(profile, tmp_path):
+    from orrery_chatgpt_mcp.tools import ToolError
+    config, dash, operator, registry = _gateway_fixture(profile, tmp_path)
+    dash.supported = False
+    with pytest.raises(ToolError, match="exclusive Mail"):
+        _launch(registry, operator)
+    assert len(dash.calls) == 1 and dash.calls[0]["dry_run"]
+
+
+def test_unknown_spawn_never_admitted(profile, tmp_path, monkeypatch):
+    from orrery_chatgpt_mcp import auto_allowlist
+    from orrery_chatgpt_mcp.tools import ToolError
+    config, dash, operator, registry = _gateway_fixture(profile, tmp_path)
+    dash.drop = True
+    monkeypatch.setattr(auto_allowlist, "admit_mcp_spawn", lambda **kw: pytest.fail("unexpected admission"))
+    with pytest.raises(ToolError) as exc:
+        _launch(registry, operator)
+    assert exc.value.code == "outcome_unknown"
+    dash.state = "ready"
+    registry.reconcile_admissions()
+    assert len(dash.calls) == 2
+
+
+def test_changed_profile_before_commit_refuses_launch(profile, tmp_path):
+    from orrery_chatgpt_mcp.tools import ToolError
+    config, dash, operator, registry = _gateway_fixture(profile, tmp_path)
+    preview = registry.call(operator, "orrery_spawn_preview", {
+        "task": "Synthetic test", "directory": "test", "name": "QuartzTesla",
+    })
+    data = json.loads(profile.read_text())
+    data["name"] = "DifferentSender"
+    profile.write_text(json.dumps(data))
+    with pytest.raises(ToolError, match="profile changed"):
+        registry.call(operator, "orrery_spawn_commit", {
+            "preview_id": preview["preview_id"], "idempotency_key": "spawn-test-001",
+        })
+    assert len(dash.calls) == 1
+
+
+def test_changed_profile_after_commit_fails_closed(profile, tmp_path):
+    config, dash, operator, registry = _gateway_fixture(profile, tmp_path)
+    preview, commit = _launch(registry, operator)
+    data = json.loads(profile.read_text())
+    data["name"] = "DifferentSender"
+    profile.write_text(json.dumps(data))
+    dash.state = "ready"
+    registry.reconcile_admissions()
+    assert registry.call(operator, "orrery_spawn_status", {"name": "QuartzTesla"})["recipient_registration"] == {
+        "state": "not_registered", "reason": "sender_profile_changed"}
+    assert json.loads(profile.read_text())["peers"] == data["peers"]
+
+
+def test_gateway_requires_message_scope_for_auto_registration(profile, tmp_path):
+    from orrery_chatgpt_mcp.auth import Principal
+    from orrery_chatgpt_mcp.tools import ToolError
+    config, dash, operator, registry = _gateway_fixture(profile, tmp_path)
+    read_spawn = Principal(operator.subject, frozenset({"orrery.read", "orrery.spawn"}), None, 0)
+    preview = registry.call(operator, "orrery_spawn_preview", {
+        "task": "Synthetic test", "directory": "test", "name": "QuartzTesla",
+    })
+    with pytest.raises(ToolError) as exc:
+        registry.call(read_spawn, "orrery_spawn_commit", {
+            "preview_id": preview["preview_id"], "idempotency_key": "spawn-test-001",
+        })
+    assert exc.value.code == "insufficient_scope"
+    assert len(dash.calls) == 1
+    preview, commit = _launch(registry, read_spawn, "spawn-test-002")
+    assert "recipient_registration" not in commit
+    assert "mail_create_only" not in dash.calls[-1]
+
+
+def test_gateway_different_mail_instance_after_preview_is_refused(profile, tmp_path):
+    from orrery_chatgpt_mcp.tools import ToolError
+    config, dash, operator, registry = _gateway_fixture(profile, tmp_path)
+    preview = registry.call(operator, "orrery_spawn_preview", {
+        "task": "Synthetic test", "directory": "test", "name": "QuartzTesla",
+    })
+    connection = Path(json.loads(profile.read_text())["connection"])
+    data = json.loads(connection.read_text())
+    data["expected_server_instance_id"] = "601f61c2-7d32-45a2-91f2-faa58244c091"
+    connection.write_text(json.dumps(data))
+    with pytest.raises(ToolError, match="profile changed"):
+        registry.call(operator, "orrery_spawn_commit", {
+            "preview_id": preview["preview_id"], "idempotency_key": "spawn-test-001",
+        })
+    assert len(dash.calls) == 1
+
+
+def test_gateway_receipt_from_wrong_instance_never_admitted(profile, tmp_path, monkeypatch):
+    from orrery_chatgpt_mcp import auto_allowlist
+    config, dash, operator, registry = _gateway_fixture(profile, tmp_path)
+    dash.binding = dict(dash.binding, mail_instance_id="601f61c2-7d32-45a2-91f2-faa58244c091")
+    monkeypatch.setattr(auto_allowlist, "admit_mcp_spawn", lambda **kw: pytest.fail("unexpected admission"))
+    _, commit = _launch(registry, operator)
+    assert commit["outcome"] == "accepted"
+    assert commit["recipient_registration"] == {"state": "not_registered", "reason": "unattested_spawn"}
+    dash.state = "ready"
+    registry.reconcile_admissions()
+
+
+def test_unsafe_spawn_ledger_cannot_supply_worker_proof(profile, tmp_path, monkeypatch):
+    from orrery_chatgpt_mcp.tools import ToolError
+    from orrery_chatgpt_mcp import auto_allowlist
+    config, dash, operator, registry = _gateway_fixture(profile, tmp_path)
+    _launch(registry, operator)
+    path = config.state_dir / "spawn-ledger.json"
+    path.chmod(0o644)
+    dash.state = "ready"
+    monkeypatch.setattr(auto_allowlist, "admit_mcp_spawn", lambda **kw: pytest.fail("unexpected admission"))
+    with pytest.raises(ToolError, match="unreadable"):
+        registry.reconcile_admissions()
+
+
+def test_worker_full_profile_reports_failure_without_evicting(profile, tmp_path):
+    config, dash, operator, registry = _gateway_fixture(profile, tmp_path)
+    data = json.loads(profile.read_text())
+    data["peers"] = [{"name": f"Fixture{i}", "id": 300 + i} for i in range(16)]
+    profile.write_text(json.dumps(data))
+    original = profile.read_bytes()
+    _, commit = _launch(registry, operator)
+    assert commit["outcome"] == "accepted"
+    dash.state = "ready"
+    registry.reconcile_admissions()
+    assert registry.call(operator, "orrery_spawn_status", {"name": "QuartzTesla"})["recipient_registration"] == {
+        "state": "not_registered", "reason": "allowlist_full"}
+    assert profile.read_bytes() == original
+
+
+def test_worker_retries_contention_without_spawning_again(profile, tmp_path, monkeypatch):
+    from orrery_chatgpt_mcp import auto_allowlist
+    config, dash, operator, registry = _gateway_fixture(profile, tmp_path)
+    calls = []
+    def admit(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise AdmissionError("sender_busy")
+        return "registered"
+    monkeypatch.setattr(auto_allowlist, "admit_mcp_spawn", admit)
+    _launch(registry, operator)
+    dash.state = "ready"
+    registry.reconcile_admissions()
+    assert registry.call(operator, "orrery_spawn_status", {"name": "QuartzTesla"})["recipient_registration"]["state"] == "pending"
+    registry.reconcile_admissions()
+    assert registry.call(operator, "orrery_spawn_status", {"name": "QuartzTesla"})["recipient_registration"]["state"] == "registered"
+    assert len(dash.calls) == 2

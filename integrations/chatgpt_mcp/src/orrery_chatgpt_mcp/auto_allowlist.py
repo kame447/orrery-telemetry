@@ -1,8 +1,8 @@
 """Fail-closed admission and atomic profile update for MCP-spawned peers.
 
-No gateway entry point calls this module yet. In particular, this module does not
-turn on auto-authorization. Only a caller holding a trusted, durable MCP spawn
-receipt and a fresh, helper-verified Mail observation may use it.
+Only the opted-in gateway worker may call the composed admission path with a
+trusted, durable MCP spawn receipt and a fresh, helper-verified Mail observation.
+The module is not an MCP tool.
 """
 from __future__ import annotations
 
@@ -147,6 +147,38 @@ def snapshot_profile(profile_path: Path) -> str:
     return hashlib.sha256(_private_regular(Path(profile_path))).hexdigest()
 
 
+@dataclass(frozen=True)
+class ProfileAuthority:
+    digest: str
+    instance: str
+
+
+def profile_authority(profile_path: Path) -> ProfileAuthority:
+    """Pin sender and canonical connection, independent of peer additions."""
+    return _profile_authority(_private_regular(Path(profile_path)))
+
+
+def _profile_authority(raw: bytes) -> ProfileAuthority:
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, dict) or data.get("kind") != "orrery-daemon-binding-v2":
+            raise ValueError("invalid profile")
+        connection = data.get("connection")
+        if not isinstance(connection, str) or not Path(connection).is_absolute():
+            raise ValueError("invalid connection")
+        binding = json.loads(_private_regular(Path(connection)))
+        if not isinstance(binding, dict) or binding.get("kind") != "orrery-mail-connection-v1":
+            raise ValueError("invalid connection")
+        instance = binding.get("expected_server_instance_id")
+        if not _canonical_instance(instance):
+            raise ValueError("invalid connection instance")
+        authority = {k: v for k, v in data.items() if k != "peers"}
+        digest = hashlib.sha256(json.dumps([authority, binding], sort_keys=True).encode()).hexdigest()
+        return ProfileAuthority(digest, instance)
+    except (ValueError, UnicodeError) as exc:
+        raise AdmissionError("invalid_profile") from exc
+
+
 def observe_unlisted_peer(profile_path: Path, helper_root: Path, *,
                           name: str, agent_id: int, expected_sha256: str) -> tuple[dict, dict]:
     """Read-only canonical Mail whois using an ephemeral candidate pin.
@@ -203,6 +235,8 @@ def observe_unlisted_peer(profile_path: Path, helper_root: Path, *,
                 sender = runtime.identity()
                 verified = runtime.lookup(name)
         except SenderError as exc:
+            if exc.code == "sender-busy":
+                raise AdmissionError("sender_busy") from exc
             raise AdmissionError("candidate_unverified") from exc
     finally:
         os.unlink(temporary)
@@ -317,11 +351,11 @@ def append_verified_peer(profile_path: Path, candidate: Candidate, *, expected_s
 
 
 def admit_mcp_spawn(*, enabled: bool, ledger: Mapping, launch: Mapping,
-                    profile_path: Path, helper_root: Path) -> str:
-    """Compose all private gates; never accept a candidate chosen via MCP args.
+                    profile_path: Path, helper_root: Path,
+                    expected_authority: str | None = None) -> str:
+    """Compose private gates using committed ledger and authoritative ready status.
 
-    This is intentionally not a gateway handler. A future caller must load the
-    private committed ledger entry and the real ready Dashboard status itself.
+    This is not a gateway handler. No candidate is chosen via MCP arguments.
     A missing trusted Mail ID or timestamp is a hard refusal, not a name lookup.
     """
     if enabled is not True:
@@ -341,7 +375,12 @@ def admit_mcp_spawn(*, enabled: bool, ledger: Mapping, launch: Mapping,
     if not isinstance(name, str) or not _NAME.fullmatch(name):
         raise AdmissionError("invalid_identity")
     profile_path = Path(profile_path)
-    snapshot = snapshot_profile(profile_path)
+    original = _private_regular(profile_path)
+    snapshot = hashlib.sha256(original).hexdigest()
+    if expected_authority is not None:
+        authority = _profile_authority(original)
+        if authority.digest != expected_authority or result.get("mail_instance_id") != authority.instance:
+            raise AdmissionError("sender_profile_changed")
     sender, peer = observe_unlisted_peer(
         profile_path, Path(helper_root), name=name,
         agent_id=result["mail_agent_id"], expected_sha256=snapshot)

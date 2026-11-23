@@ -482,3 +482,156 @@ def test_isolated_mail_candidate_admission_and_new_recipient_delivery(mail, gate
     assert len(mail["client"].fetch_inbox(project_key=mail["project"],
                agent_name="QuartzTesla", registration_token=token,
                include_bodies=True, limit=20)) == 1
+
+
+def test_pinned_gateway_auto_admits_only_approved_spawn_after_restart(mail, tmp_path):
+    """Pinned gateway process and real isolated Mail, synthetic dashboard launch.
+
+    The fixture implements the exclusive registration receipt contract but
+    never launches a real provider or touches the user's dashboard/Mail.
+    """
+    import plistlib
+    import urllib.request
+    from orrery_chatgpt_mcp import pairing, service
+    from orrery_chatgpt_mcp.helper_release import install_helper_release
+
+    dashboard = FakeDashboard()
+    state = tmp_path / "auto-service"
+    secret = pairing.create_secret(state)
+    release, digest = service.install_release(ROOT / "integrations/chatgpt_mcp/src", state / "releases")
+    helper, helper_digest = install_helper_release(ROOT, state / "helpers")
+    token = "synthetic-worker-for-spawn-0000000000000000"
+    created = []
+    name = "QuartzTesla"
+
+    def synthetic_spawn(payload):
+        assert payload["mail_create_only"] is True and payload["standalone"] is True
+        assert payload["name"] == name
+        if payload.get("dry_run"):
+            return 200, dict(ok=True, dry_run=True, mail_create_only=True,
+                             model="claude-opus", provider="claude")
+        registered = mail["client"]._call_tool_object("register_agent", {
+            "project_key": mail["project"], "name": name, "program": "claude-code",
+            "model": "fixture", "registration_token": token, "create_only": True,
+        })
+        mail["client"]._call_tool_object("set_contact_policy", {
+            "project_key": mail["project"], "agent_name": name, "policy": "open",
+        })
+        peer = mail["client"].whois(project_key=mail["project"], agent_name=name)
+        binding = dict(child_name=name, provider="claude", mail_agent_id=registered["id"],
+                       mail_instance_id=mail["instance"], mail_project_key=mail["project"],
+                       mail_project_id=peer["project_id"], mail_registered_at=peer["inception_ts"])
+        created.append(binding)
+        dashboard.spawn_status[name] = dict(name=name, state="launching", result=None, ok=True)
+        return 200, dict(ok=True, pending=True, model="claude-opus", **binding)
+
+    dashboard.spawn_hook = synthetic_spawn
+    port = free_port()
+    assert port not in LIVE_PORTS
+    plan = service.ServicePlan(
+        python=sys.executable, release_dir=release, digest=digest, state_dir=state,
+        port=port, dashboard_url=dashboard.url, spawn_dirs={"fixture": str(tmp_path)},
+        spawn_approval="chat", message_profile=mail["profile"], message_helper_root=helper,
+        message_helper_digest=helper_digest, auto_register_spawned=True,
+    )
+    spec = plistlib.loads(service.render_plist(plan))
+    assert spec["EnvironmentVariables"]["ORRERY_MCP_AUTO_REGISTER_SPAWNED"] == "1"
+    env = {**spec["EnvironmentVariables"], "HOME": str(tmp_path), "PATH": "/usr/bin:/bin"}
+    url = f"http://127.0.0.1:{port}/mcp/{secret}"
+    log = open(tmp_path / "auto-service.log", "ab")
+    proc = None
+
+    def call_mcp(name, arguments):
+        request = urllib.request.Request(url, data=json.dumps({
+            "jsonrpc": "2.0", "id": 21, "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        }).encode(), headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"})
+        with urllib.request.urlopen(request, timeout=8) as response:
+            result = json.load(response)["result"]
+        return result
+
+    def start():
+        nonlocal proc
+        proc = subprocess.Popen(spec["ProgramArguments"], cwd=spec["WorkingDirectory"],
+                                env=env, stdout=log, stderr=log)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            assert proc.poll() is None, "isolated pinned gateway exited"
+            try:
+                result = call_mcp("orrery_status", {})["structuredContent"]
+                assert result["capabilities"]["auto_register_spawned"] is True
+                return
+            except OSError:
+                time.sleep(0.1)
+        pytest.fail("isolated pinned gateway did not answer")
+
+    def stop():
+        nonlocal proc
+        if proc is not None:
+            if proc.poll() is None:
+                proc.terminate()
+            proc.wait(timeout=15)
+            proc = None
+
+    try:
+        start()
+        original = mail["profile"].read_bytes()
+        preview = call_mcp("orrery_spawn_preview", {
+            "directory": "fixture", "task": "isolated spawn", "name": name,
+        })["structuredContent"]
+        assert preview["launch"]["auto_register_recipient"] is True
+        assert created == [] and mail["profile"].read_bytes() == original
+        args = dict(preview_id=preview["preview_id"], idempotency_key="auto-spawn-001")
+        committed = call_mcp("orrery_spawn_commit", args)["structuredContent"]
+        assert committed["outcome"] == "accepted"
+        assert committed["recipient_registration"]["state"] == "pending"
+        assert len(created) == 1 and mail["profile"].read_bytes() == original
+        # The service restarts before readiness. Durable approved receipt, no
+        # new spawn or second registration; the worker resumes independently.
+        stop()
+        dashboard.spawn_status[name] = dict(name=name, state="ready", result=created[0], ok=True)
+        start()
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            result = call_mcp("orrery_spawn_status", {"name": name})["structuredContent"]
+            if result["recipient_registration"]["state"] == "registered":
+                break
+            assert result["recipient_registration"]["state"] == "pending", result
+            time.sleep(0.2)
+        else:
+            pytest.fail("isolated worker did not reconcile approved spawn")
+        assert call_mcp("orrery_spawn_commit", args)["structuredContent"]["replayed"] is True
+        assert len(created) == 1
+        assert json.loads(mail["profile"].read_text())["peers"] == [
+            {"name": "ExampleWorker", "id": mail["worker"]["id"]},
+            {"name": name, "id": created[0]["mail_agent_id"]},
+        ]
+        denied = call_mcp("orrery_message_preview", {"recipient": "ExampleOther", "instruction": "not allowed"})
+        assert denied["isError"] is True
+        msg = call_mcp("orrery_message_preview", {
+            "recipient": name, "instruction": "isolated approved recipient",
+        })["structuredContent"]
+        args = dict(preview_id=msg["preview_id"], content_sha256=msg["content_sha256"],
+                    idempotency_key="auto-msg-001")
+        assert call_mcp("orrery_message_commit", args)["structuredContent"]["outcome"] == "accepted"
+        received = mail["client"].fetch_inbox(
+            project_key=mail["project"], agent_name=name, registration_token=token, include_bodies=True, limit=20)
+        assert len(received) == 1 and received[0]["body_md"] == msg["message"]["body"]
+        ack = mail["client"].acknowledge_message(
+            project_key=mail["project"], agent_name=name, registration_token=token, message_id=received[0]["id"])
+        assert ack["acknowledged"] is True and ack["read_at"] and ack["acknowledged_at"]
+        mail["client"].send_message(
+            project_key=mail["project"], agent_name=name, registration_token=token,
+            to=["ChatRelay"], subject="Completion", body_md="Done", thread_id=received[0]["thread_id"])
+        from orrery_chatgpt_mcp.messaging import DaemonSender
+        with DaemonSender(mail["profile"], ROOT).session() as session:
+            replies = session._call("fetch_inbox", {"include_bodies": True, "limit": 20})
+        assert len(replies) == 1 and replies[0]["sender_id"] == created[0]["mail_agent_id"]
+        assert replies[0]["thread_id"] == received[0]["thread_id"] and replies[0]["body_md"] == "Done"
+        assert call_mcp("orrery_message_commit", args)["structuredContent"]["replayed"] is True
+        assert len(mail["client"].fetch_inbox(project_key=mail["project"], agent_name=name,
+                   registration_token=token, include_bodies=True, limit=20)) == 1
+    finally:
+        stop()
+        log.close()
+        dashboard.close()

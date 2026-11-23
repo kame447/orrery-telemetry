@@ -129,6 +129,7 @@ class ServicePlan:
     message_max_per_hour: int | None = None
     spawn_dirs: Mapping[str, str] | None = None
     spawn_approval: str | None = None
+    auto_register_spawned: bool = False
 
     @property
     def log_path(self) -> Path:
@@ -233,6 +234,7 @@ def render_plist(plan: ServicePlan) -> bytes:
             "ORRERY_MCP_SPAWN_DIRS": ",".join(f"{alias}={path}" for alias, path in sorted(plan.spawn_dirs.items())),
             "ORRERY_MCP_SPAWN_APPROVAL": plan.spawn_approval or "local",
         })
+    env["ORRERY_MCP_AUTO_REGISTER_SPAWNED"] = "1" if plan.auto_register_spawned else "0"
     env["ORRERY_MCP_ENABLE_MESSAGE"] = "0"
     if plan.message_profile is not None:
         env.update({
@@ -362,7 +364,8 @@ def _accepted_by(sock: socket.socket, port: int, pid: int, runner: Runner) -> bo
 
 def probe_status(port: int, secret: str, pid: int, runner: Runner = subprocess.run, timeout: float = 5,
                  *, expected_spawn: bool = False, expected_spawn_approval: str | None = None,
-                 expected_spawn_directories: list[str] | None = None) -> dict:
+                 expected_spawn_directories: list[str] | None = None,
+                 expected_auto_registration: bool = False) -> dict:
     """Call orrery_status over loopback the way tunnel-client would, after checking who answers.
 
     Raises VerifyError with a fixed label; nothing from the peer or the secret
@@ -388,7 +391,8 @@ def probe_status(port: int, secret: str, pid: int, runner: Runner = subprocess.r
         status = json.loads(data)["result"]["structuredContent"]
         capabilities = status["capabilities"]
         ok = (status["gateway"]["name"] == "orrery-chatgpt-mcp" and status["connection"]["auth_mode"] == "pairing"
-              and capabilities["spawn_enabled_on_server"] is expected_spawn)
+              and capabilities["spawn_enabled_on_server"] is expected_spawn
+              and capabilities.get("auto_register_spawned", False) is expected_auto_registration)
         if expected_spawn:
             directories = status.get("spawn_directories")
             ok = (ok and capabilities.get("spawn") is True
@@ -420,7 +424,8 @@ def wait_until_answering(plan: ServicePlan, secret: str, runner: Runner = subpro
                 return probe_status(plan.port, secret, pid, runner,
                                     expected_spawn=bool(plan.spawn_dirs),
                                     expected_spawn_approval=(plan.spawn_approval or "local") if plan.spawn_dirs else None,
-                                    expected_spawn_directories=sorted(plan.spawn_dirs or {}))
+                                    expected_spawn_directories=sorted(plan.spawn_dirs or {}),
+                                    expected_auto_registration=plan.auto_register_spawned)
             except VerifyError as exc:
                 last = exc
         time.sleep(0.5)
@@ -521,6 +526,10 @@ def install_service(plan: ServicePlan, *, runner: Runner = subprocess.run, launc
                   state_dir=plan.state_dir, spawn_enabled=bool(plan.spawn_dirs),
                   spawn_dirs=plan.spawn_dirs or {}, spawn_approval=plan.spawn_approval or "local").validate()
     plan = _resolve_message_controls(plan, existing)
+    if type(plan.auto_register_spawned) is not bool:
+        raise ConfigError("auto registration must be boolean")
+    if plan.auto_register_spawned and not (plan.spawn_dirs and plan.message_profile):
+        raise ConfigError("auto registration requires explicit spawn and message opt-ins")
     if plan.message_profile is not None:
         if not (plan.release_dir / PACKAGE / "helper_release.py").is_file():
             raise ConfigError("message opt-in requires a gateway release with helper support")
@@ -621,7 +630,8 @@ def service_status(label: str = LABEL, *, runner: Runner = subprocess.run, launc
         release = Path(env.get("PYTHONPATH", ""))
         digest = str(read_release(release).get("digest", ""))
     enabled = env.get("ORRERY_MCP_ENABLE_MESSAGE") == "1"
-    out.update(message=enabled)
+    auto_register = env.get("ORRERY_MCP_AUTO_REGISTER_SPAWNED", "0") == "1"
+    out.update(message=enabled, auto_register_spawned=auto_register)
     if enabled:
         out["message_helper_intact"] = verify_helper_release(Path(env.get("ORRERY_MCP_MESSAGE_HELPER_ROOT", "")),
                                                                env.get("ORRERY_MCP_MESSAGE_HELPER_DIGEST", ""))
@@ -643,7 +653,8 @@ def service_status(label: str = LABEL, *, runner: Runner = subprocess.run, launc
     try:
         status = probe_status(out["port"], pairing.read_secret(Path(env.get("ORRERY_MCP_STATE_DIR", ""))), pid, runner,
                               expected_spawn=spawn, expected_spawn_approval=approval,
-                              expected_spawn_directories=sorted(directories))
+                              expected_spawn_directories=sorted(directories),
+                              expected_auto_registration=auto_register)
         out["answering"] = True
         out["dashboard_reachable"] = bool(status.get("dashboard", {}).get("reachable"))
     except VerifyError as exc:
