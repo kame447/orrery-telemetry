@@ -13,19 +13,22 @@ from orrery_chatgpt_mcp.auto_allowlist import AdmissionError, append_verified_pe
 
 INSTANCE = "7b45b61c-3efc-4197-a00f-e9d21bb1da31"
 PROJECT = "/opt/test/project"
+REGISTERED = "2026-11-23T12:00:00Z"
 
 
 def observations():
     binding = dict(child_name="QuartzTesla", mail_agent_id=202, provider="claude",
-                   mail_instance_id=INSTANCE, mail_project_key=PROJECT)
+                   mail_instance_id=INSTANCE, mail_project_key=PROJECT,
+                   mail_project_id=3, mail_registered_at=REGISTERED)
     return dict(
         enabled=True,
         ledger=dict(mcp_authorized=True, state="accepted", name="QuartzTesla",
                     preview_id="a" * 64, result=dict(binding)),
         launch=dict(name="QuartzTesla", state="ready", result=dict(binding)),
-        sender=dict(instance=INSTANCE, project_key=PROJECT, name="ChatRelay", agent_id=101),
+        sender=dict(instance=INSTANCE, project_key=PROJECT, project_id=3,
+                    name="ChatRelay", agent_id=101),
         peer=dict(name="QuartzTesla", id=202, program="claude-code", retired=False,
-                  project_id=3, registered_at="2026-11-23T12:00:00Z"),
+                  project_id=3, registered_at=REGISTERED),
     )
 
 
@@ -33,6 +36,7 @@ def test_happy_path_requires_four_attestations():
     candidate = verify_mcp_spawn(**observations())
     assert candidate.name == "QuartzTesla" and candidate.agent_id == 202
     assert candidate.sender_name == "ChatRelay" and candidate.mail_instance == INSTANCE
+    assert candidate.project_id == 3 and candidate.registered_at == REGISTERED
 
 
 @pytest.mark.parametrize("patch,reason", [
@@ -44,17 +48,27 @@ def test_happy_path_requires_four_attestations():
     ({"launch.state": "failed"}, "not_ready"),
     ({"ledger.result.mail_agent_id": None}, "unattested_spawn"),
     ({"ledger.result.mail_agent_id": True}, "unattested_spawn"),
+    ({"ledger.result.mail_instance_id": "not-a-uuid"}, "unattested_spawn"),
+    ({"ledger.result.mail_project_id": True}, "unattested_spawn"),
+    ({"ledger.result.mail_project_id": 0}, "unattested_spawn"),
+    ({"ledger.result.mail_registered_at": ""}, "unattested_spawn"),
     ({"ledger.result.mail_agent_id": 999}, "spawn_binding_changed"),
     ({"launch.result.mail_agent_id": 888}, "spawn_binding_changed"),
     ({"launch.result.mail_instance_id": "different"}, "spawn_binding_changed"),
+    ({"launch.result.mail_project_id": 4}, "spawn_binding_changed"),
+    ({"launch.result.mail_registered_at": "other-generation"}, "spawn_binding_changed"),
     ({"launch.name": "RenamedAgent"}, "spawn_binding_changed"),
     ({"launch.result.provider": "codex"}, "spawn_binding_changed"),
     ({"peer.program": "codex"}, "peer_binding_changed"),
     ({"sender.instance": "other-instance"}, "sender_binding_changed"),
     ({"sender.project_key": "/different"}, "sender_binding_changed"),
+    ({"sender.project_id": 999}, "sender_binding_changed"),
+    ({"sender.project_id": True}, "sender_binding_changed"),
     ({"peer.id": 303}, "peer_binding_changed"),
     ({"peer.retired": True}, "peer_binding_changed"),
     ({"peer.project_id": -1}, "peer_binding_changed"),
+    ({"peer.project_id": 4}, "peer_binding_changed"),
+    ({"peer.registered_at": "other-generation"}, "peer_binding_changed"),
     ({"peer.registered_at": ""}, "peer_binding_changed"),
     ({"peer.name": "DifferentPeer"}, "peer_binding_changed"),
 ])
