@@ -30,6 +30,25 @@ The gateway must not expose either helper as an MCP tool. In particular, it
 must never allow an MCP user to submit a candidate proof, manually set
 mcp_authorized, or supply a target Mail ID.
 
+## Read-only candidate observation
+
+The internal `observe_unlisted_peer` helper now stages a private temporary
+binding alongside the existing daemon profile, with one candidate added to its
+fixed allowlist only for the duration of an authenticated, read-only
+`runtime_status` and `whois` call. The live profile is not changed by this
+step. The normal daemon profile lock prevents overlap with ordinary sending,
+and the temporary file is removed even on lookup failure. It refuses a stale
+profile snapshot, a full 16-peer list, conflicting name or Mail ID, unsafe
+file permissions, and changed sender identity.
+
+A read-only `whois` through the canonical daemon helper checks the candidate
+against the sender's actual Mail project. Its numeric project ID is then
+included in the verified sender observation for `verify_mcp_spawn`.
+The later write must use the same SHA-256 snapshot. The helper does not
+substitute for authorization or for the required independently attested
+dashboard spawn record, and does not close Mail-side retirement races between
+the final check and a later send.
+
 ## Not wired into production yet
 
 Additional trusted plumbing and tests are still required before enabling:
