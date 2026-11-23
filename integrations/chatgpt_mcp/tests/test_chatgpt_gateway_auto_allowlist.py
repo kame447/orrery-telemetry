@@ -40,6 +40,18 @@ def test_happy_path_requires_four_attestations():
     assert candidate.project_id == 3 and candidate.registered_at == REGISTERED
 
 
+def test_codex_uses_actual_mail_program():
+    args = observations()
+    for value in (args["ledger"]["result"], args["launch"]["result"]):
+        value["provider"] = "codex"
+    args["peer"]["program"] = "codex-cli"
+    assert verify_mcp_spawn(**args).agent_id == 202
+    args["peer"]["program"] = "codex"
+    with pytest.raises(AdmissionError) as caught:
+        verify_mcp_spawn(**args)
+    assert caught.value.code == "peer_binding_changed"
+
+
 @pytest.mark.parametrize("patch,reason", [
     ({"enabled": False}, "opt_in_required"),
     ({"ledger.mcp_authorized": False}, "no_mcp_spawn_proof"),
