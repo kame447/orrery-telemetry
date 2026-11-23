@@ -398,7 +398,7 @@ def test_isolated_mail_candidate_admission_and_new_recipient_delivery(mail, gate
     })
     mail["client"]._call_tool_object("set_contact_policy", {
         "project_key": mail["project"], "agent_name": "QuartzTesla",
-        "policy": "open", "registration_token": token,
+        "policy": "open",
     })
     peer = mail["client"].whois(project_key=mail["project"], agent_name="QuartzTesla")
     assert type(registered["id"]) is int and peer["id"] == registered["id"]
