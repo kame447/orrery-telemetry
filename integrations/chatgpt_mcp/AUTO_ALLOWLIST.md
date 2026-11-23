@@ -13,7 +13,10 @@ internal steps:
    the ready dashboard launch result, the authenticated dedicated sender's
    identity, and a canonical Mail-helper lookup of the proposed recipient.
    Every source must agree on the new agent's name, stable numeric Mail ID,
-   Mail instance, project and retirement state. It rejects a missing opt-in,
+   canonical Mail instance UUID, the exact legacy project key and numeric project
+   ID, and the same registration timestamp. A different Mail project with a
+   positive numeric ID is not sufficient. It also rejects a retired peer,
+   a missing opt-in,
    an unknown outcome, a launch that is not ready, changed identity, a
    malformed numeric ID (including boolean), or a stale recipient.
 2. append_verified_peer checks a prior SHA-256 profile snapshot and uses the
