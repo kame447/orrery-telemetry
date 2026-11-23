@@ -165,3 +165,39 @@ def test_sender_binding_change_refused(profile):
     with pytest.raises(AdmissionError, match="sender_profile_changed"):
         append_verified_peer(profile, verify_mcp_spawn(**observations()),
                              expected_sha256=snapshot_profile(profile))
+
+
+def test_parallel_admissions_never_lose_or_duplicate_peers(profile):
+    from concurrent.futures import ThreadPoolExecutor
+    from dataclasses import replace
+    from threading import Barrier
+
+    a = verify_mcp_spawn(**observations())
+    b = replace(a, name="NovaBohr", agent_id=203)
+    digest = snapshot_profile(profile)
+    barrier = Barrier(2)
+
+    def attempt(candidate):
+        barrier.wait()
+        try:
+            return append_verified_peer(profile, candidate, expected_sha256=digest)
+        except AdmissionError as exc:
+            return exc.code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(attempt, (a, b)))
+    assert results.count("registered") == 1
+    assert all(x in {"registered", "sender_busy", "profile_changed"} for x in results)
+    saved = json.loads(profile.read_text())
+    assert len(saved["peers"]) == 2
+    assert saved["peers"][0] == {"name": "ExistingPeer", "id": 102}
+
+
+def test_invalid_candidate_never_changes_profile(profile):
+    from dataclasses import replace
+    good = verify_mcp_spawn(**observations())
+    old = profile.read_bytes()
+    with pytest.raises(AdmissionError, match="invalid_candidate"):
+        append_verified_peer(profile, replace(good, agent_id=True),
+                             expected_sha256=snapshot_profile(profile))
+    assert profile.read_bytes() == old
