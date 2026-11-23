@@ -9,8 +9,8 @@ import stat
 import pytest
 
 import chatgpt_gateway_support  # noqa: F401 - register gateway source path
-from orrery_chatgpt_mcp.auto_allowlist import (AdmissionError, append_verified_peer,
-    observe_unlisted_peer, snapshot_profile, verify_mcp_spawn)
+from orrery_chatgpt_mcp.auto_allowlist import (AdmissionError, admit_mcp_spawn,
+    append_verified_peer, observe_unlisted_peer, snapshot_profile, verify_mcp_spawn)
 
 INSTANCE = "7b45b61c-3efc-4197-a00f-e9d21bb1da31"
 PROJECT = "/opt/test/project"
@@ -314,3 +314,60 @@ def test_ephemeral_candidate_pin_cleans_up_on_mail_error(profile, monkeypatch):
                               agent_id=202, expected_sha256=snapshot_profile(profile))
     assert profile.read_bytes() == before
     assert list(profile.parent.glob(".mcp-candidate-*")) == []
+
+
+def test_composed_admission_requires_real_private_attestation(profile, monkeypatch):
+    from orrery_chatgpt_mcp import auto_allowlist
+
+    calls = []
+
+    def observe(profile_path, helper_root, *, name, agent_id, expected_sha256):
+        assert profile_path == profile and helper_root == profile.parent
+        assert name == "QuartzTesla" and agent_id == 202
+        assert snapshot_profile(profile) == expected_sha256
+        calls.append(name)
+        obs = observations()
+        return obs["sender"], obs["peer"]
+
+    monkeypatch.setattr(auto_allowlist, "observe_unlisted_peer", observe)
+    obs = observations()
+    before = profile.read_bytes()
+
+    for patch, reason in [
+        ({"enabled": False}, "opt_in_required"),
+        ({"ledger": {**obs["ledger"], "mcp_authorized": False}}, "no_mcp_spawn_proof"),
+        ({"ledger": {**obs["ledger"], "state": "unknown"}}, "no_mcp_spawn_proof"),
+        ({"launch": {**obs["launch"], "state": "launching"}}, "not_ready"),
+        ({"ledger": {**obs["ledger"], "result": {"mail_agent_id": None}}}, "unattested_spawn"),
+    ]:
+        kwargs = {"enabled": True, "ledger": obs["ledger"], "launch": obs["launch"],
+                  "profile_path": profile, "helper_root": profile.parent}
+        kwargs.update(patch)
+        with pytest.raises(AdmissionError, match=reason):
+            admit_mcp_spawn(**kwargs)
+        assert calls == [] and profile.read_bytes() == before
+
+    args = {"enabled": True, "ledger": obs["ledger"], "launch": obs["launch"],
+            "profile_path": profile, "helper_root": profile.parent}
+    assert admit_mcp_spawn(**args) == "registered"
+    assert calls == ["QuartzTesla"]
+    assert json.loads(profile.read_text())["peers"][-1] == {"name": "QuartzTesla", "id": 202}
+    assert admit_mcp_spawn(**args) == "already_registered"
+    assert calls == ["QuartzTesla", "QuartzTesla"]
+
+
+def test_composed_admission_rejects_cross_project_before_profile_write(profile, monkeypatch):
+    from orrery_chatgpt_mcp import auto_allowlist
+
+    def observe(*args, **kwargs):
+        obs = observations()
+        obs["peer"]["project_id"] = 400
+        return obs["sender"], obs["peer"]
+
+    monkeypatch.setattr(auto_allowlist, "observe_unlisted_peer", observe)
+    original = profile.read_bytes()
+    obs = observations()
+    with pytest.raises(AdmissionError, match="peer_binding_changed"):
+        admit_mcp_spawn(enabled=True, ledger=obs["ledger"], launch=obs["launch"],
+                        profile_path=profile, helper_root=profile.parent)
+    assert profile.read_bytes() == original
