@@ -168,11 +168,10 @@ def append_verified_peer(profile_path: Path, candidate: Candidate, *, expected_s
         known_ids.add(peer["id"])
     if candidate.name == current["name"] or candidate.agent_id == current["agent_id"]:
         raise AdmissionError("sender_is_recipient")
-    if candidate.name in known_names or candidate.agent_id in known_ids:
-        if any(p["name"] == candidate.name and p["id"] == candidate.agent_id for p in peers):
-            return "already_registered"
+    already_pinned = any(p["name"] == candidate.name and p["id"] == candidate.agent_id for p in peers)
+    if not already_pinned and (candidate.name in known_names or candidate.agent_id in known_ids):
         raise AdmissionError("peer_name_or_id_reused")
-    if len(peers) >= _MAX_PEERS:
+    if not already_pinned and len(peers) >= _MAX_PEERS:
         raise AdmissionError("allowlist_full")
     lock_path = Path(current["lock_path"])
     if not lock_path.is_absolute():
@@ -192,6 +191,8 @@ def append_verified_peer(profile_path: Path, candidate: Candidate, *, expected_s
             raise AdmissionError("sender_busy") from exc
         if hashlib.sha256(_private_regular(profile_path)).hexdigest() != expected_sha256:
             raise AdmissionError("profile_changed")
+        if already_pinned:
+            return "already_registered"
         updated = dict(current)
         updated["peers"] = [*peers, {"name": candidate.name, "id": candidate.agent_id}]
         payload = (json.dumps(updated, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
