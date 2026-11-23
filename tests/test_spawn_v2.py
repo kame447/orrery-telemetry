@@ -1699,3 +1699,72 @@ def test_long_error_remains_whole_when_candidate_count_exceeds_budget(tmp_path):
     log.write_text("note: skipping codex /first: " + "x" * 600 +
                    "\nnote: skipping codex /second: missing node\n" + error)
     assert server._spawn_log_tail_and_reason(log)[1] == error
+
+
+def test_create_only_registration_guard_is_never_stripped(monkeypatch):
+    monkeypatch.setattr(server, "_mcp_tool_parameters", lambda _: {"name", "project_key"})
+    monkeypatch.setattr(server, "_mcp_jsonrpc", lambda *a, **k: pytest.fail("unguarded register dispatched"))
+    result = server._mcp_call("register_agent", {"name": "QuietCurie", "create_only": True})
+    assert result["error_code"] == "create_only_registration_unavailable"
+
+
+@pytest.mark.parametrize("bad", [None, "schema", "instance", "name", "id"])
+def test_attested_spawn_uses_only_new_registration_and_preserves_ready_binding(monkeypatch, tmp_path, bad):
+    launcher = tmp_path / "spawn_child.sh"
+    launcher.write_text("#!/bin/bash\n")
+    launcher.chmod(0o755)
+    instance = "7b45b61c-3efc-4197-a00f-e9d21bb1da31"
+    registration = {"id": 73, "name": "QuietCurie", "program": "claude-code", "project_id": 12,
+                    "inception_ts": "2026-11-24T00:00:00Z"}
+    if bad == "name":
+        registration["name"] = "BrightCurie"
+    if bad == "id":
+        registration["id"] = 73.0
+    calls, launched = [], []
+
+    def mcp(method, args, timeout=15):
+        calls.append((method, args))
+        if method == "health_check":
+            switched = bad == "instance" and sum(x[0] == "health_check" for x in calls) > 1
+            return {"ok": True, "data": {"server_instance_id": "1b45b61c-3efc-4197-a00f-e9d21bb1da31" if switched else instance}}
+        if method == "register_agent":
+            return {"ok": True, "data": registration}
+        return {"ok": True, "data": {}}
+
+    class ReadyProc:
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(server, "SPAWN_SCRIPT", str(launcher))
+    monkeypatch.setattr(server, "RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setattr(server, "HERE", str(tmp_path))
+    monkeypatch.setattr(server, "_project_key", lambda: "/project")
+    monkeypatch.setattr(server, "_spawn_name_status", lambda _: "available")
+    monkeypatch.setattr(server, "_mcp_call", mcp)
+    monkeypatch.setattr(server, "_mcp_tool_parameters", lambda _: set() if bad == "schema" else {"create_only"})
+    monkeypatch.setattr(server.subprocess, "Popen", lambda *a, **k: (launched.append(a), ReadyProc())[1])
+    monkeypatch.setattr(server.subprocess, "run", lambda *a, **k: type("R", (), {"returncode": 0})())
+    monkeypatch.setattr(server, "_SPAWN_LAUNCHES", {})
+    payload = {"standalone": True, "name": "QuietCurie", "task": "work", "dir": str(tmp_path),
+               "provider": "claude", "model": "claude-sonnet-5-5", "async": True, "mail_create_only": True}
+    result = server.do_spawn(payload)
+    if bad:
+        assert not result["ok"] and not launched
+        assert not any(method == "set_contact_policy" for method, _ in calls)
+        if bad == "schema":
+            assert not calls
+        else:
+            assert result["registration_retained"] is True
+        return
+    assert result["ok"] is True and result["pending"] is True
+    assert next(args for method, args in calls if method == "register_agent")["create_only"] is True
+    expected = {"mail_agent_id": 73, "mail_instance_id": instance, "mail_project_key": "/project",
+                "mail_project_id": 12, "mail_registered_at": registration["inception_ts"]}
+    assert {key: result[key] for key in expected} == expected
+    deadline = time.monotonic() + 3
+    while server.spawn_launch_status("QuietCurie")["state"] == "launching" and time.monotonic() < deadline:
+        time.sleep(0.01)
+    ready = server.spawn_launch_status("QuietCurie")
+    assert ready["state"] == "ready"
+    assert {key: ready["result"][key] for key in expected} == expected
+    assert "registration_token" not in ready["result"]

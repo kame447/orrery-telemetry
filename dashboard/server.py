@@ -41,10 +41,11 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.parse
 import urllib.request
+import uuid
 from urllib.parse import urlparse, parse_qs
 
 # Public dashboard compatibility generation (docs/tests read this source).
-API_GENERATION = 41
+API_GENERATION = 42
 # Mode admission is shared with hooks and operator/service entry points.
 import runpy as _runtime_runpy
 _MODE_API = _runtime_runpy.run_path(str(Path(__file__).resolve().parents[1] / 'bin/lib/runtime_client.py'))
@@ -8074,6 +8075,12 @@ def _mcp_call(method: str, args: dict, timeout: int = 15) -> dict:
         # This recovery guard must never be silently dropped for an older Mail.
         return {"ok": False, "error": "ORRERY Mail needs existing-owner authentication support",
                 "error_code": "existing_owner_authentication_unavailable"}
+    if (method == "register_agent" and "create_only" in args
+            and (allowed is None or "create_only" not in allowed)):
+        # Removing the guard would turn an exclusive new registration into an
+        # update/claim of a pre-existing identity. Never fall back.
+        return {"ok": False, "error": "ORRERY Mail needs create-only registration support",
+                "error_code": "create_only_registration_unavailable"}
     prepared = args if allowed is None else {
         key: value for key, value in args.items() if key in allowed
     }
@@ -8453,6 +8460,7 @@ def _spawn_request(payload: dict) -> tuple[dict | None, dict | None]:
         "worktree_base", "name", "dir", "provider", "model", "effort",
         "claude_chrome", "claude_chrome_device", "async", "dry_run", "headless", "emoji",
         "base", "tools", "harness", "helper_model", "url_index", "url_key", "web_search",
+        "mail_create_only",
     }
     if str(payload.get("provider") or "").strip().lower() == "gemini":
         allowed.add("resources")
@@ -8468,7 +8476,13 @@ def _spawn_request(payload: dict) -> tuple[dict | None, dict | None]:
     if "emoji" in payload and not isinstance(payload["emoji"], str):
         return None, {"ok": False, "error": "emoji must be a string"}
     standalone = payload.get("standalone", False)
+    create_only = payload.get("mail_create_only", False)
+    if type(create_only) is not bool:
+        return None, {"ok": False, "error": "mail_create_only must be boolean"}
+    if create_only and (GLOBAL_MODE or not standalone):
+        return None, {"ok": False, "error": "mail_create_only requires a legacy standalone launch"}
     request = {
+        "mail_create_only": create_only,
         "dry_run": payload.get("dry_run", False),
         "standalone": standalone,
         "parent": (payload.get("parent") or "").strip(),
@@ -8848,6 +8862,34 @@ def _failed_spawn_cleanup(script: str, child_name: str, environment: dict) -> bo
         return False
 
 
+def _spawn_mail_instance() -> str | None:
+    """Read the canonical instance UUID from Mail's health response."""
+    result = _mcp_call("health_check", {}, timeout=3)
+    data = result.get("data")
+    if result.get("ok") is not True or not isinstance(data, dict):
+        return None
+    value = data.get("server_instance_id")
+    try:
+        return value if isinstance(value, str) and str(uuid.UUID(value)) == value else None
+    except ValueError:
+        return None
+
+
+def _spawn_mail_binding(registration: dict, *, name: str, program: str,
+                        project: str, instance: str) -> dict | None:
+    agent_id, project_id = registration.get("id"), registration.get("project_id")
+    registered_at = registration.get("inception_ts")
+    if (registration.get("name") != name or registration.get("program") != program
+            or type(agent_id) is not int or agent_id <= 0
+            or type(project_id) is not int or project_id <= 0
+            or not isinstance(registered_at, str) or not registered_at.strip()
+            or registration.get("retired_at")):
+        return None
+    return {"mail_agent_id": agent_id, "mail_instance_id": instance,
+            "mail_project_key": project, "mail_project_id": project_id,
+            "mail_registered_at": registered_at}
+
+
 def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
                   handoff: dict, discard_handoff) -> dict:
     standalone = request["standalone"]
@@ -8864,6 +8906,9 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
     model_str = spec.model
     effort = spec.effort
     model_notice = {"model_note": spec.model_note} if spec.model_note else {}
+    create_only = request.get("mail_create_only", False)
+    mail_binding = {}
+    mail_instance = None
 
     if standalone and not spec.standalone_supported:
         return {"ok": False,
@@ -8882,9 +8927,22 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
     if not project_key:
         return {"ok": False, "error": "AGENTSTACK_PROJECT_KEY or AGENTSTACK_VAULT is not configured"}
 
+    if create_only:
+        if (not standalone or provider not in {"claude", "codex"}
+                or not re.fullmatch(r"[A-Z][A-Za-z]{2,39}", requested_name)
+                or not os.path.isabs(project_key)):
+            return {"ok": False, "error": "create-only launch needs an exact legacy Mail identity"}
+        if "create_only" not in (_mcp_tool_parameters("register_agent") or set()):
+            return {"ok": False, "error": "ORRERY Mail needs create-only registration support",
+                    "error_code": "create_only_registration_unavailable"}
+        mail_instance = _spawn_mail_instance()
+        if mail_instance is None:
+            return {"ok": False, "error": "Mail instance cannot be attested"}
+
     if request["dry_run"]:
         return {
             "ok": True, "dry_run": True, "provider": provider,
+            **({"mail_create_only": True} if create_only else {}),
             **model_notice,
             "model": model_str, "effort": effort, "dir": work_dir,
             "standalone": standalone, "worktree": worktree,
@@ -8911,6 +8969,7 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
         "task_description": task_short,
         "registration_token": child_token,
         "name": requested_name,
+        **({"create_only": True} if create_only else {}),
     })
     if not reg["ok"]:
         return {"ok": False,
@@ -8972,6 +9031,12 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
     ):
         return retained_registration_error(
             "register_agent returned no positive numeric id for child binding")
+
+    if create_only:
+        mail_binding = _spawn_mail_binding(registration, name=requested_name, program=program,
+                                           project=project_key, instance=mail_instance)
+        if mail_binding is None or _spawn_mail_instance() != mail_instance:
+            return retained_registration_error("create-only Mail registration could not be attested")
 
     # Registration defaults are contact-gated on ORRERY Mail. Match the
     # normal launcher path and open the new child before delivering its task.
@@ -9332,6 +9397,7 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
             return {
                 "ok": True,
                 **model_notice,
+                **mail_binding,
                 "child_name": child_name,
                 "requested_name": requested_name,
                 "name_substituted": name_substituted,
@@ -9352,6 +9418,7 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
             pending = {
                 "ok": True,
                 **model_notice,
+                **mail_binding,
                 "pending": True,
                 "child_name": child_name,
                 "requested_name": requested_name,

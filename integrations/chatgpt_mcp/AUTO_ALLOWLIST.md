@@ -59,10 +59,13 @@ the final check and a later send.
 
 Additional trusted plumbing and tests are still required before enabling:
 
-- The dashboard's authoritative spawn and ready-status records must include
-  the actual registered numeric Mail ID and Mail instance, and the exact
-  legacy Mail project binding. Existing status records currently do not carry
-  enough information; do not guess the ID from an agent name.
+- The fork's API 42 now supports an explicit legacy-only `mail_create_only`
+  standalone spawn. It requires the canonical Mail `register_agent.create_only`
+  guard, which refuses an existing or concurrently created identity instead of
+  claiming or updating it. The registration and ready response carry the
+  original stable Mail ID, project, timestamp and health-check instance UUID;
+  they never derive a new identity from a later name lookup. The gateway has not
+  yet been wired to request this option or retain these private proof fields.
 - After an explicitly approved MCP spawn_commit, record provenance in the
   private durable idempotency ledger, with exactly the original preview and
   result. No external trigger or unrelated dashboard launch qualifies.

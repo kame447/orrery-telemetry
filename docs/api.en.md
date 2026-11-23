@@ -73,7 +73,7 @@ curl -s http://127.0.0.1:8770/api/version
 ```
 
 ```json
-{"name":"orrery-telemetry","version":"2026.09.16.1","api":41}
+{"name":"orrery-telemetry","version":"2026.09.16.1","api":42}
 ```
 
 See [Installation](install.en.md#version) for version resolution order.
@@ -691,6 +691,8 @@ Clear only the task override (omitted role, emoji, and group retain their values
 ```
 
 ## POST `/api/spawn`
+
+API 42 adds a legacy-only `mail_create_only: true` option for a standalone Claude/Codex launch with an explicit name. It requires Mail `register_agent.create_only` support. Existing names, normalized substitutions, registration races and inconsistent Mail instances are refused without falling back to ordinary registration. Successful launch responses and ready status `result` carry `mail_agent_id`, `mail_instance_id`, `mail_project_key`, `mail_project_id`, `mail_registered_at` from the original canonical registration. These are internal binding evidence, not recipient authorization. The option defaults to off and is unavailable in fresh/global mode.
 
 Claude child with a parent:
 

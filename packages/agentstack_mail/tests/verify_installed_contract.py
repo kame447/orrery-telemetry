@@ -75,6 +75,13 @@ async def verify() -> None:
         or set(candidate["tools"]) != COMPATIBILITY_TOOLS
     ):
         raise SystemExit("installed wheel candidate namespace contract mismatch")
+    # Fork-only legacy create guard must not appear in the projectless plan.
+    registration_schema = actual["register_agent"]["inputSchema"]
+    create_guard = registration_schema["properties"].pop("create_only", None)
+    if (create_guard != {"type": "boolean", "default": False}
+            or "create_only" in registration_schema.get("required", [])
+            or "create_only" in candidate["tools"]["register_agent"]["input_schema"]["properties"]):
+        raise SystemExit("installed wheel legacy create-only guard mismatch")
     for name in tools:
         properties = dict(candidate["tools"][name]["input_schema"]["properties"])
         if name == "send_message":

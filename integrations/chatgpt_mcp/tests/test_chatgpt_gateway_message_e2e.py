@@ -394,7 +394,7 @@ def test_isolated_mail_candidate_admission_and_new_recipient_delivery(mail, gate
     registered = mail["client"]._call_tool_object("register_agent", {
         "project_key": mail["project"], "name": "QuartzTesla",
         "program": "claude-code", "model": "fixture",
-        "registration_token": token,
+        "registration_token": token, "create_only": True,
     })
     mail["client"]._call_tool_object("set_contact_policy", {
         "project_key": mail["project"], "agent_name": "QuartzTesla",
@@ -460,7 +460,7 @@ def test_isolated_mail_candidate_admission_and_new_recipient_delivery(mail, gate
     # A synthetic completion reply to the exact thread, read through the
     # same dedicated daemon identity and pinned recipient as production.
     completed = "Completed isolated fixture task"
-    reply = mail["client"].send_message(
+    mail["client"].send_message(
         project_key=mail["project"], agent_name="QuartzTesla",
         registration_token=token, to=["ChatRelay"],
         subject="Re: isolated candidate recipient", body_md=completed,

@@ -3360,10 +3360,19 @@ async def _get_or_create_agent(
     *,
     manage_registration_token: bool = False,
     attachments_policy: Optional[str] = None,
+    create_only: bool = False,
 ) -> Agent:
     if project.id is None:
         raise ValueError("Project must have an id before creating agents.")
     mode = getattr(settings, "agent_name_enforcement_mode", "coerce").lower()
+    if create_only:
+        # The approved name must be the exact name inserted, never an alias
+        # or an automatically substituted identity.
+        if (not manage_registration_token or not registration_token
+                or not isinstance(name, str) or sanitize_agent_name(name) != name
+                or mode == "always_auto"
+                or (mode != "passthrough" and not validate_agent_name_format(name))):
+            raise ValueError("Create-only registration requires an exact new name and owner credential")
     explicit_name_used = False
     window_uuid = getattr(settings, "window_identity_uuid", "") or ""
     ttl_days = getattr(settings, "window_identity_ttl_days", 30)
@@ -3505,6 +3514,8 @@ async def _get_or_create_agent(
                 desired_name,
             )
             if agent:
+                if create_only:
+                    raise ValueError("Create-only registration refuses an existing identity")
                 agent = await update_existing_agent(session, agent)
                 break
 
@@ -3532,6 +3543,8 @@ async def _get_or_create_agent(
                 with suppress(Exception):
                     session.expunge(candidate)
 
+                if create_only:
+                    raise ValueError("Create-only registration lost the identity creation race") from None
                 if explicit_name_used:
                     # Another concurrent call created this identity; treat as idempotent update.
                     agent = await _find_registration_equivalent_agent(
@@ -5425,6 +5438,7 @@ def build_mcp_server() -> FastMCP:
         registration_token: Optional[str] = None,
         format: Optional[str] = None,
         existing_agent_id: Optional[int] = None,
+        create_only: bool = False,
     ) -> dict[str, Any]:
         """
         Create or update an agent identity within a project and persist its profile to Git.
@@ -5498,6 +5512,8 @@ def build_mcp_server() -> FastMCP:
         """
         _validate_program_model(program, model)
         project = await _get_project_by_identifier(project_key)
+        if create_only and (existing_agent_id is not None or project.human_key != project_key):
+            raise ValueError("Create-only registration requires the exact project and no existing agent ID")
         if existing_agent_id is not None:
             if type(existing_agent_id) is not int or existing_agent_id <= 0:
                 raise ValueError("existing_agent_id must be a positive integer")
@@ -5540,6 +5556,7 @@ def build_mcp_server() -> FastMCP:
             registration_token=registration_token,
             manage_registration_token=True,
             attachments_policy=ap if registration_token is not None else None,
+            **({"create_only": True} if create_only else {}),
         )
         # Preserve legacy omitted-token ordering until D6/D7 are adjudicated:
         # the profile commit happens first, then attachment policy changes in DB.
