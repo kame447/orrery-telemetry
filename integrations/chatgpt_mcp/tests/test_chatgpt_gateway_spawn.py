@@ -1,6 +1,8 @@
 """Gated spawn: preview, confirmation, idempotency and unknown outcomes."""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from test_chatgpt_gateway_security import call, post, rpc
@@ -55,6 +57,10 @@ def test_preview_is_dry_run_and_commit_spawns_once(spawn_gateway, keys, dashboar
     first = call(config, token, "orrery_spawn_commit", {"preview_id": p["preview_id"], "idempotency_key": "launch-0001"})
     assert first["isError"] is False
     assert first["structuredContent"]["outcome"] == "accepted"
+    records = json.loads((config.state_dir / "spawn-ledger.json").read_text())
+    assert len(records) == 1
+    record = next(iter(records.values()))
+    assert record["mcp_authorized"] is True and record["state"] == "accepted"
     assert len(dashboard.posts()) == 1
 
     again = call(config, token, "orrery_spawn_commit", {"preview_id": p["preview_id"], "idempotency_key": "launch-0001"})
