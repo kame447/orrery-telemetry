@@ -44,7 +44,13 @@ file permissions, and changed sender identity.
 A read-only `whois` through the canonical daemon helper checks the candidate
 against the sender's actual Mail project. Its numeric project ID is then
 included in the verified sender observation for `verify_mcp_spawn`.
-The later write must use the same SHA-256 snapshot. The helper does not
+The internal `admit_mcp_spawn` function composes approved private spawn ledger
+provenance, the authoritative ready result, this read-only lookup, exact
+identity matching and same-snapshot atomic append. It refuses before lookup
+when there is no committed MCP proof, no Mail agent ID, or no ready launch.
+It is not exposed as an MCP tool and is not yet called by the gateway.
+
+The later write uses the same SHA-256 snapshot. The helper does not
 substitute for authorization or for the required independently attested
 dashboard spawn record, and does not close Mail-side retirement races between
 the final check and a later send.
