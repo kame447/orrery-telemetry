@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import stat
 import tempfile
+import uuid
 from typing import Mapping
 
 _MAX_PROFILE_BYTES = 65536
@@ -37,6 +38,7 @@ class Candidate:
     agent_id: int
     mail_instance: str
     project_key: str
+    project_id: int
     sender_name: str
     sender_id: int
     registered_at: str
@@ -44,6 +46,15 @@ class Candidate:
 
 def _positive_id(value: object) -> bool:
     return type(value) is int and value > 0
+
+
+def _canonical_instance(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return str(uuid.UUID(value)) == value
+    except (ValueError, AttributeError):
+        return False
 
 
 def verify_mcp_spawn(*, enabled: bool, ledger: Mapping, launch: Mapping,
@@ -73,30 +84,36 @@ def verify_mcp_spawn(*, enabled: bool, ledger: Mapping, launch: Mapping,
     agent_id = result.get("mail_agent_id")
     instance = result.get("mail_instance_id")
     project = result.get("mail_project_key")
+    project_id = result.get("mail_project_id")
+    registered_at = result.get("mail_registered_at")
     provider = result.get("provider")
     if provider not in ("claude", "codex"):
         raise AdmissionError("unattested_spawn")
-    if (not _positive_id(agent_id) or not isinstance(instance, str) or not instance
-            or not isinstance(project, str) or not Path(project).is_absolute()):
+    if (not _positive_id(agent_id) or not _canonical_instance(instance)
+            or not isinstance(project, str) or not project or not Path(project).is_absolute()
+            or not _positive_id(project_id)
+            or not isinstance(registered_at, str) or not registered_at.strip()):
         raise AdmissionError("unattested_spawn")
     if not all((row.get("child_name") == name and row.get("mail_agent_id") == agent_id
                 and row.get("provider") == provider and row.get("mail_instance_id") == instance
-                and row.get("mail_project_key") == project)
+                and row.get("mail_project_key") == project
+                and row.get("mail_project_id") == project_id
+                and row.get("mail_registered_at") == registered_at)
                for row in (result, observed)) or launch.get("name") != name:
         raise AdmissionError("spawn_binding_changed")
     if (sender.get("instance") != instance or sender.get("project_key") != project
+            or not _positive_id(sender.get("project_id")) or sender.get("project_id") != project_id
             or not isinstance(sender.get("name"), str) or not _NAME.fullmatch(sender["name"])
             or not _positive_id(sender.get("agent_id"))):
         raise AdmissionError("sender_binding_changed")
     if (peer.get("name") != name or peer.get("id") != agent_id
             or peer.get("program") != {"claude": "claude-code", "codex": "codex"}[provider]
             or peer.get("retired") is not False
-            or not _positive_id(peer.get("project_id"))
-            or not isinstance(peer.get("registered_at"), str)
-            or not peer.get("registered_at")):
+            or not _positive_id(peer.get("project_id")) or peer.get("project_id") != project_id
+            or peer.get("registered_at") != registered_at):
         raise AdmissionError("peer_binding_changed")
     return Candidate(name=name, agent_id=agent_id, mail_instance=instance,
-                     project_key=project, sender_name=sender["name"],
+                     project_key=project, project_id=project_id, sender_name=sender["name"],
                      sender_id=sender["agent_id"], registered_at=peer["registered_at"])
 
 
