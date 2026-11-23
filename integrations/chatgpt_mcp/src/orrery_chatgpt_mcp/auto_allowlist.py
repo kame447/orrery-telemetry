@@ -312,3 +312,37 @@ def append_verified_peer(profile_path: Path, candidate: Candidate, *, expected_s
         return "registered"
     finally:
         os.close(lock_fd)
+
+
+def admit_mcp_spawn(*, enabled: bool, ledger: Mapping, launch: Mapping,
+                    profile_path: Path, helper_root: Path) -> str:
+    """Compose all private gates; never accept a candidate chosen via MCP args.
+
+    This is intentionally not a gateway handler. A future caller must load the
+    private committed ledger entry and the real ready Dashboard status itself.
+    A missing trusted Mail ID or timestamp is a hard refusal, not a name lookup.
+    """
+    if enabled is not True:
+        raise AdmissionError("opt_in_required")
+    if (not isinstance(ledger, Mapping) or ledger.get("mcp_authorized") is not True
+            or ledger.get("state") != "accepted"
+            or not isinstance(ledger.get("preview_id"), str)
+            or not _HEX64.fullmatch(ledger["preview_id"])):
+        raise AdmissionError("no_mcp_spawn_proof")
+    if (not isinstance(launch, Mapping) or launch.get("state") != "ready"
+            or launch.get("name") != ledger.get("name")):
+        raise AdmissionError("not_ready")
+    result = ledger.get("result")
+    if not isinstance(result, Mapping) or not _positive_id(result.get("mail_agent_id")):
+        raise AdmissionError("unattested_spawn")
+    name = ledger.get("name")
+    if not isinstance(name, str) or not _NAME.fullmatch(name):
+        raise AdmissionError("invalid_identity")
+    profile_path = Path(profile_path)
+    snapshot = snapshot_profile(profile_path)
+    sender, peer = observe_unlisted_peer(
+        profile_path, Path(helper_root), name=name,
+        agent_id=result["mail_agent_id"], expected_sha256=snapshot)
+    candidate = verify_mcp_spawn(
+        enabled=True, ledger=ledger, launch=launch, sender=sender, peer=peer)
+    return append_verified_peer(profile_path, candidate, expected_sha256=snapshot)
