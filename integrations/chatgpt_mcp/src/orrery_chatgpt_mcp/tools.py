@@ -579,7 +579,10 @@ class ToolRegistry:
                     f"not approved on the Mac yet; the operator must run `orrery-chatgpt-mcp approve {preview.approval_code}`, then commit again",
                     data={"approval_code": preview.approval_code},
                 )
-            record = {"ts": now, "preview_id": _digest(preview_id), "name": preview.payload["name"], "state": "dispatching", "result": None}
+            # This proof is written only by the authenticated, approved MCP commit
+            # path. It is never accepted from tool arguments or agent text.
+            record = {"ts": now, "preview_id": _digest(preview_id), "name": preview.payload["name"],
+                      "mcp_authorized": True, "state": "dispatching", "result": None}
             raced = self._ledger.put_if_absent(ledger_key, record)
             if raced is not None:
                 if raced.get("preview_id") != _digest(preview_id):
