@@ -94,10 +94,11 @@ def verify_mcp_spawn(*, enabled: bool, ledger: Mapping, launch: Mapping,
             or not _positive_id(project_id)
             or not isinstance(registered_at, str) or not registered_at.strip()):
         raise AdmissionError("unattested_spawn")
-    if not all((row.get("child_name") == name and row.get("mail_agent_id") == agent_id
+    if not all((row.get("child_name") == name and _positive_id(row.get("mail_agent_id"))
+                and row.get("mail_agent_id") == agent_id
                 and row.get("provider") == provider and row.get("mail_instance_id") == instance
                 and row.get("mail_project_key") == project
-                and row.get("mail_project_id") == project_id
+                and _positive_id(row.get("mail_project_id")) and row.get("mail_project_id") == project_id
                 and row.get("mail_registered_at") == registered_at)
                for row in (result, observed)) or launch.get("name") != name:
         raise AdmissionError("spawn_binding_changed")
@@ -106,7 +107,8 @@ def verify_mcp_spawn(*, enabled: bool, ledger: Mapping, launch: Mapping,
             or not isinstance(sender.get("name"), str) or not _NAME.fullmatch(sender["name"])
             or not _positive_id(sender.get("agent_id"))):
         raise AdmissionError("sender_binding_changed")
-    if (peer.get("name") != name or peer.get("id") != agent_id
+    if (peer.get("name") != name or not _positive_id(peer.get("id"))
+            or peer.get("id") != agent_id
             or peer.get("program") != {"claude": "claude-code", "codex": "codex-cli"}[provider]
             or peer.get("retired") is not False
             or not _positive_id(peer.get("project_id")) or peer.get("project_id") != project_id

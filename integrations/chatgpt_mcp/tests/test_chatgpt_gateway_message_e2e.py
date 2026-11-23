@@ -452,10 +452,28 @@ def test_isolated_mail_candidate_admission_and_new_recipient_delivery(mail, gate
     )
     assert len(received) == 1
     assert received[0]["body_md"] == prepared["message"]["body"]
-    mail["client"].acknowledge_message(
+    ack = mail["client"].acknowledge_message(
         project_key=mail["project"], agent_name="QuartzTesla",
         registration_token=token, message_id=received[0]["id"],
     )
+    assert ack["acknowledged"] is True and ack["read_at"] and ack["acknowledged_at"]
+    # A synthetic completion reply to the exact thread, read through the
+    # same dedicated daemon identity and pinned recipient as production.
+    completed = "Completed isolated fixture task"
+    reply = mail["client"].send_message(
+        project_key=mail["project"], agent_name="QuartzTesla",
+        registration_token=token, to=["ChatRelay"],
+        subject="Re: isolated candidate recipient", body_md=completed,
+        thread_id=received[0]["thread_id"],
+    )
+    from orrery_chatgpt_mcp.messaging import DaemonSender
+    with DaemonSender(mail["profile"], ROOT).session() as session:
+        replies = session._call("fetch_inbox", {"include_bodies": True, "limit": 20})
+    assert len(replies) == 1
+    assert replies[0]["from"] == "QuartzTesla"
+    assert replies[0]["sender_id"] == registered["id"]
+    assert replies[0]["thread_id"] == received[0]["thread_id"]
+    assert replies[0]["body_md"] == completed
     assert call(config, "orrery_message_commit", {
         "preview_id": prepared["preview_id"],
         "idempotency_key": "candidate-mail-e2e-0001",
