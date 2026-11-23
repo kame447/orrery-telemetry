@@ -16,7 +16,7 @@ PROJECT = "/opt/test/project"
 
 
 def observations():
-    binding = dict(child_name="QuartzTesla", mail_agent_id=202,
+    binding = dict(child_name="QuartzTesla", mail_agent_id=202, provider="claude",
                    mail_instance_id=INSTANCE, mail_project_key=PROJECT)
     return dict(
         enabled=True,
@@ -24,7 +24,7 @@ def observations():
                     preview_id="a" * 64, result=dict(binding)),
         launch=dict(name="QuartzTesla", state="ready", result=dict(binding)),
         sender=dict(instance=INSTANCE, project_key=PROJECT, name="ChatRelay", agent_id=101),
-        peer=dict(name="QuartzTesla", id=202, retired=False,
+        peer=dict(name="QuartzTesla", id=202, program="claude-code", retired=False,
                   project_id=3, registered_at="2026-11-23T12:00:00Z"),
     )
 
@@ -48,6 +48,8 @@ def test_happy_path_requires_four_attestations():
     ({"launch.result.mail_agent_id": 888}, "spawn_binding_changed"),
     ({"launch.result.mail_instance_id": "different"}, "spawn_binding_changed"),
     ({"launch.name": "RenamedAgent"}, "spawn_binding_changed"),
+    ({"launch.result.provider": "codex"}, "spawn_binding_changed"),
+    ({"peer.program": "codex"}, "peer_binding_changed"),
     ({"sender.instance": "other-instance"}, "sender_binding_changed"),
     ({"sender.project_key": "/different"}, "sender_binding_changed"),
     ({"peer.id": 303}, "peer_binding_changed"),
