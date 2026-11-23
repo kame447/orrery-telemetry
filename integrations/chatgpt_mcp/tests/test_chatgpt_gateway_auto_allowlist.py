@@ -9,7 +9,8 @@ import stat
 import pytest
 
 import chatgpt_gateway_support  # noqa: F401 - register gateway source path
-from orrery_chatgpt_mcp.auto_allowlist import AdmissionError, append_verified_peer, snapshot_profile, verify_mcp_spawn
+from orrery_chatgpt_mcp.auto_allowlist import (AdmissionError, append_verified_peer,
+    observe_unlisted_peer, snapshot_profile, verify_mcp_spawn)
 
 INSTANCE = "7b45b61c-3efc-4197-a00f-e9d21bb1da31"
 PROJECT = "/opt/test/project"
@@ -217,3 +218,99 @@ def test_invalid_candidate_never_changes_profile(profile):
         append_verified_peer(profile, replace(good, agent_id=True),
                              expected_sha256=snapshot_profile(profile))
     assert profile.read_bytes() == old
+
+
+def test_ephemeral_candidate_pin_does_not_modify_operator_allowlist(profile, monkeypatch):
+    from contextlib import contextmanager
+    from orrery_chatgpt_mcp import messaging
+
+    original = profile.read_bytes()
+    seen = []
+
+    class Sender:
+        def __init__(self, temp_path, helper_root):
+            assert temp_path != profile
+            assert helper_root == profile.parent
+            assert stat.S_IMODE(temp_path.stat().st_mode) == 0o600
+            value = json.loads(temp_path.read_text())
+            assert value["peers"] == [
+                {"name": "ExistingPeer", "id": 102},
+                {"name": "QuartzTesla", "id": 202},
+            ]
+            seen.append(temp_path)
+
+        @contextmanager
+        def session(self):
+            class Runtime:
+                def identity(self):
+                    return {"instance": INSTANCE, "project_key": PROJECT,
+                            "name": "ChatRelay", "agent_id": 101}
+
+                def lookup(self, name):
+                    assert name == "QuartzTesla"
+                    return observations()["peer"]
+            yield Runtime()
+
+    monkeypatch.setattr(messaging, "DaemonSender", Sender)
+    sender, peer = observe_unlisted_peer(
+        profile, profile.parent, name="QuartzTesla", agent_id=202,
+        expected_sha256=snapshot_profile(profile))
+    assert sender["project_id"] == 3 and peer["registered_at"] == REGISTERED
+    args = observations()
+    args["sender"] = sender
+    args["peer"] = peer
+    assert verify_mcp_spawn(**args).name == "QuartzTesla"
+    assert profile.read_bytes() == original
+    assert len(seen) == 1 and not seen[0].exists()
+
+
+def test_ephemeral_candidate_lookup_fails_closed_before_helper(profile):
+    digest = snapshot_profile(profile)
+    with pytest.raises(AdmissionError, match="invalid_candidate"):
+        observe_unlisted_peer(profile, profile.parent, name="OtherAgent",
+                              agent_id=True, expected_sha256=digest)
+    with pytest.raises(AdmissionError, match="profile_changed"):
+        observe_unlisted_peer(profile, profile.parent, name="QuartzTesla",
+                              agent_id=202, expected_sha256="0" * 64)
+    data = json.loads(profile.read_text())
+    data["peers"] = [{"name": f"Agent{i}", "id": 300 + i} for i in range(16)]
+    profile.write_text(json.dumps(data))
+    profile.chmod(0o600)
+    with pytest.raises(AdmissionError, match="allowlist_full"):
+        observe_unlisted_peer(profile, profile.parent, name="QuartzTesla",
+                              agent_id=202, expected_sha256=snapshot_profile(profile))
+    assert list(profile.parent.glob(".mcp-candidate-*")) == []
+
+
+@pytest.mark.parametrize("collision", [
+    {"name": "QuartzTesla", "id": 900},
+    {"name": "UnrelatedPeer", "id": 202},
+])
+def test_candidate_pin_refuses_name_or_id_collision(profile, collision):
+    data = json.loads(profile.read_text())
+    data["peers"] = [collision]
+    profile.write_text(json.dumps(data))
+    profile.chmod(0o600)
+    with pytest.raises(AdmissionError, match="peer_name_or_id_reused"):
+        observe_unlisted_peer(profile, profile.parent, name="QuartzTesla",
+                              agent_id=202, expected_sha256=snapshot_profile(profile))
+    assert list(profile.parent.glob(".mcp-candidate-*")) == []
+
+
+def test_ephemeral_candidate_pin_cleans_up_on_mail_error(profile, monkeypatch):
+    from orrery_chatgpt_mcp import messaging
+
+    class FailingSender:
+        def __init__(self, temp_path, helper_root):
+            assert temp_path.exists()
+
+        def session(self):
+            raise messaging.SenderError("daemon-peer-changed", sent=False)
+
+    monkeypatch.setattr(messaging, "DaemonSender", FailingSender)
+    before = profile.read_bytes()
+    with pytest.raises(AdmissionError, match="candidate_unverified"):
+        observe_unlisted_peer(profile, profile.parent, name="QuartzTesla",
+                              agent_id=202, expected_sha256=snapshot_profile(profile))
+    assert profile.read_bytes() == before
+    assert list(profile.parent.glob(".mcp-candidate-*")) == []
