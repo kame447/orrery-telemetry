@@ -384,3 +384,83 @@ def test_launchd_pinned_release_optin_connects_to_isolated_mail(mail, tmp_path):
         proc.wait(timeout=12)
         output.close()
         dashboard.close()
+
+
+def test_isolated_mail_candidate_admission_and_new_recipient_delivery(mail, gateway):
+    """Real temporary Mail; synthetic trusted spawn receipt, never a live user agent."""
+    from orrery_chatgpt_mcp.auto_allowlist import admit_mcp_spawn
+
+    token = "synthetic-quartz-owner-token-000000000000"
+    registered = mail["client"]._call_tool_object("register_agent", {
+        "project_key": mail["project"], "name": "QuartzTesla",
+        "program": "claude-code", "model": "fixture",
+        "registration_token": token,
+    })
+    mail["client"]._call_tool_object("set_contact_policy", {
+        "project_key": mail["project"], "agent_name": "QuartzTesla",
+        "policy": "open", "registration_token": token,
+    })
+    peer = mail["client"].whois(project_key=mail["project"], agent_name="QuartzTesla")
+    assert type(registered["id"]) is int and peer["id"] == registered["id"]
+    assert type(peer["project_id"]) is int and isinstance(peer["inception_ts"], str)
+
+    binding = {
+        "child_name": "QuartzTesla",
+        "provider": "claude",
+        "mail_agent_id": registered["id"],
+        "mail_instance_id": mail["instance"],
+        "mail_project_key": mail["project"],
+        "mail_project_id": peer["project_id"],
+        "mail_registered_at": peer["inception_ts"],
+    }
+    ledger = {"name": "QuartzTesla", "state": "accepted",
+              "preview_id": "a" * 64, "mcp_authorized": True, "result": binding}
+    ready = {"name": "QuartzTesla", "state": "ready", "result": dict(binding)}
+
+    # The first lookup is through a temporary candidate pin. Until admission
+    # succeeds, the operator profile still authorizes only ExampleWorker.
+    original = mail["profile"].read_bytes()
+    with pytest.raises(Exception, match="opt_in_required"):
+        admit_mcp_spawn(enabled=False, ledger=ledger, launch=ready,
+                        profile_path=mail["profile"], helper_root=ROOT)
+    assert mail["profile"].read_bytes() == original
+    assert admit_mcp_spawn(enabled=True, ledger=ledger, launch=ready,
+                           profile_path=mail["profile"], helper_root=ROOT) == "registered"
+    assert json.loads(mail["profile"].read_text())["peers"] == [
+        {"name": "ExampleWorker", "id": mail["worker"]["id"]},
+        {"name": "QuartzTesla", "id": registered["id"]},
+    ]
+
+    config = gateway()
+    instruction = "Test instruction for an isolated synthetic recipient"
+    preview = call(config, "orrery_message_preview", {
+        "recipient": "QuartzTesla", "instruction": instruction,
+        "subject": "isolated candidate recipient",
+    })
+    assert preview["isError"] is False, preview
+    prepared = preview["structuredContent"]
+    sent = call(config, "orrery_message_commit", {
+        "preview_id": prepared["preview_id"],
+        "idempotency_key": "candidate-mail-e2e-0001",
+        "content_sha256": prepared["content_sha256"],
+    })
+    assert sent["isError"] is False, sent
+    assert sent["structuredContent"]["outcome"] == "accepted"
+    received = mail["client"].fetch_inbox(
+        project_key=mail["project"], agent_name="QuartzTesla",
+        registration_token=token, include_bodies=True, limit=20,
+    )
+    assert len(received) == 1
+    assert received[0]["body_md"] == prepared["message"]["body"]
+    mail["client"].acknowledge_message(
+        project_key=mail["project"], agent_name="QuartzTesla",
+        registration_token=token, message_id=received[0]["id"],
+    )
+    assert call(config, "orrery_message_commit", {
+        "preview_id": prepared["preview_id"],
+        "idempotency_key": "candidate-mail-e2e-0001",
+        "content_sha256": prepared["content_sha256"],
+    })["structuredContent"]["replayed"] is True
+    assert len(mail["client"].fetch_inbox(project_key=mail["project"],
+               agent_name="QuartzTesla", registration_token=token,
+               include_bodies=True, limit=20)) == 1
