@@ -19,6 +19,8 @@ PACKAGES = (
 )
 MANIFEST = "HELPER.json"
 WAIT_PRIMITIVE = "bin/agentstack-await-reply"
+# Runtime schema assets belong to the pinned Mail package, not ambient site-packages.
+PACKAGE_DATA = {"agentstack_mail": frozenset({"screen_schemas.json", "screen_schemas.LICENSE"})}
 
 
 def _safe_node(path: Path, *, directory: bool, readonly: bool) -> None:
@@ -35,7 +37,7 @@ def _list_modules(package: Path, *, readonly: bool) -> list[Path]:
         if not readonly and path.name == "__pycache__" and path.is_dir() and not path.is_symlink():
             continue
         _safe_node(path, directory=False, readonly=readonly)
-        if path.suffix != ".py":
+        if path.suffix != ".py" and path.name not in PACKAGE_DATA.get(package.name, ()):
             raise ConfigError("unexpected helper package entry")
         files.append(path)
     if package / "__init__.py" not in files:
