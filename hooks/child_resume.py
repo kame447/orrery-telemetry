@@ -9,7 +9,7 @@ normal cleanup, dashboard resume, explicit purge, and expiry maintenance.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 import secrets
 import fcntl
@@ -1120,6 +1120,8 @@ def purge_one(
     *,
     reason: str,
     now: datetime | None = None,
+    is_live: Callable[[str], bool | None] | None = None,
+    boot: float | None = None,
 ) -> bool:
     if reason not in {"purged", "retention_expired"}:
         raise ValueError("invalid purge reason")
@@ -1157,7 +1159,14 @@ def purge_one(
                 return False
             if _utc_now(now) < expires:
                 return False
-        if state is not None:
+        if is_live is not None and (
+            is_live(agent_name) is not False or child_process_live(agent_name) is not False
+        ):
+            return False
+        with _LeaseLock(runtime_dir) if is_live is not None else nullcontext():
+            # SessionStart can write a lease while the tmux/process probes run.
+            if is_live is not None and live_lease(runtime_dir, agent_name, boot=boot):
+                return False
             tombstone = {
                 "schema_version": SCHEMA_VERSION,
                 "reason": reason,
@@ -1173,11 +1182,11 @@ def purge_one(
                 / f"{state['agent_id']}.json",
                 tombstone,
             )
-        pending_path = state_path.with_name(f".{agent_name}.registration-pending.json")
-        tools_path = tools_record_path(runtime_dir, agent_name)
-        for path in (home_path, mcp_path, token_path, state_path, pending_path, _legacy_pending(state_path),
-                     tools_path):
-            _remove_exact(path)
+            pending_path = state_path.with_name(f".{agent_name}.registration-pending.json")
+            tools_path = tools_record_path(runtime_dir, agent_name)
+            for path in (home_path, mcp_path, token_path, state_path, pending_path, _legacy_pending(state_path),
+                         tools_path):
+                _remove_exact(path)
         return True
 
 
@@ -1192,7 +1201,10 @@ def discard_generated(runtime_dir: Path, agent_name: str) -> None:
         _remove_exact(mcp_path)
 
 
-def purge_expired(runtime_dir: Path, *, now: datetime | None = None) -> list[str]:
+def purge_expired(
+    runtime_dir: Path, *, now: datetime | None = None,
+    tmux_run: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> list[str]:
     removed: list[str] = []
     state_dir = runtime_dir / "child-agents"
     try:
@@ -1200,6 +1212,11 @@ def purge_expired(runtime_dir: Path, *, now: datetime | None = None) -> list[str
     except OSError:
         return removed
     current = _utc_now(now)
+    boot = boot_time() or 0.0
+
+    def is_live(name: str) -> bool | None:
+        return child_session_live(runtime_dir, name, boot=boot, tmux_run=tmux_run)
+
     for path in candidates:
         name = path.stem
         if not SAFE_NAME.fullmatch(name):
@@ -1213,12 +1230,15 @@ def purge_expired(runtime_dir: Path, *, now: datetime | None = None) -> list[str
             expires = _parse_timestamp(
                 state.get("resume_expires_at"), "resume_expires_at"
             )
+            if current < expires:
+                continue
+            # Same lock order as dashboard resume and stopped-child recovery.
+            with tools_change_lock(runtime_dir, name):
+                if purge_one(runtime_dir, name, reason="retention_expired", now=current,
+                             is_live=is_live, boot=boot):
+                    removed.append(name)
         except ResumeStateError:
             continue
-        if current >= expires and purge_one(
-            runtime_dir, name, reason="retention_expired", now=current
-        ):
-            removed.append(name)
     return removed
 
 
@@ -1247,6 +1267,47 @@ def boot_time() -> float | None:
         return float(match.group(1)) if match else None
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
+
+
+def child_session_live(
+    runtime_dir: Path, name: str, *, boot: float | None,
+    tmux_run: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> bool | None:
+    """Check the current tmux server and live leases. None means unknown.
+
+    Absence is read from the session list, not from has-session: the tmux
+    consumer refuses a has-session on a missing target (TMUX_TARGET_UNAVAILABLE)
+    instead of returning tmux's "can't find session", which read as "cannot
+    tell" and left every child a reboot stopped unresumable.
+    """
+    if tmux_run is None:
+        def tmux_run(args, **kwargs):
+            return subprocess.run(["tmux", *args], **kwargs)
+
+    try:
+        listed = tmux_run(['list-sessions', '-F', '#{session_name}'],
+                           capture_output=True, text=True, timeout=2)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        return None
+    if listed.returncode == 0:
+        if name not in (listed.stdout or "").splitlines():
+            return live_lease(runtime_dir, name, boot=boot)
+        # Listed: a session of that name exists, and only admission can say
+        # whether it is this child's. Any refusal stays "cannot tell".
+        try:
+            done = tmux_run(['has-session', '-t', f'={name}'], capture_output=True, text=True, timeout=2)
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            return None
+        return True if done.returncode == 0 else None
+    reason = (listed.stderr or "").lower()
+    # Only these mean "no such session". Any other failure, such as a server
+    # socket this user cannot open ("error connecting … (permission denied)"),
+    # says nothing about the session and must not be read as "gone".
+    gone = ("can't find session" in reason or "no server running" in reason
+            or ("error connecting" in reason and "no such file or directory" in reason))
+    if not gone:
+        return None
+    return live_lease(runtime_dir, name, boot=boot)
 
 
 def child_process_live(agent_name: str) -> bool | None:
@@ -1443,13 +1504,12 @@ def _lease_alive(lease: Path, boot: float | None) -> bool:
 
 
 class _LeaseLock:
-    """One lock for every live-session lease: writing one (SessionStart), removing
-    stale ones (prune_leases) and recovery's last look before it changes a
-    child's state all hold it, so none of them acts on a lease the other is
-    writing (#182 review). Nobody bypasses it. Holders keep it for milliseconds:
-    inside it they only read and write lease files and child state (no tmux, no
-    ps). A waiter that has waited `warn_after` seconds says so once on stderr and
-    keeps waiting."""
+    """Serialize lease writes and pruning with recovery and expiry's last check.
+
+    Holders work on local files. Run tmux and process probes outside the lock.
+    A waiter that has waited `warn_after` seconds says so once on stderr and
+    keeps waiting.
+    """
 
     def __init__(self, runtime_dir: Path, *, warn_after: float = 10.0) -> None:
         self.root = runtime_dir / "live-sessions"
@@ -1958,6 +2018,7 @@ def _build_home_unlocked(
     overlay_setting: str = "",
     parent_agent: str = "",
     work_dir: Path | None = None,
+    screen_generation: str = "",
 ) -> Path:
     if not SAFE_NAME.fullmatch(child) or mcp_profile not in MCP_PROFILES:
         raise ValueError("invalid child identity or MCP profile")
@@ -1967,10 +2028,10 @@ def _build_home_unlocked(
     # fails: a child that asked for less must not silently get everything.
     # child_tools.py is loaded only for a child that has a record; a missing
     # helper then fails the build instead of skipping the selection.
+    tools = _child_tools()
     tools_spec = None
     record = tools_record_path(runtime_dir, child)
     if record.exists() or record.is_symlink():
-        tools = _child_tools()
         try:
             tools_spec = tools.read_codex_record(os.fspath(record))
         except tools.ToolsError as exc:
@@ -2148,12 +2209,17 @@ def _build_home_unlocked(
                 if isinstance(plugin, dict):
                     plugin["enabled"] = False
             config_text = _emit_toml(config)
-        if tools_spec is not None:
-            config = _toml().loads(config_text)
-            try:
-                tools.codex_apply(config, tools_spec)
-            except tools.ToolsError as exc:
-                raise ValueError(str(exc)) from exc
+        config = _toml().loads(config_text)
+        try:
+            selection = tools_spec or tools.normalize()
+            managed_screen = tools.screen_definition(
+                selection, runtime_dir, project_key, child, screen_generation,
+                mail_env=mail_env,
+            )
+            tools.codex_apply(config, selection, managed_screen=managed_screen)
+        except tools.ToolsError as exc:
+            raise ValueError(str(exc)) from exc
+        if _toml().loads(config_text) != config:
             config_text = _emit_toml(config)
             _toml().loads(config_text)
         target = temporary / "config.toml"
@@ -2199,6 +2265,7 @@ def build_home(
     overlay_setting: str = "",
     parent_agent: str = "",
     work_dir: Path | None = None,
+    screen_generation: str = "",
 ) -> Path:
     """Build only the canonical generated home while holding the child lock."""
 
@@ -2230,6 +2297,7 @@ def build_home(
             overlay_setting=overlay_setting,
             parent_agent=parent_agent,
             work_dir=work_dir,
+            screen_generation=screen_generation,
         )
 
 
@@ -2339,6 +2407,7 @@ def main() -> int:
     build.add_argument("--overlay", default="")
     build.add_argument("--parent-agent", default="")
     build.add_argument("--work-dir", default="")
+    build.add_argument("--screen-generation", default="")
     args = parser.parse_args()
     try:
         runtime = Path(getattr(args, "runtime_dir", "")).expanduser()
@@ -2441,6 +2510,7 @@ def main() -> int:
                 overlay_setting=args.overlay,
                 parent_agent=args.parent_agent,
                 work_dir=Path(args.work_dir).expanduser() if args.work_dir else None,
+                screen_generation=args.screen_generation,
             )
             print(home)
     except (OSError, ValueError, ResumeStateError) as exc:

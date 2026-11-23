@@ -47,7 +47,7 @@ fi
 #   --base default|mail-only   default の明示は installer の既定を抑止。mail-only は ORRERY Mail と
 #                              --tools で選んだものだけを渡す（Claude は --no-chrome も付ける）
 #   --tools SPEC               繰り返し・カンマ区切り可: browser[:deviceId] / screen[:read|:operate]
-#                              / screen:<read|operate>:<server> / mcp:<server>
+#                              / screen:<read|operate>:<server> / mcp:<server> / chrome-extension (Codex)
 #   base・tools・MCP profile の省略時は installer の既定から使える項目を選ぶ。
 #   選択（mail-only かいずれかの tools）がある子は fail closed: Mail の proxy が作れない、
 #   選んだ server を写せない、computer use が有効な project での mail-only などは起動しない。
@@ -2587,6 +2587,9 @@ write_child_mcp_config() {
     if [[ -n "${CHILD_TOOLS_SPEC:-}" && -z "$HARNESS" ]]; then
         spec_args=(--spec "$CHILD_TOOLS_SPEC")
     fi
+    if [[ -z "$HARNESS" && -n "${CHILD_REGISTRATION_GENERATION:-}" ]]; then
+        spec_args+=(--screen-generation "$CHILD_REGISTRATION_GENERATION")
+    fi
     python3 "$HOOKS_DIR/child_tools.py" claude-config \
         ${spec_args[@]+"${spec_args[@]}"} --cwd "${WORK_DIR:-$PWD}" \
         --chrome "$([[ "${CLAUDE_CHILD_CHROME:-false}" == true ]] && echo 1 || echo 0)" \
@@ -2645,6 +2648,7 @@ write_child_codex_home() {
         --mail-env "$MAIL_ENV" \
         --bearer-mode "$HTTP_BEARER_MODE" \
         --python-bin "${AGENTSTACK_PYTHON:-}" \
+        --screen-generation "${CHILD_REGISTRATION_GENERATION:-}" \
         --mcp-profile "$mcp_profile" \
         --parent-agent "${PARENT_NAME:-}" \
         --work-dir "$WORK_DIR" \

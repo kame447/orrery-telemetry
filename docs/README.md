@@ -27,6 +27,7 @@ Telemetry 自体の操作は、header の `HELP MAP`（NETWORK では `SETTINGS`
 - [ChatGPT から既存エージェントへ追加指示を送る](chatgpt-mcp-message.md) — 専用の Mail 送信者、宛先の許可リスト、プレビューと重複防止、配送状態の照合（既定無効）。
 - [委任と child agent](delegation.md) — ORRERY /delegate、組み込み子との違いと渡す道具の選択。
 - [Launcher と identity](launchers.md) — agent-start、名前、resume、/delegate と /log、通知の流れ。
+- [子の computer use](computer-use.md)
 - [Obsidian と一緒に使う](obsidian.md) — ログ・論文ノート・タスクを vault と Daily Note に置く。
 
 ## 空のMailへの切替候補
