@@ -145,6 +145,77 @@ def snapshot_profile(profile_path: Path) -> str:
     return hashlib.sha256(_private_regular(Path(profile_path))).hexdigest()
 
 
+def observe_unlisted_peer(profile_path: Path, helper_root: Path, *,
+                          name: str, agent_id: int, expected_sha256: str) -> tuple[dict, dict]:
+    """Read-only canonical Mail whois using an ephemeral candidate pin.
+
+    The helper refuses to inspect unlisted peers. A verified MCP spawn is allowed
+    to use an owner-private temporary copy containing just one additional peer;
+    no live allowlist, credential or Mail database is changed. Caller must
+    separately verify_mcp_spawn and append_verified_peer using the same snapshot.
+    """
+    profile_path, helper_root = Path(profile_path), Path(helper_root)
+    if (not profile_path.is_absolute() or not helper_root.is_absolute()
+            or not isinstance(name, str) or not _NAME.fullmatch(name)
+            or not _positive_id(agent_id)):
+        raise AdmissionError("invalid_candidate")
+    if not isinstance(expected_sha256, str) or not _HEX64.fullmatch(expected_sha256):
+        raise AdmissionError("invalid_snapshot")
+    original = _private_regular(profile_path)
+    if hashlib.sha256(original).hexdigest() != expected_sha256:
+        raise AdmissionError("profile_changed")
+    from .config import ConfigError
+    from .helper_release import check_profile
+    from .messaging import DaemonSender, SenderError
+
+    try:
+        check_profile(profile_path)
+        current = json.loads(original)
+    except (ConfigError, ValueError, UnicodeError) as exc:
+        raise AdmissionError("invalid_profile") from exc
+    peers = current["peers"]
+    if current["name"] == name or current["agent_id"] == agent_id:
+        raise AdmissionError("sender_is_recipient")
+    for peer in peers:
+        if peer["name"] == name and peer["id"] == agent_id:
+            break
+        if peer["name"] == name or peer["id"] == agent_id:
+            raise AdmissionError("peer_name_or_id_reused")
+    else:
+        if len(peers) >= _MAX_PEERS:
+            raise AdmissionError("allowlist_full")
+        current["peers"] = [*peers, {"name": name, "id": agent_id}]
+
+    encoded = (json.dumps(current, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
+    if len(encoded) > _MAX_PROFILE_BYTES:
+        raise AdmissionError("profile_too_large")
+    fd, temporary = tempfile.mkstemp(prefix=".mcp-candidate-", dir=profile_path.parent)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            with DaemonSender(Path(temporary), helper_root).session() as runtime:
+                sender = runtime.identity()
+                verified = runtime.lookup(name)
+        except SenderError as exc:
+            raise AdmissionError("candidate_unverified") from exc
+    finally:
+        os.unlink(temporary)
+    if (not isinstance(sender, dict) or sender.get("name") != current["name"]
+            or sender.get("agent_id") != current["agent_id"]
+            or sender.get("project_key") != current["project_key"]
+            or not isinstance(verified, dict) or verified.get("name") != name
+            or verified.get("id") != agent_id or verified.get("retired") is not False
+            or not _positive_id(verified.get("project_id"))):
+        raise AdmissionError("candidate_unverified")
+    # The canonical helper's pinned whois requires the same Mail project ID
+    # as its authenticated sender. It does not expose that sender ID directly.
+    return {**sender, "project_id": verified["project_id"]}, verified
+
+
 def append_verified_peer(profile_path: Path, candidate: Candidate, *, expected_sha256: str) -> str:
     """Compare-and-swap an operator v2 allowlist, never replacing an old peer.
 
