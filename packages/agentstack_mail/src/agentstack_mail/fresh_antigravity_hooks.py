@@ -93,7 +93,7 @@ async def handle(plan_path, event, payload):
     if event == 'invocation':
         return {}
     call = payload.get('toolCall')
-    if isinstance(call, dict) and call.get('name') == 'notebook_edit':
+    if isinstance(call, dict) and call.get('name') in {'notebook_edit', 'sed_file'}:
         raise B1Error('FRESH_ANTIGRAVITY_EDITOR_UNSUPPORTED')
     if not isinstance(call, dict) or call.get('name') not in EDIT_TOOLS:
         raise B1Error('FRESH_HOOK_EVENT_INVALID')

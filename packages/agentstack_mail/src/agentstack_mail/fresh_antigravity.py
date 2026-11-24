@@ -88,7 +88,7 @@ def plan(client, root, settings, run, cwd, prompt, session_id):
     hooks = {'orrery-fresh-' + run.name: {
         'SessionStart': [handler('session')],
         'PreInvocation': [handler('invocation')],
-        'PreToolUse': [{'matcher': 'write_to_file|replace_file_content|multi_replace_file_content|notebook_edit',
+        'PreToolUse': [{'matcher': 'write_to_file|replace_file_content|multi_replace_file_content|notebook_edit|sed_file',
                         'hooks': [handler('guard')]}]}}
     _write_private(integration / '.agents/hooks.json', hooks)
     argv = [settings['binary'], '--model', settings['model'], '--effort', settings['effort'],

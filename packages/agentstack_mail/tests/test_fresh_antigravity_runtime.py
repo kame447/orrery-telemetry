@@ -112,8 +112,9 @@ for index, raw in enumerate(sys.stdin, 1):
             args=dict(TargetFile=str(pathlib.Path.cwd() / 'owned.txt')))),
             {'AGENTSTACK_FRESH_CLIENT_CONTEXT': os.environ['AGY_TEST_OTHER_CONTEXT']},
             phase='foreign-context')
-        decisions['notebook_edit'] = hook('PreToolUse',
-            dict(toolCall=dict(name='notebook_edit', args={})), phase='notebook_edit')
+        for unsupported in ('notebook_edit', 'sed_file'):
+            decisions[unsupported] = hook('PreToolUse',
+                dict(toolCall=dict(name=unsupported, args={})), phase=unsupported)
         record('guard-proxy', decisions=decisions, status=proxy_status())
     emit('result', result=dict(status='SUCCESS', response='READY' if index == 1 else content,
                                denied_actions=[]))
@@ -217,9 +218,10 @@ def test_native_hooks_proxy_identity_and_reservations_survive_until_sigint(tmp_p
             work = tmp_path / 'work';work.mkdir()
             await grant(runtime, people, [work / 'foreign.txt'], actor=1)
             async with launched(parent, work, monkeypatch, guards=True) as (client, process, trace, log, task):
-                # This turn starts five real hook clients and one stdio MCP client sequentially.
+                # Bootstrap and six guard checks invoke real hook subprocesses;
+                # allow their cumulative startup time on a loaded Mac runner.
                 await until(lambda: 'native turn 1: SUCCESS' in log.read_text(), process, log,
-                            timeout=60, trace=trace)
+                            timeout=120, trace=trace)
                 received = [r for r in trace_rows(trace) if r['kind'] == 'input']
                 assert len(received) == 2 and task in received[1]['content']
                 assert received[1]['native_ready'] and received[1]['hook_ready']
@@ -232,8 +234,9 @@ def test_native_hooks_proxy_identity_and_reservations_survive_until_sigint(tmp_p
                 decisions = evidence['decisions']
                 assert decisions['owned.txt']['decision'] == 'allow'
                 assert all(decisions[name]['decision'] == 'deny' for name in
-                           ('unreserved.txt', 'foreign.txt', 'foreign-context', 'notebook_edit'))
+                           ('unreserved.txt', 'foreign.txt', 'foreign-context', 'notebook_edit', 'sed_file'))
                 assert 'FRESH_ANTIGRAVITY_EDITOR_UNSUPPORTED' in decisions['notebook_edit']['reason']
+                assert 'FRESH_ANTIGRAVITY_EDITOR_UNSUPPORTED' in decisions['sed_file']['reason']
                 assert evidence['status']['mail_agent_id'] == client.context['mail_agent_id']
                 assert evidence['status']['mail_instance_id'] == parent.context['mail_instance_id']
                 _, base, _ = family(client)
