@@ -3,7 +3,21 @@
 ORRERY can use Google Antigravity CLI (`agy`) alongside Claude Code and Codex.
 The integration uses the user's signed-in Antigravity account; it does not set an API key or auto-approve permissions.
 
-## Prerequisites
+## Projectless fresh runtime (fork)
+
+The fork connects `program=antigravity` to fresh owner registration, parent relationships, absolute-path reservations and native launch evidence. Legacy runtime keeps its existing route. Fresh NEW AGENT supports standalone and parented tasks with explicit resources. Prepare the working directory first; fresh does not create a git worktree automatically. The overall cutover requirements remain in the [fresh migration guide](fresh-global-update.en.md).
+
+Fresh uses the official `agy --input-format stream-json --output-format stream-json` interface and keeps the conversation open for subsequent Mail instructions. A TTY also accepts line-oriented input and `/exit`. This is a stream interface rather than the native full-screen TUI. Resume verifies the saved owner and native conversation ID without replaying the original task. Native transcript rendering in Cockpit remains outside this change.
+
+A small launch-specific folder is passed with `--add-dir`. Its `.agents/hooks.json` and `.agents/mcp_config.json` provide the reservation guard and a uniquely named fresh Mail server. The user's HOME, login, permissions and existing workspace configuration are unchanged. Hooks and MCP definitions are not supplied through `--settings`. Owner credential values never enter prompts, argv or MCP configuration, and the entry does not fall back to legacy project keys or Mail credentials.
+
+The first turn is initialization only. The real CLI init and the real SessionStart hook must agree on the conversation ID, owner, instance and current launch, followed by a nonempty successful response, before the task is sent. Missing hook evidence stops the launch before task delivery. The guard uses the native `decision=deny` response and an internal deadline shorter than the native hook timeout. Native permissions are not broadened; denied headless MCP operations are not reported as successful work.
+
+A protected private socket wakes the runner, which reads its authenticated pending notifications and submits a subsequent stream turn. Submission, notification handoff, read, ACK and completed work remain separate facts. Notification handoff does not mark a message read or acknowledged. A wake received while busy is reconsidered after the current turn.
+
+Shutdown verifies that this launch's native process group has ended before releasing only the child's declared reservations. Unknown shutdown retains reservations for explicit `resolve-ended` recovery. Other processes, existing services and legacy Mail are not stopped. Acceptance must distinguish real CLI, MCP, continuation, guard and shutdown observations from synthetic-provider regression tests.
+
+## Legacy provider prerequisites
 
 Start with ORRERY core installed and ORRERY Mail running. Follow the
 [Google installation guide](https://antigravity.google/docs/getting-started?tab=cli)

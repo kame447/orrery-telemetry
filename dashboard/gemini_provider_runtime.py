@@ -207,7 +207,14 @@ def _gemini_models(base: Any, *, discover: bool = True) -> tuple[list[str], str]
     return models, ""
 
 
-def _catalog_item(models: list[str]) -> dict:
+def _capabilities(*, fresh: bool = False) -> dict:
+    capabilities = dict(CAPABILITIES)
+    if fresh:
+        capabilities.update(standalone=True, worktree_required=False)
+    return capabilities
+
+
+def _catalog_item(models: list[str], *, fresh: bool = False) -> dict:
     available = set(models)
     model_efforts = {}
     for model in models:
@@ -226,7 +233,7 @@ def _catalog_item(models: list[str]) -> dict:
         "model_efforts": model_efforts,
         "effort_default": "" if CAPABILITIES["effort_required"] else "high",
         "provider_key": "google",
-        "capabilities": dict(CAPABILITIES),
+        "capabilities": _capabilities(fresh=fresh),
     }
 
 
@@ -672,6 +679,27 @@ def _write_task_file(base: Any, task: str) -> str:
     return path
 
 
+def _fresh_preflight(base: Any, request: dict, resources: str) -> tuple[dict, str]:
+    """Check the native fresh path without legacy tokens or task handoff files."""
+    path = _launch_path()
+    for command, label in (
+        (os.environ.get("AGENTSTACK_GEMINI_BIN") or "agy", "Antigravity CLI"),
+        (os.environ.get("AGENTSTACK_PYTHON") or "python3", "selected Python"),
+        ("tmux", "tmux"),
+    ):
+        if not _which(command, path):
+            return {}, f"{label} not found for provider gemini"
+    work_dir = os.path.realpath(os.path.expanduser(request["dir"]))
+    boundary = resource_boundary_error(work_dir, resources)
+    if boundary:
+        return {}, boundary
+    root = base._fresh_backend().root
+    wrapper = os.path.join(root, "bin", "agentstack-runtime-client")
+    if not _executable(wrapper):
+        return {}, "fresh runtime client is unavailable for provider gemini"
+    return {"wrapper": wrapper}, ""
+
+
 # --------------------------------------------------------------------------- #
 # Installation into the provider-aware dashboard
 # --------------------------------------------------------------------------- #
@@ -739,7 +767,8 @@ def _install_catalog(base: Any, integration: _Integration) -> None:
         models, error = integration.availability()
         if error:
             return payload
-        payload["providers"] = [*providers, _catalog_item(models)]
+        payload["providers"] = [*providers, _catalog_item(
+            models, fresh=bool(getattr(base, "FRESH_MODE", False)))]
         return payload
 
     base.spawn_names_payload = spawn_names_payload
@@ -760,7 +789,9 @@ def _install_spawn(base: Any, integration: _Integration) -> None:
         request, error = base._spawn_request(payload)
         if error:
             return error
-        if request["standalone"] and not CAPABILITIES["standalone"]:
+        fresh = bool(getattr(base, "FRESH_MODE", False))
+        capabilities = _capabilities(fresh=fresh)
+        if request.get("standalone") and not capabilities["standalone"]:
             return {"ok": False, "error": "standalone not supported for provider gemini"}
         requested_model = str(payload.get("model") or "").strip()
         # Native Gemini IDs keep the existing offline-compatible launch path.
@@ -798,9 +829,26 @@ def _install_spawn(base: Any, integration: _Integration) -> None:
                 )}
             model = resolved_model
         try:
-            resources = normalize_resources(payload.get("resources"))
-        except ValueError as exc:
+            raw_resources = payload.get("resources")
+            if fresh and isinstance(raw_resources, list):
+                raw_resources = ",".join(raw_resources)
+            resources = normalize_resources(raw_resources)
+        except (TypeError, ValueError) as exc:
             return {"ok": False, "error": str(exc)}
+        if fresh:
+            context, error = _fresh_preflight(base, request, resources)
+            if error:
+                return {"ok": False, "error": error}
+            selected = dict(payload, resources=resources)
+            if not selected.get("name"):
+                selected["name"] = base._suggest_any_spawn_name()
+            spec = base.SpawnLaunchSpec(
+                provider=PROVIDER_ID, program="antigravity", model=model,
+                script=context["wrapper"], effort=effort,
+                standalone_supported=True, worktree_required=False,
+                task_mail=False,
+            )
+            return base.spawn_with_launch_spec(selected, spec)
         context, error = _preflight(base, request, resources)
         if error:
             return {"ok": False, "error": error}

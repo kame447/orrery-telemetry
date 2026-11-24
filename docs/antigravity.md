@@ -3,7 +3,21 @@
 ORRERY では、Claude Code や Codex と並んで Google Antigravity CLI（`agy`）を
 使えます。利用者が Antigravity でサインインしたアカウントを使います。
 
-## Prerequisites
+## Projectless fresh runtime（fork）
+
+fork の fresh runtime は `program=antigravity` を正規の本人登録、親子関係、絶対pathの予約、起動証跡へ接続します。通常の旧runtimeは従来の経路を使います。fresh の NEW AGENT では親あり・親なしのどちらも利用でき、編集対象の resources を明示します。fresh 自体の worktree 自動生成は未対応のため、作業folderは先に用意します。全体の移行条件は [fresh移行手順](fresh-global-update.md) に従います。
+
+fresh 起動は公式 `agy --input-format stream-json --output-format stream-json` を使用し、同じ会話を維持して Mail から追加指示を受け取ります。TTYから起動した場合は行単位の入力と `/exit` も使えます。これはネイティブの全画面TUIとは異なる操作画面です。再開は保存された本人・native conversation IDを照合し、元の依頼を自動で繰り返しません。Cockpitのnative transcript readerは今回の対象に含みません。
+
+起動専用の小さなfolderを `--add-dir` で渡し、その `.agents/hooks.json` と `.agents/mcp_config.json` から予約guardと一意名のfresh Mail接続を読み込みます。利用者のHOME、ログイン、permissions、作業folderの既存設定は変更しません。`--settings` にhooksやMCP定義を入れて読み込ませる方式ではありません。owner資格値をprompt、argv、MCP設定へ入れず、旧project key／旧Mail資格へfallbackしません。
+
+最初のturnは初期化確認だけです。実CLIのinitと実SessionStart hookが返したconversation ID、本人、instance、現在のlaunchが一致し、非空の正常応答が得られてから依頼内容を送ります。hookが読み込まれなければ依頼を渡さず停止します。予約guardはagyの正式な `decision=deny` で拒否し、native hook timeoutより短いdeadlineで失敗を返します。ネイティブ権限は広げません。必要なMCP操作をheadlessで承認できない場合も、拒否を成功として扱いません。
+
+Mail通知は保護されたprivate socketで待機中のrunnerを起こし、本人のpendingを正規APIから取得して次のstream turnへ渡します。送信、通知引渡し、既読、ACK、モデルの仕事完了は別の事実です。通知の引渡しだけで既読やACKを付けません。busy中に受けたwakeは現在のturnが終わってから再確認します。
+
+終了時はこの起動が作ったnative process groupの消滅を確認してから、この子に宣言した予約だけを解放します。終了を確認できない場合は予約を保持し、通常の `resolve-ended` 経路で明示確認します。別のprocess、既存サービス、旧Mailは停止しません。実CLI・MCP・追加指示・編集guard・終了を確認した範囲と、模擬providerによる回帰試験を区別して受け入れます。
+
+## Legacy provider prerequisites
 
 先に ORRERY core と稼働中の ORRERY Mail を用意します。
 [Google の手順](https://antigravity.google/docs/getting-started?tab=cli)で CLI を導入し、

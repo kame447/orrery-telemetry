@@ -108,7 +108,10 @@ def route(client):
             or any(value.get('launch_id') != current['launch_id'] for value in (intent,observed,row))
             or observed.get('provider') != intent.get('provider')):
         raise B1Error('FRESH_TMUX_TARGET_CHANGED')
-    if intent.get('provider') in {'dsh','hermes'}:
+    if intent.get('provider') == 'antigravity':
+        from .fresh_antigravity import native_session_id
+        session = native_session_id(observed.get('native_session_id'))
+    elif intent.get('provider') in {'dsh','hermes'}:
         from .fresh_harness import native_session_id
         session = native_session_id(observed.get('native_session_id'))
     else:session = native_id(observed.get('native_session_id'))
@@ -141,6 +144,8 @@ def target(client, wrapper_root, expected=None, *, readiness=True):
                 or not ancestry()
                 or not births()):raise B1Error('FRESH_TMUX_TARGET_CHANGED')
         if readiness:
+            if intent['provider'] == 'antigravity':
+                raise B1Error('FRESH_ANTIGRAVITY_STREAM_REQUIRED')
             screen = transport.command('capture-pane','-p','-t',row['pane']['pane_id'],'-S','-25')
             if screen.returncode:raise B1Error('FRESH_TMUX_TARGET_NOT_READY')
             if intent['provider'] in {'dsh','hermes'}:
@@ -171,6 +176,13 @@ def save_attempt(path, value):
 
 async def deliver(client, wrapper_root):
     await verified_owner(client)
+    if route(client)[1]['provider'] == 'antigravity':
+        if os.environ.get('AGENTSTACK_MAIL_DISABLED') == '1':return {'status':'disabled','completed':0}
+        from .fresh_antigravity import deliver as signal_runner
+        accepted = await signal_runner(client, wrapper_root)
+        # The native runner owns notification_pending and notification_complete.
+        # A wakeup is neither a completed delivery nor a model acknowledgement.
+        return {'status':'signalled' if accepted else 'idle','completed':0}
     with consumer_lock(client) as acquired:
         if not acquired:return {'status':'busy','completed':0}
         if os.environ.get('AGENTSTACK_MAIL_DISABLED') == '1':return {'status':'disabled','completed':0}

@@ -50,12 +50,13 @@ def read_task(base):
 async def prepare(parent, slot, name, program, model, description, *, managed=None, standalone=False, effort=None):
     await verified_owner(parent)
     slot = slot_name(slot)
-    if program not in ('claude-code', 'codex', 'dsh', 'hermes') or not all(isinstance(v, str) and v for v in (name, model, description)):
+    if program not in ('claude-code', 'codex', 'dsh', 'hermes', 'antigravity') or not all(isinstance(v, str) and v for v in (name, model, description)):
         raise B1Error('FRESH_CHILD_ARGUMENTS_INVALID')
     if len(name) > 64 or len(model) > 128 or len(description.encode()) > 8192:
         raise B1Error('FRESH_CHILD_ARGUMENTS_INVALID')
+    efforts = ('low','medium','high','xhigh','max') if program == 'antigravity' else ('low','medium','high','xhigh','max','ultra')
     if type(standalone) is not bool or (effort is not None and
-            (program not in ('claude-code','codex') or effort not in ('low','medium','high','xhigh','max','ultra'))):
+            (program not in ('claude-code','codex','antigravity') or effort not in efforts)):
         raise B1Error('FRESH_CHILD_ARGUMENTS_INVALID')
     base = children(parent, slot)
     with operation(base):
@@ -191,9 +192,10 @@ async def handoff(parent, root, *, slot=None, name=None, cwd, task, resources, t
         if transport is None:transport = tmux['legacy_transport']()
         if transport.identity is None:raise B1Error('FRESH_CHILD_TMUX_PREPARE_REQUIRED')
         pane_name = 'orrery-' + child.context['client_id']
+        binary_env = 'GEMINI' if provider == 'antigravity' else provider.upper()
         command = shlex.join(['/usr/bin/env', 'AGENTSTACK_RUNTIME_MODE=fresh',
             'AGENTSTACK_FRESH_CLIENT_CONTEXT=' + str(child.path), 'AGENTSTACK_PYTHON=' + sys.executable,
-            'AGENTSTACK_' + provider.upper() + '_BIN=' + binary,
+            'AGENTSTACK_' + binary_env + '_BIN=' + binary,
             sys.executable, '-m', 'agentstack_mail.fresh_client', 'child-run', '--spawn-id', saved['spawn_id']])
         # Commit the attempt before the externally visible tmux operation. An
         # uncertain result is preserved and never automatically launches twice.
@@ -315,9 +317,11 @@ def main(operation_name, argv):
                 runner, _, pins = selection(root, args.program, args.model, spec)
                 spec.update({key:runner[key] for key in ('url_index','url_key','server_url') if key in runner})
                 managed = dict(selection=spec,pins=pins)
-            elif any(getattr(args,k) is not None for k in ('manifest','backend','effort','helper_model','url_index','url_key','web_search')):
+            elif (any(getattr(args,k) is not None for k in ('manifest','backend','helper_model','url_index','url_key','web_search'))
+                    or (args.effort is not None and args.program != 'antigravity')):
                 raise B1Error('FRESH_CHILD_ARGUMENTS_INVALID')
-            result = asyncio.run(prepare(client, args.child_client_name, args.name, args.program, args.model, args.task_description, managed=managed))
+            result = asyncio.run(prepare(client, args.child_client_name, args.name, args.program, args.model, args.task_description,
+                managed=managed, effort=args.effort if args.program == 'antigravity' else None))
         else:
             _, ready, _ = asyncio.run(selected_child(client, args.child_client_name, args.pre_registered))
             if (args.codex and ready['program'] != 'codex') or (args.model is not None and args.model != ready['model']):

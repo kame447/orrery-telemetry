@@ -75,7 +75,10 @@ def root_path(value):
     return root
 
 
-def provider_setup(client, root, provider, *, persistent=None):
+def provider_setup(client, root, provider, *, persistent=None, owner=None):
+    if provider == 'antigravity':
+        from .fresh_antigravity import setup
+        return setup(client, root, owner=owner)
     if provider in {'dsh','hermes'}:
         from .fresh_harness import setup
         return setup(client, root, provider, persistent=persistent)
@@ -272,8 +275,9 @@ def codex_config_overrides(root, plan, config):
 def launch(client, wrapper_root, provider, cwd, *, session_id=None, persistent=None):
     root = root_path(wrapper_root)
     cwd = Path(cwd).resolve(strict=True)
-    if not cwd.is_dir() or provider not in {'claude', 'codex', 'dsh', 'hermes'}:raise B1Error('FRESH_LAUNCH_ARGUMENTS_INVALID')
+    if not cwd.is_dir() or provider not in {'claude', 'codex', 'dsh', 'hermes', 'antigravity'}:raise B1Error('FRESH_LAUNCH_ARGUMENTS_INVALID')
     managed = provider in {'dsh','hermes'}
+    antigravity = provider == 'antigravity'
     owner = asyncio.run(verified_owner(client))
     from .fresh_child import family, launch_task
     task, prompt = launch_task(client)
@@ -290,9 +294,12 @@ def launch(client, wrapper_root, provider, cwd, *, session_id=None, persistent=N
             _directory(previous_run)
             if read_run_end(client, previous_run) is None:
                 raise B1Error('FRESH_LAUNCH_OUTCOME_UNKNOWN', launch_id=previous_run.name)
-        home, binary, plan = provider_setup(client, root, provider, persistent=persistent)
+        home, binary, plan = provider_setup(client, root, provider, persistent=persistent, owner=owner)
         if session_id is not None:
-            if managed:
+            if antigravity:
+                from .fresh_antigravity import native_session_id
+                session_id = native_session_id(session_id)
+            elif managed:
                 from .fresh_harness import native_session_id
                 session_id = native_session_id(session_id)
             else:session_id = native_id(session_id)
@@ -301,9 +308,9 @@ def launch(client, wrapper_root, provider, cwd, *, session_id=None, persistent=N
             if receipt.get('provider') != provider or receipt.get('native_session_id') != session_id:
                 raise B1Error('FRESH_NATIVE_SESSION_MISMATCH')
             transcript = Path(receipt['transcript_path'])
-            expected_root = client.path.parent if managed else home
+            expected_root = client.path.parent if managed or antigravity else home
             if not transcript.resolve(strict=True).is_relative_to(expected_root):raise B1Error('FRESH_NATIVE_SESSION_MISMATCH')
-            if managed:
+            if managed or antigravity:
                 previous_native = _read_private(transcript)
                 if previous_native.get('harness') != provider or previous_native.get('native_session_id') != session_id:
                     raise B1Error('FRESH_NATIVE_SESSION_MISMATCH')
@@ -319,7 +326,12 @@ def launch(client, wrapper_root, provider, cwd, *, session_id=None, persistent=N
                       resume_session_id=session_id, nonce=secrets.token_hex(32), **identity(client))
         if persistent is not None:intent['persistent'] = True
         managed_plan = None
-        if managed:
+        if antigravity:
+            from .fresh_antigravity import plan as native_plan
+            managed_plan = native_plan(client, root, plan, run, cwd,
+                                       (prompt or '') if session_id is None else '', session_id)
+            args = managed_plan['argv']
+        elif managed:
             from .fresh_harness import plan as native_plan
             managed_plan = native_plan(client, root, provider, plan, run, cwd,
                                        prompt if session_id is None else '', session_id, persistent=persistent)
@@ -330,7 +342,7 @@ def launch(client, wrapper_root, provider, cwd, *, session_id=None, persistent=N
         if task is not None:
             _, _, child_record = family(client)
             if binary != task['binary']:raise B1Error('FRESH_CHILD_INTENT_CONFLICT')
-            if not managed:
+            if not managed and not antigravity:
                 model_args = ['--model', child_record['model']]
                 effort = child_record.get('effort')
                 if effort:
@@ -358,7 +370,7 @@ def launch(client, wrapper_root, provider, cwd, *, session_id=None, persistent=N
         runtime = base / 'runtime'
         runtime.mkdir(mode=0o700, exist_ok=True);_directory(runtime)
         environment.update(AGENTSTACK_RUNTIME_DIR=str(runtime), AGENTSTACK_HOOKS_DIR=str(root / 'hooks'))
-        if managed:environment.update(managed_plan['env'])
+        if managed or antigravity:environment.update(managed_plan['env'])
         else:environment['CODEX_HOME' if provider == 'codex' else 'CLAUDE_CONFIG_DIR'] = str(home)
         if provider == 'codex':
             if (not os.path.isabs(sys.executable) or not os.path.isfile(sys.executable)
@@ -370,7 +382,7 @@ def launch(client, wrapper_root, provider, cwd, *, session_id=None, persistent=N
                 AGENTSTACK_FRESH_RUNTIME_DIR=str(runtime), AGENTSTACK_FRESH_CODEX_HOME=str(home),
                 AGENTSTACK_FRESH_CODEX_BIN=binary)
             args += codex_effective_overrides(root, home, binary, plan, cwd, config_args, environment)
-        if task is not None and not managed:args += ['--', prompt]
+        if task is not None and not managed and not antigravity:args += ['--', prompt]
         from .fresh_delivery import capture, publish
         captured = capture(client, root, launch_id)
         _write_private(run / 'intent.json', intent)
@@ -398,6 +410,12 @@ def launch(client, wrapper_root, provider, cwd, *, session_id=None, persistent=N
             raise
         # Lifecycle closure does not imply native readiness. A missing receipt
         # must not strand a run whose actual wait/required child checks finished.
+        if antigravity:
+            from .fresh_antigravity_end import verify_native_ended
+            try:
+                verify_native_ended(client, root, run, runner_pid=process.pid)
+            except (B1Error, OSError, ValueError, KeyError, TypeError):
+                raise B1Error('FRESH_LAUNCH_OUTCOME_UNKNOWN', launch_id=launch_id) from None
         _write_private(run / 'ended.json', {'launch_id': launch_id, 'exit_code': code})
         if code == 0:
             observed = _read_private(run / 'session.json')
@@ -419,7 +437,10 @@ def session_state(client, payload):
     current = _read_private(base / 'current.json')
     if current != {'launch_id': launch_id}:raise B1Error('FRESH_LAUNCH_RECEIPT_MISMATCH')
     managed = intent['provider'] in {'dsh','hermes'}
-    if managed:
+    if intent['provider'] == 'antigravity':
+        from .fresh_antigravity import native_session_id
+        session_id = native_session_id(payload.get('session_id'))
+    elif managed:
         from .fresh_harness import native_session_id
         session_id = native_session_id(payload.get('session_id'))
     else:session_id = native_id(payload.get('session_id'))
@@ -468,7 +489,10 @@ async def record_session(client, payload, *, defer_transcript=False):
         request_restart(client, payload)
     managed = intent['provider'] in {'dsh','hermes'}
     from .fresh_child import provider_home
-    if managed:
+    if intent['provider'] == 'antigravity':
+        from .fresh_antigravity import session_reference
+        transcript = session_reference(client, intent, session_id)
+    elif managed:
         from .fresh_harness import session_reference
         transcript = session_reference(client, intent, session_id)
     else:
@@ -496,7 +520,7 @@ async def record_session(client, payload, *, defer_transcript=False):
         reader = runpy.run_path(str(root / 'hooks/prepare-codex-session-binding.py'))
         if reader['_transcript_header_session_id'](transcript) != session_id:
             raise B1Error('FRESH_NATIVE_SESSION_MISMATCH')
-    publish_session(client, payload, state, transcript.resolve() if managed else resolved)
+    publish_session(client, payload, state, transcript.resolve() if managed or intent['provider'] == 'antigravity' else resolved)
     return True
 
 

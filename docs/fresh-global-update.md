@@ -72,6 +72,8 @@ env AGENTSTACK_PYTHON="$orrery_python" AGENTSTACK_HOME="$orrery_install" \
 
 確認は `/api/version` の runtime_mode／I／capabilities、`/api/agents` のI/A、既存New Agentからstandaloneと親付き各1件、`/api/spawn-status?name=...` のnative_ready／終了記録の順です。pendingだけで起動成功としません。不明結果や準備後エラーではjob/I/Aを控え、同じ子を自動で作り直さず、既存processと準備記録を手順で確認します。provider未準備や失効は明示停止です。
 
+Antigravity（`agy`）も fresh の本人登録、Mail、予約、起動記録へ接続します。モデル・effortと編集対象のresourcesを指定し、既存のログインと権限を保ったまま、stream入力で追加のMailを受け取ります。対応範囲は [Antigravityの説明](antigravity.md#projectless-fresh-runtimefork) を確認してください。
+
 現段階では worktree、browser、独自base/tools、terminalを開く指定、role/group/emoji注釈、dry_runは未接続として拒否します。必要なfolder／provider設定はagentが既存手順で準備してください。通常のClaude/Codex/dsh/Hermes/Localのstandalone／親付き自動起動を手動子作成へ置き換える意味ではありません。rosterのnative receiptだけでは現在のOS生存を証明しません。Mail／graph／Terminalの接続・上限・拒否条件は[API契約](api.md)を確認してください。
 
 dashboardが応答してから、別の保守端末で同じ変数を再設定してCockpitを起動します。`orrery_instance`はhealthで確認した新I、`orrery_cockpit_root`は対応版checkout、`orrery_cockpit_python`はその公開依存を使える承認済みPython、`orrery_cockpit_port`は確認済みの空きport、`orrery_tmux`は確認済みの絶対binaryです。未確定なら起動しません。
@@ -358,7 +360,7 @@ orrery_child_resource='/absolute/path/to/child-work-folder/target.py'
 )
 ```
 
-task fileは事前に予約して作り、fresh Mailのprivate rootの外に置きます。本文は保存してnative providerへargvで渡し、shellのコードとして再評価しません。資格・bindingをtaskへ貼りません。準備コマンドの出力はtokenを含まないJSONで、子の名前とcontextを返します。旧 `--token-file-out` やproject指定はこのfresh入口では受けません。資源不要の場合だけ `--resources` の代わりに `--unsafe-no-resources` を明示します。`--prepare-only` をspawnへ付けると、準備・task固定・予約まででproviderは起動しません。
+task fileは事前に予約して作り、fresh Mailのprivate rootの外に置きます。本文を保存し、Claude/Codexにはargvで、Antigravityにはnativeの初期化確認後のstream入力で渡します。shellのコードとして再評価しません。資格・bindingをtaskへ貼りません。準備コマンドの出力はtokenを含まないJSONで、子の名前とcontextを返します。旧 `--token-file-out` やproject指定はこのfresh入口では受けません。資源不要の場合だけ `--resources` の代わりに `--unsafe-no-resources` を明示します。`--prepare-only` をspawnへ付けると、準備・task固定・予約まででproviderは起動しません。
 
 通常spawnは既存tmux transportに新しい子sessionを自動作成します。親のtmux socketを使い、無指定なら既存の通常socketの規則だけを使います。serverが未準備なら `FRESH_CHILD_TMUX_PREPARE_REQUIRED` で止まり、本人が既存のtmux起動手順を確認します。別paneへの入力注入や新watcher／daemonはありません。初期応答の `accepted` はhandoffの記録で、`native_ready` とは別です。同じtask／slotで再送すると同じattemptの状態を返し、二重起動しません。結果不明時はtaskやreceiptを消して再試行せず、本人が実行状況を確認します。task変更や別の子との混在も拒否します。子は渡されたtaskに従い、同instanceの指定親IDへMailで報告します。
 

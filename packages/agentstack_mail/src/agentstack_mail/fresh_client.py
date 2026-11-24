@@ -325,7 +325,7 @@ def main(argv=None):
         launch = commands.add_parser(operation)
         launch.add_argument('--context', required=True)
         launch.add_argument('--wrapper-root', required=True)
-        launch.add_argument('provider', choices=('claude', 'codex', 'dsh', 'hermes'))
+        launch.add_argument('provider', choices=('claude', 'codex', 'dsh', 'hermes', 'antigravity'))
         launch.add_argument('cwd')
         if operation == 'resume':launch.add_argument('--session-id', required=True)
     resolve = commands.add_parser('resolve-ended')
