@@ -88,3 +88,61 @@ def test_concurrent_create_only_has_one_owner(monkeypatch, tmp_path):
         asyncio.run(db.dispose_database_for_shutdown())
         db.reset_database_state()
         config.clear_settings_cache()
+
+
+@pytest.mark.parametrize("first_create_only,second_create_only", [(True, True), (True, False), (False, True)])
+def test_concurrent_equivalent_names_cannot_create_two_owners(
+    monkeypatch, tmp_path, first_create_only, second_create_only,
+):
+    _configure_isolated_runtime(monkeypatch, tmp_path, mode="passthrough")
+    project = str(tmp_path / "project")
+
+    async def run():
+        async with Client(app.build_mcp_server()) as client:
+            await client.call_tool("ensure_project", {"human_key": project})
+            first_read = asyncio.Event()
+            second_read = asyncio.Event()
+            original_lookup = app._find_registration_equivalent_agent
+
+            async def controlled_lookup(session, project_id, name):
+                result = await original_lookup(session, project_id, name)
+                if name == "QuietCurie" and not first_read.is_set():
+                    first_read.set()
+                    # Without writer admission both lookups can see an empty
+                    # project. With it, the second lookup must wait for commit.
+                    try:
+                        await asyncio.wait_for(second_read.wait(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        pass
+                elif name == "Quietcurie":
+                    second_read.set()
+                return result
+
+            monkeypatch.setattr(app, "_find_registration_equivalent_agent", controlled_lookup)
+            args = dict(project_key=project, program="claude-code", model="fixture")
+            first = asyncio.create_task(client.call_tool("register_agent", {
+                **args, "name": "QuietCurie", "registration_token": "synthetic-first-owner",
+                "create_only": first_create_only,
+            }, raise_on_error=False))
+            await asyncio.wait_for(first_read.wait(), timeout=10)
+            second = asyncio.create_task(client.call_tool("register_agent", {
+                **args, "name": "Quietcurie", "registration_token": "synthetic-second-owner",
+                "create_only": second_create_only,
+            }, raise_on_error=False))
+            results = await asyncio.gather(first, second)
+            assert second_read.is_set()
+            assert sum(not result.is_error for result in results) == 1
+            assert not results[0].is_error
+            async with db.get_session() as session:
+                rows = (await session.execute(select(Agent))).scalars().all()
+                assert len(rows) == 1
+                assert rows[0].name == "QuietCurie"
+                assert rows[0].registration_token == "synthetic-first-owner"
+                assert rows[0].id == _payload(results[0])["id"]
+
+    try:
+        asyncio.run(run())
+    finally:
+        asyncio.run(db.dispose_database_for_shutdown())
+        db.reset_database_state()
+        config.clear_settings_cache()

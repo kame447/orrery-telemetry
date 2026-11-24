@@ -3506,7 +3506,16 @@ async def _get_or_create_agent(
 
     await ensure_schema()
     async with get_session() as session:
+        # The unique index is case-sensitive, while registration equivalence
+        # includes case and legacy normalized aliases. SQLite SELECT does not
+        # acquire the writer lock. Serialize the lookup and insertion across
+        # both ordinary and create-only registration (including retries).
+        sqlite_registration = session.bind.dialect.name == "sqlite"
+        if create_only and not sqlite_registration:
+            raise ValueError("Create-only registration requires SQLite writer admission")
         for _attempt in range(5):
+            if sqlite_registration:
+                await session.execute(text("BEGIN IMMEDIATE"))
             # Preserve exact legacy names, then detect their normalized aliases.
             agent = await _find_registration_equivalent_agent(
                 session,
