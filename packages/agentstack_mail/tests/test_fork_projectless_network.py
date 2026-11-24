@@ -26,10 +26,12 @@ def test_cross_folder_cli_mail_and_network(tmp_path, monkeypatch):
                 runtime.root / "config.json", people[1]["binding_path"],
                 alpha.context["endpoint"], client_id=str(uuid4())
             )
-            async def call(client, cwd, tool, arguments):
+            async def call(client, cwd, tool, arguments, *, project_key=True, expected_code=None):
                 env = dict(os.environ, AGENTSTACK_PROJECT_KEY=str(cwd),
                            AGENTSTACK_RUNTIME_MODE="fresh",
                            PYTHONPATH=os.pathsep.join(map(str, (ROOT, ROOT / "packages/agentstack_mail/src"))))
+                if not project_key:
+                    env.pop("AGENTSTACK_PROJECT_KEY", None)
                 result = await asyncio.to_thread(
                     subprocess.run,
                     [sys.executable, "-m", "agentstack_mail.fresh_client",
@@ -37,6 +39,11 @@ def test_cross_folder_cli_mail_and_network(tmp_path, monkeypatch):
                     cwd=cwd, env=env, input=json.dumps(arguments),
                     capture_output=True, text=True, timeout=45
                 )
+                if expected_code is not None:
+                    assert result.returncode == 1, "fixture client did not reject request"
+                    failure = json.loads(result.stdout)
+                    assert failure["code"] == expected_code
+                    return failure
                 assert result.returncode == 0, "fixture client failed"
                 return json.loads(result.stdout)
 
@@ -50,6 +57,20 @@ def test_cross_folder_cli_mail_and_network(tmp_path, monkeypatch):
                 call(beta, b, "fetch_inbox", {}))
             assert any(m["sender_id"] == bid and m["subject"] == "B to A" for m in ainbox)
             assert any(m["sender_id"] == aid and m["subject"] == "A to B" for m in binbox)
+            # One absolute path must have one owner across cwd boundaries,
+            # including when the other client has no legacy project key.
+            held = str((a / "shared.py").resolve())
+            separate = str((b / "shared.py").resolve())
+            await call(alpha, a, "reserve_files", {"paths": [held]})
+            conflict = await call(beta, b, "check_reservations", {"paths": [held]},
+                                  project_key=False)
+            assert conflict["conflict_free"] is False
+            assert conflict["conflicts"][0]["owner_agent_id"] == aid
+            await call(beta, b, "reserve_files", {"paths": [held]},
+                       project_key=False, expected_code="RESERVATION_CONFLICT")
+            await call(beta, b, "reserve_files", {"paths": [separate]}, project_key=False)
+            await call(alpha, a, "release_reservations", {"paths": [held]})
+            await call(beta, b, "reserve_files", {"paths": [held]}, project_key=False)
             backend = Backend(alpha.path, ROOT)
             with dashboard(alpha, backend, monkeypatch, tmp_path) as (_, request):
                 ac, roster = await asyncio.to_thread(request, "/api/agents")
