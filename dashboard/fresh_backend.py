@@ -23,6 +23,9 @@ from agentstack_mail.storage_origin_contract import B1Error, name_keys
 
 CAPABILITIES = {'spawn': True, 'roster': True, 'mail': True, 'graph': True, 'terminal': True,
                 'worktree': False, 'browser': False, 'tools': False}
+# Two process snapshots plus bounded tmux inventories can take over 250 ms on Mac.
+# Keep the read-only observation bounded, below the Cockpit's HTTP deadline.
+DISPLAY_OBSERVATION_BUDGET_SECONDS = 1.0
 CLEANUP_ATTACHED_MESSAGE='Close the attached Terminal/Cockpit views and wait for their observers to stop before checking again.'
 
 
@@ -161,7 +164,7 @@ class Backend:
                         batches=list(groups.values())
                         offset=self._display_offset%len(batches) if batches else 0
                         rotated=[s for group in batches[offset:]+batches[:offset] for s in group]
-                        facts=Targets(self.client,self.root).display_snapshot(rotated,deadline=now+.25) if rotated else {}
+                        facts=Targets(self.client,self.root).display_snapshot(rotated,deadline=now+DISPLAY_OBSERVATION_BUDGET_SECONDS) if rotated else {}
                         self._display_offset=offset+2
                         self._display_cache=(key,now,facts)
                 finally:self._display_lock.release()

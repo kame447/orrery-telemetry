@@ -42,6 +42,11 @@ def test_roster_display_cache_parallel_get_expiry_and_owner_changes_are_not_auth
         async with cleanup_fixture(tmp_path,monkeypatch) as (runtime,people,client,operator,run,row,calls,*_):
             backend=Backend(operator.path,ROOT);entered=threading.Event();release=threading.Event();observed=[]
             def slow(self,selections,*,deadline):
+                # Two real Mac ps snapshots plus tmux inventory can exceed 250 ms.
+                # Simulate that cost without a timing-sensitive sleep or weakening
+                # the underlying fail-closed process/route checks.
+                remaining=deadline-time.monotonic()
+                assert .5 < remaining <= 1.0
                 observed.append(deadline);entered.set();assert release.wait(5)
                 return {people[0]['agent_id']:dict(category='finished',running=False,attached=False)}
             monkeypatch.setattr(Targets,'display_snapshot',slow)
