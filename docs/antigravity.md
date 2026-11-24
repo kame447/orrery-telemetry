@@ -11,7 +11,7 @@ fresh 起動は公式 `agy --input-format stream-json --output-format stream-jso
 
 起動専用の小さなfolderを `--add-dir` で渡し、その `.agents/hooks.json` と `.agents/mcp_config.json` から予約guardと一意名のfresh Mail接続を読み込みます。利用者のHOME、ログイン、permissions、作業folderの既存設定は変更しません。`--settings` にhooksやMCP定義を入れて読み込ませる方式ではありません。owner資格値をprompt、argv、MCP設定へ入れず、旧project key／旧Mail資格へfallbackしません。
 
-最初のturnは初期化確認だけです。実CLIのinitと実SessionStart hookが返したconversation ID、本人、instance、現在のlaunchが一致し、非空の正常応答が得られてから依頼内容を送ります。hookが読み込まれなければ依頼を渡さず停止します。予約guardはagyの正式な `decision=deny` で拒否し、native hook timeoutより短いdeadlineで失敗を返します。ネイティブ権限は広げません。必要なMCP操作をheadlessで承認できない場合も、拒否を成功として扱いません。
+最初のturnは初期化確認だけです。実CLIのinitと実SessionStart hookが返したconversation ID、本人、instance、現在のlaunchが一致し、非空の正常応答が得られてから依頼内容を送ります。hookが読み込まれなければ依頼を渡さず停止します。予約guardはagyの正式な `decision=deny` で拒否し、native hook timeoutより短いdeadlineで失敗を返します。対象パスの契約が未確認の `notebook_edit` は明示拒否します。ネイティブ権限は広げません。必要なMCP操作をheadlessで承認できない場合も、拒否を成功として扱いません。
 
 Mail通知は保護されたprivate socketで待機中のrunnerを起こし、本人のpendingを正規APIから取得して次のstream turnへ渡します。送信、通知引渡し、既読、ACK、モデルの仕事完了は別の事実です。通知の引渡しだけで既読やACKを付けません。busy中に受けたwakeは現在のturnが終わってから再確認します。
 

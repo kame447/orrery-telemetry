@@ -110,6 +110,9 @@ def test_agy_native_plan_keeps_all_public_tool_names_within_cli_limit(tmp_path):
             plan = _read_private(folder / 'antigravity/plan.json')
             config = _read_private(folder / 'antigravity/integration/.agents/mcp_config.json')
             assert set(config['mcpServers']) == {plan['mcp_name']}
+            groups = _read_private(folder / 'antigravity/integration/.agents/hooks.json')
+            matcher = next(iter(groups.values()))['PreToolUse'][0]['matcher']
+            assert 'notebook_edit' in matcher.split('|')
             # agy 1.5.16 only enables composed native tool names up to 64 characters.
             for tool in PUBLISHED | {'runtime_status', 'show_files'}:
                 name = f"mcp_{plan['mcp_name']}_{tool}"
