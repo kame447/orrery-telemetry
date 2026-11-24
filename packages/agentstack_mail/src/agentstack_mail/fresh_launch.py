@@ -294,7 +294,10 @@ def launch(client, wrapper_root, provider, cwd, *, session_id=None, persistent=N
             _directory(previous_run)
             if read_run_end(client, previous_run) is None:
                 raise B1Error('FRESH_LAUNCH_OUTCOME_UNKNOWN', launch_id=previous_run.name)
-        home, binary, plan = provider_setup(client, root, provider, persistent=persistent, owner=owner)
+        if antigravity:
+            home, binary, plan = provider_setup(client, root, provider, owner=owner)
+        else:
+            home, binary, plan = provider_setup(client, root, provider, persistent=persistent)
         if session_id is not None:
             if antigravity:
                 from .fresh_antigravity import native_session_id

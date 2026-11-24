@@ -1105,6 +1105,10 @@ EXPECTED_CUTOVER_APPROVAL = {
 
 REQUIRED_RUNTIME_MODULES = {
     "archive_cli.py",
+    "fresh_antigravity.py",
+    "fresh_antigravity_end.py",
+    "fresh_antigravity_hooks.py",
+    "fresh_antigravity_runner.py",
     "fresh_cli.py",
     "fresh_child.py",
     "fresh_client.py",
@@ -1259,6 +1263,9 @@ SDIST_REQUIRED_SUFFIXES = {
     "/tests/test_consumer.py",
     "/tests/test_cutover_evidence.py",
     "/tests/test_cutover_client.py",
+    "/tests/test_fresh_antigravity_core.py",
+    "/tests/test_fresh_antigravity_end.py",
+    "/tests/test_fresh_antigravity_runtime.py",
     "/tests/test_service.py",
     "/tests/test_upstream_parity_d2.py",
     "/tests/verify_installed_contract.py",
