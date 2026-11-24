@@ -88,7 +88,7 @@ curl -s http://127.0.0.1:8770/api/version
 ```
 
 ```json
-{"name":"orrery-telemetry","version":"2026.09.16.1","api":46}
+{"name":"orrery-telemetry","version":"2026.09.16.1","api":47}
 ```
 
 version の解決順は [インストール](install.md#version)を参照してください。
@@ -769,7 +769,7 @@ taskの上書きだけを外す例（省略したrole・emoji・groupは維持�
 
 ## POST `/api/spawn`
 
-API 46 の legacy 専用オプション `mail_create_only: true` は、名前を明示した standalone Claude/Codex の新規 Mail 登録だけを許します。対応する Mail の `register_agent.create_only` が必要です。既存名・正規化による別名・登録競合・Mail インスタンス不一致は拒否し、通常登録にフォールバックしません。成功した起動応答と ready 状態の `result` に `mail_agent_id`, `mail_instance_id`, `mail_project_key`, `mail_project_id`, `mail_registered_at` を載せます。これらは登録時の正規応答から取得する内部照合用の値で、宛先許可を付与するものではありません。既定 OFF、fresh/global では使用できません。
+API 47 の legacy 専用オプション `mail_create_only: true` は、名前を明示した standalone Claude/Codex の新規 Mail 登録だけを許します。対応する Mail の `register_agent.create_only` が必要です。既存名・正規化による別名・登録競合・Mail インスタンス不一致は拒否し、通常登録にフォールバックしません。成功した起動応答と ready 状態の `result` に `mail_agent_id`, `mail_instance_id`, `mail_project_key`, `mail_project_id`, `mail_registered_at` を載せます。これらは登録時の正規応答から取得する内部照合用の値で、宛先許可を付与するものではありません。既定 OFF、fresh/global では使用できません。
 
 parent ありの Claude child:
 

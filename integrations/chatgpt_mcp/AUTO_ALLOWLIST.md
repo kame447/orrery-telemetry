@@ -60,7 +60,7 @@ the final check and a later send.
 
 ## Explicit opt-in and runtime contract
 
-- The fork's API 46 supports explicit legacy-only `mail_create_only`
+- The fork's API 47 supports explicit legacy-only `mail_create_only`
   standalone spawn and canonical Mail `register_agent.create_only`. It
   refuses existing and concurrent identities, including case-equivalent
   and normalized legacy names. For both ordinary and create-only registration,
