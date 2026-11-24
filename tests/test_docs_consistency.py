@@ -273,3 +273,14 @@ def test_child_tool_docs_explain_approval_refusal_reports_and_repair():
         "(#人がやること事前の設定と接続操作時の許可)",
     ):
         assert link in japanese
+
+
+def test_idle_watch_docs_list_the_implemented_defaults():
+    from dashboard import idle_watch
+
+    for doc in ("docs/idle-watch.md", "docs/idle-watch.en.md"):
+        text = _read(doc)
+        for key, value in idle_watch.DEFAULTS.items():
+            assert f"`{key}` {value}" in text, (doc, key)
+            low, high = idle_watch.LIMITS[key]
+            assert f"`{key}` {low}–{high}" in text, (doc, key)
