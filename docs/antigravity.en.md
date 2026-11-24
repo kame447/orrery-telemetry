@@ -1,7 +1,7 @@
 # Google Antigravity / Gemini provider
 
 ORRERY can use Google Antigravity CLI (`agy`) alongside Claude Code and Codex.
-The integration uses the user's signed-in Antigravity account.
+The integration uses the user's signed-in Antigravity account; it does not set an API key or auto-approve permissions.
 
 ## Prerequisites
 
@@ -40,13 +40,13 @@ Choose a setup based on how you will use the provider. The dry run works without
 scripts/install-gemini-provider.sh --configure-mcp
 ```
 
-Restart the Dashboard after installation:
+After installation, restart the Dashboard only after active agents have finished and reservations are released:
 
 ```sh
 ~/.agentstack/dashboard/agentctl.sh restart
 ```
 
-The optional installer copies provider files. If it reports an outdated core,
+The optional installer copies only Gemini-owned payload files, never dashboard/server.py. If it reports an outdated core,
 update the core and run the installer again.
 
 ## Show account quota in Usage left

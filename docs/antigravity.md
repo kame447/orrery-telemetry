@@ -40,13 +40,13 @@ scripts/install-gemini-provider.sh --dry-run
 scripts/install-gemini-provider.sh --configure-mcp
 ```
 
-導入後、Dashboard を再起動します。
+導入後、稼働中のエージェントの作業終了と予約の解放を確認してから Dashboard を再起動します。
 
 ```sh
 ~/.agentstack/dashboard/agentctl.sh restart
 ```
 
-optional installer は provider のファイルだけをコピーします。必要な core が古い場合は
+optional installer は Gemini 専用のファイルだけをコピーし、dashboard/server.py は置換しません。必要な core が古い場合は
 core を更新してから再実行します。
 
 ## Usage left に利用枠を表示
