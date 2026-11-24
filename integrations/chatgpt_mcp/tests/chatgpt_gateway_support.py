@@ -71,6 +71,7 @@ class FakeDashboard:
             {"name": "shell", "category": "terminal", "running": True},
         ]
         self.spawn_mode = "ok"
+        self.spawn_hook = None
         self.spawn_status = {}
         self.names_taken = {"WindyFermi"}
         self.down = False
@@ -123,6 +124,10 @@ class FakeDashboard:
                 outer.requests.append(("POST", self.path, body))
                 if self.path != "/api/spawn":
                     self._json(404, {"error": "nope"})
+                    return
+                if outer.spawn_hook is not None:
+                    status, result = outer.spawn_hook(body)
+                    self._json(status, result)
                     return
                 if body.get("dry_run"):
                     self._json(200, {"ok": True, "dry_run": True, "provider": body.get("provider"), "model": body.get("model") or "claude-opus-5-5",

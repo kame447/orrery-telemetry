@@ -215,3 +215,29 @@ def test_pinned_process_exposes_spawn_without_starting_an_agent(tmp_path, releas
         assert dashboard.posts(real_only=True) == []
     finally:
         stop(proc)
+
+
+def test_auto_admission_default_off_requires_both_optins(tmp_path, release, paired):
+    state, _ = paired
+    plan = plan_for(release, state)
+    assert plistlib.loads(service.render_plist(plan))["EnvironmentVariables"]["ORRERY_MCP_AUTO_REGISTER_SPAWNED"] == "0"
+    agents = tmp_path / "LA"
+    agents.mkdir()
+    target = agents / TARGET
+    target.write_bytes(service.render_plist(plan))
+    before = target.read_bytes()
+    fake = FakeLaunchctl(loaded=True, path=str(target))
+    with pytest.raises(ConfigError, match="auto registration requires"):
+        service.install_service(replace(plan, auto_register_spawned=True), runner=fake,
+                                launch_agents=agents, verify=False)
+    assert target.read_bytes() == before and fake.loaded
+    assert not {"bootout", "bootstrap"}.intersection(fake.verbs())
+
+
+def test_auto_admission_cli_does_not_allow_implicit_optins(tmp_path, paired):
+    from orrery_chatgpt_mcp import server
+    state, _ = paired
+    with pytest.raises(ConfigError, match="auto registration requires explicit"):
+        server._service_cli(["install", "--auto-register-spawned", "1"], state)
+    with pytest.raises(ConfigError, match="must be 0 or 1"):
+        server._service_cli(["install", "--auto-register-spawned", "true"], state)

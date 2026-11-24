@@ -44,7 +44,7 @@ class Config:
             validate_scope(mode, project_key)
         except DashboardError as exc:
             raise ConfigurationError(str(exc)) from None
-        for opt in ("ORRERY_MCP_ENABLE_SPAWN", "ORRERY_MCP_ENABLE_MESSAGE"):
+        for opt in ("ORRERY_MCP_ENABLE_SPAWN", "ORRERY_MCP_ENABLE_MESSAGE", "ORRERY_MCP_AUTO_REGISTER_SPAWNED"):
             if env.get(opt, "0").lower() not in ("0", "false"):
                 raise ConfigurationError(opt + " is unsupported in the read-only adapter")
         if env.get("ORRERY_MCP_AUTH", "pairing") != "pairing":

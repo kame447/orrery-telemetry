@@ -563,11 +563,15 @@ def test_default_mcp_still_routes_by_project_and_preserves_v1_schema(
                         properties["thread_id"] = tool.inputSchema["properties"][
                             "thread_id"
                         ]
-                    assert properties == {
+                    current = {
                         key: value
                         for key, value in tool.inputSchema["properties"].items()
                         if key not in SCOPE_ARGUMENTS
                     }
+                    if tool.name == "register_agent":
+                        assert current.pop("create_only") == {"type": "boolean", "default": False}
+                        assert "create_only" not in properties
+                    assert properties == current
                 projects = [str(tmp_path / "legacy-a"), str(tmp_path / "legacy-b")]
                 for project in projects:
                     await client.call_tool("ensure_project", {"human_key": project})
