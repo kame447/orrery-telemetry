@@ -71,6 +71,33 @@ def test_roster_display_cache_parallel_get_expiry_and_owner_changes_are_not_auth
     asyncio.run(scenario())
 
 
+def test_graph_uses_only_matching_roster_observations(tmp_path,monkeypatch):
+    async def scenario():
+        async with live(tmp_path) as (runtime,people,parent,_):
+            backend=Backend(parent.path,ROOT)
+            original=backend.roster
+            async def observed():
+                data=await original()
+                rows={a['name']:a for a in data['agents']}
+                rows['Alpha'].update(running=True,category='running',observation={'state':'observed'})
+                rows['Beta'].update(running=False,category='finished',observation={'state':'observed'})
+                # An observation for an identity that changed must not attach
+                # to an older graph snapshot merely because the ID matches.
+                rows['Gamma'].update(name='DifferentName',running=True,category='running',observation={'state':'observed'})
+                return data
+            monkeypatch.setattr(backend,'roster',observed)
+            with dashboard(parent,backend,monkeypatch,tmp_path) as (_,request):
+                code,graph=await asyncio.to_thread(request,'/api/graph?all=1')
+                assert code==200
+                nodes={n['name']:n for n in graph['nodes']}
+                assert nodes['Alpha']['running'] is True
+                assert nodes['Beta']['running'] is False
+                assert nodes['Gamma']['running'] is None
+                code,graph=await asyncio.to_thread(request,'/api/graph?all=1&spawn_only=1')
+                assert code==200 and graph['nodes']==[] and graph['edges']==[]
+    asyncio.run(scenario())
+
+
 class Transport:
     identity=(1,1)
     def __init__(self,tmp):self.path=tmp/'synthetic.sock';self.calls=[]

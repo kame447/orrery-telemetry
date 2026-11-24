@@ -87,6 +87,15 @@ class Backend:
                 # Only saved, verified logical families; never infer parenthood
                 # from a preparation root, matching name, or latest job.
                 ids={a['mail_agent_id']:a for a in (await self.roster())['agents']}
+                # Graph and DECK share the same bounded OS observation. The
+                # Mail snapshot may predate the roster, so join only matching
+                # identities and leave unknown observations unknown.
+                for node in result['nodes']:
+                    row=ids.get(node['mail_agent_id'])
+                    if (row is not None and row['mail_instance_id']==node['mail_instance_id']
+                            and row['name']==node['name'] and row['retired']==node['retired']
+                            and row['observation']['state']=='observed' and type(row['running']) is bool):
+                        node['running']=row['running']
                 for aid, clients in self._contexts().items():
                     if len(clients)!=1 or aid not in ids or aid not in selected:continue
                     try:
