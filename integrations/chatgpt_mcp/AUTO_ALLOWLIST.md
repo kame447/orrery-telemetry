@@ -63,8 +63,10 @@ the final check and a later send.
 - The fork's API 46 supports explicit legacy-only `mail_create_only`
   standalone spawn and canonical Mail `register_agent.create_only`. It
   refuses existing and concurrent identities, including case-equivalent
-  and normalized legacy names. SQLite writer admission covers both ordinary
-  and create-only registration; create-only refuses unsupported DB dialects.
+  and normalized legacy names. For both ordinary and create-only registration,
+  a missing identity is rechecked under SQLite writer admission before insertion.
+  Existing identities retain the authenticated update/null-token CAS path;
+  create-only refuses unsupported DB dialects.
   The dry-run must explicitly
   echo the capability; the gateway never falls back to ordinary registration
   for an auto-admission preview.

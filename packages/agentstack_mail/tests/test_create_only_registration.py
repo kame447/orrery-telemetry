@@ -102,20 +102,21 @@ def test_concurrent_equivalent_names_cannot_create_two_owners(
             await client.call_tool("ensure_project", {"human_key": project})
             first_read = asyncio.Event()
             second_read = asyncio.Event()
+            initial_reads = {}
             original_lookup = app._find_registration_equivalent_agent
 
             async def controlled_lookup(session, project_id, name):
                 result = await original_lookup(session, project_id, name)
-                if name == "QuietCurie" and not first_read.is_set():
-                    first_read.set()
-                    # Without writer admission both lookups can see an empty
-                    # project. With it, the second lookup must wait for commit.
-                    try:
-                        await asyncio.wait_for(second_read.wait(), timeout=1.0)
-                    except asyncio.TimeoutError:
-                        pass
-                elif name == "Quietcurie":
-                    second_read.set()
+                if name not in initial_reads:
+                    initial_reads[name] = result is None
+                    if name == "QuietCurie":
+                        first_read.set()
+                        # Force both contenders to see an absent identity
+                        # before either can insert. The locked recheck must
+                        # reject the loser, regardless of acquisition order.
+                        await asyncio.wait_for(second_read.wait(), timeout=10)
+                    else:
+                        second_read.set()
                 return result
 
             monkeypatch.setattr(app, "_find_registration_equivalent_agent", controlled_lookup)
@@ -130,15 +131,16 @@ def test_concurrent_equivalent_names_cannot_create_two_owners(
                 "create_only": second_create_only,
             }, raise_on_error=False))
             results = await asyncio.gather(first, second)
-            assert second_read.is_set()
-            assert sum(not result.is_error for result in results) == 1
-            assert not results[0].is_error
+            assert initial_reads == {"QuietCurie": True, "Quietcurie": True}
+            winners = [i for i, result in enumerate(results) if not result.is_error]
+            assert len(winners) == 1
+            winner = winners[0]
             async with db.get_session() as session:
                 rows = (await session.execute(select(Agent))).scalars().all()
                 assert len(rows) == 1
-                assert rows[0].name == "QuietCurie"
-                assert rows[0].registration_token == "synthetic-first-owner"
-                assert rows[0].id == _payload(results[0])["id"]
+                assert rows[0].name == ("QuietCurie", "Quietcurie")[winner]
+                assert rows[0].registration_token == ("synthetic-first-owner", "synthetic-second-owner")[winner]
+                assert rows[0].id == _payload(results[winner])["id"]
 
     try:
         asyncio.run(run())
