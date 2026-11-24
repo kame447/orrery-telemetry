@@ -81,9 +81,14 @@ async def handle(plan_path, event, payload):
         raise B1Error('FRESH_NATIVE_SESSION_MISMATCH')
     if event == 'session':
         text = (f"Use the {plan['mcp_name']} MCP server for ORRERY fresh Mail. "
-                'Use fetch_inbox, mark_message_read, acknowledge_message and '
-                'reply_message for received instructions; use send_message for '
-                'coordination. Keep the bound identity and existing file reservations.')
+                'Use that MCP server, not the native send_message tool. '
+                'The public arguments for send_message are recipients (a list of '
+                'objects such as {"target_agent_id": 123}), subject and body_md; '
+                'do not use to or body. Use the actual recipient ID, not 123. '
+                'Use fetch_inbox with {}, mark_message_read and acknowledge_message '
+                'with {"message_id": <actual integer ID>}, and reply_message with '
+                'message_id and body_md for received instructions. '
+                'Keep the bound identity and existing file reservations.')
         return {'injectSteps': [{'systemMessage': {'systemMessage': text}}]}
     if event == 'invocation':
         return {}

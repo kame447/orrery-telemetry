@@ -223,6 +223,11 @@ def test_native_hooks_proxy_identity_and_reservations_survive_until_sigint(tmp_p
                 received = [r for r in trace_rows(trace) if r['kind'] == 'input']
                 assert len(received) == 2 and task in received[1]['content']
                 assert received[1]['native_ready'] and received[1]['hook_ready']
+                startup = next(r['result'] for r in trace_rows(trace) if r['kind'] == 'session-hook')
+                instruction = startup['injectSteps'][0]['systemMessage']['systemMessage']
+                assert 'not the native send_message tool' in instruction
+                assert '"target_agent_id"' in instruction and 'body_md' in instruction
+                assert '"message_id"' in instruction
                 evidence = next(r for r in trace_rows(trace) if r['kind'] == 'guard-proxy')
                 decisions = evidence['decisions']
                 assert decisions['owned.txt']['decision'] == 'allow'
