@@ -26,6 +26,8 @@ CAPABILITIES = {'spawn': True, 'roster': True, 'mail': True, 'graph': True, 'ter
 # Two process snapshots plus bounded tmux inventories can take over 250 ms on Mac.
 # Keep the read-only observation bounded, below the Cockpit's HTTP deadline.
 DISPLAY_OBSERVATION_BUDGET_SECONDS = 1.0
+DISPLAY_CACHE_TTL_SECONDS = 5.0
+DISPLAY_MULTI_SOCKET_REFRESH_SECONDS = 1.0
 CLEANUP_ATTACHED_MESSAGE='Close the attached Terminal/Cockpit views and wait for their observers to stop before checking again.'
 
 
@@ -160,33 +162,56 @@ class Backend:
                 except (B1Error,OSError,ValueError,KeyError):
                     continue
             key=(self.client.context_digest,revision,tuple((s.client.context['mail_agent_id'],s.signature) for s in selections))
-            now=time.monotonic();cache=self._display_cache
-            if not(cache is not None and cache[0]==key and now-cache[1]<5) and self._display_lock.acquire(blocking=False):
-                try:
-                    # Recheck after acquiring: another GET may have just published.
-                    cache=self._display_cache
-                    if not(cache is not None and cache[0]==key and now-cache[1]<5):
-                        groups={}
-                        for selected in selections:
-                            socket=(selected.route['socket_path'],tuple(selected.route['socket_identity']))
-                            groups.setdefault(socket,[]).append(selected)
-                        batches=list(groups.values())
-                        offset=self._display_offset%len(batches) if batches else 0
-                        rotated=[s for group in batches[offset:]+batches[:offset] for s in group]
-                        facts=Targets(self.client,self.root).display_snapshot(rotated,deadline=now+DISPLAY_OBSERVATION_BUDGET_SECONDS) if rotated else {}
-                        self._display_offset=offset+2
-                        self._display_cache=(key,now,facts)
-                finally:self._display_lock.release()
-            cache=self._display_cache
-            valid=cache is not None and cache[0]==key and time.monotonic()-cache[1]<5
+            facts=self._display_observations(key,selections)
             for row in rows:
-                fact=cache[2].get(row['mail_agent_id']) if valid else None
+                observation=facts.get(row['mail_agent_id'])
                 row.update(category='unknown',running=None,attached=True,
                     observation=dict(state='unknown',age_ms=None,reason='unobserved'))
-                if fact is not None:
-                    row.update(fact,observation=dict(state='observed',age_ms=round((time.monotonic()-cache[1])*1000),reason=None))
+                if observation is not None:
+                    stamp,fact=observation
+                    age=time.monotonic()-stamp
+                    if age<DISPLAY_CACHE_TTL_SECONDS:
+                        row.update(fact,observation=dict(state='observed',age_ms=round(age*1000),reason=None))
             return dict(mail_instance_id=context['mail_instance_id'], agents=rows,observation_truncated=len(contexts)>128)
         finally:await runtime.close()
+
+    def _display_observations(self,key,selections):
+        from agentstack_mail.fresh_targets import Targets
+        groups={}
+        for selected in selections:
+            socket=(selected.route['socket_path'],tuple(selected.route['socket_identity']))
+            groups.setdefault(socket,[]).append(selected)
+        batches=list(groups.values())
+        interval=DISPLAY_MULTI_SOCKET_REFRESH_SECONDS if len(batches)>2 else DISPLAY_CACHE_TTL_SECONDS
+
+        def recent(cache,now):
+            return cache is not None and cache[0]==key and now-cache[1]<interval
+
+        now=time.monotonic()
+        if not recent(self._display_cache,now) and self._display_lock.acquire(blocking=False):
+            try:
+                cache=self._display_cache;now=time.monotonic()
+                if not recent(cache,now):
+                    offset=self._display_offset%len(batches) if batches else 0
+                    rotated=batches[offset:]+batches[:offset]
+                    batch=[s for group in rotated[:2] for s in group]
+                    attempted={s.client.context['mail_agent_id'] for s in batch}
+                    # Retain only unvisited observations for the exact same roster
+                    # revision and signed launch selections. An attempted socket
+                    # without a verified fact must immediately become unknown.
+                    facts={aid:(stamp,fact) for aid,(stamp,fact) in cache[2].items()
+                           if aid not in attempted and now-stamp<DISPLAY_CACHE_TTL_SECONDS} if (
+                               cache is not None and cache[0]==key) else {}
+                    observed=Targets(self.client,self.root).display_snapshot(batch,
+                        deadline=now+DISPLAY_OBSERVATION_BUDGET_SECONDS) if batch else {}
+                    facts.update({aid:(now,fact) for aid,fact in observed.items() if aid in attempted})
+                    self._display_offset=offset+2
+                    self._display_cache=(key,now,facts)
+            finally:self._display_lock.release()
+        cache=self._display_cache;now=time.monotonic()
+        if cache is None or cache[0]!=key or now-cache[1]>=DISPLAY_CACHE_TTL_SECONDS:return {}
+        return {aid:(stamp,fact) for aid,(stamp,fact) in cache[2].items()
+                if now-stamp<DISPLAY_CACHE_TTL_SECONDS}
 
     async def resolve(self, *, name=None, ref=None):
         roster = await self.roster()

@@ -71,6 +71,47 @@ def test_roster_display_cache_parallel_get_expiry_and_owner_changes_are_not_auth
     asyncio.run(scenario())
 
 
+def test_roster_display_round_robin_retains_only_fresh_unvisited_observations(monkeypatch):
+    import dashboard.fresh_backend as module
+    from agentstack_mail.fresh_targets import Targets
+    clock=[10.0];calls=[];unavailable=set()
+    monkeypatch.setattr(module,'time',SimpleNamespace(monotonic=lambda:clock[0]))
+    backend=Backend.__new__(Backend)
+    backend.client=None;backend.root=ROOT
+    backend._display_lock=threading.Lock()
+    backend._display_offset=0;backend._display_cache=None
+    selections=[SimpleNamespace(client=SimpleNamespace(context={'mail_agent_id':aid}),
+        route={'socket_path':'/synthetic-socket-'+str(aid),'socket_identity':[1,aid]}) for aid in (1,2,3)]
+    def observe(self,chosen,*,deadline):
+        ids=[s.client.context['mail_agent_id'] for s in chosen]
+        assert deadline==clock[0]+1.0
+        calls.append(ids)
+        return {aid:dict(category='running',running=True,attached=False) for aid in ids if aid not in unavailable}
+    monkeypatch.setattr(Targets,'display_snapshot',observe)
+    key=('instance-owner',1,((1,'sig1'),(2,'sig2'),(3,'sig3')))
+    assert set(backend._display_observations(key,selections))=={1,2}
+    clock[0]=10.5
+    assert set(backend._display_observations(key,selections))=={1,2}
+    assert len(calls)==1
+    clock[0]=11.1
+    combined=backend._display_observations(key,selections)
+    assert set(combined)=={1,2,3} and combined[2][0]==10.0
+    assert combined[1][0]==combined[3][0]==11.1
+    clock[0]=12.2;unavailable.add(2)
+    assert set(backend._display_observations(key,selections))=={1,3}
+    assert calls==[[1,2],[3,1],[2,3]]
+    clock[0]=16.3
+    with backend._display_lock:
+        assert set(backend._display_observations(key,selections))=={3}
+        for changed_key in (
+            ('different-owner',1,key[2]),('instance-owner',2,key[2]),
+            ('instance-owner',1,((1,'changed-signature'),(2,'sig2'),(3,'sig3'))),
+        ):
+            assert backend._display_observations(changed_key,selections)=={}
+    clock[0]=16.4
+    assert set(backend._display_observations(('instance-owner',2,key[2]),selections))=={1}
+
+
 def test_graph_uses_only_matching_roster_observations(tmp_path,monkeypatch):
     async def scenario():
         async with live(tmp_path) as (runtime,people,parent,_):
