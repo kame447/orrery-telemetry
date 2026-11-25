@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import errno
 import json
 import os
 from pathlib import Path
+import re
 import runpy
 import selectors
 import signal
@@ -344,6 +346,21 @@ class Runner:
             raise B1Error("FRESH_ANTIGRAVITY_PROCESS_CHANGED")
         return group
 
+    def reap_native_if_ended(self, deadline):
+        if set(self.native_group(deadline)) != {self.process.pid}:
+            return False
+        remaining = max(0.01, min(1, deadline - time.monotonic()))
+        state = subprocess.run(["ps", "-p", str(self.process.pid), "-o", "stat="],
+            capture_output=True, text=True, timeout=remaining, check=False)
+        if state.returncode != 0 or not state.stdout.strip():
+            raise B1Error("FRESH_ANTIGRAVITY_PROCESS_UNCONFIRMED")
+        if not state.stdout.strip().startswith("Z"):
+            return False
+        if set(self.native_group(deadline)) != {self.process.pid}:
+            return False
+        self.native_code = self.process.wait(timeout=1)
+        return True
+
     def stop_native(self):
         if self.process is None:
             if self.owns_run:
@@ -356,24 +373,21 @@ class Runner:
         # other member is gone. No Popen.poll()/wait() runs before that point.
         for signum in (signal.SIGTERM, signal.SIGKILL):
             deadline = time.monotonic() + 5
+            if self.reap_native_if_ended(deadline):
+                return
             self.native_group(deadline)
             try:
                 os.killpg(self.native_record["pgid"], signum)
             except ProcessLookupError:
                 pass
+            except PermissionError as error:
+                # Darwin can reject a group containing only an exited leader.
+                if error.errno != errno.EPERM or not self.reap_native_if_ended(deadline):
+                    raise
+                return
             while time.monotonic() < deadline:
-                group = self.native_group(deadline)
-                if set(group) == {self.process.pid}:
-                    remaining = max(0.01, min(1, deadline - time.monotonic()))
-                    state = subprocess.run(["ps", "-p", str(self.process.pid), "-o", "stat="],
-                        capture_output=True, text=True, timeout=remaining, check=False)
-                    if state.returncode != 0 or not state.stdout.strip():
-                        raise B1Error("FRESH_ANTIGRAVITY_PROCESS_UNCONFIRMED")
-                    if state.stdout.strip().startswith("Z"):
-                        if set(self.native_group(deadline)) != {self.process.pid}:
-                            continue
-                        self.native_code = self.process.wait(timeout=1)
-                        return
+                if self.reap_native_if_ended(deadline):
+                    return
                 time.sleep(0.05)
         raise B1Error("FRESH_ANTIGRAVITY_GROUP_ALIVE")
 
@@ -448,8 +462,14 @@ def main(argv=None):
                 runner.close()
                 if code == 0 and runner.native_eof and runner.native_code:
                     code = runner.native_code if runner.native_code > 0 else 128 - runner.native_code
-            except (B1Error, OSError, RuntimeError, ValueError, KeyError, subprocess.SubprocessError):
-                print("FRESH ANTIGRAVITY: FRESH_ANTIGRAVITY_CLEANUP_INCOMPLETE", file=sys.stderr)
+            except (B1Error, OSError, RuntimeError, ValueError, KeyError, subprocess.SubprocessError) as error:
+                cause = error.code if isinstance(error, B1Error) else None
+                if not isinstance(cause, str) or re.fullmatch(r"[A-Z][A-Z0-9_]{1,79}", cause) is None:
+                    cause = type(error).__name__
+                if isinstance(error, OSError) and type(error.errno) is int:
+                    cause += " errno=" + str(error.errno)
+                print("FRESH ANTIGRAVITY: FRESH_ANTIGRAVITY_CLEANUP_INCOMPLETE (" + cause + ")",
+                      file=sys.stderr)
                 code = code or 1
         for signum, handler in previous.items():
             signal.signal(signum, handler)

@@ -314,6 +314,11 @@ def test_native_bootstrap_requires_real_hook_and_init_before_user_task(tmp_path,
                     assert 'FRESH_ANTIGRAVITY_TURN_INCOMPLETE' in log.read_text()
                 else:
                     assert 'FRESH_ANTIGRAVITY_HOOK_UNCONFIRMED' in log.read_text()
+                ended_path = folder / 'antigravity/native-ended.json'
+                assert ended_path.is_file(), log.read_text()
+                ended = _read_private(ended_path)
+                assert (ended.get('launch_id'), ended.get('context_digest')) == (
+                    folder.name, client.context_digest), log.read_text()
                 # Failed bootstrap must return only this child's existing lease.
                 await parent.call('reserve_files', {'paths': [str(work / 'owned.txt')]})
     asyncio.run(run())

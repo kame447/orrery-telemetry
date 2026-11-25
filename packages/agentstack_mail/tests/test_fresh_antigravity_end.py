@@ -1,19 +1,122 @@
 """Native process-group closure, with a real surviving group-member regression."""
 from __future__ import annotations
 
+import errno
+import io
 import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
 from agentstack_mail import fresh_antigravity_end as native_end
+from agentstack_mail import fresh_antigravity_runner as native_runner
+from agentstack_mail import fresh_child
 from agentstack_mail import fresh_end as end
 from agentstack_mail.fresh_launch import identity
 from agentstack_mail.fresh_runtime import _read_private, _write_private
 from agentstack_mail.storage_origin_contract import B1Error
 from test_fresh_end import ROOT, close, closed_candidate, replace
+
+
+@pytest.fixture
+def runner_cleanup(tmp_path, monkeypatch):
+    runner = native_runner.Runner.__new__(native_runner.Runner)
+    pid = os.getpid() + 100_000_000
+    row = (os.getpid(), os.getuid(), 'native-birth', pid)
+    state = {'rows': {pid: row}, 'status': 'S', 'waited': False, 'events': [], 'signals': []}
+    runner.run = tmp_path
+    runner.state = tmp_path / 'antigravity';runner.state.mkdir(mode=0o700)
+    runner.expected = dict(mail_instance_id='fixture-instance', mail_agent_id=3, credential_generation=1)
+    runner.plan = {'wrapper_root': str(ROOT)}
+    runner.intent = {'child_spawn_id': 'fixture-spawn'}
+    runner.owns_run = True
+    runner.listener = runner.socket_path = None
+    runner.native_code = None
+    runner.native_record = dict(pid=pid, process_start='native-birth', pgid=pid)
+    runner.processes = {'process_snapshot': lambda **_: state['rows']}
+
+    def wait(*, timeout):
+        assert state['rows'] == {pid: row} and state['status'] == 'Z'
+        state['waited'] = True
+        state['rows'] = {}
+        state['events'].append('wait')
+        return 0
+
+    runner.process = SimpleNamespace(pid=pid, stdin=io.BytesIO(), stdout=io.BytesIO(), wait=wait)
+
+    async def call(name, arguments):
+        assert (runner.state / 'native-ended.json').is_file()
+        state['events'].append((name, arguments))
+        return {}
+
+    runner.client = SimpleNamespace(context_digest='fixture-context', call=call)
+
+    def verify(client, root, run, *, runner_pid):
+        assert client is runner.client and root == ROOT and run == runner.run
+        assert runner_pid == os.getpid() and state['waited'] and not state['rows']
+        state['events'].append('verify')
+        return {'process': {'state': 'absent'}, 'group': {'state': 'empty'}}
+
+    def process_state(arguments, **_):
+        assert arguments == ['ps', '-p', str(pid), '-o', 'stat=']
+        return subprocess.CompletedProcess(arguments, 0, state['status'] + '\n', '')
+
+    monkeypatch.setattr(native_end, 'verify_native_ended', verify)
+    resources = [str(tmp_path / 'owned.txt')]
+    monkeypatch.setattr(fresh_child, 'launch_task', lambda _: (
+        {'spawn_id': 'fixture-spawn', 'resources': resources}, None))
+    monkeypatch.setattr(native_runner.subprocess, 'run', process_state)
+    monkeypatch.setattr(native_runner.os, 'killpg', lambda *_: pytest.fail('unexpected signal'))
+    return runner, state, resources
+
+
+@pytest.mark.parametrize('exit_before_signal', [True, False])
+def test_runner_reaps_proven_exit_before_releasing_reservations(runner_cleanup, monkeypatch, exit_before_signal):
+    runner, state, resources = runner_cleanup
+    if exit_before_signal:
+        state['status'] = 'Z'
+
+    def signal_denied(pgid, signum):
+        assert pgid == runner.process.pid
+        state['signals'].append(signum)
+        state['status'] = 'Z'
+        raise PermissionError(errno.EPERM, 'fixture signal denial')
+
+    monkeypatch.setattr(native_runner.os, 'killpg', signal_denied)
+    runner.close()
+    assert len(state['signals']) == (0 if exit_before_signal else 1)
+    assert runner.native_code == 0
+    assert state['events'] == ['wait', 'verify', ('release_reservations', {'paths': resources})]
+    assert (runner.state / 'native-ended.json').is_file()
+
+
+@pytest.mark.parametrize('boundary', ['live', 'group-member', 'identity-changed', 'unavailable'])
+def test_runner_eperm_without_proven_exit_retains_reservations(runner_cleanup, monkeypatch, boundary):
+    runner, state, _ = runner_cleanup
+    pid = runner.process.pid
+
+    def signal_denied(pgid, signum):
+        assert pgid == pid
+        state['signals'].append(signum)
+        if boundary == 'group-member':
+            state['status'] = 'Z'
+            state['rows'][pid + 1] = (pid, os.getuid(), 'member-birth', pid)
+        elif boundary == 'identity-changed':
+            state['status'] = 'Z'
+            state['rows'][pid] = (os.getpid(), os.getuid(), 'different-birth', pid)
+        elif boundary == 'unavailable':
+            state['rows'] = None
+        raise PermissionError(errno.EPERM, 'fixture signal denial')
+
+    monkeypatch.setattr(native_runner.os, 'killpg', signal_denied)
+    with pytest.raises((PermissionError, B1Error)):
+        runner.close()
+    assert len(state['signals']) == 1 and not state['waited']
+    assert state['events'] == []
+    assert not (runner.state / 'native-ended.json').exists()
 
 
 def native_record(fixture, *, pid=201, start='native-birth'):
