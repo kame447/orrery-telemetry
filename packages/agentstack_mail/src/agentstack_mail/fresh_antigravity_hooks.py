@@ -10,9 +10,11 @@ import sys
 
 
 EDIT_TOOLS = {
-    'write_to_file': 'Write',
-    'replace_file_content': 'Edit',
-    'multi_replace_file_content': 'Edit',
+    'write_to_file': ('Write', 'TargetFile'),
+    'replace_file_content': ('Edit', 'TargetFile'),
+    'multi_replace_file_content': ('Edit', 'TargetFile'),
+    'write_file': ('Write', 'Path'),
+    'edit_file': ('Edit', 'Path'),
 }
 MAX_INPUT = 1024 * 1024
 HANDLER_TIMEOUT = 20
@@ -29,6 +31,27 @@ def _object(pairs):
             _reject()
         result[key] = value
     return result
+
+
+def _edit_target(call):
+    from .storage_origin_contract import B1Error
+
+    if not isinstance(call, dict) or not isinstance(call.get('name'), str):
+        raise B1Error('FRESH_HOOK_EVENT_INVALID')
+    name = call['name']
+    if name in {'notebook_edit', 'sed_file'}:
+        raise B1Error('FRESH_ANTIGRAVITY_EDITOR_UNSUPPORTED')
+    if name not in EDIT_TOOLS:
+        raise B1Error('FRESH_HOOK_EVENT_INVALID')
+    tool, key = EDIT_TOOLS[name]
+    arguments = call.get('args')
+    if (not isinstance(arguments, dict)
+            or arguments.keys() & {'Path', 'TargetFile'} != {key}):
+        raise B1Error('FRESH_HOOK_EVENT_INVALID')
+    path = arguments[key]
+    if not isinstance(path, str) or not path:
+        raise B1Error('INVALID_PATH')
+    return tool, path
 
 
 def _workspace(plan, payload):
@@ -92,18 +115,11 @@ async def handle(plan_path, event, payload):
         return {'injectSteps': [{'systemMessage': {'systemMessage': text}}]}
     if event == 'invocation':
         return {}
-    call = payload.get('toolCall')
-    if isinstance(call, dict) and call.get('name') in {'notebook_edit', 'sed_file'}:
-        raise B1Error('FRESH_ANTIGRAVITY_EDITOR_UNSUPPORTED')
-    if not isinstance(call, dict) or call.get('name') not in EDIT_TOOLS:
-        raise B1Error('FRESH_HOOK_EVENT_INVALID')
-    arguments = call.get('args')
-    if not isinstance(arguments, dict):
-        raise B1Error('FRESH_HOOK_EVENT_INVALID')
+    tool, path = _edit_target(payload.get('toolCall'))
     from .fresh_guard import check
     await check(str(client.path), {
-        'tool_name': EDIT_TOOLS[call['name']], 'cwd': plan['cwd'],
-        'tool_input': {'file_path': arguments.get('TargetFile')},
+        'tool_name': tool, 'cwd': plan['cwd'],
+        'tool_input': {'file_path': path},
     })
     return {'decision': 'allow'}
 

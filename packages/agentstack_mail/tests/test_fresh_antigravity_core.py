@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import re
 import shlex
 import subprocess
 from uuid import uuid4
@@ -11,6 +12,7 @@ import pytest
 
 from agentstack_mail import fresh_antigravity as agy
 from agentstack_mail import fresh_antigravity_end as native_end
+from agentstack_mail import fresh_antigravity_hooks as agy_hooks
 from agentstack_mail import fresh_child as child_api
 from agentstack_mail import fresh_delivery as delivery
 from agentstack_mail import fresh_launch as launch_api
@@ -112,12 +114,35 @@ def test_agy_native_plan_keeps_all_public_tool_names_within_cli_limit(tmp_path):
             assert set(config['mcpServers']) == {plan['mcp_name']}
             groups = _read_private(folder / 'antigravity/integration/.agents/hooks.json')
             matcher = next(iter(groups.values()))['PreToolUse'][0]['matcher']
-            assert {'notebook_edit', 'sed_file'} <= set(matcher.split('|'))
+            for tool in ('write_to_file', 'replace_file_content', 'multi_replace_file_content',
+                         'write_file', 'edit_file', 'notebook_edit', 'sed_file'):
+                assert re.search(matcher, tool), tool
+            assert not re.search(matcher, 'read_file')
             # agy 1.5.16 only enables composed native tool names up to 64 characters.
             for tool in PUBLISHED | {'runtime_status', 'show_files'}:
                 name = f"mcp_{plan['mcp_name']}_{tool}"
                 assert len(name) <= 64, name
     asyncio.run(run())
+
+
+@pytest.mark.parametrize(('name', 'tool', 'key', 'other'), [
+    ('write_to_file', 'Write', 'TargetFile', 'Path'),
+    ('replace_file_content', 'Edit', 'TargetFile', 'Path'),
+    ('multi_replace_file_content', 'Edit', 'TargetFile', 'Path'),
+    ('write_file', 'Write', 'Path', 'TargetFile'),
+    ('edit_file', 'Edit', 'Path', 'TargetFile'),
+])
+def test_agy_edit_target_requires_tool_specific_selector(name, tool, key, other):
+    assert agy_hooks._edit_target({'name': name, 'args': {key: '/reserved.txt'}}) == (
+        tool, '/reserved.txt')
+    for arguments in ({}, {other: '/reserved.txt'},
+                      {key: '/reserved.txt', other: '/unreserved.txt'},
+                      {key: '/reserved.txt', other: '/reserved.txt'}):
+        with pytest.raises(B1Error, match='FRESH_HOOK_EVENT_INVALID'):
+            agy_hooks._edit_target({'name': name, 'args': arguments})
+    for value in (None, '', [], 1):
+        with pytest.raises(B1Error, match='INVALID_PATH'):
+            agy_hooks._edit_target({'name': name, 'args': {key: value}})
 
 
 @pytest.mark.parametrize('native_ended', [True, False])

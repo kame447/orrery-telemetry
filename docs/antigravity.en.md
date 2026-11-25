@@ -11,7 +11,7 @@ Fresh uses the official `agy --input-format stream-json --output-format stream-j
 
 A small launch-specific folder is passed with `--add-dir`. Its `.agents/hooks.json` and `.agents/mcp_config.json` provide the reservation guard and a uniquely named fresh Mail server. The user's HOME, login, permissions and existing workspace configuration are unchanged. Hooks and MCP definitions are not supplied through `--settings`. Owner credential values never enter prompts, argv or MCP configuration, and the entry does not fall back to legacy project keys or Mail credentials.
 
-The first turn is initialization only. The real CLI init and the real SessionStart hook must agree on the conversation ID, owner, instance and current launch, followed by a nonempty successful response, before the task is sent. Missing hook evidence stops the launch before task delivery. The guard uses the native `decision=deny` response and an internal deadline shorter than the native hook timeout. The dedicated `notebook_edit` and `sed_file` tools are refused until its target-path contract is verified. Native permissions are not broadened; denied headless MCP operations are not reported as successful work.
+The first turn is initialization only. The real CLI init and the real SessionStart hook must agree on the conversation ID, owner, instance and current launch, followed by a nonempty successful response, before the task is sent. Missing hook evidence stops the launch before task delivery. The guard uses the native `decision=deny` response and an internal deadline shorter than the native hook timeout. It checks `Path` for `write_file`/`edit_file` and `TargetFile` for the earlier `write_to_file`/`replace_file_content`/`multi_replace_file_content` tools. Missing or mixed target selectors are refused without falling back to another key. Hook configuration is stored per launch; load an update through a new launch or explicit resume. The dedicated `notebook_edit` and `sed_file` tools are refused until their target-path contracts are verified. Native permissions are not broadened; denied headless MCP operations are not reported as successful work.
 
 A protected private socket wakes the runner, which reads its authenticated pending notifications and submits a subsequent stream turn. Submission, notification handoff, read, ACK and completed work remain separate facts. Notification handoff does not mark a message read or acknowledged. A wake received while busy is reconsidered after the current turn.
 
@@ -241,7 +241,7 @@ leaves the launcher-owned shell runner alive so report/release/retire/cleanup ca
 finish. For a top-level interactive Antigravity session, `EXIT` keeps the normal
 interactive `/exit` path.
 
-ORRERY does not currently implement Antigravity conversation resume or native
+The legacy runtime does not implement Antigravity conversation resume or native
 transcript history. Gone or retired Antigravity entries therefore fail closed
 instead of falling through to Claude/Codex transcript lookup. A top-level
 Antigravity session whose `agy` process has exited but whose human shell remains

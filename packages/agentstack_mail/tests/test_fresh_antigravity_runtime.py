@@ -30,7 +30,7 @@ from test_fresh_proxy import environment
 ROOT = Path(__file__).resolve().parents[3]
 
 NATIVE = r'''
-import json, os, pathlib, subprocess, sys, time, uuid
+import json, os, pathlib, re, subprocess, sys, time, uuid
 
 args = sys.argv[1:]
 assert args[args.index('--input-format') + 1] == 'stream-json'
@@ -53,11 +53,19 @@ def emit(kind, **values):
     print(json.dumps(dict(event=kind, **values)), flush=True)
 
 def hook(event, extra=None, env_changes=None, *, phase=None):
-    handler = hooks[event][0]
-    if 'hooks' in handler:
-        handler = handler['hooks'][0]
     payload = dict(conversationId=session, workspacePaths=[os.getcwd(), str(integration)])
     payload.update(extra or {})
+    handlers = hooks[event]
+    if event in ('PreToolUse', 'PostToolUse'):
+        name = payload['toolCall']['name']
+        handlers = [handler for group in handlers
+                    if group.get('matcher', '') in ('', '*') or re.search(group['matcher'], name)
+                    for handler in group['hooks']]
+        if not handlers:
+            record('hook-unmatched', event=event, phase=phase or event, tool=name)
+            return {'decision': 'allow'}
+    assert len(handlers) == 1
+    handler = handlers[0]
     record('hook-start', event=event, phase=phase or event)
     result = subprocess.run(['/bin/bash', '-c', handler['command']], input=json.dumps(payload),
         cwd=os.getcwd(), env=dict(os.environ, **(env_changes or {})), capture_output=True,
@@ -105,11 +113,13 @@ for index, raw in enumerate(sys.stdin, 1):
         assert checked.get('terminationBehavior') != 'terminate', checked
     if index == 2 and os.environ.get('AGY_TEST_GUARDS') == '1':
         decisions = {}
-        for name in ('owned.txt', 'unreserved.txt', 'foreign.txt'):
-            decisions[name] = hook('PreToolUse', dict(toolCall=dict(name='write_to_file',
-                args=dict(TargetFile=str(pathlib.Path.cwd() / name)))), phase=name)
-        decisions['foreign-context'] = hook('PreToolUse', dict(toolCall=dict(name='write_to_file',
-            args=dict(TargetFile=str(pathlib.Path.cwd() / 'owned.txt')))),
+        for tool in ('write_file', 'edit_file'):
+            for name in ('owned.txt', 'unreserved.txt', 'foreign.txt'):
+                phase = tool + '/' + name
+                decisions[phase] = hook('PreToolUse', dict(toolCall=dict(name=tool,
+                    args=dict(Path=str(pathlib.Path.cwd() / name)))), phase=phase)
+        decisions['foreign-context'] = hook('PreToolUse', dict(toolCall=dict(name='write_file',
+            args=dict(Path=str(pathlib.Path.cwd() / 'owned.txt')))),
             {'AGENTSTACK_FRESH_CLIENT_CONTEXT': os.environ['AGY_TEST_OTHER_CONTEXT']},
             phase='foreign-context')
         for unsupported in ('notebook_edit', 'sed_file'):
@@ -160,6 +170,7 @@ async def launched(parent, work, monkeypatch, *, mode='normal', guards=False):
     argv = shlex.split(transport.calls[0][-1])
     trace, log = work / 'native-trace.jsonl', work / 'launch.log'
     env = environment(client, AGENTSTACK_RUNTIME_MODE='fresh',
+        PYTHONPATH=os.pathsep.join([str(ROOT / 'packages/agentstack_mail/src'), str(ROOT)]),
         AGY_TEST_TRACE=str(trace), AGY_TEST_MODE=mode, AGY_TEST_GUARDS='1' if guards else '0',
         AGY_TEST_OTHER_CONTEXT=str(parent.path))
     env.pop('TMUX', None);env.pop('TMUX_PANE', None)
@@ -218,7 +229,7 @@ def test_native_hooks_proxy_identity_and_reservations_survive_until_sigint(tmp_p
             work = tmp_path / 'work';work.mkdir()
             await grant(runtime, people, [work / 'foreign.txt'], actor=1)
             async with launched(parent, work, monkeypatch, guards=True) as (client, process, trace, log, task):
-                # Bootstrap and six guard checks invoke real hook subprocesses;
+                # Bootstrap and nine guard checks invoke real hook subprocesses;
                 # allow their cumulative startup time on a loaded Mac runner.
                 await until(lambda: 'native turn 1: SUCCESS' in log.read_text(), process, log,
                             timeout=120, trace=trace)
@@ -232,9 +243,12 @@ def test_native_hooks_proxy_identity_and_reservations_survive_until_sigint(tmp_p
                 assert '"message_id"' in instruction
                 evidence = next(r for r in trace_rows(trace) if r['kind'] == 'guard-proxy')
                 decisions = evidence['decisions']
-                assert decisions['owned.txt']['decision'] == 'allow'
+                for tool in ('write_file', 'edit_file'):
+                    assert decisions[tool + '/owned.txt']['decision'] == 'allow'
+                    assert all(decisions[tool + '/' + name]['decision'] == 'deny'
+                               for name in ('unreserved.txt', 'foreign.txt'))
                 assert all(decisions[name]['decision'] == 'deny' for name in
-                           ('unreserved.txt', 'foreign.txt', 'foreign-context', 'notebook_edit', 'sed_file'))
+                           ('foreign-context', 'notebook_edit', 'sed_file'))
                 assert 'FRESH_ANTIGRAVITY_EDITOR_UNSUPPORTED' in decisions['notebook_edit']['reason']
                 assert 'FRESH_ANTIGRAVITY_EDITOR_UNSUPPORTED' in decisions['sed_file']['reason']
                 assert evidence['status']['mail_agent_id'] == client.context['mail_agent_id']
@@ -302,6 +316,7 @@ def test_native_resume_keeps_session_index_and_does_not_repeat_original_task(tmp
                 await stop_runner(client, first, first_log)
                 resume_trace, resume_log = work / 'resume-trace.jsonl', work / 'resume.log'
                 env = environment(client, AGENTSTACK_RUNTIME_MODE='fresh',
+                    PYTHONPATH=os.pathsep.join([str(ROOT / 'packages/agentstack_mail/src'), str(ROOT)]),
                     AGENTSTACK_GEMINI_BIN=str(work / 'synthetic-agy'),
                     AGY_TEST_TRACE=str(resume_trace), AGY_TEST_MODE='normal', AGY_TEST_GUARDS='0')
                 env.pop('TMUX', None);env.pop('TMUX_PANE', None)
