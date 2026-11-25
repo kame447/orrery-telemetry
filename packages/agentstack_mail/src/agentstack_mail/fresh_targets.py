@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import json
 import os
@@ -27,6 +28,8 @@ from .fresh_runtime import FreshRuntime, _directory, _read_private, _write_priva
 from .storage_origin_contract import B1Error, canonical, digest
 
 SELECTORS = {'session','mail_instance_id','mail_agent_id'}
+DISPLAY_SOCKET_LIMIT = 12
+DISPLAY_SOCKET_WORKERS = 4
 DISPLAY_FORMAT = '#{session_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_current_command}'
 
 
@@ -440,25 +443,35 @@ class Targets:
         tmux,processes,_=delivery.helpers(self.root)
         before=processes['process_snapshot'](deadline=deadline)
         if before is None:return {}
-        inventories={};identities={}
-        for selected in selections:
-            if time.monotonic()>=deadline:break
-            route=selected.route
-            if route is None:continue
-            key=(route['socket_path'],tuple(route['socket_identity']))
-            if key in inventories:continue
-            if len(inventories)>=2:break
+        keys=list(dict.fromkeys((s.route['socket_path'],tuple(s.route['socket_identity']))
+                                for s in selections if s.route is not None))[:DISPLAY_SOCKET_LIMIT]
+        # Reserve a portion of the remaining budget for the second process
+        # snapshot. A slow socket cannot consume the entire batch's deadline.
+        inventory_deadline=deadline
+        if len(keys)>2:
+            now=time.monotonic()
+            inventory_deadline=now+max(0,deadline-now)*.7
+
+        def inspect_socket(key):
+            if time.monotonic()>=inventory_deadline:return key,None,None
             try:
-                path=Path(key[0]);identities[key]=None
+                path=Path(key[0])
                 try:path.lstat()
-                except FileNotFoundError:
-                    inventories[key]=([],set());continue
+                except FileNotFoundError:return key,([],set()),None
                 transport=tmux['Transport'](path)
                 if transport.identity!=key[1]:raise B1Error('FRESH_CLEANUP_TARGET_CHANGED')
-                inventories[key]=self._inventory(transport,deadline)
+                inventory=self._inventory(transport,inventory_deadline)
                 if tmux['validate_socket'](path)!=transport.identity:raise B1Error('FRESH_CLEANUP_TARGET_CHANGED')
-                identities[key]=transport.identity
-            except (B1Error,OSError,RuntimeError,ValueError):inventories[key]=None
+                return key,inventory,transport.identity
+            except (B1Error,OSError,RuntimeError,ValueError):return key,None,None
+
+        if len(keys)>2:
+            with ThreadPoolExecutor(max_workers=DISPLAY_SOCKET_WORKERS) as pool:
+                results=list(pool.map(inspect_socket,keys))
+        else:
+            results=list(map(inspect_socket,keys))
+        inventories={key:inventory for key,inventory,_ in results}
+        identities={key:identity for key,_,identity in results}
         if time.monotonic()>=deadline:return {}
         after=processes['process_snapshot'](deadline=deadline)
         if after is None or time.monotonic()>=deadline:return {}

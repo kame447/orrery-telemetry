@@ -180,7 +180,7 @@ class Backend:
         finally:await runtime.close()
 
     def _display_observations(self,key,selections):
-        from agentstack_mail.fresh_targets import Targets
+        from agentstack_mail.fresh_targets import Targets, DISPLAY_SOCKET_LIMIT
         groups={}
         for selected in selections:
             socket=(selected.route['socket_path'],tuple(selected.route['socket_identity']))
@@ -198,7 +198,7 @@ class Backend:
                 if not recent(cache,now):
                     offset=self._display_offset%len(batches) if batches else 0
                     rotated=batches[offset:]+batches[:offset]
-                    batch=[s for group in rotated[:2] for s in group]
+                    batch=[s for group in rotated[:DISPLAY_SOCKET_LIMIT] for s in group]
                     attempted={s.client.context['mail_agent_id'] for s in batch}
                     # Retain only unvisited observations for the exact same roster
                     # revision and signed launch selections. An attempted socket
@@ -209,7 +209,7 @@ class Backend:
                     observed=Targets(self.client,self.root).display_snapshot(batch,
                         deadline=now+DISPLAY_OBSERVATION_BUDGET_SECONDS) if batch else {}
                     facts.update({aid:(now,fact) for aid,fact in observed.items() if aid in attempted})
-                    self._display_offset=offset+2
+                    self._display_offset=offset+DISPLAY_SOCKET_LIMIT
                     self._display_cache=(key,now,facts)
             finally:self._display_lock.release()
         cache=self._display_cache;now=time.monotonic()

@@ -101,6 +101,7 @@ def test_roster_unended_native_presence_is_not_running_or_cleanup_authority(tmp_
 def test_roster_display_round_robin_retains_only_fresh_unvisited_observations(monkeypatch):
     import dashboard.fresh_backend as module
     from agentstack_mail.fresh_targets import Targets
+    monkeypatch.setattr('agentstack_mail.fresh_targets.DISPLAY_SOCKET_LIMIT',2)
     clock=[10.0];calls=[];unavailable=set()
     monkeypatch.setattr(module,'time',SimpleNamespace(monotonic=lambda:clock[0]))
     backend=Backend.__new__(Backend)
@@ -140,6 +141,33 @@ def test_roster_display_round_robin_retains_only_fresh_unvisited_observations(mo
             assert backend._display_observations(changed_key,selections)=={}
     clock[0]=16.4
     assert set(backend._display_observations(('instance-owner',2,key[2]),selections))=={1}
+
+
+@pytest.mark.parametrize('count',[5,12])
+def test_roster_observes_all_normal_sockets_even_on_revision_changes(monkeypatch,count):
+    import dashboard.fresh_backend as module
+    from agentstack_mail.fresh_targets import Targets
+    clock=[10.0];calls=[]
+    monkeypatch.setattr(module,'time',SimpleNamespace(monotonic=lambda:clock[0]))
+    backend=Backend.__new__(Backend)
+    backend.client=None;backend.root=ROOT
+    backend._display_lock=threading.Lock()
+    backend._display_offset=0;backend._display_cache=None
+    selections=[SimpleNamespace(client=SimpleNamespace(context={'mail_agent_id':aid}),
+        route={'socket_path':'/synthetic-socket-'+str(aid),'socket_identity':[1,aid]}) for aid in range(1,count+1)]
+    monkeypatch.setattr(Targets,'__init__',lambda self,operator,root:None)
+    def observe(self,chosen,*,deadline):
+        ids=[s.client.context['mail_agent_id'] for s in chosen]
+        calls.append(ids)
+        return {aid:dict(category='running',running=True,attached=False) for aid in ids}
+    monkeypatch.setattr(Targets,'display_snapshot',observe)
+    for revision in range(16):
+        key=('instance-owner',revision,tuple((i,'sig'+str(i)) for i in range(1,count+1)))
+        facts=backend._display_observations(key,selections)
+        assert set(facts)==set(range(1,count+1))
+        assert all(stamp==clock[0] for stamp,_ in facts.values())
+        clock[0]+=3
+    assert len(calls)==16 and all(len(batch)==count for batch in calls)
 
 
 def test_graph_uses_only_matching_roster_observations(tmp_path,monkeypatch):
