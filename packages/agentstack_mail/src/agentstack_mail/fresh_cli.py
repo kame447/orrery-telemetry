@@ -53,7 +53,11 @@ def main(argv=None):
             from .fresh_server import build_fresh_server
             server = build_fresh_server(args.config)
             server.run(transport='streamable-http', host='127.0.0.1', port=args.port,
-                       path='/mcp', stateless_http=True, json_response=True)
+                       path='/mcp', stateless_http=True, json_response=True,
+                       # Match the legacy Mail CLI's grace, below the supervisor's
+                       # 10-second TERM grace. FastMCP otherwise defaults to zero.
+                       uvicorn_config={'loop': 'asyncio', 'ws': 'none',
+                                       'timeout_graceful_shutdown': 8.0})
         else:
             print(json.dumps(asyncio.run(execute(args)), ensure_ascii=False))
     except B1Error as error:
