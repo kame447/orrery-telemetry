@@ -831,6 +831,10 @@ def _install_spawn(base: Any, integration: _Integration) -> None:
         try:
             raw_resources = payload.get("resources")
             if fresh and isinstance(raw_resources, list):
+                # The shared normalizer and boundary checker use comma-separated
+                # patterns. Never silently split one declared list item into two.
+                if any(isinstance(item, str) and "," in item for item in raw_resources):
+                    raise ValueError("resource list item must not contain comma")
                 raw_resources = ",".join(raw_resources)
             resources = normalize_resources(raw_resources)
         except (TypeError, ValueError) as exc:

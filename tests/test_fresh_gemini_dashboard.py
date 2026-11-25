@@ -117,6 +117,7 @@ def test_fresh_adapter_generates_missing_name_and_normalizes_resource_lists(fres
     ({"resources": ""}, "resources required for provider gemini"),
     ({"effort": ""}, "effort required for provider gemini"),
     ({"resources": "../outside"}, "resource must not contain parent traversal"),
+    ({"resources": ["src/a,b.py"]}, "resource list item must not contain comma"),
     ({"task": ""}, "FRESH_CHILD_TASK_INVALID"),
 ])
 def test_fresh_rejected_fields_never_reach_registration(fresh_dashboard, changes, error):
