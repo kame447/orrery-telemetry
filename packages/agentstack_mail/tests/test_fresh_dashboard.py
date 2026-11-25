@@ -87,6 +87,9 @@ def test_roster_display_round_robin_retains_only_fresh_unvisited_observations(mo
         assert deadline==clock[0]+1.0
         calls.append(ids)
         return {aid:dict(category='running',running=True,attached=False) for aid in ids if aid not in unavailable}
+    # This unit test supplies synthetic selections, not a bound Mail operator.
+    # Stub the constructor as well as OS observation; real binding is tested above.
+    monkeypatch.setattr(Targets,'__init__',lambda self,operator,root:None)
     monkeypatch.setattr(Targets,'display_snapshot',observe)
     key=('instance-owner',1,((1,'sig1'),(2,'sig2'),(3,'sig3')))
     assert set(backend._display_observations(key,selections))=={1,2}
