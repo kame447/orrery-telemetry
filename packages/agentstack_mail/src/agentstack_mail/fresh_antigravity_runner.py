@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import errno
 import json
 import os
 from pathlib import Path
@@ -18,6 +17,7 @@ import tempfile
 import time
 
 from .fresh_antigravity import read_plan
+from .fresh_antigravity_supervisor import SupervisedNative
 from .fresh_launch import identity, native_id, record_session
 from .fresh_notifications import IMPORTANCE, consumer_lock
 from .fresh_runtime import _directory, _read_private, _write_private
@@ -59,11 +59,8 @@ class Runner:
         self.selector = None
         self.terminal = self.terminal_registered = False
         self.terminal_buffer = bytearray()
-        self.native_record = None
         self.native_eof = False
         self.native_code = None
-        self.processes = runpy.run_path(str(Path(self.plan["wrapper_root"])
-                                           / "bin/lib/process_observation.py"))
 
     def check(self):
         client, plan, run, intent = read_plan(self.plan_path)
@@ -274,9 +271,8 @@ class Runner:
         with os.fdopen(log_fd, "wb") as log, selectors.DefaultSelector() as selector:
             self.selector = selector
             self.bind()
-            self.process = subprocess.Popen(self.plan["argv"], stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE, stderr=None, cwd=self.plan["cwd"], start_new_session=True)
-            self.capture_native()
+            self.process = SupervisedNative()
+            self.process.start(self.plan_path)
             selector.register(self.listener, selectors.EVENT_READ, "wake")
             selector.register(self.process.stdout, selectors.EVENT_READ, "native")
             self.terminal = sys.stdin.isatty()
@@ -317,79 +313,13 @@ class Runner:
                             continue
                         self.event(event)
 
-    def capture_native(self):
-        pid = self.process.pid
-        birth = self.processes["process_start"](pid)
-        rows = self.processes["process_snapshot"](include_groups=True)
-        row = rows.get(pid) if isinstance(rows, dict) else None
-        if (birth in (None, "absent") or row != (os.getpid(), os.getuid(), birth, pid)
-                or os.getpgid(pid) != pid or pid == os.getpgrp()):
-            raise B1Error("FRESH_ANTIGRAVITY_PROCESS_UNCONFIRMED")
-        self.native_record = dict(pid=pid, process_start=birth, pgid=pid,
-            runner_pid=os.getpid(), launch_id=self.run.name,
-            context_digest=self.client.context_digest, **self.expected)
-        _write_private(self.state / "native-process.json", self.native_record)
-
-    def native_group(self, deadline):
-        record = self.native_record
-        if record is None:
-            raise B1Error("FRESH_ANTIGRAVITY_PROCESS_UNCONFIRMED")
-        rows = self.processes["process_snapshot"](include_groups=True, deadline=deadline)
-        if not isinstance(rows, dict) or any(len(row) != 4 for row in rows.values()):
-            raise B1Error("FRESH_ANTIGRAVITY_PROCESS_UNCONFIRMED")
-        leader = rows.get(record["pid"])
-        if (leader != (os.getpid(), os.getuid(), record["process_start"], record["pgid"])
-                or record["pgid"] != self.process.pid or record["pgid"] == os.getpgrp()):
-            raise B1Error("FRESH_ANTIGRAVITY_PROCESS_CHANGED")
-        group = {pid: row for pid, row in rows.items() if row[3] == record["pgid"]}
-        if any(row[1] != os.getuid() for row in group.values()):
-            raise B1Error("FRESH_ANTIGRAVITY_PROCESS_CHANGED")
-        return group
-
-    def reap_native_if_ended(self, deadline):
-        if set(self.native_group(deadline)) != {self.process.pid}:
-            return False
-        remaining = max(0.01, min(1, deadline - time.monotonic()))
-        state = subprocess.run(["ps", "-p", str(self.process.pid), "-o", "stat="],
-            capture_output=True, text=True, timeout=remaining, check=False)
-        if state.returncode != 0 or not state.stdout.strip():
-            raise B1Error("FRESH_ANTIGRAVITY_PROCESS_UNCONFIRMED")
-        if not state.stdout.strip().startswith("Z"):
-            return False
-        if set(self.native_group(deadline)) != {self.process.pid}:
-            return False
-        self.native_code = self.process.wait(timeout=1)
-        return True
-
     def stop_native(self):
         if self.process is None:
             if self.owns_run:
                 _write_private(self.state / "native-not-started.json", dict(
                     launch_id=self.run.name, context_digest=self.client.context_digest, **self.expected))
             return
-        if self.native_record is None:
-            self.capture_native()
-        # Keep the unreaped child PID as the group identity anchor until every
-        # other member is gone. No Popen.poll()/wait() runs before that point.
-        for signum in (signal.SIGTERM, signal.SIGKILL):
-            deadline = time.monotonic() + 5
-            if self.reap_native_if_ended(deadline):
-                return
-            self.native_group(deadline)
-            try:
-                os.killpg(self.native_record["pgid"], signum)
-            except ProcessLookupError:
-                pass
-            except PermissionError as error:
-                # Darwin can reject a group containing only an exited leader.
-                if error.errno != errno.EPERM or not self.reap_native_if_ended(deadline):
-                    raise
-                return
-            while time.monotonic() < deadline:
-                if self.reap_native_if_ended(deadline):
-                    return
-                time.sleep(0.05)
-        raise B1Error("FRESH_ANTIGRAVITY_GROUP_ALIVE")
+        self.native_code = self.process.stop()
 
     def close(self):
         cleanup_error = None
@@ -400,7 +330,8 @@ class Runner:
         if self.process is not None:
             for stream in (self.process.stdin, self.process.stdout):
                 try:
-                    stream.close()
+                    if stream is not None:
+                        stream.close()
                 except OSError:
                     pass
         if self.listener is not None:

@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import runpy
 import signal
 import sys
 import time
@@ -31,7 +32,7 @@ from test_fresh_proxy import environment
 ROOT = Path(__file__).resolve().parents[3]
 
 NATIVE = r'''
-import json, os, pathlib, re, subprocess, sys, time, uuid
+import json, os, pathlib, re, signal, subprocess, sys, time, uuid
 
 args = sys.argv[1:]
 assert args[args.index('--input-format') + 1] == 'stream-json'
@@ -187,6 +188,12 @@ for index, raw in enumerate(sys.stdin, 1):
         message = next(row for row in inbox if row['subject'] == 'Native resume continuation')
         reply = proxy_call('reply_message', {'message_id': message['id'], 'body_md': message['body_md']})
         record('resume-proxy', status=owner, reply=reply, decisions=decisions)
+    if mode == 'active-crash' and index == 2:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        member = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(90)'])
+        record('active-crash', member_pid=member.pid)
+        while True:
+            time.sleep(.1)
     emit('result', result=dict(status='SUCCESS', response='READY' if index == 1 else content,
                                denied_actions=[]))
     record('result', index=index)
@@ -589,4 +596,56 @@ def test_historical_hook_policy_only_normalizes_launch_identifiers(tmp_path):
                 finally:
                     path.write_bytes(saved)
             assert agy.same_hook_policy(source, current)
+    asyncio.run(run())
+
+
+def test_runner_sigkill_stops_active_native_group_without_releasing_lease(tmp_path, monkeypatch):
+    from agentstack_mail.fresh_antigravity_end import verify_native_ended
+
+    api = runpy.run_path(str(ROOT / 'bin/lib/process_observation.py'))
+
+    def rows():
+        result = api['process_snapshot'](include_groups=True)
+        assert isinstance(result, dict) and result
+        return result
+
+    async def run():
+        async with live(tmp_path) as (_, _, parent, _):
+            work = tmp_path / 'work';work.mkdir()
+            async with launched(parent, work, monkeypatch, mode='active-crash') as (client, process, trace, log, _):
+                active = await until(lambda: next((r for r in trace_rows(trace)
+                    if r['kind'] == 'active-crash'), None), process, log, trace=trace)
+                folder = native_run(client)
+                native = _read_private(folder / 'antigravity/native-process.json')
+                runner = native['runner_pid']
+                pid = native['pid']
+                before = rows()
+                known = {key: row for key, row in before.items() if row[3] == pid}
+                assert set(known) == {pid, active['member_pid']}
+                assert all(row[1] == os.getuid() for row in known.values())
+                assert known[pid][2] == native['process_start']
+                assert api['snapshot_belongs_to'](before, pid, runner, os.getuid())
+                try:
+                    assert rows()[runner] == before[runner]
+                    os.kill(runner, signal.SIGKILL)
+                    deadline = time.monotonic() + 15
+                    while time.monotonic() < deadline:
+                        if not any(row[3] == pid for row in rows().values()):
+                            break
+                        await asyncio.sleep(.1)
+                    else:
+                        pytest.fail('active native group survived runner SIGKILL')
+                    await asyncio.wait_for(process.wait(), timeout=15)
+                    verify_native_ended(client, ROOT, folder, runner_pid=runner)
+                    assert not (folder / 'antigravity/native-ended.json').exists()
+                    with pytest.raises(B1Error, match='RESERVATION_CONFLICT'):
+                        await parent.call('reserve_files', {'paths': [str(work / 'owned.txt')]})
+                finally:
+                    # Red-test cleanup, only the two birth/UID/group-verified fixture PIDs.
+                    for key, original in known.items():
+                        if rows().get(key, (None, None, None, None))[1:] == original[1:]:
+                            try:
+                                os.kill(key, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
     asyncio.run(run())

@@ -15,6 +15,8 @@ fresh 起動は公式 `agy --input-format stream-json --output-format stream-jso
 
 Mail通知は保護されたprivate socketで待機中のrunnerを起こし、本人のpendingを正規APIから取得して次のstream turnへ渡します。送信、通知引渡し、既読、ACK、モデルの仕事完了は別の事実です。通知の引渡しだけで既読やACKを付けません。busy中に受けたwakeは現在のturnが終わってから再確認します。
 
+fresh の native CLI はrunnerと独立した専用supervisorが直接の親として保持します。起動時はprivate gateを閉じたままPID・起動時刻・UID・process groupを照合し、起動証跡の保存に成功してからCLIをexecします。runnerとのprivate lifetime channelが閉じるとsupervisorは終了処理を行います。観測不能なら未回収の直接の子を保持して再確認し、無関係なgroupを推測で停止しません。runnerの待機がtimeoutしてもsupervisorを強制終了しないため、持続する観測不能は運用上の調査が必要です。supervisor自体が強制終了した場合まで自動復旧を保証するものではありません。
+
 終了時はこの起動が作ったnative process groupの消滅を確認してから、この子に宣言した予約だけを解放します。終了を確認できない場合は予約を保持し、通常の `resolve-ended` 経路で明示確認します。別のprocess、既存サービス、旧Mailは停止しません。実CLI・MCP・追加指示・編集guard・終了を確認した範囲と、模擬providerによる回帰試験を区別して受け入れます。
 
 ## Legacy provider prerequisites

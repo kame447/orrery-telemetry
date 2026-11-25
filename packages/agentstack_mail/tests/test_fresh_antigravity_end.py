@@ -6,6 +6,7 @@ import io
 import os
 from pathlib import Path
 import subprocess
+import runpy
 import sys
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ import pytest
 
 from agentstack_mail import fresh_antigravity_end as native_end
 from agentstack_mail import fresh_antigravity_runner as native_runner
+from agentstack_mail.fresh_antigravity_supervisor import NativeOwner
 from agentstack_mail import fresh_child
 from agentstack_mail import fresh_end as end
 from agentstack_mail.fresh_launch import identity
@@ -35,8 +37,10 @@ def runner_cleanup(tmp_path, monkeypatch):
     runner.owns_run = True
     runner.listener = runner.socket_path = None
     runner.native_code = None
-    runner.native_record = dict(pid=pid, process_start='native-birth', pgid=pid)
-    runner.processes = {'process_snapshot': lambda **_: state['rows']}
+    owner = NativeOwner.__new__(NativeOwner)
+    owner.native_record = dict(pid=pid, process_start='native-birth', pgid=pid)
+    owner.processes = {'process_snapshot': lambda **_: state['rows']}
+    owner.native_code = None
 
     def wait(*, timeout):
         assert state['rows'] == {pid: row} and state['status'] == 'Z'
@@ -45,7 +49,13 @@ def runner_cleanup(tmp_path, monkeypatch):
         state['events'].append('wait')
         return 0
 
-    runner.process = SimpleNamespace(pid=pid, stdin=io.BytesIO(), stdout=io.BytesIO(), wait=wait)
+    owner.process = SimpleNamespace(pid=pid, wait=wait)
+
+    def stop():
+        owner.stop_native()
+        return owner.native_code
+
+    runner.process = SimpleNamespace(pid=pid, stdin=io.BytesIO(), stdout=io.BytesIO(), stop=stop)
 
     async def call(name, arguments):
         assert (runner.state / 'native-ended.json').is_file()
@@ -204,3 +214,87 @@ def test_real_group_member_outlives_native_leader_and_blocks_end(closed_candidat
         for process in (member, leader):
             if process is not None and process.poll() is None:
                 process.kill();process.wait(timeout=5)
+
+
+def test_native_owner_cleans_direct_child_when_record_publication_fails(tmp_path):
+    owner = NativeOwner.__new__(NativeOwner)
+    owner.run = tmp_path
+    owner.state = tmp_path / 'antigravity';owner.state.mkdir(mode=0o700)
+    owner.expected = {}
+    owner.runner_pid = os.getpid()
+    owner.client = SimpleNamespace(context_digest='fixture-context')
+    owner.native_record = owner.native_code = None
+    owner.processes = runpy.run_path(str(ROOT / 'bin/lib/process_observation.py'))
+    occupied = owner.state / 'native-process.json'
+    occupied.write_bytes(b'untouched')
+    owner.process = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(90)'],
+        start_new_session=True)
+    try:
+        with pytest.raises(FileExistsError):
+            owner.capture_native()
+        assert owner.native_record['pid'] == owner.process.pid
+        owner.stop_native()
+        assert owner.native_code is not None
+        assert occupied.read_bytes() == b'untouched'
+        assert owner.processes['process_start'](owner.process.pid) == 'absent'
+    finally:
+        # A direct, unreaped fixture child is owned by this test.
+        if owner.process.returncode is None:
+            owner.process.kill()
+            owner.process.wait(timeout=5)
+
+
+@pytest.mark.parametrize('release', [False, True])
+def test_native_gate_requires_explicit_release_before_plan_or_exec(monkeypatch, release):
+    from agentstack_mail import fresh_antigravity_supervisor as supervisor
+
+    calls = []
+    argv = ['/fixture/native', '--fixture']
+    def plan(path):
+        calls.append(('plan', path))
+        return None, {'argv': argv}, None, None
+    def execute(binary, args):
+        calls.append(('exec', binary, args))
+    monkeypatch.setattr(supervisor, 'read_plan', plan)
+    monkeypatch.setattr(supervisor.os, 'execv', execute)
+    read, write = os.pipe()
+    if release:
+        os.write(write, b'1')
+    os.close(write)
+    result = supervisor.gated_native('/fixture/plan.json', read)
+    if release:
+        assert calls == [('plan', Path('/fixture/plan.json')), ('exec', argv[0], argv)]
+    else:
+        assert result == 1 and calls == []
+    with pytest.raises(OSError):
+        os.fstat(read)
+
+def test_supervisor_keeps_ownership_until_cleanup_is_proven():
+    from agentstack_mail.fresh_antigravity_supervisor import finish_released_native
+    calls = []
+    def stop():
+        calls.append('observe')
+        if calls.count('observe') < 3:
+            raise B1Error('FRESH_ANTIGRAVITY_PROCESS_UNCONFIRMED')
+    finish_released_native(SimpleNamespace(stop_native=stop),
+        sleep=lambda seconds: calls.append(seconds))
+    assert calls == ['observe', 1, 'observe', 2, 'observe']
+
+
+def test_supervisor_timeout_does_not_kill_ownership_anchor():
+    from agentstack_mail.fresh_antigravity_supervisor import SupervisedNative
+    import socket
+    calls = []
+    def wait(*, timeout):
+        calls.append(timeout)
+        raise subprocess.TimeoutExpired('fixture supervisor', timeout)
+    process = SupervisedNative()
+    process.control, peer = socket.socketpair()
+    process.worker = SimpleNamespace(wait=wait)
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            process.stop()
+        assert calls == [40]
+        assert peer.recv(1) == b''
+    finally:
+        peer.close()
