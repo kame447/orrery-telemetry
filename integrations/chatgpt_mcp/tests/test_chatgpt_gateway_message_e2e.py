@@ -484,7 +484,8 @@ def test_isolated_mail_candidate_admission_and_new_recipient_delivery(mail, gate
                include_bodies=True, limit=20)) == 1
 
 
-def test_pinned_gateway_auto_admits_only_approved_spawn_after_restart(mail, tmp_path):
+@pytest.mark.parametrize("full_profile", [False, True], ids=["available-slot", "full-profile"])
+def test_pinned_gateway_auto_admits_only_approved_spawn_after_restart(mail, tmp_path, full_profile):
     """Pinned gateway process and real isolated Mail, synthetic dashboard launch.
 
     The fixture implements the exclusive registration receipt contract but
@@ -524,6 +525,20 @@ def test_pinned_gateway_auto_admits_only_approved_spawn_after_restart(mail, tmp_
         created.append(binding)
         dashboard.spawn_status[name] = dict(name=name, state="launching", result=None, ok=True)
         return 200, dict(ok=True, pending=True, model="claude-opus", **binding)
+
+    if full_profile:
+        profile = json.loads(mail["profile"].read_text())
+        for i in range(15):
+            peer_name = f"CapacityPeer{i}"
+            peer = mail["client"]._call_tool_object("register_agent", {
+                "project_key": mail["project"], "name": peer_name,
+                "program": "fixture-worker", "model": "deterministic",
+                "registration_token": f"synthetic-capacity-peer-token-{i:02d}-000000000000",
+                "create_only": True,
+            })
+            profile["peers"].append({"name": peer_name, "id": peer["id"]})
+        assert len(profile["peers"]) == 16
+        _write(mail["profile"], profile)
 
     dashboard.spawn_hook = synthetic_spawn
     port = free_port()
@@ -592,9 +607,10 @@ def test_pinned_gateway_auto_admits_only_approved_spawn_after_restart(mail, tmp_
         dashboard.spawn_status[name] = dict(name=name, state="ready", result=created[0], ok=True)
         start()
         deadline = time.monotonic() + 20
+        expected_state = "not_registered" if full_profile else "registered"
         while time.monotonic() < deadline:
             result = call_mcp("orrery_spawn_status", {"name": name})["structuredContent"]
-            if result["recipient_registration"]["state"] == "registered":
+            if result["recipient_registration"]["state"] == expected_state:
                 break
             assert result["recipient_registration"]["state"] == "pending", result
             time.sleep(0.2)
@@ -602,6 +618,25 @@ def test_pinned_gateway_auto_admits_only_approved_spawn_after_restart(mail, tmp_
             pytest.fail("isolated worker did not reconcile approved spawn")
         assert call_mcp("orrery_spawn_commit", args)["structuredContent"]["replayed"] is True
         assert len(created) == 1
+        if full_profile:
+            assert result["recipient_registration"] == {
+                "state": "not_registered", "reason": "allowlist_full",
+            }
+            assert mail["profile"].read_bytes() == original
+            denied = call_mcp("orrery_message_preview", {
+                "recipient": name, "instruction": "must not be delivered",
+            })
+            assert denied["isError"] is True
+            assert mail["client"].fetch_inbox(
+                project_key=mail["project"], agent_name=name,
+                registration_token=token, include_bodies=True, limit=20,
+            ) == []
+            stop()
+            start()
+            persisted = call_mcp("orrery_spawn_status", {"name": name})["structuredContent"]
+            assert persisted["recipient_registration"] == result["recipient_registration"]
+            assert mail["profile"].read_bytes() == original
+            return
         assert json.loads(mail["profile"].read_text())["peers"] == [
             {"name": "ExampleWorker", "id": mail["worker"]["id"]},
             {"name": name, "id": created[0]["mail_agent_id"]},
