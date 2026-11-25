@@ -334,7 +334,8 @@ class MessageTools:
             {
                 "name": "orrery_message_preview",
                 "title": "Preview a message to an ORRERY agent",
-                "description": "Check one additional instruction for an existing agent that the operator allowed, and show the exact Mail message without sending it. Returns preview_id and content_sha256; show the message to the user and commit only after they confirm. Recipients: " + ", ".join(self.recipients() or ["(none configured)"]) + ".",
+                "description": "Check one additional instruction for an existing agent that the operator allowed, and show the exact Mail message without sending it. Returns preview_id and content_sha256; show the message to the user and commit only after they confirm. Recipients: " + ("Use orrery_status to obtain the current authorized recipients."
+                    if self._config.auto_register_spawned else ", ".join(self.recipients() or ["(none configured)"]) + "."),
                 "inputSchema": _schema(
                     {
                         "recipient": {"type": "string", "pattern": f"^{RECIPIENT_RE_TEXT}$", "description": "Allowed ORRERY agent name"},

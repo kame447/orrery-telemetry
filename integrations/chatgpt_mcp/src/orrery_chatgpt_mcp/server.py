@@ -418,7 +418,9 @@ class GatewayServer(ThreadingHTTPServer):
 
 def build_server(config: GatewayConfig, **kwargs) -> GatewayServer:
     gateway = Gateway(config.validate(), **kwargs)
-    return GatewayServer((config.bind_host, config.port), make_handler(gateway))
+    server = GatewayServer((config.bind_host, config.port), make_handler(gateway))
+    server.gateway = gateway
+    return server
 
 
 def _instance_lock(config: GatewayConfig):
@@ -446,11 +448,26 @@ def serve(config: GatewayConfig) -> int:
         file=sys.stderr,
         flush=True,
     )
+    stop = threading.Event()
+    worker = None
+    if config.auto_register_spawned:
+        def reconcile():
+            while not stop.is_set():
+                try:
+                    server.gateway.tools.reconcile_admissions(stop)
+                except Exception as exc:
+                    log.warning("recipient registration reconciliation failed type=%s", type(exc).__name__)
+                stop.wait(2)
+        worker = threading.Thread(target=reconcile, name="mcp-recipient-admission", daemon=True)
+        worker.start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        stop.set()
+        if worker is not None:
+            worker.join()
         server.server_close()
         import os
 
@@ -472,6 +489,7 @@ USAGE = """usage: orrery-chatgpt-mcp [serve | pair [--rotate] [--quiet] | url | 
                   [--spawn-dirs ALIAS=/ABS[,ALIAS=/ABS...]] [--spawn-approval local|chat]
                   [--message-profile ABS --message-helper-from ORRERY_ROOT]
                   [--message-approval chat|local] [--message-max-per-hour N]
+                  [--auto-register-spawned 0|1]
                  macOS: pin a read-only copy of the gateway and keep it running with launchd
                  (127.0.0.1 only, launches disabled by default, restarts after login)
   service status show whether the service is loaded and answering (never prints the secret)
@@ -563,6 +581,7 @@ def _service_cli(argv: list[str], state_dir) -> int:
             "--message-max-per-hour": None,
             "--spawn-dirs": None,
             "--spawn-approval": None,
+            "--auto-register-spawned": "0",
         }
         if len(rest) % 2 or any(k not in opts for k in rest[::2]) or len(set(rest[::2])) != len(rest[::2]):
             raise ConfigError("usage: service install [--from SRC] [--source-commit SHA] [--python PATH] [--spawn-dirs ALIAS=/ABS,...] [--spawn-approval local|chat] [--message-profile ABS --message-helper-from ORRERY_ROOT]")
@@ -574,6 +593,11 @@ def _service_cli(argv: list[str], state_dir) -> int:
         if opts["--spawn-dirs"] is None and opts["--spawn-approval"] is not None:
             raise ConfigError("spawn approval requires --spawn-dirs")
         spawn_dirs = service.parse_spawn_dirs(opts["--spawn-dirs"]) if opts["--spawn-dirs"] is not None else None
+        auto_registration = opts["--auto-register-spawned"]
+        if auto_registration not in ("0", "1"):
+            raise ConfigError("--auto-register-spawned must be 0 or 1")
+        if auto_registration == "1" and not (spawn_dirs and opts["--message-profile"]):
+            raise ConfigError("auto registration requires explicit --spawn-dirs and --message-profile")
         pairing.read_secret(state_dir)  # refuse before writing anything when unpaired
         release, digest = service.install_release(Path(opts["--from"]), state_dir / "releases",
                                                   source_commit=opts["--source-commit"])
@@ -592,7 +616,8 @@ def _service_cli(argv: list[str], state_dir) -> int:
                                    message_profile=Path(opts["--message-profile"]) if opts["--message-profile"] else None,
                                    message_helper_root=helper_root, message_helper_digest=helper_digest,
                                    message_approval=opts["--message-approval"], message_max_per_hour=message_rate,
-                                   spawn_dirs=spawn_dirs, spawn_approval=opts["--spawn-approval"])
+                                   spawn_dirs=spawn_dirs, spawn_approval=opts["--spawn-approval"],
+                                   auto_register_spawned=auto_registration == "1")
         try:
             status = service.install_service(plan)
         except service.VerifyError as exc:
@@ -644,6 +669,8 @@ def _describe(record: dict, *, full: bool = False) -> str:
         f"({_safe(summary.get('provider'))} {_safe(summary.get('model') or '')}, worktree={summary.get('worktree')}, expires in {max(left, 0)}s"
         f"{', APPROVED' if record.get('approved') else ''})"
     )
+    if summary.get("auto_register_recipient") is True:
+        head += "\n    Approval also permits adding this newly created, verified Mail identity to the message allowlist."
     if not full:
         return f"{head}\n    task ({summary.get('task_chars')} chars): {_safe(summary.get('task_preview'))}"
     task = summary.get("task", "")

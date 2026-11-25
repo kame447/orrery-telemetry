@@ -78,6 +78,7 @@ class GatewayConfig:
     message_approval: str = APPROVAL_CHAT
     message_helper_root: Path | None = None
     message_max_per_hour: int = 20
+    auto_register_spawned: bool = False
 
     @property
     def expected_audience(self) -> str:
@@ -159,6 +160,10 @@ class GatewayConfig:
                 raise ConfigError("messages need a state directory for idempotency records")
         elif self.message_profile is not None:
             raise ConfigError("ORRERY_MCP_MESSAGE_PROFILE is set but ORRERY_MCP_ENABLE_MESSAGE is not 1; refusing an ambiguous setup")
+        if type(self.auto_register_spawned) is not bool:
+            raise ConfigError("auto registration must be boolean")
+        if self.auto_register_spawned and not (self.spawn_enabled and self.message_enabled):
+            raise ConfigError("auto registration requires spawn and message opt-ins")
         return self
 
     @classmethod
@@ -190,6 +195,9 @@ class GatewayConfig:
         message_enabled = env.get("ORRERY_MCP_ENABLE_MESSAGE", "").strip()
         if message_enabled not in ("", "0", "1"):
             raise ConfigError("ORRERY_MCP_ENABLE_MESSAGE must be 0 or 1")
+        auto_register = env.get("ORRERY_MCP_AUTO_REGISTER_SPAWNED", "").strip()
+        if auto_register not in ("", "0", "1"):
+            raise ConfigError("ORRERY_MCP_AUTO_REGISTER_SPAWNED must be 0 or 1")
         message_profile = env.get("ORRERY_MCP_MESSAGE_PROFILE", "").strip()
         helper_root = env.get("ORRERY_MCP_MESSAGE_HELPER_ROOT", "").strip()
         try:
@@ -214,6 +222,7 @@ class GatewayConfig:
             message_approval=env.get("ORRERY_MCP_MESSAGE_APPROVAL", APPROVAL_CHAT).strip(),
             message_helper_root=Path(helper_root) if helper_root else default_helper_root(),
             message_max_per_hour=message_rate,
+            auto_register_spawned=auto_register == "1",
         )
         if mode != AUTH_OAUTH:
             for name in ("ORRERY_MCP_RESOURCE", "ORRERY_MCP_ISSUER", "ORRERY_MCP_JWKS_URL", "ORRERY_MCP_JWKS_FILE", "ORRERY_MCP_ALLOWED_SUBJECTS", "ORRERY_MCP_ALLOWED_ORIGINS"):

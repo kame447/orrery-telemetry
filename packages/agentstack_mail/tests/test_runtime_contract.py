@@ -211,6 +211,8 @@ def test_actual_tool_schemas_match_the_frozen_live_contract() -> None:
         "anyOf": [{"type": "integer"}, {"type": "null"}], "default": None,
     }
     assert "existing_agent_id" not in registration_schema.get("required", [])
+    assert registration_schema["properties"].pop("create_only") == {"type": "boolean", "default": False}
+    assert "create_only" not in registration_schema.get("required", [])
     assert actual == expected
     tools = asyncio.run(build_mcp_server().get_tools())
     assert {
