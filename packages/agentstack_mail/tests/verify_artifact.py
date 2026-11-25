@@ -1109,6 +1109,7 @@ REQUIRED_RUNTIME_MODULES = {
     "fresh_antigravity_end.py",
     "fresh_antigravity_hooks.py",
     "fresh_antigravity_runner.py",
+    "fresh_antigravity_supervisor.py",
     "fresh_cli.py",
     "fresh_child.py",
     "fresh_client.py",
