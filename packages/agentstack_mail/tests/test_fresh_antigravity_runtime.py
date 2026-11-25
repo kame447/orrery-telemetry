@@ -599,7 +599,8 @@ def test_historical_hook_policy_only_normalizes_launch_identifiers(tmp_path):
     asyncio.run(run())
 
 
-def test_runner_sigkill_stops_active_native_group_without_releasing_lease(tmp_path, monkeypatch):
+@pytest.mark.parametrize("crash_target", ["runner", "supervisor"])
+def test_sigkill_stops_active_native_group_without_releasing_lease(tmp_path, monkeypatch, crash_target):
     from agentstack_mail.fresh_antigravity_end import verify_native_ended
 
     api = runpy.run_path(str(ROOT / 'bin/lib/process_observation.py'))
@@ -621,20 +622,24 @@ def test_runner_sigkill_stops_active_native_group_without_releasing_lease(tmp_pa
                 pid = native['pid']
                 before = rows()
                 known = {key: row for key, row in before.items() if row[3] == pid}
-                assert set(known) == {pid, active['member_pid']}
+                assert {pid, active['member_pid']} <= set(known)
+                assert all(key in (pid, active['member_pid']) or row[0] == pid
+                           for key, row in known.items())
                 assert all(row[1] == os.getuid() for row in known.values())
                 assert known[pid][2] == native['process_start']
                 assert api['snapshot_belongs_to'](before, pid, runner, os.getuid())
                 try:
-                    assert rows()[runner] == before[runner]
-                    os.kill(runner, signal.SIGKILL)
+                    target = runner if crash_target == "runner" else before[pid][0]
+                    assert target not in known and api["snapshot_belongs_to"](before, target, runner, os.getuid())
+                    assert rows()[target] == before[target]
+                    os.kill(target, signal.SIGKILL)
                     deadline = time.monotonic() + 15
                     while time.monotonic() < deadline:
                         if not any(row[3] == pid for row in rows().values()):
                             break
                         await asyncio.sleep(.1)
                     else:
-                        pytest.fail('active native group survived runner SIGKILL')
+                        pytest.fail('active native group survived ' + crash_target + ' SIGKILL')
                     await asyncio.wait_for(process.wait(), timeout=15)
                     verify_native_ended(client, ROOT, folder, runner_pid=runner)
                     assert not (folder / 'antigravity/native-ended.json').exists()

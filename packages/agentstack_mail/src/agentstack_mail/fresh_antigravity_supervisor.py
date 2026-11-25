@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import runpy
+import select
 import signal
 import socket
 import subprocess
@@ -182,7 +183,60 @@ def runner_present(connection):
         connection.setblocking(True)
 
 
-def gated_native(plan_path, fd):
+def guard_native_group(plan_path, fd, ready, leader):
+    """The guard is itself a member of the private native session/group.
+
+    Its own live membership anchors the group even if the supervisor dies.
+    It never accepts a target group from disk or signals another group.
+    """
+    if (leader <= 1 or os.getpid() == leader or os.getpgrp() != leader
+            or os.getsid(0) != leader or os.getppid() != leader):
+        return 1
+    read_plan(Path(plan_path))
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(signum, signal.SIG_IGN)
+    try:
+        os.write(ready, b"1")
+    finally:
+        os.close(ready)
+    try:
+        while True:
+            if select.select([fd], [], [], 0.25)[0]:
+                # No data is expected. EOF means the supervisor lost its
+                # ownership channel. Our own membership pins this private
+                # group until the kernel processes the signal.
+                if os.getpgrp() != leader or os.getsid(0) != leader:
+                    return 1
+                os.killpg(leader, signal.SIGKILL)
+                return 1
+            # A normal owner shutdown can reap the leader only once we have
+            # left. Exit only when the leader is a zombie and there are no
+            # other group members capable of forking.
+            try:
+                state = subprocess.run(["ps", "-axo", "pid=,pgid=,stat="],
+                    capture_output=True, text=True, timeout=2, check=False,
+                    start_new_session=True)
+                if state.returncode != 0:
+                    continue
+                rows = {}
+                for line in state.stdout.splitlines():
+                    parts = line.split()
+                    if len(parts) != 3 or not all(v.isdigit() for v in parts[:2]):
+                        raise ValueError("invalid process observation")
+                    pid, pgid = map(int, parts[:2])
+                    if pid in rows:
+                        raise ValueError("duplicate process observation")
+                    rows[pid] = (pgid, parts[2])
+                members = {pid for pid, row in rows.items() if row[0] == leader}
+                if members == {leader, os.getpid()} and rows[leader][1].startswith("Z"):
+                    return 0
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+                continue
+    finally:
+        os.close(fd)
+
+
+def gated_native(plan_path, fd, watch_fd=None):
     # Until the owner has captured and published the identity, this trusted
     # single process cannot start the provider or create any descendants.
     try:
@@ -191,6 +245,23 @@ def gated_native(plan_path, fd):
     finally:
         os.close(fd)
     _, plan, _, _ = read_plan(Path(plan_path))
+    if watch_fd is not None:
+        read_ready, write_ready = os.pipe()
+        try:
+            try:
+                subprocess.Popen(
+                    [sys.executable, "-m", "agentstack_mail.fresh_antigravity_supervisor",
+                     "--plan", str(plan_path), "--guardian-fd", str(watch_fd),
+                     "--ready-fd", str(write_ready), "--leader", str(os.getpid())],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=None,
+                    pass_fds=(watch_fd, write_ready))
+            finally:
+                os.close(write_ready)
+                os.close(watch_fd)
+            if not select.select([read_ready], [], [], 10)[0] or os.read(read_ready, 1) != b"1":
+                raise B1Error("FRESH_ANTIGRAVITY_SUPERVISOR_UNCONFIRMED")
+        finally:
+            os.close(read_ready)
     os.execv(plan["argv"][0], plan["argv"])
 
 
@@ -217,6 +288,7 @@ def supervise(plan_path, runner_pid, connection):
     released = False
     code = 1
     interrupted = False
+    watch_write = None
 
     def interrupt(signum, frame):
         nonlocal interrupted
@@ -236,15 +308,18 @@ def supervise(plan_path, runner_pid, connection):
         if interrupted or not runner_present(connection):
             return 1
         gate_read, gate_write = os.pipe()
+        watch_read, watch_write = os.pipe()
         try:
             try:
                 owner.process = subprocess.Popen(
                     [sys.executable, "-m", "agentstack_mail.fresh_antigravity_supervisor",
-                     "--plan", str(plan_path), "--gate-fd", str(gate_read)],
+                     "--plan", str(plan_path), "--gate-fd", str(gate_read),
+                     "--watch-fd", str(watch_read)],
                     stdin=None, stdout=None, stderr=None, cwd=owner.plan["cwd"],
-                    start_new_session=True, pass_fds=(gate_read,))
+                    start_new_session=True, pass_fds=(gate_read, watch_read))
             finally:
                 os.close(gate_read)
+                os.close(watch_read)
             # The native process has its own copies. Do not keep the runner's
             # stdin/stdout pipes open after native exit.
             with open(os.devnull, "rb+") as sink:
@@ -283,6 +358,8 @@ def supervise(plan_path, runner_pid, connection):
             except (B1Error, OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
                 if code != 0:
                     print("FRESH ANTIGRAVITY SUPERVISOR CLEANUP: " + (error.code if isinstance(error, B1Error) else type(error).__name__), file=sys.stderr)
+        if watch_write is not None:
+            os.close(watch_write)
         connection.close()
     return code
 
@@ -294,12 +371,20 @@ def main():
     channel = parser.add_mutually_exclusive_group(required=True)
     channel.add_argument("--control-fd", type=int)
     channel.add_argument("--gate-fd", type=int)
+    channel.add_argument("--guardian-fd", type=int)
+    parser.add_argument("--watch-fd", type=int)
+    parser.add_argument("--ready-fd", type=int)
+    parser.add_argument("--leader", type=int)
     args = parser.parse_args()
+    if args.guardian_fd is not None:
+        if args.ready_fd is None or args.leader is None or args.runner is not None:
+            parser.error("guardian requires ready fd and leader")
+        return guard_native_group(args.plan, args.guardian_fd, args.ready_fd, args.leader)
     if args.gate_fd is not None:
         if args.runner is not None:
             parser.error("gate cannot specify runner")
         try:
-            return gated_native(args.plan, args.gate_fd)
+            return gated_native(args.plan, args.gate_fd, args.watch_fd)
         except (B1Error, OSError, ValueError, KeyError) as error:
             print("FRESH ANTIGRAVITY NATIVE GATE: " + (error.code if isinstance(error, B1Error) else type(error).__name__), file=sys.stderr)
             return 1
