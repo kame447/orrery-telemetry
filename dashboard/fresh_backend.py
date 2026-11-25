@@ -98,6 +98,13 @@ class Backend:
                             and row['name']==node['name'] and row['retired']==node['retired']
                             and row['observation']['state']=='observed' and type(row['running']) is bool):
                         node['running']=row['running']
+                        # NETWORK's renderer uses state before running. Project
+                        # both from the same verified fact, not from Mail history.
+                        if not node['retired']:
+                            if row['running'] is True:
+                                node['state']='run'
+                            elif row['category'] in ('finished','gone'):
+                                node['state']=row['category']
                 for aid, clients in self._contexts().items():
                     if len(clients)!=1 or aid not in ids or aid not in selected:continue
                     try:

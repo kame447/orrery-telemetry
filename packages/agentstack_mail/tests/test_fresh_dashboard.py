@@ -175,11 +175,12 @@ def test_graph_uses_only_matching_roster_observations(tmp_path,monkeypatch):
         async with live(tmp_path) as (runtime,people,parent,_):
             backend=Backend(parent.path,ROOT)
             original=backend.roster
+            category='finished'
             async def observed():
                 data=await original()
                 rows={a['name']:a for a in data['agents']}
                 rows['Alpha'].update(running=True,category='running',observation={'state':'observed'})
-                rows['Beta'].update(running=False,category='finished',observation={'state':'observed'})
+                rows['Beta'].update(running=False,category=category,observation={'state':'observed'})
                 # An observation for an identity that changed must not attach
                 # to an older graph snapshot merely because the ID matches.
                 rows['Gamma'].update(name='DifferentName',running=True,category='running',observation={'state':'observed'})
@@ -189,9 +190,14 @@ def test_graph_uses_only_matching_roster_observations(tmp_path,monkeypatch):
                 code,graph=await asyncio.to_thread(request,'/api/graph?all=1')
                 assert code==200
                 nodes={n['name']:n for n in graph['nodes']}
-                assert nodes['Alpha']['running'] is True
-                assert nodes['Beta']['running'] is False
-                assert nodes['Gamma']['running'] is None
+                assert (nodes['Alpha']['running'],nodes['Alpha']['state']) == (True,'run')
+                assert (nodes['Beta']['running'],nodes['Beta']['state']) == (False,'finished')
+                assert (nodes['Gamma']['running'],nodes['Gamma']['state']) == (None,'unknown')
+                category='gone'
+                code,graph=await asyncio.to_thread(request,'/api/graph?all=1')
+                assert code==200
+                beta=next(n for n in graph['nodes'] if n['name']=='Beta')
+                assert (beta['running'],beta['state']) == (False,'gone')
                 code,graph=await asyncio.to_thread(request,'/api/graph?all=1&spawn_only=1')
                 assert code==200 and graph['nodes']==[] and graph['edges']==[]
     asyncio.run(scenario())
