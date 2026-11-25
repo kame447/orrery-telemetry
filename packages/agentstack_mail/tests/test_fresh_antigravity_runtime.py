@@ -200,7 +200,7 @@ def trace_rows(path):
     return [json.loads(line) for line in complete.splitlines() if line]
 
 
-async def until(check, process, log, timeout=30, *, trace=None):
+async def until(check, process, log, timeout=60, *, trace=None):
     def diagnostic():
         tail = [] if trace is None else [
             {key: row[key] for key in ('kind', 'monotonic', 'event', 'phase', 'returncode', 'decision', 'termination')
@@ -325,10 +325,10 @@ def test_native_hooks_proxy_identity_and_reservations_survive_until_sigint(tmp_p
             work = tmp_path / 'work';work.mkdir()
             await grant(runtime, people, [work / 'foreign.txt'], actor=1)
             async with launched(parent, work, monkeypatch, guards=True) as (client, process, trace, log, task):
-                # Bootstrap and nine guard checks invoke real hook subprocesses;
+                # SessionStart, two PreInvocation callbacks and nine guards use subprocesses;
                 # allow their cumulative startup time on a loaded Mac runner.
                 await until(lambda: 'native turn 1: SUCCESS' in log.read_text(), process, log,
-                            timeout=120, trace=trace)
+                            timeout=180, trace=trace)
                 received = [r for r in trace_rows(trace) if r['kind'] == 'input']
                 assert len(received) == 2 and task in received[1]['content']
                 assert received[1]['native_ready'] and received[1]['hook_ready']
