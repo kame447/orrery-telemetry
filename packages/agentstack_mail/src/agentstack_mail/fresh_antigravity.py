@@ -110,15 +110,16 @@ def plan(client, root, settings, run, cwd, prompt, session_id):
             'env': {**shared_env, 'AGENTSTACK_ANTIGRAVITY_PLAN_DIGEST': digest(document)}}
 
 
-def _bound_plan(client, run):
-    from .fresh_end import read_run_end
+def _plan_record(client, run):
+    from .fresh_end import run_directory, validate_intent
     from .fresh_launch import pinned
 
-    _directory(run)
+    run_directory(client, run)
     state = run / 'antigravity'
     _directory(state)
     row = _read_private(state / 'plan.json', max_bytes=1024 * 1024)
     intent = _read_private(run / 'intent.json')
+    validate_intent(client, run, intent)
     for value in (row, intent):
         pinned(client, value)
     if (row.get('kind') != 'orrery-fresh-antigravity-plan-v1'
@@ -127,10 +128,10 @@ def _bound_plan(client, run):
             or row.get('integration_dir') != str(state / 'integration')
             or row.get('wrapper_root') != intent.get('wrapper_root')
             or row.get('cwd') != intent.get('cwd') or intent.get('provider') != 'antigravity'
-            or row.get('resume_session_id') != intent.get('resume_session_id')
-            or _read_private(run.parent.parent / 'current.json') != {'launch_id': run.name}
-            or read_run_end(client, run) is not None):
+            or row.get('resume_session_id') != intent.get('resume_session_id')):
         raise B1Error('FRESH_LAUNCH_RECEIPT_MISMATCH')
+    for directory in (state / 'integration', state / 'integration/.agents'):
+        _directory(directory)
     expected = {'integration/.agents/mcp_config.json', 'integration/.agents/hooks.json'}
     if not isinstance(row.get('config_hashes'), dict) or set(row['config_hashes']) != expected:
         raise B1Error('FRESH_ANTIGRAVITY_CONFIG_CHANGED')
@@ -139,6 +140,16 @@ def _bound_plan(client, run):
         _read_private(path)
         if hashlib.sha256(path.read_bytes()).hexdigest() != value:
             raise B1Error('FRESH_ANTIGRAVITY_CONFIG_CHANGED')
+    return row, intent
+
+
+def _bound_plan(client, run):
+    from .fresh_end import read_run_end
+
+    row, intent = _plan_record(client, run)
+    if (_read_private(run.parent.parent / 'current.json') != {'launch_id': run.name}
+            or read_run_end(client, run) is not None):
+        raise B1Error('FRESH_LAUNCH_RECEIPT_MISMATCH')
     return row, intent
 
 
@@ -162,20 +173,177 @@ def read_plan(plan_path):
     return client, row, run, intent
 
 
+def _session_index(client, session_id):
+    from .fresh_launch import identity
+
+    base = client.path.parent
+    reference = base / 'providers/antigravity/sessions' / (session_id + '.json')
+    for directory in (base / 'launch/sessions', base / 'providers',
+                      reference.parent.parent, reference.parent):
+        _directory(directory)
+    binding = dict(context_digest=client.context_digest, **identity(client))
+    receipt = dict(kind='orrery-fresh-native-session-v1', provider='antigravity',
+                   native_session_id=session_id, transcript_path=str(reference), **binding)
+    if (_read_private(base / 'launch/sessions' / (session_id + '.json')) != receipt
+            or _read_private(reference) != dict(harness='antigravity',
+                native_session_id=session_id, **binding)):
+        raise B1Error('FRESH_NATIVE_SESSION_MISMATCH')
+    return receipt
+
+
+def hook_evidence(client, plan, session_id):
+    from .fresh_launch import identity
+
+    return dict(native_session_id=session_id, launch_id=plan['launch_id'],
+                context_digest=client.context_digest, **identity(client))
+
+
+def hook_origin(client, plan, session_id, event):
+    if (event not in {'SessionStart', 'PreInvocation'}
+            or event == 'PreInvocation' and plan.get('resume_session_id') != session_id):
+        raise B1Error('FRESH_NATIVE_SESSION_MISMATCH')
+    return dict(hook_evidence(client, plan, session_id), event=event,
+                source_plan_path=str(Path(plan['run_dir']) / 'antigravity/plan.json'),
+                source_plan_digest=digest(plan))
+
+
+def _historical_plan(client, run, current, session_id, receipt):
+    from .fresh_antigravity_end import _observation, _record
+    from .fresh_end import present, read_run_end
+    from .fresh_launch import identity, pinned
+
+    plan, intent = _plan_record(client, run)
+    if (plan['cwd'] != current['cwd'] or plan['wrapper_root'] != current['wrapper_root']
+            or intent['resume_session_id'] not in (None, session_id)):
+        raise B1Error('FRESH_LAUNCH_RECEIPT_MISMATCH')
+    ended = read_run_end(client, run)
+    if ended is None:
+        raise B1Error('FRESH_LAUNCH_OUTCOME_UNKNOWN')
+    state = run / 'antigravity'
+    process = _read_private(state / 'native-process.json')
+    _, record, native = _record(client, plan['wrapper_root'], run,
+        runner_pid=process.get('runner_pid'), require_current=False)
+    if not native:
+        raise B1Error('FRESH_LAUNCH_OUTCOME_UNKNOWN')
+    if ended.kind == 'normal':
+        proof = _read_private(state / 'native-ended.json')
+        if proof != dict(launch_id=run.name, context_digest=client.context_digest,
+                         observation=_observation(record, True), **identity(client)):
+            raise B1Error('FRESH_LAUNCH_OUTCOME_UNKNOWN')
+    evidence = hook_evidence(client, plan, session_id)
+    expected = {
+        state / 'hook-session.json': evidence,
+        state / 'native-session.json': dict(evidence, harness='antigravity',
+            native_pid=record['pid'], runner_pid=record['runner_pid']),
+        run / 'session.json': dict(receipt, launch_id=run.name),
+    }
+    # A failed resume may leave a discovered integration, but never ready proof.
+    for path, value in expected.items():
+        if intent['resume_session_id'] is None or present(path):
+            actual = _read_private(path)
+            pinned(client, actual)
+            if actual != value:
+                raise B1Error('FRESH_NATIVE_SESSION_MISMATCH')
+    origin = state / 'hook-origin.json'
+    if present(origin):
+        value = _read_private(origin)
+        if value != hook_origin(client, plan, session_id, value.get('event')):
+            raise B1Error('FRESH_NATIVE_SESSION_MISMATCH')
+    return plan
+
+
+def read_hook_plan(plan_path, session_id):
+    """Resolve persisted hook configuration without redirecting runner authority."""
+    from .fresh_client import FreshBoundClient
+    from .fresh_launch import layout
+
+    native_session_id(session_id)
+    context = os.environ.get('AGENTSTACK_FRESH_CLIENT_CONTEXT')
+    if not context:
+        raise B1Error('FRESH_CONTEXT_REQUIRED')
+    client = FreshBoundClient(context)
+    run = layout(client) / 'runs' / native_session_id(os.environ.get('AGENTSTACK_FRESH_LAUNCH_ID'))
+    client, plan, run, intent = read_plan(run / 'antigravity/plan.json')
+    resume = intent['resume_session_id']
+    if resume is not None and resume != session_id:
+        raise B1Error('FRESH_NATIVE_SESSION_MISMATCH')
+    receipt = _session_index(client, session_id) if resume is not None else None
+    path = Path(plan_path)
+    if path == run / 'antigravity/plan.json':
+        return client, plan, run, intent, plan
+    source_run = path.parent.parent
+    if (resume is None or path != source_run / 'antigravity/plan.json'
+            or source_run.parent != run.parent):
+        raise B1Error('FRESH_LAUNCH_RECEIPT_MISMATCH')
+    native_session_id(source_run.name)
+    source = _historical_plan(client, source_run, plan, session_id, receipt)
+    return client, plan, run, intent, source
+
+
+def same_hook_policy(source, current):
+    """Normalize only generated group IDs and the generated --plan argument."""
+    def policy(plan):
+        directory = Path(plan['integration_dir']) / '.agents'
+        groups = _read_private(directory / 'hooks.json')
+        name = 'orrery-fresh-' + plan['launch_id']
+        if set(groups) != {name} or not isinstance(groups[name], dict):
+            raise B1Error('FRESH_ANTIGRAVITY_CONFIG_CHANGED')
+        group = groups[name]
+        if set(group) != {'SessionStart', 'PreInvocation', 'PreToolUse'}:
+            raise B1Error('FRESH_ANTIGRAVITY_CONFIG_CHANGED')
+
+        def handlers(values, event):
+            if not isinstance(values, list) or not values:
+                raise B1Error('FRESH_ANTIGRAVITY_CONFIG_CHANGED')
+            result = []
+            for handler in values:
+                if (not isinstance(handler, dict) or set(handler) != {'type', 'command', 'timeout'}
+                        or handler['type'] != 'command' or not isinstance(handler['command'], str)):
+                    raise B1Error('FRESH_ANTIGRAVITY_CONFIG_CHANGED')
+                args = shlex.split(handler['command'])
+                if (len(args) != 10 or args[:3] != ['cd', plan['cwd'], '&&']
+                        or not Path(args[3]).is_absolute()
+                        or args[4:7] != ['-m', 'agentstack_mail.fresh_antigravity_hooks', '--plan']
+                        or args[7] != str(Path(plan['run_dir']) / 'antigravity/plan.json')
+                        or args[8:] != ['--event', event]
+                        or handler['command'] != shlex.join(args[:2]) + ' && ' + shlex.join(args[3:])):
+                    raise B1Error('FRESH_ANTIGRAVITY_CONFIG_CHANGED')
+                result.append(dict(handler, command=[*args[:7], '<current-plan>', *args[8:]]))
+            return result
+
+        tools = group['PreToolUse']
+        if not isinstance(tools, list) or not tools:
+            raise B1Error('FRESH_ANTIGRAVITY_CONFIG_CHANGED')
+        normalized = []
+        for entry in tools:
+            if (not isinstance(entry, dict) or set(entry) != {'matcher', 'hooks'}
+                    or not isinstance(entry['matcher'], str)):
+                raise B1Error('FRESH_ANTIGRAVITY_CONFIG_CHANGED')
+            normalized.append(dict(entry, hooks=handlers(entry['hooks'], 'guard')))
+        return {'hooks': {'SessionStart': handlers(group['SessionStart'], 'session'),
+                         'PreInvocation': handlers(group['PreInvocation'], 'invocation'),
+                         'PreToolUse': normalized},
+                'mcp': _read_private(directory / 'mcp_config.json')}
+
+    return digest(policy(source)) == digest(policy(current))
+
+
 def session_reference(client, intent, session_id):
     from .fresh_launch import identity, same_session_file
 
     native_session_id(session_id)
     run = client.path.parent / 'launch/runs' / native_session_id(intent['launch_id'])
-    _, checked = _bound_plan(client, run)
+    plan, checked = _bound_plan(client, run)
     if checked != intent:
         raise B1Error('FRESH_LAUNCH_RECEIPT_MISMATCH')
     path = run / 'antigravity/native-session.json'
     value = _read_private(path)
     evidence = _read_private(run / 'antigravity/hook-session.json')
+    origin = _read_private(run / 'antigravity/hook-origin.json')
     expected = {'native_session_id': session_id, 'launch_id': run.name,
                 'context_digest': client.context_digest, **identity(client)}
-    if (evidence != expected or any(value.get(k) != v for k, v in expected.items())
+    if (evidence != expected or origin != hook_origin(client, plan, session_id, origin.get('event'))
+            or any(value.get(k) != v for k, v in expected.items())
             or value.get('harness') != 'antigravity'
             or type(value.get('native_pid')) is not int or value['native_pid'] < 1
             or type(value.get('runner_pid')) is not int or value['runner_pid'] < 1):

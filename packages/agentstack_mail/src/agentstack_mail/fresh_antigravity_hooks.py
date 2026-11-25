@@ -77,30 +77,65 @@ def _workspace(plan, payload):
 
 async def handle(plan_path, event, payload):
     # Import inside the protected handler: dependency errors must deny too.
-    from .fresh_antigravity import native_session_id, read_plan
-    from .fresh_launch import identity, same_session_file
+    from .fresh_antigravity import (hook_evidence, hook_origin, native_session_id,
+                                   read_hook_plan, same_hook_policy)
+    from .fresh_end import present
+    from .fresh_launch import same_session_file
     from .fresh_proxy import verified_owner
     from .fresh_runtime import _directory, _read_private
     from .storage_origin_contract import B1Error, canonical
 
-    if event not in {'session', 'invocation', 'guard'}:
+    if event not in {'session', 'invocation', 'guard'} or not isinstance(payload, dict):
         _reject()
-    client, plan, run, intent = read_plan(plan_path)
-    _workspace(plan, payload)
     session_id = native_session_id(payload.get('conversationId'))
+    client, plan, run, intent, source = read_hook_plan(plan_path, session_id)
+    _workspace(plan, payload)
+    if source != plan:
+        _workspace(source, payload)
     await verified_owner(client)
-    checked, current_plan, current_run, current_intent = read_plan(plan_path)
+    checked, current_plan, current_run, current_intent, current_source = read_hook_plan(plan_path, session_id)
     if (checked.path != client.path or checked.context_digest != client.context_digest
-            or current_plan != plan or current_run != run or current_intent != intent):
+            or current_plan != plan or current_run != run or current_intent != intent
+            or current_source != source):
         raise B1Error('FRESH_LAUNCH_RECEIPT_MISMATCH')
-    evidence = dict(native_session_id=session_id, launch_id=intent['launch_id'],
-                    context_digest=client.context_digest, **identity(client))
+    evidence = hook_evidence(client, plan, session_id)
     directory = run / 'antigravity'
     _directory(directory)
     path = directory / 'hook-session.json'
-    if event == 'session':
-        same_session_file(path, evidence)
-    if canonical(_read_private(path)) != canonical(evidence):
+    origin_path = directory / 'hook-origin.json'
+
+    def current_proof(create_event=None):
+        if present(origin_path):
+            origin = _read_private(origin_path)
+            if origin != hook_origin(client, plan, session_id, origin.get('event')):
+                raise B1Error('FRESH_NATIVE_SESSION_MISMATCH')
+        elif present(path):
+            raise B1Error('FRESH_NATIVE_SESSION_MISMATCH')
+        elif create_event is not None:
+            same_session_file(origin_path, hook_origin(client, plan, session_id, create_event))
+        else:
+            return False
+        if create_event is not None:
+            same_session_file(path, evidence)
+        if not present(path):
+            raise B1Error('FRESH_NATIVE_SESSION_MISMATCH')
+        if canonical(_read_private(path)) != canonical(evidence):
+            raise B1Error('FRESH_NATIVE_SESSION_MISMATCH')
+        return True
+
+    if source['launch_id'] != run.name:
+        if event == 'session':
+            return {}
+        if event == 'invocation':
+            if not current_proof() and not same_hook_policy(source, plan):
+                raise B1Error('FRESH_ANTIGRAVITY_CONFIG_CHANGED')
+            return {}
+        confirmed = current_proof()
+    else:
+        observed = ('SessionStart' if event == 'session' else
+                    'PreInvocation' if event == 'invocation' and intent['resume_session_id'] is not None else None)
+        confirmed = current_proof(observed)
+    if not confirmed:
         raise B1Error('FRESH_NATIVE_SESSION_MISMATCH')
     if event == 'session':
         text = (f"Use the {plan['mcp_name']} MCP server for ORRERY fresh Mail. "
