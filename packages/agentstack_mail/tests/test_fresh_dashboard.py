@@ -71,6 +71,33 @@ def test_roster_display_cache_parallel_get_expiry_and_owner_changes_are_not_auth
     asyncio.run(scenario())
 
 
+def test_roster_unended_native_presence_is_not_running_or_cleanup_authority(tmp_path,monkeypatch):
+    async def scenario():
+        from agentstack_mail.fresh_targets import Targets
+        from test_fresh_targets import cleanup_fixture, replace
+        async with cleanup_fixture(tmp_path,monkeypatch) as (_,people,client,operator,run,route,*_):
+            backend=Backend(operator.path,ROOT)
+            monkeypatch.setattr(Targets,'display_snapshot',lambda *args,**kwargs:{})
+            async def rows():
+                return {a['name']:a for a in (await backend.roster())['agents']}
+            ended=await rows()
+            assert ended['Alpha']['native_launch_unended'] is False
+            assert ended['Beta']['native_launch_unended'] is False
+            (run/'ended.json').unlink()
+            pending=await rows()
+            alpha=pending['Alpha']
+            assert alpha['mail_agent_id']==people[0]['agent_id']
+            assert alpha['native_launch_unended'] is True
+            assert alpha['running'] is None and alpha['category']=='unknown'
+            assert alpha['attached'] is True and alpha['observation']['state']=='unknown'
+            assert pending['Beta']['native_launch_unended'] is False
+            replace(run/'tmux.json',dict(route,launch_id=str(uuid4())))
+            invalid=await rows()
+            assert invalid['Alpha']['native_launch_unended'] is False
+            assert invalid['Alpha']['running'] is None
+    asyncio.run(scenario())
+
+
 def test_roster_display_round_robin_retains_only_fresh_unvisited_observations(monkeypatch):
     import dashboard.fresh_backend as module
     from agentstack_mail.fresh_targets import Targets
