@@ -122,7 +122,7 @@ class Backend:
                 revision=owner.state['revision']
                 rows = [dict(mail_instance_id=context['mail_instance_id'], mail_agent_id=a.id,
                     name=a.name, program=a.program, model=a.model, provider=a.program,
-                    retired=a.retired_at is not None, running=None,
+                    retired=a.retired_at is not None, running=None, native_launch_unended=False,
                     state='retired' if a.retired_at is not None else 'unknown',
                     last_active=a.last_active_ts.timestamp()) for a in sorted(owner.records.values(), key=lambda a:a.id)]
             contexts=self._contexts();selections=[]
@@ -158,6 +158,10 @@ class Backend:
                             signature=digest(dict(context=client.context_digest,intent=intent,receipt=receipt,route=route,
                                 ended=outcome.record if outcome is not None else None))
                             selections.append(Selected(client,row['name'],run,intent,receipt,outcome,route,signature))
+                            # Presence is a receipt-level fact, not process liveness or
+                            # permission to act. Consumers may show an unobserved launch
+                            # without treating it as running, including on cache misses.
+                            row['native_launch_unended']=not row['retired'] and not ended
                     # A receipt proves native startup, not a currently live OS process.
                 except (B1Error,OSError,ValueError,KeyError):
                     continue
