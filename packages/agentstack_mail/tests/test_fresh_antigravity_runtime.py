@@ -599,7 +599,7 @@ def test_historical_hook_policy_only_normalizes_launch_identifiers(tmp_path):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("crash_target", ["runner", "supervisor"])
+@pytest.mark.parametrize("crash_target", ["runner", "supervisor", "guardian"])
 def test_sigkill_stops_active_native_group_without_releasing_lease(tmp_path, monkeypatch, crash_target):
     from agentstack_mail.fresh_antigravity_end import verify_native_ended
 
@@ -629,8 +629,14 @@ def test_sigkill_stops_active_native_group_without_releasing_lease(tmp_path, mon
                 assert known[pid][2] == native['process_start']
                 assert api['snapshot_belongs_to'](before, pid, runner, os.getuid())
                 try:
-                    target = runner if crash_target == "runner" else before[pid][0]
-                    assert target not in known and api["snapshot_belongs_to"](before, target, runner, os.getuid())
+                    if crash_target == "guardian":
+                        guards = set(known) - {pid, active['member_pid']}
+                        assert len(guards) == 1
+                        target = guards.pop()
+                    else:
+                        target = runner if crash_target == "runner" else before[pid][0]
+                        assert target not in known
+                    assert api["snapshot_belongs_to"](before, target, runner, os.getuid())
                     assert rows()[target] == before[target]
                     os.kill(target, signal.SIGKILL)
                     deadline = time.monotonic() + 15

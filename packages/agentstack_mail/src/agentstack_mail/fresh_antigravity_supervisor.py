@@ -162,6 +162,9 @@ class SupervisedNative:
                 raise B1Error("FRESH_ANTIGRAVITY_SUPERVISOR_UNCONFIRMED")
             self.control.settimeout(40)
             value = _receive(self.control)
+            if value == {"error": "FRESH_ANTIGRAVITY_GUARD_LOST"}:
+                self.worker.wait(timeout=5)
+                raise B1Error("FRESH_ANTIGRAVITY_GUARD_LOST")
             if (set(value) != {"native_code"} or type(value["native_code"]) is not int
                     or self.worker.wait(timeout=5) != 0):
                 raise B1Error("FRESH_ANTIGRAVITY_SUPERVISOR_UNCONFIRMED")
@@ -193,9 +196,17 @@ def guard_native_group(plan_path, fd, ready, leader):
             or os.getsid(0) != leader or os.getppid() != leader):
         return 1
     read_plan(Path(plan_path))
+    stopping = False
+
+    def stop_requested(signum, frame):
+        nonlocal stopping
+        stopping = True
+
     for signum in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(signum, signal.SIG_IGN)
+        signal.signal(signum, stop_requested)
     try:
+        if select.select([fd], [], [], 0)[0]:
+            return 1
         os.write(ready, b"1")
     finally:
         os.close(ready)
@@ -209,6 +220,8 @@ def guard_native_group(plan_path, fd, ready, leader):
                     return 1
                 os.killpg(leader, signal.SIGKILL)
                 return 1
+            if not stopping:
+                continue
             # A normal owner shutdown can reap the leader only once we have
             # left. Exit only when the leader is a zombie and there are no
             # other group members capable of forking.
@@ -288,7 +301,8 @@ def supervise(plan_path, runner_pid, connection):
     released = False
     code = 1
     interrupted = False
-    watch_write = None
+    watch_owner = None
+    guard_lost = False
 
     def interrupt(signum, frame):
         nonlocal interrupted
@@ -308,18 +322,18 @@ def supervise(plan_path, runner_pid, connection):
         if interrupted or not runner_present(connection):
             return 1
         gate_read, gate_write = os.pipe()
-        watch_read, watch_write = os.pipe()
+        watch_owner, watch_peer = socket.socketpair()
         try:
             try:
                 owner.process = subprocess.Popen(
                     [sys.executable, "-m", "agentstack_mail.fresh_antigravity_supervisor",
                      "--plan", str(plan_path), "--gate-fd", str(gate_read),
-                     "--watch-fd", str(watch_read)],
+                     "--watch-fd", str(watch_peer.fileno())],
                     stdin=None, stdout=None, stderr=None, cwd=owner.plan["cwd"],
-                    start_new_session=True, pass_fds=(gate_read, watch_read))
+                    start_new_session=True, pass_fds=(gate_read, watch_peer.fileno()))
             finally:
                 os.close(gate_read)
-                os.close(watch_read)
+                watch_peer.close()
             # The native process has its own copies. Do not keep the runner's
             # stdin/stdout pipes open after native exit.
             with open(os.devnull, "rb+") as sink:
@@ -335,7 +349,12 @@ def supervise(plan_path, runner_pid, connection):
         finally:
             os.close(gate_write)
         _send(connection, {"pid": owner.process.pid})
-        connection.recv(1)
+        # The independent guard and the supervisor watch the same private
+        # lifetime socket in opposite directions. No application data flows.
+        ready, _, _ = select.select([connection, watch_owner], [], [])
+        guard_lost = watch_owner in ready
+        if not guard_lost:
+            connection.recv(1)
     except (B1Error, OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as error:
         print("FRESH ANTIGRAVITY SUPERVISOR: " + (error.code if isinstance(error, B1Error) else type(error).__name__), file=sys.stderr)
     finally:
@@ -353,13 +372,17 @@ def supervise(plan_path, runner_pid, connection):
                     except subprocess.TimeoutExpired:
                         owner.process.kill()
                         owner.native_code = owner.process.wait(timeout=5)
-                code = 0
-                _send(connection, {"native_code": owner.native_code})
+                # An unexpected guard exit is not a normal provider exit.
+                # Keep reservations until the existing explicit resolution path
+                # proves termination; do not publish a normal cleanup receipt.
+                code = 1 if guard_lost else 0
+                _send(connection, {"error": "FRESH_ANTIGRAVITY_GUARD_LOST"}
+                      if guard_lost else {"native_code": owner.native_code})
             except (B1Error, OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
                 if code != 0:
                     print("FRESH ANTIGRAVITY SUPERVISOR CLEANUP: " + (error.code if isinstance(error, B1Error) else type(error).__name__), file=sys.stderr)
-        if watch_write is not None:
-            os.close(watch_write)
+        if watch_owner is not None:
+            watch_owner.close()
         connection.close()
     return code
 
