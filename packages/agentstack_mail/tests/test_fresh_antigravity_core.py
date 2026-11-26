@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 import re
 import shlex
@@ -94,6 +95,16 @@ def test_agy_handoff_pins_binary_and_keeps_task_out_of_shell(tmp_path, monkeypat
             assert not any(x.startswith(('AGENTSTACK_ANTIGRAVITY_BIN=', 'AGENTSTACK_PROJECT_KEY=',
                                          'CHILD_REGISTRATION_TOKEN=')) for x in argv)
             assert task not in transport.calls[0][-1]
+            assert argv[argv.index('child-run') - 3:argv.index('child-run')] == [
+                '-P', '-m', 'agentstack_mail.fresh_client']
+            shadow = tmp_path / 'agentstack_mail'
+            shadow.mkdir()
+            (shadow / '__init__.py').write_text('raise SystemExit("WORKSPACE_SHADOW_EXECUTED")')
+            # The exact generated env command, but invoke only harmless help.
+            help_argv = [*argv[:argv.index('child-run')], '--help']
+            probe = subprocess.run(help_argv, cwd=tmp_path, env={**os.environ, 'PYTHONPATH': '.'},
+                                   capture_output=True, text=True, timeout=20)
+            assert probe.returncode == 0 and 'WORKSPACE_SHADOW_EXECUTED' not in probe.stderr + probe.stdout
             _, base, _ = child_api.family(child)
             assert child_api.read_task(base)['task'] == task
             assert not first['native_ready'] and first['execution'] == 'unknown'
@@ -108,11 +119,23 @@ def test_agy_native_plan_keeps_all_public_tool_names_within_cli_limit(tmp_path):
             folder.mkdir(mode=0o700)
             settings = {'binary': str(tmp_path / 'synthetic-agy'),
                         'model': 'gemini-4-neon-high', 'effort': 'high'}
-            agy.plan(child, ROOT, settings, folder, tmp_path, 'bounded native task', None)
+            launch = agy.plan(child, ROOT, settings, folder, tmp_path, 'bounded native task', None)
             plan = _read_private(folder / 'antigravity/plan.json')
             config = _read_private(folder / 'antigravity/integration/.agents/mcp_config.json')
             assert set(config['mcpServers']) == {plan['mcp_name']}
             groups = _read_private(folder / 'antigravity/integration/.agents/hooks.json')
+            proxy = config['mcpServers'][plan['mcp_name']]
+            commands = [launch['argv'], [proxy['command'], *proxy['args']],
+                        shlex.split(next(iter(groups.values()))['SessionStart'][0]['command'])[3:]]
+            shadow = tmp_path / 'agentstack_mail'
+            shadow.mkdir()
+            (shadow / '__init__.py').write_text('raise SystemExit("WORKSPACE_SHADOW_EXECUTED")')
+            for argv in commands:
+                assert argv[1:3] == ['-P', '-m']
+                probe = subprocess.run([*argv[:4], '--help'], cwd=tmp_path,
+                    env={**os.environ, **launch['env']}, capture_output=True, text=True, timeout=20)
+                assert 'WORKSPACE_SHADOW_EXECUTED' not in probe.stderr + probe.stdout
+                assert probe.returncode == 0, probe.stderr
             matcher = next(iter(groups.values()))['PreToolUse'][0]['matcher']
             for tool in ('write_to_file', 'replace_file_content', 'multi_replace_file_content',
                          'write_file', 'edit_file', 'notebook_edit', 'sed_file'):

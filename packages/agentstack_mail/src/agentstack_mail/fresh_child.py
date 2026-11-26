@@ -196,7 +196,8 @@ async def handoff(parent, root, *, slot=None, name=None, cwd, task, resources, t
         command = shlex.join(['/usr/bin/env', 'AGENTSTACK_RUNTIME_MODE=fresh',
             'AGENTSTACK_FRESH_CLIENT_CONTEXT=' + str(child.path), 'AGENTSTACK_PYTHON=' + sys.executable,
             'AGENTSTACK_' + binary_env + '_BIN=' + binary,
-            sys.executable, '-m', 'agentstack_mail.fresh_client', 'child-run', '--spawn-id', saved['spawn_id']])
+            'PYTHONPATH=' + os.pathsep.join([str(Path(__file__).resolve().parents[1]), str(root)]),
+            sys.executable, '-P', '-m', 'agentstack_mail.fresh_client', 'child-run', '--spawn-id', saved['spawn_id']])
         # Commit the attempt before the externally visible tmux operation. An
         # uncertain result is preserved and never automatically launches twice.
         _write_private(base / 'handoff.json', dict(spawn_id=saved['spawn_id'], socket_path=str(transport.path),

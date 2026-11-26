@@ -336,3 +336,19 @@ def test_cleanup_retry_survives_diagnostic_failure(monkeypatch):
         scoped.setattr(supervisor.sys, "stderr", BrokenStderr())
         supervisor.finish_released_native(SimpleNamespace(stop_native=stop), sleep=lambda _: None)
     assert calls == [1, 1]
+
+
+def test_runner_refuses_input_after_supervisor_control_loss():
+    import socket
+    runner = native_runner.Runner.__new__(native_runner.Runner)
+    left, right = socket.socketpair()
+    with left, right:
+        stream = io.BytesIO()
+        runner.process = SimpleNamespace(control=left, stdin=stream)
+        runner.check = lambda: None
+        runner.send("before")
+        before = stream.getvalue()
+        right.close()
+        with pytest.raises(B1Error, match="FRESH_ANTIGRAVITY_SUPERVISOR_LOST"):
+            runner.send("after")
+        assert stream.getvalue() == before

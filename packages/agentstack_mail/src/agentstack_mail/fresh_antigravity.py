@@ -75,13 +75,13 @@ def plan(client, root, settings, run, cwd, prompt, session_id):
                   'AGENTSTACK_PYTHON': sys.executable, 'PYTHONPATH': python_path}
     mcp = {'mcpServers': {mcp_name: {
         'command': sys.executable,
-        'args': ['-m', 'agentstack_mail.fresh_client', 'proxy', '--context', str(client.path)],
+        'args': ['-P', '-m', 'agentstack_mail.fresh_client', 'proxy', '--context', str(client.path)],
         'env': shared_env, 'cwd': str(cwd)}}}
     _write_private(integration / '.agents/mcp_config.json', mcp)
 
     def handler(event):
         command = shlex.join(['cd', str(cwd)]) + ' && ' + shlex.join([
-            sys.executable, '-m', 'agentstack_mail.fresh_antigravity_hooks',
+            sys.executable, '-P', '-m', 'agentstack_mail.fresh_antigravity_hooks',
             '--plan', str(plan_path), '--event', event])
         return {'type': 'command', 'command': command, 'timeout': 30}
 
@@ -105,7 +105,7 @@ def plan(client, root, settings, run, cwd, prompt, session_id):
                 'resume_session_id': session_id, 'argv': argv, 'prompt': prompt,
                 'config_hashes': configs, **identity(client)}
     _write_private(plan_path, document)
-    return {'argv': [sys.executable, '-m', 'agentstack_mail.fresh_antigravity_runner',
+    return {'argv': [sys.executable, '-P', '-m', 'agentstack_mail.fresh_antigravity_runner',
                      '--plan', str(plan_path)],
             'env': {**shared_env, 'AGENTSTACK_ANTIGRAVITY_PLAN_DIGEST': digest(document)}}
 
@@ -301,14 +301,14 @@ def same_hook_policy(source, current):
                         or handler['type'] != 'command' or not isinstance(handler['command'], str)):
                     raise B1Error('FRESH_ANTIGRAVITY_CONFIG_CHANGED')
                 args = shlex.split(handler['command'])
-                if (len(args) != 10 or args[:3] != ['cd', plan['cwd'], '&&']
+                if (len(args) != 11 or args[:3] != ['cd', plan['cwd'], '&&']
                         or not Path(args[3]).is_absolute()
-                        or args[4:7] != ['-m', 'agentstack_mail.fresh_antigravity_hooks', '--plan']
-                        or args[7] != str(Path(plan['run_dir']) / 'antigravity/plan.json')
-                        or args[8:] != ['--event', event]
+                        or args[4:8] != ['-P', '-m', 'agentstack_mail.fresh_antigravity_hooks', '--plan']
+                        or args[8] != str(Path(plan['run_dir']) / 'antigravity/plan.json')
+                        or args[9:] != ['--event', event]
                         or handler['command'] != shlex.join(args[:2]) + ' && ' + shlex.join(args[3:])):
                     raise B1Error('FRESH_ANTIGRAVITY_CONFIG_CHANGED')
-                result.append(dict(handler, command=[*args[:7], '<current-plan>', *args[8:]]))
+                result.append(dict(handler, command=[*args[:8], '<current-plan>', *args[9:]]))
             return result
 
         tools = group['PreToolUse']

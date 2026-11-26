@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import runpy
+import select
 import selectors
 import signal
 import socket
@@ -68,8 +69,15 @@ class Runner:
                 or run != self.run or intent != self.intent or identity(client) != self.expected):
             raise B1Error("FRESH_LAUNCH_RECEIPT_MISMATCH")
 
+    def check_supervisor(self):
+        # The only control messages after startup are termination receipts.
+        # Readability (including EOF) before requesting stop is unexpected.
+        if select.select([self.process.control], [], [], 0)[0]:
+            raise B1Error("FRESH_ANTIGRAVITY_SUPERVISOR_LOST")
+
     def send(self, text):
         self.check()
+        self.check_supervisor()
         if not isinstance(text, str) or not text.strip():
             raise B1Error("FRESH_ANTIGRAVITY_EMPTY_TURN")
         data = json.dumps({"event": "user", "message": {"content": text}}, ensure_ascii=False)
@@ -275,6 +283,7 @@ class Runner:
             self.process.start(self.plan_path)
             selector.register(self.listener, selectors.EVENT_READ, "wake")
             selector.register(self.process.stdout, selectors.EVENT_READ, "native")
+            selector.register(self.process.control, selectors.EVENT_READ, "supervisor")
             self.terminal = sys.stdin.isatty()
             if self.terminal:
                 print("[antigravity] ORRERY stream session: type a line to send a turn; /exit finishes, Ctrl-C interrupts", flush=True)
@@ -282,11 +291,15 @@ class Runner:
             self.send(BOOTSTRAP_PROMPT)
             started, buffer = time.monotonic(), bytearray()
             while True:
+                self.check_supervisor()
                 if self.exit_requested and not self.busy:
                     return 0
                 if self.bootstrap and time.monotonic() - started > INITIALIZATION_TIMEOUT:
                     raise B1Error("FRESH_ANTIGRAVITY_STARTUP_TIMEOUT")
-                for key, _ in selector.select(0.5):
+                events = selector.select(0.5)
+                if any(key.data == "supervisor" for key, _ in events):
+                    raise B1Error("FRESH_ANTIGRAVITY_SUPERVISOR_LOST")
+                for key, _ in events:
                     if key.data == "wake":
                         self.wake()
                         continue
