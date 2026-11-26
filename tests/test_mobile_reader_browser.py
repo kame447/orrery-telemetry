@@ -7,6 +7,54 @@ import pytest
 from mobile_reader_browser import AREA, MAIL_MARKDOWN, assert_mail_markdown, phone  # noqa: F401
 
 
+def test_mobile_lists_update_existing_context_meter(phone):
+    _, js, wait, state = phone
+    agent = state["snapshot"]["agents"][0]
+    agent.update(ctx_used=None)
+    refresh = "document.dispatchEvent(new Event('visibilitychange'))"
+    js("OrreryMobileTerminal.close();OrreryMobileGraph.show();" + refresh)
+    working = "document.querySelector('#graph-working-agents [data-name=SampleAgent]')"
+    wait(working + "!==null")
+    wait("OrreryMobileGraph.agents()[0]?.ctx_used===null")
+    js("document.querySelector('[data-agent-status=work] summary').click()")
+    meter = working + "?.querySelector('.agent-context-meter')"
+    assert js(meter + "===null")
+    agent["ctx_used"] = 14
+    js(refresh)
+    wait(meter + "?.getAttribute('aria-valuenow')==='86'")
+    assert js(meter + ".firstElementChild.style.width") == "86%"
+    js("OrreryMobileWorkspace.readerEntry('SampleAgent',null).click()")
+    picker = "document.querySelector('.workspace-agent-choice .agent-context-meter')"
+    wait(picker + "?.getAttribute('aria-valuenow')==='86'")
+    assert js(picker + ".getBoundingClientRect().width") > 0
+    checkbox = "document.querySelector('.workspace-agent-choice input')"
+    js(checkbox + ".focus()")
+    agent["ctx_used"] = 100
+    js(refresh)
+    wait(picker + "?.getAttribute('aria-valuenow')==='0'")
+    assert js(checkbox + "===document.activeElement")
+    assert js(checkbox + ".checked")
+    for invalid in (True, -1, 101, "50", None):
+        agent["ctx_used"] = invalid
+        js(refresh)
+        wait("OrreryMobileGraph.agents()[0]?.ctx_used===" + json.dumps(invalid))
+        wait(picker + "===null && " + meter + "===null")
+    agent["ctx_used"] = 0
+    js(refresh)
+    wait(picker + "?.getAttribute('aria-valuenow')==='100'")
+    snapshot = state["snapshot"]
+    old = snapshot["sources"]["graph"]
+    snapshot["sources"]["graph"] = dict(status="stale", observed_at=time.time()-45, age_seconds=45)
+    js(refresh)
+    wait(picker + "===null && " + meter + "===null")
+    snapshot["sources"]["graph"] = old
+    js(refresh)
+    wait(picker + "?.getAttribute('aria-valuenow')==='100'")
+    snapshot["sources"]["agents"] = dict(status="stale", observed_at=time.time()-45, age_seconds=45)
+    js(refresh)
+    wait(picker + "===null && " + meter + "===null")
+
+
 @pytest.mark.parametrize('theme',['dark','light'])
 def test_image_path_uses_existing_review_and_once_send(phone,tmp_path,theme):
     import base64
