@@ -5,10 +5,11 @@ import asyncio
 from hashlib import sha256
 import hmac
 import json
+import math
 from pathlib import Path
 import re
 import time
-from uuid import NAMESPACE_URL, uuid4, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from .message_state import MessageState, read_private_json
 from .model import AGENT_NAME, ToolError, _schema
@@ -17,6 +18,7 @@ INSTANCE = re.compile(r'[0-9a-f]{32}')
 KEY = re.compile(r'[A-Za-z0-9_.:-]{1,128}')
 PREVIEW_SECONDS = 300
 MAX_INTENTS = 10000
+MAX_RECIPIENTS = 16
 NOTE = ('Mail acceptance is not proof of agent execution. Unknown results are reconciled by reading Mail receipts and updating the local ledger, never by resending. '
         'Chat confirmation is not server-verified human approval; the operator delegates send authority.')
 
@@ -121,8 +123,8 @@ class FreshMessages:
                 or Path(policy['context_path']).resolve() != Path(policy['context_path'])):
             raise ValueError('invalid fixed fresh message policy')
         recipients = policy['recipients']
-        if not isinstance(recipients, list) or not 1 <= len(recipients) <= 128:
-            raise ValueError('an explicit finite recipient allowlist is required')
+        if not isinstance(recipients, list) or not 1 <= len(recipients) <= MAX_RECIPIENTS:
+            raise ValueError('an explicit allowlist of 1 to 16 recipients is required')
         seen = set()
         for recipient in recipients:
             if (not isinstance(recipient, dict)
@@ -180,20 +182,65 @@ class FreshMessages:
             raise ToolError('invalid_arguments', 'invalid preview proof')
         return self.commit(key_hash, args['preview_id'], args['content_digest'])
 
-    def _bound(self, record: dict) -> dict:
-        if record['binding'] != self.binding:
+    def _request_id(self, key_hash: str) -> str:
+        return str(uuid5(NAMESPACE_URL, 'urn:orrery:mcp:message:' + canonical(
+            [self.mail.instance, self.mail.sender_id, key_hash])))
+
+    def _bound(self, record: dict, key_hash: str) -> dict:
+        if not isinstance(record, dict):
+            raise ToolError('message_state_invalid', 'saved message evidence is inconsistent; preserve state and do not retry')
+        if record.get('binding') != self.binding:
             raise ToolError('message_binding_changed', 'request belongs to a different fixed authority')
+        try:
+            envelope = record['envelope']
+            if (not isinstance(envelope, dict) or set(envelope) != {'recipients', 'subject', 'body_md'}
+                    or not isinstance(envelope['recipients'], list) or len(envelope['recipients']) != 1):
+                raise ValueError
+            recipient = envelope['recipients'][0]
+            if (not isinstance(recipient, dict)
+                    or set(recipient) != {'target_agent_id', 'expected_target_name', 'kind'}
+                    or recipient['kind'] != 'to'):
+                raise ValueError
+            self._envelope(dict(mail_instance_id=self.mail.instance,
+                target_agent_id=recipient['target_agent_id'], expected_target_name=recipient['expected_target_name'],
+                subject=envelope['subject'], body_md=envelope['body_md']))
+            expected_digest = digest({'instance': self.mail.instance, 'sender': self.mail.sender_id,
+                                      'message': envelope})
+            if (record['content_digest'] != expected_digest or record['request_id'] != self._request_id(key_hash)
+                    or str(UUID(record['preview_id'])) != record['preview_id']
+                    or record['state'] not in ('previewed', 'sending', 'unknown', 'accepted', 'refused')
+                    or any(type(record[key]) not in (int, float) or not math.isfinite(record[key])
+                           for key in ('created_at', 'expires_at'))
+                    or record['expires_at'] != record['created_at'] + PREVIEW_SECONDS):
+                raise ValueError
+            if record['state'] == 'accepted':
+                verified = self._receipt_projection(record['receipt'])
+                if verified is None or verified != record['receipt']:
+                    raise ValueError
+            elif record['receipt'] is not None:
+                raise ValueError
+            if record['state'] == 'refused':
+                code = record['refusal_code']
+                if not isinstance(code, str) or not re.fullmatch(r'[A-Z][A-Z0-9_]{0,127}', code):
+                    raise ValueError
+            elif 'refusal_code' in record:
+                raise ValueError
+            if ('receipt_observation' in record and record['receipt_observation'] not in
+                    ('accepted', 'refused', 'not_observed', 'unavailable')):
+                raise ValueError
+        except (KeyError, TypeError, ValueError, AttributeError, OverflowError, ToolError):
+            raise ToolError('message_state_invalid', 'saved message evidence is inconsistent; preserve state and do not retry') from None
         return record
 
     def _record(self, key_hash: str) -> dict:
-        return self._bound(self.state.read(key_hash))
+        return self._bound(self.state.read(key_hash), key_hash)
 
     def preview(self, key_hash: str, envelope: dict) -> dict:
         content_digest = digest({'instance': self.mail.instance, 'sender': self.mail.sender_id, 'message': envelope})
         with self.state.transaction() as db:
             old = self.state.get(db, key_hash)
             if old is not None:
-                self._bound(old)
+                self._bound(old, key_hash)
                 if old['content_digest'] != content_digest:
                     raise ToolError('idempotency_conflict', 'this key already belongs to different content')
                 return self._public(old, preview=True)
@@ -209,14 +256,13 @@ class FreshMessages:
             raise ToolError('recipient_unavailable', 'Mail could not verify the active recipient; nothing sent') from None
         now = time.time()
         record = {'binding': self.binding, 'preview_id': str(uuid4()),
-                  'request_id': str(uuid5(NAMESPACE_URL, 'urn:orrery:mcp:message:' + canonical(
-                      [self.mail.instance, self.mail.sender_id, key_hash]))),
+                  'request_id': self._request_id(key_hash),
                   'content_digest': content_digest, 'envelope': envelope,
                   'created_at': now, 'expires_at': now + PREVIEW_SECONDS, 'state': 'previewed', 'receipt': None}
         with self.state.transaction() as db:
             old = self.state.get(db, key_hash)
             if old is not None:
-                self._bound(old)
+                self._bound(old, key_hash)
                 if old['content_digest'] != content_digest:
                     raise ToolError('idempotency_conflict', 'this key already belongs to different content')
                 record = old
@@ -231,7 +277,7 @@ class FreshMessages:
             record = self.state.get(db, key_hash)
             if record is None:
                 raise ToolError('not_found', 'preview not found')
-            self._bound(record)
+            self._bound(record, key_hash)
             if (not hmac.compare_digest(record['preview_id'], preview_id)
                     or not hmac.compare_digest(record['content_digest'], content_digest)):
                 raise ToolError('preview_mismatch', 'commit must match the exact preview')
@@ -251,7 +297,7 @@ class FreshMessages:
         record['receipt'] = projected
         record['state'] = 'accepted' if projected is not None else 'unknown'
         with self.state.transaction() as db:
-            current = self._bound(self.state.get(db, key_hash))
+            current = self._bound(self.state.get(db, key_hash), key_hash)
             if current['state'] in ('accepted', 'refused'):
                 record = current  # Never overwrite stronger concurrent receipt evidence with unknown.
             else:
@@ -288,7 +334,7 @@ class FreshMessages:
         except Exception:
             observation = 'unavailable'
         with self.state.transaction() as db:
-            current = self._bound(self.state.get(db, key_hash))
+            current = self._bound(self.state.get(db, key_hash), key_hash)
             if current['state'] not in ('accepted', 'refused'):
                 if resolved is not None:
                     current.update(resolved)
@@ -297,23 +343,27 @@ class FreshMessages:
             record = current
         return self._public(record)
 
-    def _receipt(self, value: object, record: dict) -> dict | None:
-        if not isinstance(value, dict):
-            return None
-        targets = record['envelope']['recipients']
-        rows = value.get('recipients')
-        if (value.get('mail_instance_id') != self.mail.instance or not positive(value.get('sender_id'))
-                or value['sender_id'] != self.mail.sender_id or not positive(value.get('message_id'))
-                or value.get('decision_only') is not False or value.get('delivery_status') != 'notification_pending'
-                or not bounded_text(value.get('thread_id'), 512) or not bounded_text(value.get('created_ts'), 128)
-                or not isinstance(rows, list) or len(rows) != len(targets)):
-            return None
-        if any(not isinstance(row, dict) or not positive(row.get('agent_id'))
-               or row['agent_id'] != target['target_agent_id'] or row.get('kind') != target['kind']
-               for row, target in zip(rows, targets)):
+    def _receipt_projection(self, value: object) -> dict | None:
+        if (not isinstance(value, dict) or value.get('mail_instance_id') != self.mail.instance
+                or not positive(value.get('sender_id')) or value['sender_id'] != self.mail.sender_id
+                or not positive(value.get('message_id')) or value.get('delivery_status') != 'notification_pending'
+                or not bounded_text(value.get('thread_id'), 512) or not bounded_text(value.get('created_ts'), 128)):
             return None
         return {key: value[key] for key in ('mail_instance_id', 'message_id', 'sender_id', 'thread_id',
                                            'created_ts', 'delivery_status')}
+
+    def _receipt(self, value: object, record: dict) -> dict | None:
+        projected = self._receipt_projection(value)
+        if projected is None or value.get('decision_only') is not False:
+            return None
+        targets = record['envelope']['recipients']
+        rows = value.get('recipients')
+        if (not isinstance(rows, list) or len(rows) != len(targets)
+                or any(not isinstance(row, dict) or not positive(row.get('agent_id'))
+                       or row['agent_id'] != target['target_agent_id'] or row.get('kind') != target['kind']
+                       for row, target in zip(rows, targets))):
+            return None
+        return projected
 
     def _public(self, record: dict, *, preview: bool = False) -> dict:
         state = 'unknown' if record['state'] == 'sending' else record['state']
