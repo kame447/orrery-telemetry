@@ -414,12 +414,11 @@ def launch(client, wrapper_root, provider, cwd, *, session_id=None, persistent=N
         # Lifecycle closure does not imply native readiness. A missing receipt
         # must not strand a run whose actual wait/required child checks finished.
         if antigravity:
-            from .fresh_antigravity_end import verify_native_ended
-            try:
-                verify_native_ended(client, root, run, runner_pid=process.pid)
-            except (B1Error, OSError, ValueError, KeyError, TypeError):
-                raise B1Error('FRESH_LAUNCH_OUTCOME_UNKNOWN', launch_id=launch_id) from None
-        _write_private(run / 'ended.json', {'launch_id': launch_id, 'exit_code': code})
+            from .fresh_antigravity_end import finalize_native_launch
+            finalize_native_launch(client, root, run, runner_pid=process.pid,
+                                   code=code, intent=intent, task=task)
+        else:
+            _write_private(run / 'ended.json', {'launch_id': launch_id, 'exit_code': code})
         if code == 0:
             observed = _read_private(run / 'session.json')
             pinned(client, observed)

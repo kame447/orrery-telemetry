@@ -1,12 +1,13 @@
 """Prove the native agy process group ended before releasing its resources."""
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 import runpy
 import time
 
-from .fresh_runtime import _directory, _read_private
+from .fresh_runtime import _directory, _read_private, _write_private
 from .storage_origin_contract import B1Error, digest
 
 KIND = 'orrery-fresh-antigravity-ended-v1'
@@ -122,3 +123,48 @@ def verify_native_ended(client, wrapper_root, run, *, runner_pid=None, deadline=
         if _record(client, root, run, runner_pid=runner_pid)[1:] != (record, native):
             raise B1Error('FRESH_ANTIGRAVITY_END_RECORD_INVALID')
     return _observation(record, True)
+
+
+def release_ready(client, run, intent, task, observation):
+    from .fresh_launch import identity
+
+    return dict(kind='orrery-fresh-antigravity-release-ready-v1',
+                launch_id=run.name, context_digest=client.context_digest,
+                intent_digest=digest(intent), task_digest=digest(task),
+                observation_digest=digest(observation), **identity(client))
+
+
+def finalize_native_launch(client, root, run, *, runner_pid, code, intent, task):
+    """Publish durable closure before making a child reservation reusable.
+
+    A missing runner release receipt means retain; do not infer eligibility.
+    A failed Mail release after closure is not automatically retried: a later
+    reservation may already have been created for the same path.
+    """
+    from .fresh_child import launch_task
+    from .fresh_end import present
+    from .fresh_launch import identity
+
+    try:
+        observation = verify_native_ended(client, root, run, runner_pid=runner_pid)
+        state = run / 'antigravity'
+        receipt = state / 'release-ready.json'
+        resources = []
+        if present(receipt):
+            current_task, _ = launch_task(client)
+            if (task is None or current_task != task
+                    or task.get('spawn_id') != intent.get('child_spawn_id')
+                    or not task.get('resources')
+                    or intent.get('resume_session_id') is not None
+                       and observation.get('state') == 'not-started'
+                    or _read_private(state / 'native-ended.json') != dict(
+                        launch_id=run.name, context_digest=client.context_digest,
+                        **identity(client), observation=observation)
+                    or _read_private(receipt) != release_ready(client, run, intent, task, observation)):
+                raise B1Error('FRESH_ANTIGRAVITY_RELEASE_BINDING_MISMATCH')
+            resources = task['resources']
+    except (B1Error, OSError, ValueError, KeyError, TypeError):
+        raise B1Error('FRESH_LAUNCH_OUTCOME_UNKNOWN', launch_id=run.name) from None
+    _write_private(run / 'ended.json', {'launch_id': run.name, 'exit_code': code})
+    if resources:
+        asyncio.run(client.call('release_reservations', {'paths': resources}))

@@ -365,7 +365,7 @@ class Runner:
             except (B1Error, OSError) as error:
                 cleanup_error = cleanup_error or error
         if self.owns_run and cleanup_error is None:
-            from .fresh_antigravity_end import verify_native_ended
+            from .fresh_antigravity_end import release_ready, verify_native_ended
             observation = verify_native_ended(self.client, Path(self.plan["wrapper_root"]),
                                               self.run, runner_pid=os.getpid())
             _write_private(self.state / "native-ended.json", dict(
@@ -381,7 +381,8 @@ class Runner:
             resumed_without_native = (self.plan.get("resume_session_id") is not None
                                       and observation.get("state") == "not-started")
             if resources and self.resume_history_admitted and not resumed_without_native:
-                asyncio.run(self.client.call("release_reservations", {"paths": resources}))
+                _write_private(self.state / "release-ready.json",
+                               release_ready(self.client, self.run, self.intent, task, observation))
         if cleanup_error is not None:
             raise cleanup_error
 

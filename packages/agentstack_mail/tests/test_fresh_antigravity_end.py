@@ -60,10 +60,11 @@ def runner_cleanup(tmp_path, monkeypatch):
 
     async def call(name, arguments):
         assert (runner.state / 'native-ended.json').is_file()
+        assert (runner.run / 'ended.json').is_file()
         state['events'].append((name, arguments))
         return {}
 
-    runner.client = SimpleNamespace(context_digest='fixture-context', call=call)
+    runner.client = SimpleNamespace(context_digest='fixture-context', context=runner.expected, call=call)
 
     def verify(client, root, run, *, runner_pid):
         assert client is runner.client and root == ROOT and run == runner.run
@@ -100,7 +101,8 @@ def test_runner_reaps_proven_exit_before_releasing_reservations(runner_cleanup, 
     runner.close()
     assert len(state['signals']) == (0 if exit_before_signal else 1)
     assert runner.native_code == 0
-    assert state['events'] == ['wait', 'verify', ('release_reservations', {'paths': resources})]
+    assert state['events'] == ['wait', 'verify']
+    assert (runner.state / 'release-ready.json').is_file()
     assert (runner.state / 'native-ended.json').is_file()
 
 
@@ -162,7 +164,8 @@ def test_new_nonstarted_child_retains_existing_release_contract(runner_cleanup, 
     monkeypatch.setattr(native_end, 'verify_native_ended', lambda *args, **kwargs: {
         'kind': native_end.KIND, 'state': 'not-started', 'record_digest': 'fixture'})
     runner.close()
-    assert state['events'] == [('release_reservations', {'paths': resources})]
+    assert state['events'] == []
+    assert (runner.state / 'release-ready.json').is_file()
 
 
 def test_nonchild_without_task_closes_normally(runner_cleanup, monkeypatch):
@@ -176,6 +179,70 @@ def test_nonchild_without_task_closes_normally(runner_cleanup, monkeypatch):
     runner.close()
     assert state['events'] == []
 
+
+
+@pytest.mark.parametrize('failure', [None, 'verify', 'publish', 'task', 'receipt', 'missing'])
+def test_launcher_closes_before_releasing_reservations(runner_cleanup, monkeypatch, failure):
+    runner, state, resources = runner_cleanup
+    state['status'] = 'Z'
+    runner.close()
+    task = {'spawn_id': 'fixture-spawn', 'resources': resources}
+    assert state['events'] == ['wait', 'verify']
+    receipt = runner.state / 'release-ready.json'
+    if failure == 'verify':
+        def refuse(*args, **kwargs):
+            raise B1Error('FRESH_ANTIGRAVITY_GROUP_ALIVE')
+        monkeypatch.setattr(native_end, 'verify_native_ended', refuse)
+    elif failure == 'publish':
+        def refuse(*args, **kwargs):
+            raise OSError('fixture publication failure')
+        monkeypatch.setattr(native_end, '_write_private', refuse)
+    elif failure == 'task':
+        monkeypatch.setattr(fresh_child, 'launch_task', lambda _: (
+            dict(task, resources=['/other']), None))
+    elif failure == 'receipt':
+        replace(receipt, dict(_read_private(receipt), task_digest='changed'))
+    elif failure == 'missing':
+        receipt.unlink()
+
+    def finalize():
+        native_end.finalize_native_launch(runner.client, ROOT, runner.run,
+            runner_pid=os.getpid(), code=130, intent=runner.intent, task=task)
+
+    if failure not in (None, 'missing'):
+        with pytest.raises((B1Error, OSError)):
+            finalize()
+        assert not (runner.run / 'ended.json').exists()
+        assert all(not isinstance(event, tuple) for event in state['events'])
+    else:
+        finalize()
+        assert _read_private(runner.run / 'ended.json')['exit_code'] == 130
+        assert state['events'] == ['wait', 'verify', 'verify'] + (
+            [('release_reservations', {'paths': resources})] if failure is None else [])
+
+
+def test_release_failure_after_closure_is_not_retried(runner_cleanup, monkeypatch):
+    runner, state, resources = runner_cleanup
+    state['status'] = 'Z'
+    runner.close()
+    task = {'spawn_id': 'fixture-spawn', 'resources': resources}
+    calls = []
+    async def uncertain(name, args):
+        assert (runner.run / 'ended.json').is_file()
+        calls.append((name, args))
+        raise OSError('fixture uncertain Mail outcome')
+    runner.client.call = uncertain
+
+    def finalize():
+        native_end.finalize_native_launch(runner.client, ROOT, runner.run,
+            runner_pid=os.getpid(), code=130, intent=runner.intent, task=task)
+
+    with pytest.raises(OSError, match='uncertain Mail'):
+        finalize()
+    assert _read_private(runner.run / 'ended.json')['exit_code'] == 130
+    with pytest.raises(FileExistsError):
+        finalize()
+    assert calls == [('release_reservations', {'paths': resources})]
 
 def native_record(fixture, *, pid=201, start='native-birth'):
     client, run, intent, route, *_ = fixture
