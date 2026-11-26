@@ -627,6 +627,7 @@ def test_pinned_gateway_auto_admits_only_approved_spawn_after_restart(mail, tmp_
                 "recipient": name, "instruction": "must not be delivered",
             })
             assert denied["isError"] is True
+            assert denied["structuredContent"]["error"]["code"] == "recipient_not_allowed"
             assert mail["client"].fetch_inbox(
                 project_key=mail["project"], agent_name=name,
                 registration_token=token, include_bodies=True, limit=20,
