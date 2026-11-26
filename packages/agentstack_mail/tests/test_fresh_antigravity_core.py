@@ -84,9 +84,15 @@ def test_agy_handoff_pins_binary_and_keeps_task_out_of_shell(tmp_path, monkeypat
             monkeypatch.setattr(child_api, 'provider_setup', lambda *a, **k: (tmp_path, binary, {}))
             task = 'Read literally: $(touch unwanted) and `touch unwanted2`'
             transport = SyntheticTransport(tmp_path / 'private.sock')
-            first = await child_api.handoff(parent, ROOT, slot='agy-worker', cwd=tmp_path,
+            wrapper = tmp_path / 'wrapper'
+            wrapper.mkdir()
+            (wrapper / 'bin').symlink_to(ROOT / 'bin', target_is_directory=True)
+            marker = tmp_path / 'wrapper-shadow'
+            (wrapper / 'sitecustomize.py').write_text(
+                f'from pathlib import Path; Path({str(marker)!r}).touch()')
+            first = await child_api.handoff(parent, wrapper, slot='agy-worker', cwd=tmp_path,
                 task=task, resources=['report.txt'], transport=transport)
-            again = await child_api.handoff(parent, ROOT, slot='agy-worker', cwd=tmp_path,
+            again = await child_api.handoff(parent, wrapper, slot='agy-worker', cwd=tmp_path,
                 task=task, resources=['report.txt'], transport=transport)
             assert first == again and len(transport.calls) == 1
             argv = shlex.split(transport.calls[0][-1])
@@ -105,6 +111,7 @@ def test_agy_handoff_pins_binary_and_keeps_task_out_of_shell(tmp_path, monkeypat
             probe = subprocess.run(help_argv, cwd=tmp_path, env={**os.environ, 'PYTHONPATH': '.'},
                                    capture_output=True, text=True, timeout=20)
             assert probe.returncode == 0 and 'WORKSPACE_SHADOW_EXECUTED' not in probe.stderr + probe.stdout
+            assert not marker.exists()
             _, base, _ = child_api.family(child)
             assert child_api.read_task(base)['task'] == task
             assert not first['native_ready'] and first['execution'] == 'unknown'
@@ -119,7 +126,12 @@ def test_agy_native_plan_keeps_all_public_tool_names_within_cli_limit(tmp_path):
             folder.mkdir(mode=0o700)
             settings = {'binary': str(tmp_path / 'synthetic-agy'),
                         'model': 'gemini-4-neon-high', 'effort': 'high'}
-            launch = agy.plan(child, ROOT, settings, folder, tmp_path, 'bounded native task', None)
+            wrapper = tmp_path / 'wrapper'
+            wrapper.mkdir()
+            marker = tmp_path / 'wrapper-shadow'
+            (wrapper / 'sitecustomize.py').write_text(
+                f'from pathlib import Path; Path({str(marker)!r}).touch()')
+            launch = agy.plan(child, wrapper, settings, folder, tmp_path, 'bounded native task', None)
             plan = _read_private(folder / 'antigravity/plan.json')
             config = _read_private(folder / 'antigravity/integration/.agents/mcp_config.json')
             assert set(config['mcpServers']) == {plan['mcp_name']}
@@ -136,6 +148,7 @@ def test_agy_native_plan_keeps_all_public_tool_names_within_cli_limit(tmp_path):
                     env={**os.environ, **launch['env']}, capture_output=True, text=True, timeout=20)
                 assert 'WORKSPACE_SHADOW_EXECUTED' not in probe.stderr + probe.stdout
                 assert probe.returncode == 0, probe.stderr
+                assert not marker.exists()
             matcher = next(iter(groups.values()))['PreToolUse'][0]['matcher']
             for tool in ('write_to_file', 'replace_file_content', 'multi_replace_file_content',
                          'write_file', 'edit_file', 'notebook_edit', 'sed_file'):

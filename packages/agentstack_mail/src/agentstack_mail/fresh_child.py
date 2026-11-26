@@ -19,7 +19,7 @@ from .fresh_client import FreshBoundClient
 from .fresh_launch import identity, native_id, operation, pinned, provider_setup, root_path
 from .fresh_end import read_run_end
 from .fresh_proxy import verified_owner
-from .fresh_runtime import FreshRuntime, _directory, _read_private, _write_private
+from .fresh_runtime import FreshRuntime, _directory, _read_private, _write_private, isolated_python_path
 from .storage_origin_contract import B1Error, canonical
 
 
@@ -196,7 +196,7 @@ async def handoff(parent, root, *, slot=None, name=None, cwd, task, resources, t
         command = shlex.join(['/usr/bin/env', 'AGENTSTACK_RUNTIME_MODE=fresh',
             'AGENTSTACK_FRESH_CLIENT_CONTEXT=' + str(child.path), 'AGENTSTACK_PYTHON=' + sys.executable,
             'AGENTSTACK_' + binary_env + '_BIN=' + binary,
-            'PYTHONPATH=' + os.pathsep.join([str(Path(__file__).resolve().parents[1]), str(root)]),
+            'PYTHONPATH=' + isolated_python_path(),
             sys.executable, '-P', '-m', 'agentstack_mail.fresh_client', 'child-run', '--spawn-id', saved['spawn_id']])
         # Commit the attempt before the externally visible tmux operation. An
         # uncertain result is preserved and never automatically launches twice.

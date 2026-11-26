@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import secrets
 import stat
+import sysconfig
 import tempfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -29,6 +30,17 @@ from . import fresh_notifications as notifications
 
 KIND = 'orrery-fresh-mail-isolated-v1'
 FRESH_KIND = 'orrery-fresh-mail-v1'
+
+
+def isolated_python_path() -> str:
+    # Source-tree launches need the package source; an installed package
+    # already lives on the interpreter's normal path. Never prepend the
+    # entire wrapper root or inherit an arbitrary PYTHONPATH.
+    source = Path(__file__).resolve().parents[1]
+    if os.pathsep in str(source):
+        raise B1Error('FRESH_PYTHON_PATH_INVALID')
+    installed = {Path(sysconfig.get_path(key)).resolve() for key in ('purelib', 'platlib')}
+    return '' if source in installed else str(source)
 
 
 def _directory(path: Path) -> None:

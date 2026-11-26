@@ -18,7 +18,7 @@ import stat
 import sys
 from uuid import UUID
 
-from .fresh_runtime import _directory, _read_private, _write_private
+from .fresh_runtime import _directory, _read_private, _write_private, isolated_python_path
 from .storage_origin_contract import B1Error, digest
 
 EFFORTS = {'low', 'medium', 'high', 'xhigh', 'max'}
@@ -68,8 +68,7 @@ def plan(client, root, settings, run, cwd, prompt, session_id):
     plan_path = state / 'plan.json'
     # Native mcp_<server>_<tool> names must fit the 64-character bound.
     mcp_name = 'orrery-' + UUID(client.context['client_id']).hex
-    source = Path(__file__).resolve().parents[1]
-    python_path = os.pathsep.join([str(source), str(root)])
+    python_path = isolated_python_path()
     shared_env = {'AGENTSTACK_RUNTIME_MODE': 'fresh',
                   'AGENTSTACK_FRESH_CLIENT_CONTEXT': str(client.path),
                   'AGENTSTACK_PYTHON': sys.executable, 'PYTHONPATH': python_path}
