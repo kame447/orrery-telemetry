@@ -275,6 +275,9 @@ def guard_native_group(plan_path, fd, ready, leader):
                     rows[pid] = (pgid, parts[2])
                 members = {pid for pid, row in rows.items() if row[0] == leader}
                 if members == {leader, os.getpid()} and rows[leader][1].startswith("Z"):
+                    # Only the guard can attest that it observed normal cleanup.
+                    # EOF or forced group escalation is not that attestation.
+                    os.write(fd, b"C")
                     return 0
             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
                 continue
@@ -407,6 +410,14 @@ def supervise(plan_path, runner_pid, connection):
                         except OSError:
                             guard_lost = True
                     finish_released_native(owner)
+                    if not guard_lost:
+                        # The group is gone, but a guard killed or stopped during
+                        # cleanup cannot be distinguished by group emptiness.
+                        try:
+                            watch_owner.settimeout(1)
+                            guard_lost = watch_owner.recv(1) != b"C"
+                        except OSError:
+                            guard_lost = True
                 else:
                     # Gate EOF: no provider could have executed. Reap only
                     # our direct child, whose PID cannot be reused yet.

@@ -704,12 +704,11 @@ def test_sigkill_stops_active_native_group_without_releasing_lease(tmp_path, mon
                     else:
                         pytest.fail('active native group survived ' + crash_target + ' SIGKILL')
                     await asyncio.wait_for(process.wait(), timeout=15)
-                    if crash_target == 'runner':
+                    # This fixture ignores SIGTERM, requiring escalation that
+                    # kills the guard too. No owner may certify its cleanup.
+                    with pytest.raises(B1Error, match='FRESH_ANTIGRAVITY_CLEANUP_UNCONFIRMED'):
                         verify_native_ended(client, ROOT, folder, runner_pid=runner)
-                    else:
-                        with pytest.raises(B1Error, match='FRESH_ANTIGRAVITY_CLEANUP_UNCONFIRMED'):
-                            verify_native_ended(client, ROOT, folder, runner_pid=runner)
-                        assert not (folder / 'ended.json').exists()
+                    assert not (folder / 'ended.json').exists()
                     assert not (folder / 'antigravity/native-ended.json').exists()
                     with pytest.raises(B1Error, match='RESERVATION_CONFLICT'):
                         await parent.call('reserve_files', {'paths': [str(work / 'owned.txt')]})
@@ -944,4 +943,62 @@ def test_combined_owner_loss_and_escape_cannot_certify_ended(tmp_path, monkeypat
                     while time.monotonic() < deadline and any(alive(key) for key in known):
                         await asyncio.sleep(.1)
                     assert not any(alive(key) for key in known)
+    asyncio.run(run())
+
+
+def test_guardian_unacknowledged_shutdown_retains_lease(tmp_path, monkeypatch):
+    """A stopped guard cannot confirm normal cleanup merely by disappearing."""
+    from agentstack_mail.fresh_antigravity_end import verify_native_ended
+    api = runpy.run_path(str(ROOT / 'bin/lib/process_observation.py'))
+    def rows():
+        result = api['process_snapshot'](include_groups=True)
+        assert isinstance(result, dict) and result
+        return result
+
+    async def run():
+        async with live(tmp_path) as (_, _, parent, _):
+            work = tmp_path / 'work'; work.mkdir()
+            async with launched(parent, work, monkeypatch, mode='active-crash') as (client, process, trace, log, _):
+                active = await until(lambda: next((r for r in trace_rows(trace)
+                    if r['kind'] == 'active-crash'), None), process, log, trace=trace)
+                folder = native_run(client)
+                native = _read_private(folder / 'antigravity/native-process.json')
+                runner, pid = native['runner_pid'], native['pid']
+                before = rows()
+                group = {key: row for key, row in before.items() if row[3] == pid}
+                guards = set(group) - {pid, active['member_pid']}
+                assert len(guards) == 1 and before[pid][2] == native['process_start']
+                guardian = guards.pop()
+                assert before[guardian][0] == pid
+                assert all(api['snapshot_belongs_to'](before, key, runner, os.getuid()) for key in group)
+                try:
+                    assert rows()[guardian] == before[guardian]
+                    os.kill(guardian, signal.SIGSTOP)
+                    assert rows()[runner] == before[runner]
+                    os.kill(runner, signal.SIGINT)
+                    code = await asyncio.wait_for(process.wait(), timeout=40)
+                    assert not any(row[3] == pid for row in rows().values())
+                    try:
+                        verify_native_ended(client, ROOT, folder, runner_pid=runner)
+                        error = None
+                    except B1Error as exc:
+                        error = exc.code
+                    try:
+                        await parent.call('reserve_files', {'paths': [str(work / 'owned.txt')]})
+                        reacquired = True
+                    except B1Error as exc:
+                        assert exc.code == 'RESERVATION_CONFLICT'
+                        reacquired = False
+                    proof = dict(code=code, error=error, reacquired=reacquired,
+                        ended=(folder / 'ended.json').exists(),
+                        receipt=(folder / 'antigravity/native-cleanup.json').exists())
+                    (work / 'guardian-proof.json').write_text(json.dumps(proof))
+                    print('GUARDIAN PROOF', proof, flush=True)
+                    assert error == 'FRESH_ANTIGRAVITY_CLEANUP_UNCONFIRMED', proof
+                    assert not reacquired and not proof['ended'] and not proof['receipt']
+                finally:
+                    for key, original in group.items():
+                        if rows().get(key, (None, None, None, None))[1:] == original[1:]:
+                            try: os.kill(key, signal.SIGKILL)
+                            except ProcessLookupError: pass
     asyncio.run(run())
