@@ -787,3 +787,80 @@ def test_escape_probe_retains_lease_until_detached_child_is_gone(tmp_path, monke
                         await asyncio.sleep(.1)
                     assert rows().get(pid,(None,None,None,None))[1:] != original[1:]
     asyncio.run(run())
+
+
+def test_dual_owner_failure_retains_lease_with_native_alive(tmp_path, monkeypatch):
+    """Simultaneous loss of both owners must not certify a live native as ended."""
+    from agentstack_mail.fresh_antigravity_end import verify_native_ended
+
+    api = runpy.run_path(str(ROOT / 'bin/lib/process_observation.py'))
+
+    def rows():
+        result = api['process_snapshot'](include_groups=True)
+        assert isinstance(result, dict) and result
+        return result
+
+    async def run():
+        async with live(tmp_path) as (_, _, parent, _):
+            work = tmp_path / 'work'
+            work.mkdir()
+            async with launched(parent, work, monkeypatch, mode='active-crash') as (client, process, trace, log, _):
+                active = await until(lambda: next((r for r in trace_rows(trace)
+                    if r['kind'] == 'active-crash'), None), process, log, trace=trace)
+                folder = native_run(client)
+                native = _read_private(folder / 'antigravity/native-process.json')
+                runner, pid = native['runner_pid'], native['pid']
+                before = rows()
+                group = {key: row for key, row in before.items() if row[3] == pid}
+                assert set(group) >= {pid, active['member_pid']}
+                assert len(group) == 3
+                assert group[pid][2] == native['process_start']
+                guardian = next(iter(set(group) - {pid, active['member_pid']}))
+                supervisor = before[pid][0]
+                assert guardian != supervisor and supervisor not in group
+                known = {**group, supervisor: before[supervisor]}
+                assert all(row[1] == os.getuid() for row in known.values())
+                assert all(api['snapshot_belongs_to'](before, key, runner, os.getuid()) for key in known)
+
+                def send_verified(key, sig):
+                    assert rows().get(key, (None, None, None, None))[1:] == known[key][1:]
+                    os.kill(key, sig)
+
+                try:
+                    # Stop both owners before either can observe the other's death.
+                    send_verified(supervisor, signal.SIGSTOP)
+                    send_verified(guardian, signal.SIGSTOP)
+                    send_verified(supervisor, signal.SIGKILL)
+                    send_verified(guardian, signal.SIGKILL)
+                    await asyncio.sleep(2)
+                    observed = rows()
+                    alive = observed.get(pid, (None,None,None,None))[1:] == known[pid][1:]
+                    member_alive = observed.get(active['member_pid'], (None,None,None,None))[1:] == known[active['member_pid']][1:]
+                    with pytest.raises(B1Error, match='FRESH_ANTIGRAVITY_NATIVE_ALIVE'):
+                        verify_native_ended(client, ROOT, folder, runner_pid=runner)
+                    with pytest.raises(B1Error, match='RESERVATION_CONFLICT'):
+                        await parent.call('reserve_files', {'paths': [str(work / 'owned.txt')]})
+                    proof = dict(native_alive=alive, member_alive=member_alive,
+                        ended=(folder / 'ended.json').exists(),
+                        native_ended=(folder / 'antigravity/native-ended.json').exists(),
+                        release_ready=(folder / 'antigravity/release-ready.json').exists(),
+                        reservation_conflict=True)
+                    (work / 'dual-owner-proof.json').write_text(json.dumps(proof))
+                    print('DUAL OWNER PROOF', proof, flush=True)
+                    assert alive and member_alive
+                    assert not any(proof[k] for k in ('ended', 'native_ended', 'release_ready'))
+                finally:
+                    for key in (supervisor, guardian, active['member_pid'], pid):
+                        if rows().get(key, (None,None,None,None))[1:] == known[key][1:]:
+                            try:
+                                os.kill(key, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline and any(
+                        rows().get(key, (None,None,None,None))[1:] == original[1:]
+                        for key, original in known.items()):
+                        await asyncio.sleep(.1)
+                    assert not any(rows().get(key, (None,None,None,None))[1:] == original[1:]
+                                   for key, original in known.items())
+    asyncio.run(run())
