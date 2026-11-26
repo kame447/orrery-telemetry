@@ -239,6 +239,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run)
       DRY_RUN=true
+      export PYTHONDONTWRITEBYTECODE=1
       shift
       ;;
     --retire-legacy-mail)

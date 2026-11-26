@@ -209,6 +209,19 @@ def test_default_uses_agentstack_dry_run(tmp_path):
     assert not (home / ".agentstack").exists()
 
 
+def test_dry_run_does_not_write_python_bytecode(tmp_path, monkeypatch):
+    cache = tmp_path / "bytecode"
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+    monkeypatch.setenv("PYTHONPYCACHEPREFIX", str(cache))
+
+    result, home = _provider_dry_run(tmp_path, None)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "create immutable ORRERY Mail candidate venv" in result.stdout
+    assert not (home / ".agentstack").exists()
+    assert not list(cache.rglob("*.pyc"))
+
+
 def test_obsolete_provider_env_cannot_change_the_native_dry_run(tmp_path):
     result, home = _provider_dry_run(tmp_path, "agentstack")
 
