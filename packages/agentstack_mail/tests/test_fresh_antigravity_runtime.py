@@ -197,10 +197,11 @@ for index, raw in enumerate(sys.stdin, 1):
     emit('result', result=dict(status='SUCCESS', response='READY' if index == 1 else content,
                                denied_actions=[]))
     record('result', index=index)
-    if mode == 'provider-group-stop' and index == 2:
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if mode in ('provider-group-stop', 'provider-group-hangup') and index == 2:
+        signum = signal.SIGHUP if mode == 'provider-group-hangup' else signal.SIGTERM
+        signal.signal(signum, signal.SIG_IGN)
         assert os.getpid() == os.getpgrp() == os.getsid(0)
-        os.killpg(os.getpgrp(), signal.SIGTERM)
+        os.killpg(os.getpgrp(), signum)
         break
 '''
 
@@ -712,12 +713,13 @@ def test_sigkill_stops_active_native_group_without_releasing_lease(tmp_path, mon
     asyncio.run(run())
 
 
-def test_provider_group_signal_can_finish_with_verified_cleanup(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode", ["provider-group-stop", "provider-group-hangup"])
+def test_provider_group_signal_can_finish_with_verified_cleanup(tmp_path, monkeypatch, mode):
     async def run():
         async with live(tmp_path) as (_, _, parent, _):
             work = tmp_path / 'work'
             work.mkdir()
-            async with launched(parent, work, monkeypatch, mode='provider-group-stop') as (client, process, trace, log, _):
+            async with launched(parent, work, monkeypatch, mode=mode) as (client, process, trace, log, _):
                 assert await asyncio.wait_for(process.wait(), timeout=90) == 0, log.read_text()
                 folder = native_run(client)
                 assert (folder / 'antigravity/native-ended.json').exists()

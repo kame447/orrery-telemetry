@@ -212,7 +212,9 @@ def guard_native_group(plan_path, fd, ready, leader):
     read_plan(Path(plan_path))
     stopping = False
 
-    for signum in (signal.SIGTERM, signal.SIGINT):
+    # A native group can receive a terminal hangup while the guard is still
+    # required to anchor its identity. Only the private owner channel ends it.
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, signal.SIG_IGN)
     try:
         if select.select([fd], [], [], 0)[0]:
