@@ -18,6 +18,7 @@
 | 使う系統 | 共通導入後の準備 |
 | --- | --- |
 | Claude Code / Codex | 使うCLIを入れてログインし、下の[最初のagentを起動する手順](#3-最初の-agent-を起動しdashboard-で見る)へ |
+| Gemini (Antigravity) | [Geminiの導入ガイド](antigravity.md)でCLIのサインイン、追加providerの導入と起動条件を確認する |
 | DeepSeek / Local LLM | [APIの初期設定ガイド](native-setup.md)でdsh/Hermes・キー・接続設定を準備し、NEW AGENTから起動。Claude/Codexのログインは不要 |
 
 準備済みのagentを観測するときはDECK / NETWORKを開きます。agent同士を連携させるなら、[Mailの通し確認](#5-しりとりで通しの確認をする)へ進みます。APIの[対応組合せと制限](managed-catalog.md)も確認してください。
@@ -81,6 +82,8 @@ agentstack-selftest
 **成功**: `agentstack-doctor` の必須の確認が `ok:` になり、`missing:` が出ないこと。`warn:` は内容と表示された対処を確認します（補足の `note:` や `mail-features:` 行も通常の出力です）。`agentstack-selftest` が `self-test passed: two agents registered, exchanged messages, ...` で終わります。どこかで止まったら[トラブルシューティング](troubleshooting.md)の該当節へ進んでください。
 
 ### 3. 最初の agent を起動し、dashboard で見る
+
+**Geminiの場合**: [Geminiの導入ガイド](antigravity.md)に従い、CLIのサインインと追加providerの導入を済ませます。稼働中のagentの作業終了・予約解放後にDashboardを再起動し、NEW AGENTで親agentとAntigravityのmodel・effortを選んで起動します。親agentがまだいない場合は先に対応する親を起動してください。DECKのカードとMail接続を確認します。
 
 **DeepSeek / Local LLMの場合**: [APIの初期設定ガイド](native-setup.md)を終え、`http://127.0.0.1:8770/`のNEW AGENTで準備したModelとHarnessを選んで起動します。DECKに科学者名付きのカードが現れたら、ガイドの短い会話確認と下の[Mail確認](#5-しりとりで通しの確認をする)へ進みます。
 

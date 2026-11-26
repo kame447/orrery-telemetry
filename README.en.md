@@ -2,7 +2,7 @@
 
 [日本語](README.md)
 
-Claude Code, Codex, DeepSeek and Local LLM agents can talk directly, divide the work and check each other's results. ORRERY Telemetry shows their work and Mail round trips on one screen. Claude Code and Codex use their own CLIs; DeepSeek and Local LLMs use dsh or Hermes. Choose which to prepare: you do not need to install Claude Code or Codex before using DeepSeek or Local models. Pair Telemetry with [ORRERY cockpit](https://github.com/gyroid-eth/orrery) to use their terminals in the same workspace.
+Claude Code, Codex, Gemini, DeepSeek and Local LLM agents can talk directly, divide the work and check each other's results. ORRERY Telemetry shows their work and Mail round trips on one screen. Claude Code and Codex use their own CLIs; Gemini uses the separately installed Google Antigravity CLI (`agy`); DeepSeek and Local LLMs use dsh or Hermes. Choose which to prepare: you do not need to install Claude Code or Codex before using DeepSeek or Local models. Pair Telemetry with [ORRERY cockpit](https://github.com/gyroid-eth/orrery) to use their terminals in the same workspace.
 
 ![A child joins the open NETWORK view, sends ready, and exchanges three shiritori Mail round trips](docs/img/network-mail.gif)
 
@@ -12,6 +12,7 @@ Claude Code, Codex, DeepSeek and Local LLM agents can talk directly, divide the 
 | --- | --- |
 | Observe agents on your machine | Start a configured agent and open DECK / NETWORK |
 | Start with Claude Code or Codex | Install the shared components, sign in to your chosen CLI, then [start the first agent](docs/getting-started.en.md#3-start-the-first-agent-and-watch-it-on-the-dashboard) |
+| Start with Gemini | Follow the [Gemini setup guide](docs/antigravity.en.md) for CLI sign-in, optional provider installation and NEW AGENT launch requirements |
 | Start with DeepSeek or Local LLMs | Install the shared components, then follow the [API setup guide](docs/native-setup.en.md) for dsh/Hermes, key storage, connection settings and launch. Claude/Codex login is not required |
 | Have agents divide work | Follow the [delegate and Mail end-to-end check](docs/getting-started.en.md#5-play-shiritori-as-an-end-to-end-check) |
 
@@ -38,9 +39,10 @@ Top-level and delegated-child launches protect the selected working folder (not 
 `--project-key` is the absolute path of the folder where agents work, not this repository. Review and confirm the changes, then check the shared components with `~/.agentstack/bin/agentstack-doctor` and `~/.agentstack/bin/agentstack-selftest`. Continue with your chosen provider:
 
 - **Claude Code / Codex**: Install and sign in to the chosen CLI in the same OS environment. Start it with `~/.agentstack/bin/agent-start <project folder>` or `~/.agentstack/bin/agent-start-codex <project folder>`.
+- **Gemini (Antigravity)**: Follow the [Gemini setup guide](docs/antigravity.en.md) to sign in to `agy` and install the optional provider. Restart Dashboard after active agents have finished and released their reservations; select a parent agent, Antigravity model and effort in NEW AGENT.
 - **DeepSeek / Local LLMs**: Follow the [API setup guide](docs/native-setup.en.md) to prepare dsh or Hermes, key storage and connection settings. Then select and launch it from NEW AGENT at `http://127.0.0.1:8770/`. The install command above does not complete this API setup.
 
-For either route, check that the agent appears in DECK. The [standalone procedure](docs/getting-started.en.md#standalone-installation-and-verification) covers preparation, launch and Mail verification.
+After launch, check that the agent appears in DECK. The [standalone procedure](docs/getting-started.en.md#standalone-installation-and-verification) covers preparation, launch and Mail verification.
 
 Installer `--child-default-tools` selects default child tools (empty by default). Explicit choices win; unavailable default items are omitted with a notice. See [tool selection](docs/delegation.en.md#installer-defaults).
 
@@ -121,7 +123,7 @@ Japanese documents are the source of truth. The English entry point is the [Engl
 | Launch isolated global clients and deliver notifications | [Launch, delivery and operator recovery](docs/global-delivery-client.en.md) (legacy remains default) |
 | Move instructions to the user scope | [Block migration and recovery](docs/instruction-migration.en.md) |
 
-[Using it with Obsidian](docs/obsidian.en.md) and the public [demo vault](https://github.com/gyroid-eth/orrery-demo-vault) turn logs, paper notes, and tasks into notes; Obsidian is optional. [Codex App](docs/codex-app.en.md) and [Antigravity / Gemini](docs/antigravity.en.md) are optional providers beyond the CLIs.
+[Using it with Obsidian](docs/obsidian.en.md) and the public [demo vault](https://github.com/gyroid-eth/orrery-demo-vault) turn logs, paper notes, and tasks into notes; Obsidian is optional. [Codex App](docs/codex-app.en.md) and the [Antigravity / Gemini CLI](docs/antigravity.en.md) are optional providers.
 
 Look before installing with the [public demo](https://agentstack-demo.pages.dev/); the [introduction video](https://youtu.be/Jpc1ad7c90k) illustrates the idea ([Japanese version](https://youtu.be/JXoa93TQolU)). See [CONTRIBUTING.md](CONTRIBUTING.md) before contributing code.
 
