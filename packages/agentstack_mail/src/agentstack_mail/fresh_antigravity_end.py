@@ -78,6 +78,21 @@ def _record(client, wrapper_root, run, *, runner_pid=None, require_current=True)
     return root, value, True
 
 
+def cleanup_receipt(record):
+    """Positive, launch-bound evidence from the direct native owner."""
+    return dict(kind='orrery-fresh-antigravity-owner-cleanup-v1',
+                record_digest=digest(record))
+
+
+def _require_cleanup(state, record):
+    try:
+        if _read_private(state / 'native-cleanup.json') == cleanup_receipt(record):
+            return
+    except (B1Error, OSError, ValueError, TypeError):
+        pass
+    raise B1Error('FRESH_ANTIGRAVITY_CLEANUP_UNCONFIRMED')
+
+
 def _observation(record, native):
     result = {'kind': KIND, 'record_digest': digest(record)}
     if not native:
@@ -125,6 +140,9 @@ def verify_native_ended(client, wrapper_root, run, *, runner_pid=None, deadline=
             raise B1Error('FRESH_ANTIGRAVITY_GROUP_ALIVE')
         if _record(client, root, run, runner_pid=runner_pid)[1:] != (record, native):
             raise B1Error('FRESH_ANTIGRAVITY_END_RECORD_INVALID')
+    # Absence of the recorded group is not evidence of owner cleanup: both
+    # monitors may have died while a detached descendant remained alive.
+    _require_cleanup(run / 'antigravity', record)
     return _observation(record, True)
 
 

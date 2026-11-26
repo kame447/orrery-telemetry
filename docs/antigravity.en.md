@@ -15,7 +15,7 @@ The first turn is initialization only. The real CLI init and a real hook must ag
 
 A protected private socket wakes the runner, which reads its authenticated pending notifications and submits a subsequent stream turn. Submission, notification handoff, read, ACK and completed work remain separate facts. Notification handoff does not mark a message read or acknowledged. A wake received while busy is reconsidered after the current turn.
 
-Shutdown verifies that this launch's native process group has ended before releasing only the child's declared reservations. Unknown shutdown retains reservations for explicit `resolve-ended` recovery. Other processes, existing services and legacy Mail are not stopped. Acceptance must distinguish real CLI, MCP, continuation, guard and shutdown observations from synthetic-provider regression tests.
+Shutdown requires both an empty native process group and a launch-bound cleanup receipt from the direct supervisor before releasing only the child's declared reservations. Observed group escape, missing or invalid receipts and guard loss retain reservations as unknown. `resolve-ended` also refuses native-started runs without the receipt; an empty group alone is insufficient. This is not OS containment of arbitrary descendants, and safe recovery when the receipt cannot be obtained remains unresolved. Other processes, existing services and legacy Mail are not stopped. Acceptance must distinguish real CLI, MCP, continuation, guard and shutdown observations from synthetic-provider regression tests.
 
 ## Legacy provider prerequisites
 

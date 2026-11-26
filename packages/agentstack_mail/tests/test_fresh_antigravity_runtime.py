@@ -704,7 +704,12 @@ def test_sigkill_stops_active_native_group_without_releasing_lease(tmp_path, mon
                     else:
                         pytest.fail('active native group survived ' + crash_target + ' SIGKILL')
                     await asyncio.wait_for(process.wait(), timeout=15)
-                    verify_native_ended(client, ROOT, folder, runner_pid=runner)
+                    if crash_target == 'runner':
+                        verify_native_ended(client, ROOT, folder, runner_pid=runner)
+                    else:
+                        with pytest.raises(B1Error, match='FRESH_ANTIGRAVITY_CLEANUP_UNCONFIRMED'):
+                            verify_native_ended(client, ROOT, folder, runner_pid=runner)
+                        assert not (folder / 'ended.json').exists()
                     assert not (folder / 'antigravity/native-ended.json').exists()
                     with pytest.raises(B1Error, match='RESERVATION_CONFLICT'):
                         await parent.call('reserve_files', {'paths': [str(work / 'owned.txt')]})
@@ -863,4 +868,80 @@ def test_dual_owner_failure_retains_lease_with_native_alive(tmp_path, monkeypatc
                         await asyncio.sleep(.1)
                     assert not any(rows().get(key, (None,None,None,None))[1:] == original[1:]
                                    for key, original in known.items())
+    asyncio.run(run())
+
+
+
+def test_combined_owner_loss_and_escape_cannot_certify_ended(tmp_path, monkeypatch):
+    """An empty group after both monitors die does not prove no escaped child."""
+    from agentstack_mail.fresh_antigravity_end import verify_native_ended
+    api = runpy.run_path(str(ROOT / 'bin/lib/process_observation.py'))
+
+    def rows():
+        result = api['process_snapshot'](include_groups=True)
+        assert isinstance(result, dict) and result
+        return result
+
+    async def run():
+        async with live(tmp_path) as (_, _, parent, _):
+            work = tmp_path / 'work'; work.mkdir()
+            async with launched(parent, work, monkeypatch, mode='escape-probe') as (client, process, trace, log, _):
+                active = await until(lambda: next((r for r in trace_rows(trace)
+                    if r['kind'] == 'active-crash'), None), process, log, trace=trace)
+                folder = native_run(client)
+                native = _read_private(folder / 'antigravity/native-process.json')
+                runner, pid, escaped = native['runner_pid'], native['pid'], active['member_pid']
+                before = rows()
+                group = {key: row for key, row in before.items() if row[3] == pid}
+                assert len(group) == 2 and pid in group and escaped not in group
+                assert before[escaped][0] == pid and before[escaped][3] == escaped
+                assert before[pid][2] == native['process_start']
+                guardian = next(iter(set(group) - {pid}))
+                supervisor = before[pid][0]
+                known = {key: before[key] for key in (pid, guardian, supervisor, escaped)}
+                assert all(row[1] == os.getuid() for row in known.values())
+                assert all(api['snapshot_belongs_to'](before, key, runner, os.getuid()) for key in known)
+
+                def alive(key):
+                    return rows().get(key, (None, None, None, None))[1:] == known[key][1:]
+
+                def send_verified(key, sig):
+                    assert alive(key)
+                    os.kill(key, sig)
+
+                try:
+                    send_verified(supervisor, signal.SIGSTOP)
+                    send_verified(guardian, signal.SIGSTOP)
+                    send_verified(supervisor, signal.SIGKILL)
+                    send_verified(guardian, signal.SIGKILL)
+                    send_verified(pid, signal.SIGKILL)
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline and any(row[3] == pid for row in rows().values()):
+                        await asyncio.sleep(.1)
+                    assert not any(row[3] == pid for row in rows().values())
+                    assert alive(escaped)
+                    await asyncio.wait_for(process.wait(), timeout=15)
+                    error = None
+                    try:
+                        verify_native_ended(client, ROOT, folder, runner_pid=runner)
+                    except B1Error as exc:
+                        error = exc.code
+                    with pytest.raises(B1Error, match='RESERVATION_CONFLICT'):
+                        await parent.call('reserve_files', {'paths': [str(work / 'owned.txt')]})
+                    proof = dict(escaped_alive=alive(escaped), native_group_empty=True,
+                        verify_error=error, ended=(folder / 'ended.json').exists(),
+                        release_ready=(folder / 'antigravity/release-ready.json').exists())
+                    (work / 'combined-proof.json').write_text(json.dumps(proof))
+                    print('COMBINED PROOF', proof, flush=True)
+                    assert error == 'FRESH_ANTIGRAVITY_CLEANUP_UNCONFIRMED', proof
+                    assert not proof['ended'] and not proof['release_ready']
+                finally:
+                    for key in (supervisor, guardian, escaped, pid):
+                        if alive(key):
+                            try: os.kill(key, signal.SIGKILL)
+                            except ProcessLookupError: pass
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline and any(alive(key) for key in known):
+                        await asyncio.sleep(.1)
+                    assert not any(alive(key) for key in known)
     asyncio.run(run())

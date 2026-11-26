@@ -291,7 +291,8 @@ def test_operator_resolution_retains_proof_after_wrapper_removal_and_pid_reuse(c
     (wrapper / 'bin').mkdir(parents=True)
     executable = wrapper / 'bin/agentstack-runtime-client';executable.touch()
     intent['wrapper_root'] = str(wrapper);replace(run / 'intent.json', intent)
-    native_record(closed_candidate)
+    record = native_record(closed_candidate)
+    _write_private(run / 'antigravity/native-cleanup.json', native_end.cleanup_receipt(record))
     monkeypatch.setattr(native_end, 'process_api', lambda _: api)
     assert end.resolve_ended(client, wrapper, run.name, confirm_ended=True)['end_kind'] == 'resolved'
     value = _read_private(run / 'resolved-ended.json')
@@ -322,12 +323,15 @@ def test_real_group_member_outlives_native_leader_and_blocks_end(closed_candidat
         api = native_end.process_api(ROOT)
         start = api['process_start'](leader.pid)
         assert start not in (None, 'absent')
-        native_record(closed_candidate, pid=leader.pid, start=start)
+        record = native_record(closed_candidate, pid=leader.pid, start=start)
         leader.terminate();leader.wait(timeout=5)
         with pytest.raises(B1Error, match='FRESH_ANTIGRAVITY_GROUP_ALIVE'):
             native_end.verify_native_ended(client, ROOT, run)
         assert member.poll() is None
         member.terminate();member.wait(timeout=5)
+        with pytest.raises(B1Error, match='FRESH_ANTIGRAVITY_CLEANUP_UNCONFIRMED'):
+            native_end.verify_native_ended(client, ROOT, run)
+        _write_private(run / 'antigravity/native-cleanup.json', native_end.cleanup_receipt(record))
         observation = native_end.verify_native_ended(client, ROOT, run)
         assert observation['process']['state'] == 'absent' and observation['group']['state'] == 'empty'
     finally:
@@ -501,3 +505,21 @@ def test_containment_witness_survives_failed_publication_and_reparent(tmp_path, 
     marker = tmp_path / 'native-containment-lost.json'
     assert _read_private(marker) == owner.containment_witness
     assert owner.native_group(time.monotonic() + 3) == group
+
+
+@pytest.mark.parametrize('damage', ['missing', 'malformed', 'wrong-record'])
+def test_empty_group_without_bound_owner_cleanup_cannot_resolve(closed_candidate, monkeypatch, damage):
+    client, run, intent, route, state, api, _ = closed_candidate
+    record = native_record(closed_candidate)
+    monkeypatch.setattr(native_end, 'process_api', lambda _: api)
+    receipt = run / 'antigravity/native-cleanup.json'
+    if damage == 'malformed':
+        receipt.write_bytes(b'incomplete')
+    elif damage == 'wrong-record':
+        _write_private(receipt, native_end.cleanup_receipt(dict(record, pid=999)))
+    with pytest.raises(B1Error, match='FRESH_ANTIGRAVITY_CLEANUP_UNCONFIRMED'):
+        native_end.verify_native_ended(client, ROOT, run)
+    with pytest.raises(B1Error, match='FRESH_ANTIGRAVITY_CLEANUP_UNCONFIRMED'):
+        close(closed_candidate)
+    assert not (run / 'resolved-ended.json').exists()
+    assert not (run / 'ended.json').exists()

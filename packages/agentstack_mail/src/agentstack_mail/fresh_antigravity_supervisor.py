@@ -418,6 +418,14 @@ def supervise(plan_path, runner_pid, connection):
                 # An unexpected guard exit is not a normal provider exit.
                 # Keep reservations until the existing explicit resolution path
                 # proves termination; do not publish a normal cleanup receipt.
+                # Publish a positive cleanup receipt before acknowledging stop.
+                # Missing/failed publication, guard loss or an observed escape
+                # cannot be converted into a clean group-empty observation.
+                if (not guard_lost and owner.native_record is not None
+                        and owner.containment_witness is None):
+                    from .fresh_antigravity_end import cleanup_receipt
+                    _write_private(owner.state / "native-cleanup.json",
+                                   cleanup_receipt(owner.native_record))
                 code = 1 if guard_lost else 0
                 _send(connection, {"error": "FRESH_ANTIGRAVITY_GUARD_LOST"}
                       if guard_lost else {"native_code": owner.native_code})
