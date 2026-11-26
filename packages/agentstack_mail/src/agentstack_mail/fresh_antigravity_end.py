@@ -34,6 +34,9 @@ def _record(client, wrapper_root, run, *, runner_pid=None, require_current=True)
             or require_current and _read_private(run.parent.parent / 'current.json') != {'launch_id': run.name}):
         raise B1Error('FRESH_ANTIGRAVITY_END_RECORD_INVALID')
     state = run / 'antigravity';_directory(state)
+    # A group-empty observation is insufficient after a proven escape.
+    if present(state / 'native-containment-lost.json'):
+        raise B1Error('FRESH_ANTIGRAVITY_CONTAINMENT_LOST')
     native, absent = (present(state / name) for name in ('native-process.json', 'native-not-started.json'))
     if native == absent:
         raise B1Error('FRESH_ANTIGRAVITY_END_RECORD_INVALID')

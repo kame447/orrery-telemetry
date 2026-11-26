@@ -188,9 +188,9 @@ for index, raw in enumerate(sys.stdin, 1):
         message = next(row for row in inbox if row['subject'] == 'Native resume continuation')
         reply = proxy_call('reply_message', {'message_id': message['id'], 'body_md': message['body_md']})
         record('resume-proxy', status=owner, reply=reply, decisions=decisions)
-    if mode == 'active-crash' and index == 2:
+    if mode in ('active-crash', 'escape-probe') and index == 2:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        member = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(90)'])
+        member = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(90)'], start_new_session=(mode == 'escape-probe'))
         record('active-crash', member_pid=member.pid)
         while True:
             time.sleep(.1)
@@ -731,4 +731,59 @@ def test_provider_group_signal_can_finish_with_verified_cleanup(tmp_path, monkey
                 assert (folder / 'antigravity/native-ended.json').exists()
                 assert _read_private(folder / 'ended.json')['exit_code'] == 0
                 await parent.call('reserve_files', {'paths': [str(work / 'owned.txt')]})
+    asyncio.run(run())
+
+
+def test_escape_probe_retains_lease_until_detached_child_is_gone(tmp_path, monkeypatch):
+    api = runpy.run_path(str(ROOT / 'bin/lib/process_observation.py'))
+    def rows():
+        result = api['process_snapshot'](include_groups=True)
+        assert isinstance(result, dict) and result
+        return result
+
+    async def run():
+        async with live(tmp_path) as (_, _, parent, _):
+            work = tmp_path / 'work'; work.mkdir()
+            async with launched(parent, work, monkeypatch, mode='escape-probe') as (client, process, trace, log, _):
+                active = await until(lambda: next((r for r in trace_rows(trace)
+                    if r['kind'] == 'active-crash'), None), process, log, trace=trace)
+                folder = native_run(client)
+                native = _read_private(folder / 'antigravity/native-process.json')
+                pid = active['member_pid']
+                before = rows()
+                original = before[pid]
+                assert original[0] == native['pid'] and original[1] == os.getuid()
+                assert original[3] == pid and native['pgid'] != pid
+                assert api['snapshot_belongs_to'](before, pid, native['runner_pid'], os.getuid())
+                try:
+                    assert rows()[native['pid']][2] == native['process_start']
+                    assert rows()[native['runner_pid']] == before[native['runner_pid']]
+                    os.kill(native['runner_pid'], signal.SIGINT)
+                    code = await asyncio.wait_for(process.wait(), timeout=35)
+                    after = rows()
+                    alive = after.get(pid, (None,None,None,None))[1:] == original[1:]
+                    released = False
+                    try:
+                        await parent.call('reserve_files', {'paths': [str(work / 'owned.txt')]})
+                        released = True
+                    except B1Error as error:
+                        assert error.code == 'RESERVATION_CONFLICT', error.code
+                    proof = dict(escaped_alive=alive, reservation_reacquired=released, launcher_exit=code,
+                                 ended=(folder / 'ended.json').exists(),
+                                 native_ended=(folder / 'antigravity/native-ended.json').exists(),
+                                 release_ready=(folder / 'antigravity/release-ready.json').exists())
+                    (work / 'escape-proof.json').write_text(json.dumps(proof))
+                    print('ESCAPE PROOF', proof, flush=True)
+                    assert not (alive and released), proof
+                    assert not released and not proof['ended'] and not proof['native_ended']
+                    assert not proof['release_ready']
+                    assert (folder / 'antigravity/native-containment-lost.json').is_file()
+                finally:
+                    if rows().get(pid,(None,None,None,None))[1:] == original[1:]:
+                        try: os.kill(pid, signal.SIGKILL)
+                        except ProcessLookupError: pass
+                    deadline = time.monotonic()+5
+                    while time.monotonic()<deadline and rows().get(pid,(None,None,None,None))[1:] == original[1:]:
+                        await asyncio.sleep(.1)
+                    assert rows().get(pid,(None,None,None,None))[1:] != original[1:]
     asyncio.run(run())

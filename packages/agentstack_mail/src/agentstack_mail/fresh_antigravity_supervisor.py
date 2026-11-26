@@ -42,6 +42,7 @@ class NativeOwner:
         self.expected = identity(self.client)
         self.runner_pid = runner_pid
         self.process = self.native_record = self.native_code = None
+        self.containment_witness = None
         self.processes = runpy.run_path(str(Path(self.plan["wrapper_root"])
                                            / "bin/lib/process_observation.py"))
 
@@ -73,6 +74,24 @@ class NativeOwner:
         group = {pid: row for pid, row in rows.items() if row[3] == record["pgid"]}
         if any(row[1] != os.getuid() for row in group.values()):
             raise B1Error("FRESH_ANTIGRAVITY_PROCESS_CHANGED")
+        # A still-related descendant can leave the process group (e.g. setsid).
+        # Persist a fail-closed witness before sending any group signal.
+        # Never signal a process outside the anchored group automatically.
+        escaped = {pid: row for pid, row in rows.items() if pid not in group
+                   and self.processes["snapshot_belongs_to"](
+                       rows, pid, record["pid"], os.getuid())}
+        if escaped and self.containment_witness is None:
+            self.containment_witness = {"native": record, "escaped": [
+                {"pid": pid, "process_start": row[2], "pgid": row[3]}
+                for pid, row in sorted(escaped.items())]}
+        # A failed publication must not become a clean observation when the
+        # descendant disappears or reparents before the next cleanup retry.
+        if self.containment_witness is not None:
+            marker = self.state / "native-containment-lost.json"
+            try:
+                _write_private(marker, self.containment_witness)
+            except FileExistsError:
+                pass  # Presence alone blocks closure pending explicit recovery.
         return group
 
     def reap_native_if_ended(self, deadline):

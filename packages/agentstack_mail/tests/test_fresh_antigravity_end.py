@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import runpy
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -42,6 +43,7 @@ def runner_cleanup(tmp_path, monkeypatch):
     owner.native_record = dict(pid=pid, process_start='native-birth', pgid=pid)
     owner.processes = {'process_snapshot': lambda **_: state['rows']}
     owner.native_code = None
+    owner.containment_witness = None
 
     def wait(*, timeout):
         assert state['rows'] == {pid: row} and state['status'] == 'Z'
@@ -254,7 +256,7 @@ def native_record(fixture, *, pid=201, start='native-birth'):
     return value
 
 
-@pytest.mark.parametrize('damage', ['native-alive', 'pid-reused', 'group-child', 'wrong-owner', 'both-records'])
+@pytest.mark.parametrize('damage', ['native-alive', 'pid-reused', 'group-child', 'wrong-owner', 'both-records', 'containment-lost'])
 def test_native_ambiguity_keeps_normal_and_operator_closure_unknown(closed_candidate, monkeypatch, damage):
     client, run, intent, route, state, api, _ = closed_candidate
     proof = native_record(closed_candidate)
@@ -270,6 +272,9 @@ def test_native_ambiguity_keeps_normal_and_operator_closure_unknown(closed_candi
     elif damage == 'wrong-owner':
         proof['mail_agent_id'] += 1
         replace(run / 'antigravity/native-process.json', proof)
+    elif damage == 'containment-lost':
+        # Even malformed/torn evidence must not be interpreted as safe.
+        (run / 'antigravity/native-containment-lost.json').write_bytes(b'incomplete')
     else:
         _write_private(run / 'antigravity/native-not-started.json', dict(
             launch_id=run.name, context_digest=client.context_digest, **identity(client)))
@@ -339,6 +344,7 @@ def test_native_owner_cleans_direct_child_when_record_publication_fails(tmp_path
     owner.runner_pid = os.getpid()
     owner.client = SimpleNamespace(context_digest='fixture-context')
     owner.native_record = owner.native_code = None
+    owner.containment_witness = None
     owner.processes = runpy.run_path(str(ROOT / 'bin/lib/process_observation.py'))
     occupied = owner.state / 'native-process.json'
     occupied.write_bytes(b'untouched')
@@ -467,3 +473,31 @@ def test_runner_refuses_input_after_supervisor_control_loss():
         with pytest.raises(B1Error, match="FRESH_ANTIGRAVITY_SUPERVISOR_LOST"):
             runner.send("after")
         assert stream.getvalue() == before
+
+
+def test_containment_witness_survives_failed_publication_and_reparent(tmp_path, monkeypatch):
+    from agentstack_mail import fresh_antigravity_supervisor as supervisor
+    pid, child = 100000001, 100000002
+    uid = os.getuid()
+    owner = NativeOwner.__new__(NativeOwner)
+    owner.state = tmp_path
+    owner.native_record = dict(pid=pid, pgid=pid, process_start='native-birth')
+    owner.process = SimpleNamespace(pid=pid)
+    owner.containment_witness = None
+    group = {pid: (os.getpid(), uid, 'native-birth', pid)}
+    rows = dict(group)
+    rows[child] = (pid, uid, 'child-birth', child)
+    owner.processes = runpy.run_path(str(ROOT / 'bin/lib/process_observation.py'))
+    owner.processes['process_snapshot'] = lambda **_: rows
+    with monkeypatch.context() as m:
+        def unavailable(*args):
+            raise OSError('fixture disk unavailable')
+        m.setattr(supervisor, '_write_private', unavailable)
+        with pytest.raises(OSError, match='fixture disk unavailable'):
+            owner.native_group(time.monotonic() + 3)
+    assert owner.containment_witness['escaped'][0]['pid'] == child
+    rows.pop(child)
+    assert owner.native_group(time.monotonic() + 3) == group
+    marker = tmp_path / 'native-containment-lost.json'
+    assert _read_private(marker) == owner.containment_witness
+    assert owner.native_group(time.monotonic() + 3) == group
