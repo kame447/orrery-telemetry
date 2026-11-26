@@ -119,7 +119,7 @@ def verify_mcp_spawn(*, enabled: bool, ledger: Mapping, launch: Mapping,
                      sender_id=sender["agent_id"], registered_at=peer["registered_at"])
 
 
-def _private_regular(path: Path) -> bytes:
+def _private_regular(path: Path, *, snapshot_bound: bool = False) -> bytes:
     parent = path.parent.lstat()
     if (not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid()
             or parent.st_mode & 0o022):
@@ -132,8 +132,14 @@ def _private_regular(path: Path) -> bytes:
     try:
         info = os.fstat(fd)
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-                or info.st_mode & 0o077 or info.st_nlink != 1
-                or info.st_size > _MAX_PROFILE_BYTES):
+                or info.st_mode & 0o077 or info.st_size > _MAX_PROFILE_BYTES):
+            raise AdmissionError("unsafe_profile_file")
+        if info.st_nlink != 1:
+            # A concurrent atomic replacement can unlink an already-open inode.
+            # Refuse the old snapshot without reading it; only a snapshot-bound
+            # CAS may report contention so the caller can re-verify from scratch.
+            if snapshot_bound and info.st_nlink == 0:
+                raise AdmissionError("profile_changed")
             raise AdmissionError("unsafe_profile_file")
         data = os.read(fd, _MAX_PROFILE_BYTES + 1)
         if len(data) > _MAX_PROFILE_BYTES:
@@ -269,7 +275,7 @@ def append_verified_peer(profile_path: Path, candidate: Candidate, *, expected_s
         raise AdmissionError("invalid_candidate")
     if not isinstance(expected_sha256, str) or not _HEX64.fullmatch(expected_sha256):
         raise AdmissionError("invalid_snapshot")
-    initial = _private_regular(profile_path)
+    initial = _private_regular(profile_path, snapshot_bound=True)
     if hashlib.sha256(initial).hexdigest() != expected_sha256:
         raise AdmissionError("profile_changed")
     try:
@@ -320,7 +326,7 @@ def append_verified_peer(profile_path: Path, candidate: Candidate, *, expected_s
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise AdmissionError("sender_busy") from exc
-        if hashlib.sha256(_private_regular(profile_path)).hexdigest() != expected_sha256:
+        if hashlib.sha256(_private_regular(profile_path, snapshot_bound=True)).hexdigest() != expected_sha256:
             raise AdmissionError("profile_changed")
         if already_pinned:
             return "already_registered"
