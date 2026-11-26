@@ -42,6 +42,11 @@ def test_roster_display_cache_parallel_get_expiry_and_owner_changes_are_not_auth
         async with cleanup_fixture(tmp_path,monkeypatch) as (runtime,people,client,operator,run,row,calls,*_):
             backend=Backend(operator.path,ROOT);entered=threading.Event();release=threading.Event();observed=[]
             def slow(self,selections,*,deadline):
+                # Two real Mac ps snapshots plus tmux inventory can exceed 250 ms.
+                # Simulate that cost without a timing-sensitive sleep or weakening
+                # the underlying fail-closed process/route checks.
+                remaining=deadline-time.monotonic()
+                assert .5 < remaining <= 1.0
                 observed.append(deadline);entered.set();assert release.wait(5)
                 return {people[0]['agent_id']:dict(category='finished',running=False,attached=False)}
             monkeypatch.setattr(Targets,'display_snapshot',slow)
@@ -63,6 +68,138 @@ def test_roster_display_cache_parallel_get_expiry_and_owner_changes_are_not_auth
             await runtime.core.recover(people[1]['agent_id'],expected_generation=0,new_token='roster-fixture-new-owner-secret')
             with pytest.raises(B1Error):await backend.roster()
             assert len(observed)==1
+    asyncio.run(scenario())
+
+
+def test_roster_unended_native_presence_is_not_running_or_cleanup_authority(tmp_path,monkeypatch):
+    async def scenario():
+        from agentstack_mail.fresh_targets import Targets
+        from test_fresh_targets import cleanup_fixture, replace
+        async with cleanup_fixture(tmp_path,monkeypatch) as (_,people,client,operator,run,route,*_):
+            backend=Backend(operator.path,ROOT)
+            monkeypatch.setattr(Targets,'display_snapshot',lambda *args,**kwargs:{})
+            async def rows():
+                return {a['name']:a for a in (await backend.roster())['agents']}
+            ended=await rows()
+            assert ended['Alpha']['native_launch_unended'] is False
+            assert ended['Beta']['native_launch_unended'] is False
+            (run/'ended.json').unlink()
+            pending=await rows()
+            alpha=pending['Alpha']
+            assert alpha['mail_agent_id']==people[0]['agent_id']
+            assert alpha['native_launch_unended'] is True
+            assert alpha['running'] is None and alpha['category']=='unknown'
+            assert alpha['attached'] is True and alpha['observation']['state']=='unknown'
+            assert pending['Beta']['native_launch_unended'] is False
+            replace(run/'tmux.json',dict(route,launch_id=str(uuid4())))
+            invalid=await rows()
+            assert invalid['Alpha']['native_launch_unended'] is False
+            assert invalid['Alpha']['running'] is None
+    asyncio.run(scenario())
+
+
+def test_roster_display_round_robin_retains_only_fresh_unvisited_observations(monkeypatch):
+    import dashboard.fresh_backend as module
+    from agentstack_mail.fresh_targets import Targets
+    monkeypatch.setattr('agentstack_mail.fresh_targets.DISPLAY_SOCKET_LIMIT',2)
+    clock=[10.0];calls=[];unavailable=set()
+    monkeypatch.setattr(module,'time',SimpleNamespace(monotonic=lambda:clock[0]))
+    backend=Backend.__new__(Backend)
+    backend.client=None;backend.root=ROOT
+    backend._display_lock=threading.Lock()
+    backend._display_offset=0;backend._display_cache=None
+    selections=[SimpleNamespace(client=SimpleNamespace(context={'mail_agent_id':aid}),
+        route={'socket_path':'/synthetic-socket-'+str(aid),'socket_identity':[1,aid]}) for aid in (1,2,3)]
+    def observe(self,chosen,*,deadline):
+        ids=[s.client.context['mail_agent_id'] for s in chosen]
+        assert deadline==clock[0]+1.0
+        calls.append(ids)
+        return {aid:dict(category='running',running=True,attached=False) for aid in ids if aid not in unavailable}
+    # This unit test supplies synthetic selections, not a bound Mail operator.
+    # Stub the constructor as well as OS observation; real binding is tested above.
+    monkeypatch.setattr(Targets,'__init__',lambda self,operator,root:None)
+    monkeypatch.setattr(Targets,'display_snapshot',observe)
+    key=('instance-owner',1,((1,'sig1'),(2,'sig2'),(3,'sig3')))
+    assert set(backend._display_observations(key,selections))=={1,2}
+    clock[0]=10.5
+    assert set(backend._display_observations(key,selections))=={1,2}
+    assert len(calls)==1
+    clock[0]=11.1
+    combined=backend._display_observations(key,selections)
+    assert set(combined)=={1,2,3} and combined[2][0]==10.0
+    assert combined[1][0]==combined[3][0]==11.1
+    clock[0]=12.2;unavailable.add(2)
+    assert set(backend._display_observations(key,selections))=={1,3}
+    assert calls==[[1,2],[3,1],[2,3]]
+    clock[0]=16.3
+    with backend._display_lock:
+        assert set(backend._display_observations(key,selections))=={3}
+        for changed_key in (
+            ('different-owner',1,key[2]),('instance-owner',2,key[2]),
+            ('instance-owner',1,((1,'changed-signature'),(2,'sig2'),(3,'sig3'))),
+        ):
+            assert backend._display_observations(changed_key,selections)=={}
+    clock[0]=16.4
+    assert set(backend._display_observations(('instance-owner',2,key[2]),selections))=={1}
+
+
+@pytest.mark.parametrize('count',[5,12])
+def test_roster_observes_all_normal_sockets_even_on_revision_changes(monkeypatch,count):
+    import dashboard.fresh_backend as module
+    from agentstack_mail.fresh_targets import Targets
+    clock=[10.0];calls=[]
+    monkeypatch.setattr(module,'time',SimpleNamespace(monotonic=lambda:clock[0]))
+    backend=Backend.__new__(Backend)
+    backend.client=None;backend.root=ROOT
+    backend._display_lock=threading.Lock()
+    backend._display_offset=0;backend._display_cache=None
+    selections=[SimpleNamespace(client=SimpleNamespace(context={'mail_agent_id':aid}),
+        route={'socket_path':'/synthetic-socket-'+str(aid),'socket_identity':[1,aid]}) for aid in range(1,count+1)]
+    monkeypatch.setattr(Targets,'__init__',lambda self,operator,root:None)
+    def observe(self,chosen,*,deadline):
+        ids=[s.client.context['mail_agent_id'] for s in chosen]
+        calls.append(ids)
+        return {aid:dict(category='running',running=True,attached=False) for aid in ids}
+    monkeypatch.setattr(Targets,'display_snapshot',observe)
+    for revision in range(16):
+        key=('instance-owner',revision,tuple((i,'sig'+str(i)) for i in range(1,count+1)))
+        facts=backend._display_observations(key,selections)
+        assert set(facts)==set(range(1,count+1))
+        assert all(stamp==clock[0] for stamp,_ in facts.values())
+        clock[0]+=3
+    assert len(calls)==16 and all(len(batch)==count for batch in calls)
+
+
+def test_graph_uses_only_matching_roster_observations(tmp_path,monkeypatch):
+    async def scenario():
+        async with live(tmp_path) as (runtime,people,parent,_):
+            backend=Backend(parent.path,ROOT)
+            original=backend.roster
+            category='finished'
+            async def observed():
+                data=await original()
+                rows={a['name']:a for a in data['agents']}
+                rows['Alpha'].update(running=True,category='running',observation={'state':'observed'})
+                rows['Beta'].update(running=False,category=category,observation={'state':'observed'})
+                # An observation for an identity that changed must not attach
+                # to an older graph snapshot merely because the ID matches.
+                rows['Gamma'].update(name='DifferentName',running=True,category='running',observation={'state':'observed'})
+                return data
+            monkeypatch.setattr(backend,'roster',observed)
+            with dashboard(parent,backend,monkeypatch,tmp_path) as (_,request):
+                code,graph=await asyncio.to_thread(request,'/api/graph?all=1')
+                assert code==200
+                nodes={n['name']:n for n in graph['nodes']}
+                assert (nodes['Alpha']['running'],nodes['Alpha']['state']) == (True,'run')
+                assert (nodes['Beta']['running'],nodes['Beta']['state']) == (False,'finished')
+                assert (nodes['Gamma']['running'],nodes['Gamma']['state']) == (None,'unknown')
+                category='gone'
+                code,graph=await asyncio.to_thread(request,'/api/graph?all=1')
+                assert code==200
+                beta=next(n for n in graph['nodes'] if n['name']=='Beta')
+                assert (beta['running'],beta['state']) == (False,'gone')
+                code,graph=await asyncio.to_thread(request,'/api/graph?all=1&spawn_only=1')
+                assert code==200 and graph['nodes']==[] and graph['edges']==[]
     asyncio.run(scenario())
 
 

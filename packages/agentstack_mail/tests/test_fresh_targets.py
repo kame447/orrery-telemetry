@@ -176,15 +176,15 @@ def test_display_batch_limits_sockets_and_snapshots_and_never_grants_cleanup(tmp
             processes['process_snapshot']=lambda **kw:observed.append(kw) or original(**kw)
             chosen=[]
             for index in range(128):
-                path=tmp_path/('batch-'+str(index%3)+'.sock');path.touch(exist_ok=True)
+                path=tmp_path/('batch-'+str(index%13)+'.sock');path.touch(exist_ok=True)
                 chosen.append(selected_copy(selected,client=SimpleNamespace(context=dict(mail_agent_id=index+1)),
                     route=dict(row,socket_path=str(path))))
             facts=target.display_snapshot(chosen,deadline=time.monotonic()+1)
             assert len(observed)==2
-            assert sum(a[0]=='list-panes' for a,k in calls)==2
-            assert sum(a[0]=='list-clients' for a,k in calls)==2
+            assert sum(a[0]=='list-panes' for a,k in calls)==12
+            assert sum(a[0]=='list-clients' for a,k in calls)==12
             assert facts and all(v['category']=='finished' for v in facts.values())
-            assert 3 not in facts  # Third socket remains explicitly unobserved.
+            assert 13 not in facts  # Thirteenth socket remains explicitly unobserved.
             count=(len(observed),len(calls))
             assert target.display_snapshot(chosen,deadline=time.monotonic()-1)=={}
             assert count==(len(observed),len(calls))
@@ -192,6 +192,38 @@ def test_display_batch_limits_sockets_and_snapshots_and_never_grants_cleanup(tmp
             with pytest.raises(B1Error,match='FRESH_CLEANUP_ATTACHED'):
                 await target.cleanup(dict(session='Alpha'))
             assert not any(a[0]=='kill-pane' for a,k in calls)
+    asyncio.run(scenario())
+
+
+def test_display_parallel_inventory_failure_isolated_and_worker_limit(tmp_path,monkeypatch):
+    async def scenario():
+        from dataclasses import replace as selected_copy
+        import threading
+        import time
+        async with cleanup_fixture(tmp_path,monkeypatch) as (_,_,_,operator,_,route,_,tmux,_,_):
+            target=Targets(operator,ROOT);selected=await target.select_managed(dict(session='Alpha'))
+            chosen=[]
+            for index in range(8):
+                path=tmp_path/('parallel-'+str(index)+'.sock');path.touch()
+                chosen.append(selected_copy(selected,client=SimpleNamespace(context=dict(mail_agent_id=index+1)),
+                    route=dict(route,socket_path=str(path))))
+            barrier=threading.Barrier(4);lock=threading.Lock();active=0;peak=0
+            original=Targets._inventory
+            def inspect(transport,deadline):
+                nonlocal active,peak
+                index=int(transport.path.stem.split('-')[1])
+                with lock:
+                    active+=1;peak=max(peak,active)
+                try:
+                    if index<4:barrier.wait(timeout=2)
+                    if index==1:raise B1Error('FRESH_CLEANUP_OBSERVATION_UNAVAILABLE')
+                    return original(transport,deadline)
+                finally:
+                    with lock:active-=1
+            monkeypatch.setattr(Targets,'_inventory',staticmethod(inspect))
+            facts=target.display_snapshot(chosen,deadline=time.monotonic()+5)
+            assert set(facts)==set(range(1,9))-{2}
+            assert peak==4 and active==0
     asyncio.run(scenario())
 
 
