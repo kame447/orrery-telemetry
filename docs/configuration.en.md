@@ -45,6 +45,17 @@ env AGENTSTACK_RUNTIME_MODE=fresh AGENTSTACK_CLIENT_CONFIG= AGENTSTACK_GLOBAL_SE
   "$orrery_source/scripts/install.sh" --dry-run
 ```
 
+## Dashboard service logs and restarts
+
+| Environment variable | Default | Purpose |
+| --- | --- | --- |
+| `AGENTSTACK_DASHBOARD_LOG` | `$AGENTSTACK_RUNTIME_DIR/dashboard.log` | Log path for the dashboard service |
+| `AGENTSTACK_DASHBOARD_LOG_MAX_BYTES` | `5242880` (5 MiB) | Log size threshold in bytes before rotation |
+| `AGENTSTACK_DASHBOARD_LOG_BACKUPS` | `3` | Number of rotated logs to keep |
+| `AGENTSTACK_DASHBOARD_RESTART_DELAY` | `5` | Seconds before a supervised-background self-restart |
+
+The installer saves and preserves these values across routine updates. Under launchd, restart behavior is controlled by the plist KeepAlive / ThrottleInterval (5 seconds), not by the delay above.
+
 ## Dashboard / `server.py`
 
 `server.py` directly reads the following `AGENTSTACK_*` values.
