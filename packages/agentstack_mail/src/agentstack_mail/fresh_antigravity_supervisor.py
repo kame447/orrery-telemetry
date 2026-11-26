@@ -20,6 +20,21 @@ from .fresh_runtime import _write_private
 from .storage_origin_contract import B1Error
 
 
+def _diag(message):
+    try:
+        print(message, file=sys.stderr)
+    except OSError:
+        pass
+
+
+def _owner_argv(plan_path, *args):
+    # The worktree may contain modules shadowing the stdlib or this package.
+    # Python >=3.11 supports safe-path mode; use a trusted cwd for every
+    # interpreter in the ownership chain, then chdir only for native exec.
+    return [sys.executable, "-P", "-m", "agentstack_mail.fresh_antigravity_supervisor",
+            "--plan", str(Path(plan_path).resolve()), *args]
+
+
 class NativeOwner:
     def __init__(self, plan_path, runner_pid):
         self.client, self.plan, self.run, _ = read_plan(Path(plan_path))
@@ -64,7 +79,7 @@ class NativeOwner:
         if set(self.native_group(deadline)) != {self.process.pid}:
             return False
         remaining = max(0.01, min(1, deadline - time.monotonic()))
-        state = subprocess.run(["ps", "-p", str(self.process.pid), "-o", "stat="],
+        state = subprocess.run(["/bin/ps", "-p", str(self.process.pid), "-o", "stat="],
             capture_output=True, text=True, timeout=remaining, check=False)
         if state.returncode != 0 or not state.stdout.strip():
             raise B1Error("FRESH_ANTIGRAVITY_PROCESS_UNCONFIRMED")
@@ -134,11 +149,10 @@ class SupervisedNative:
         self.control, peer = socket.socketpair()
         try:
             self.worker = subprocess.Popen(
-                [sys.executable, "-m", "agentstack_mail.fresh_antigravity_supervisor",
-                 "--plan", str(plan_path), "--runner", str(os.getpid()),
-                 "--control-fd", str(peer.fileno())],
+                _owner_argv(plan_path, "--runner", str(os.getpid()),
+                            "--control-fd", str(peer.fileno())),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None,
-                start_new_session=True, pass_fds=(peer.fileno(),))
+                cwd="/", start_new_session=True, pass_fds=(peer.fileno(),))
             self.stdin, self.stdout = self.worker.stdin, self.worker.stdout
         finally:
             peer.close()
@@ -198,12 +212,8 @@ def guard_native_group(plan_path, fd, ready, leader):
     read_plan(Path(plan_path))
     stopping = False
 
-    def stop_requested(signum, frame):
-        nonlocal stopping
-        stopping = True
-
     for signum in (signal.SIGTERM, signal.SIGINT):
-        signal.signal(signum, stop_requested)
+        signal.signal(signum, signal.SIG_IGN)
     try:
         if select.select([fd], [], [], 0)[0]:
             return 1
@@ -213,20 +223,22 @@ def guard_native_group(plan_path, fd, ready, leader):
     try:
         while True:
             if select.select([fd], [], [], 0.25)[0]:
-                # No data is expected. EOF means the supervisor lost its
-                # ownership channel. Our own membership pins this private
-                # group until the kernel processes the signal.
-                if os.getpgrp() != leader or os.getsid(0) != leader:
+                # Only the private owner channel may authorize departure.
+                # Group SIGTERM (including provider-originated signals) cannot.
+                if os.read(fd, 1) == b"S":
+                    stopping = True
+                else:
+                    if os.getpgrp() != leader or os.getsid(0) != leader:
+                        return 1
+                    os.killpg(leader, signal.SIGKILL)
                     return 1
-                os.killpg(leader, signal.SIGKILL)
-                return 1
             if not stopping:
                 continue
             # A normal owner shutdown can reap the leader only once we have
             # left. Exit only when the leader is a zombie and there are no
             # other group members capable of forking.
             try:
-                state = subprocess.run(["ps", "-axo", "pid=,pgid=,stat="],
+                state = subprocess.run(["/bin/ps", "-A", "-o", "pid=,pgid=,stat="],
                     capture_output=True, text=True, timeout=2, check=False,
                     start_new_session=True)
                 if state.returncode != 0:
@@ -258,16 +270,17 @@ def gated_native(plan_path, fd, watch_fd=None):
     finally:
         os.close(fd)
     _, plan, _, _ = read_plan(Path(plan_path))
+    if watch_fd is None:
+        raise B1Error("FRESH_ANTIGRAVITY_SUPERVISOR_UNCONFIRMED")
     if watch_fd is not None:
         read_ready, write_ready = os.pipe()
         try:
             try:
                 subprocess.Popen(
-                    [sys.executable, "-m", "agentstack_mail.fresh_antigravity_supervisor",
-                     "--plan", str(plan_path), "--guardian-fd", str(watch_fd),
-                     "--ready-fd", str(write_ready), "--leader", str(os.getpid())],
+                    _owner_argv(plan_path, "--guardian-fd", str(watch_fd),
+                                "--ready-fd", str(write_ready), "--leader", str(os.getpid())),
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=None,
-                    pass_fds=(watch_fd, write_ready))
+                    cwd="/", pass_fds=(watch_fd, write_ready))
             finally:
                 os.close(write_ready)
                 os.close(watch_fd)
@@ -275,6 +288,7 @@ def gated_native(plan_path, fd, watch_fd=None):
                 raise B1Error("FRESH_ANTIGRAVITY_SUPERVISOR_UNCONFIRMED")
         finally:
             os.close(read_ready)
+    os.chdir(plan["cwd"])
     os.execv(plan["argv"][0], plan["argv"])
 
 
@@ -288,11 +302,11 @@ def finish_released_native(owner, *, sleep=time.sleep):
         try:
             owner.stop_native()
             return
-        except (B1Error, OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+        except Exception as error:
             failures += 1
             if failures == 1 or failures % 12 == 0:
                 reason = error.code if isinstance(error, B1Error) else type(error).__name__
-                print("FRESH ANTIGRAVITY SUPERVISOR CLEANUP PENDING: " + reason, file=sys.stderr)
+                _diag("FRESH ANTIGRAVITY SUPERVISOR CLEANUP PENDING: " + reason)
             sleep(min(5, failures))
 
 
@@ -321,15 +335,18 @@ def supervise(plan_path, runner_pid, connection):
         owner = NativeOwner(plan_path, runner_pid)
         if interrupted or not runner_present(connection):
             return 1
-        gate_read, gate_write = os.pipe()
         watch_owner, watch_peer = socket.socketpair()
+        try:
+            gate_read, gate_write = os.pipe()
+        except OSError:
+            watch_peer.close()
+            raise
         try:
             try:
                 owner.process = subprocess.Popen(
-                    [sys.executable, "-m", "agentstack_mail.fresh_antigravity_supervisor",
-                     "--plan", str(plan_path), "--gate-fd", str(gate_read),
-                     "--watch-fd", str(watch_peer.fileno())],
-                    stdin=None, stdout=None, stderr=None, cwd=owner.plan["cwd"],
+                    _owner_argv(plan_path, "--gate-fd", str(gate_read),
+                                "--watch-fd", str(watch_peer.fileno())),
+                    stdin=None, stdout=None, stderr=None, cwd="/",
                     start_new_session=True, pass_fds=(gate_read, watch_peer.fileno()))
             finally:
                 os.close(gate_read)
@@ -350,19 +367,24 @@ def supervise(plan_path, runner_pid, connection):
             os.close(gate_write)
         _send(connection, {"pid": owner.process.pid})
         # The independent guard and the supervisor watch the same private
-        # lifetime socket in opposite directions. No application data flows.
+        # lifetime socket in opposite directions. Only explicit stop is sent.
         ready, _, _ = select.select([connection, watch_owner], [], [])
         guard_lost = watch_owner in ready
         if not guard_lost:
             connection.recv(1)
     except (B1Error, OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as error:
-        print("FRESH ANTIGRAVITY SUPERVISOR: " + (error.code if isinstance(error, B1Error) else type(error).__name__), file=sys.stderr)
+        _diag("FRESH ANTIGRAVITY SUPERVISOR: " + (error.code if isinstance(error, B1Error) else type(error).__name__))
     finally:
         for signum in (signal.SIGINT, signal.SIGTERM):
             signal.signal(signum, signal.SIG_IGN)
         if owner is not None and owner.process is not None:
             try:
                 if released:
+                    if not guard_lost:
+                        try:
+                            watch_owner.sendall(b"S")
+                        except OSError:
+                            guard_lost = True
                     finish_released_native(owner)
                 else:
                     # Gate EOF: no provider could have executed. Reap only
@@ -380,7 +402,7 @@ def supervise(plan_path, runner_pid, connection):
                       if guard_lost else {"native_code": owner.native_code})
             except (B1Error, OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
                 if code != 0:
-                    print("FRESH ANTIGRAVITY SUPERVISOR CLEANUP: " + (error.code if isinstance(error, B1Error) else type(error).__name__), file=sys.stderr)
+                    _diag("FRESH ANTIGRAVITY SUPERVISOR CLEANUP: " + (error.code if isinstance(error, B1Error) else type(error).__name__))
         if watch_owner is not None:
             watch_owner.close()
         connection.close()
@@ -404,8 +426,8 @@ def main():
             parser.error("guardian requires ready fd and leader")
         return guard_native_group(args.plan, args.guardian_fd, args.ready_fd, args.leader)
     if args.gate_fd is not None:
-        if args.runner is not None:
-            parser.error("gate cannot specify runner")
+        if args.runner is not None or args.watch_fd is None:
+            parser.error("gate requires watch fd and cannot specify runner")
         try:
             return gated_native(args.plan, args.gate_fd, args.watch_fd)
         except (B1Error, OSError, ValueError, KeyError) as error:

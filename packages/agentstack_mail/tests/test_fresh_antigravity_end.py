@@ -71,7 +71,7 @@ def runner_cleanup(tmp_path, monkeypatch):
         return {'process': {'state': 'absent'}, 'group': {'state': 'empty'}}
 
     def process_state(arguments, **_):
-        assert arguments == ['ps', '-p', str(pid), '-o', 'stat=']
+        assert arguments == ['/bin/ps', '-p', str(pid), '-o', 'stat=']
         return subprocess.CompletedProcess(arguments, 0, state['status'] + '\n', '')
 
     monkeypatch.setattr(native_end, 'verify_native_ended', verify)
@@ -261,11 +261,12 @@ def test_native_gate_requires_explicit_release_before_plan_or_exec(monkeypatch, 
     if release:
         os.write(write, b'1')
     os.close(write)
-    result = supervisor.gated_native('/fixture/plan.json', read)
     if release:
-        assert calls == [('plan', Path('/fixture/plan.json')), ('exec', argv[0], argv)]
+        with pytest.raises(B1Error, match='FRESH_ANTIGRAVITY_SUPERVISOR_UNCONFIRMED'):
+            supervisor.gated_native('/fixture/plan.json', read)
+        assert calls == [('plan', Path('/fixture/plan.json'))]
     else:
-        assert result == 1 and calls == []
+        assert supervisor.gated_native('/fixture/plan.json', read) == 1 and calls == []
     with pytest.raises(OSError):
         os.fstat(read)
 
@@ -298,3 +299,40 @@ def test_supervisor_timeout_does_not_kill_ownership_anchor():
         assert peer.recv(1) == b''
     finally:
         peer.close()
+
+
+def test_owner_python_safe_path_blocks_workspace_package_shadow(tmp_path):
+    from agentstack_mail import fresh_antigravity_supervisor as supervisor
+    shadow = tmp_path / "agentstack_mail"
+    shadow.mkdir()
+    marker = tmp_path / "shadow-executed"
+    (shadow / "__init__.py").write_text(
+        f"from pathlib import Path; Path({str(marker)!r}).touch()")
+    (shadow / "fresh_antigravity_supervisor.py").write_text("raise SystemExit(0)")
+    read, write = os.pipe()
+    os.close(write)
+    try:
+        env = dict(os.environ, PYTHONPATH=str(ROOT / "packages/agentstack_mail/src"))
+        argv = supervisor._owner_argv(tmp_path / "not-read.json",
+                                      "--gate-fd", str(read), "--watch-fd", str(read))
+        proc = subprocess.run(argv, cwd=tmp_path, env=env, pass_fds=(read,),
+                              capture_output=True, timeout=10)
+        assert proc.returncode == 1 and not marker.exists(), proc.stderr
+    finally:
+        os.close(read)
+
+
+def test_cleanup_retry_survives_diagnostic_failure(monkeypatch):
+    from agentstack_mail import fresh_antigravity_supervisor as supervisor
+    class BrokenStderr:
+        def write(self, data):
+            raise OSError("closed tty")
+    calls = []
+    def stop():
+        calls.append(1)
+        if len(calls) == 1:
+            raise TypeError("bad observation")
+    with monkeypatch.context() as scoped:
+        scoped.setattr(supervisor.sys, "stderr", BrokenStderr())
+        supervisor.finish_released_native(SimpleNamespace(stop_native=stop), sleep=lambda _: None)
+    assert calls == [1, 1]
