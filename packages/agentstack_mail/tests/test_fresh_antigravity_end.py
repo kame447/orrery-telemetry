@@ -35,6 +35,7 @@ def runner_cleanup(tmp_path, monkeypatch):
     runner.plan = {'wrapper_root': str(ROOT)}
     runner.intent = {'child_spawn_id': 'fixture-spawn'}
     runner.owns_run = True
+    runner.resume_history_admitted = True
     runner.listener = runner.socket_path = None
     runner.native_code = None
     owner = NativeOwner.__new__(NativeOwner)
@@ -127,6 +128,53 @@ def test_runner_eperm_without_proven_exit_retains_reservations(runner_cleanup, m
     assert len(state['signals']) == 1 and not state['waited']
     assert state['events'] == []
     assert not (runner.state / 'native-ended.json').exists()
+
+
+def test_admitted_resume_without_native_start_retains_reservations(runner_cleanup, monkeypatch):
+    runner, state, _ = runner_cleanup
+    runner.plan['resume_session_id'] = 'previous-session'
+    runner.resume_history_admitted = True
+    runner.process = None
+    monkeypatch.setattr(native_end, 'verify_native_ended', lambda *args, **kwargs: {
+        'kind': native_end.KIND, 'state': 'not-started', 'record_digest': 'fixture'})
+    runner.close()
+    assert (runner.state / 'native-not-started.json').is_file()
+    assert (runner.state / 'native-ended.json').is_file()
+    assert state['events'] == []
+
+
+def test_missing_child_task_is_not_reported_as_success(runner_cleanup, monkeypatch):
+    runner, state, _ = runner_cleanup
+    runner.resume_history_admitted = True
+    runner.process = None
+    monkeypatch.setattr(native_end, 'verify_native_ended', lambda *args, **kwargs: {
+        'kind': native_end.KIND, 'state': 'not-started', 'record_digest': 'fixture'})
+    monkeypatch.setattr(fresh_child, 'launch_task', lambda _: (None, None))
+    with pytest.raises(B1Error, match='FRESH_CHILD_BINDING_MISMATCH'):
+        runner.close()
+    assert state['events'] == []
+
+
+def test_new_nonstarted_child_retains_existing_release_contract(runner_cleanup, monkeypatch):
+    runner, state, resources = runner_cleanup
+    runner.resume_history_admitted = True
+    runner.process = None
+    monkeypatch.setattr(native_end, 'verify_native_ended', lambda *args, **kwargs: {
+        'kind': native_end.KIND, 'state': 'not-started', 'record_digest': 'fixture'})
+    runner.close()
+    assert state['events'] == [('release_reservations', {'paths': resources})]
+
+
+def test_nonchild_without_task_closes_normally(runner_cleanup, monkeypatch):
+    runner, state, _ = runner_cleanup
+    runner.resume_history_admitted = True
+    runner.intent['child_spawn_id'] = None
+    runner.process = None
+    monkeypatch.setattr(native_end, 'verify_native_ended', lambda *args, **kwargs: {
+        'kind': native_end.KIND, 'state': 'not-started', 'record_digest': 'fixture'})
+    monkeypatch.setattr(fresh_child, 'launch_task', lambda _: (None, None))
+    runner.close()
+    assert state['events'] == []
 
 
 def native_record(fixture, *, pid=201, start='native-birth'):

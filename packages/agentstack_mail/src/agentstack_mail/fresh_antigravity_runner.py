@@ -373,12 +373,14 @@ class Runner:
                 **self.expected, observation=observation))
             from .fresh_child import launch_task
             task, _ = launch_task(self.client)
-            if task is not None and task.get("spawn_id") != self.intent.get("child_spawn_id"):
+            if (task.get("spawn_id") if task is not None else None) != self.intent.get("child_spawn_id"):
                 raise B1Error("FRESH_CHILD_BINDING_MISMATCH")
             resources = task.get("resources", []) if task is not None else []
-            # A refused historical policy did not start a new native job.
-            # Keep any existing reservations for the operator to recover.
-            if resources and self.resume_history_admitted:
+            # Admission alone is not a native start. A refused or non-started
+            # resume must keep the earlier session's reservations intact.
+            resumed_without_native = (self.plan.get("resume_session_id") is not None
+                                      and observation.get("state") == "not-started")
+            if resources and self.resume_history_admitted and not resumed_without_native:
                 asyncio.run(self.client.call("release_reservations", {"paths": resources}))
         if cleanup_error is not None:
             raise cleanup_error

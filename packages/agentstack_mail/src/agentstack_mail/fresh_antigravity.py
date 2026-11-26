@@ -244,6 +244,10 @@ def _historical_plan(client, run, current, session_id, receipt):
             if actual != value:
                 raise B1Error('FRESH_NATIVE_SESSION_MISMATCH')
     origin = state / 'hook-origin.json'
+    # A history with any session evidence must also prove its hook origin.
+    # Only a failed resume without any such evidence may lack the proof.
+    if not present(origin) and any(present(path) for path in expected):
+        raise B1Error('FRESH_NATIVE_SESSION_MISMATCH')
     if present(origin):
         value = _read_private(origin)
         if value != hook_origin(client, plan, session_id, value.get('event')):
