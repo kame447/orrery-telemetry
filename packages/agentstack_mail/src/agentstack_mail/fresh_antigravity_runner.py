@@ -17,7 +17,7 @@ import sys
 import tempfile
 import time
 
-from .fresh_antigravity import read_plan
+from .fresh_antigravity import read_plan, validate_resume_history
 from .fresh_antigravity_supervisor import SupervisedNative
 from .fresh_launch import identity, native_id, record_session
 from .fresh_notifications import IMPORTANCE, consumer_lock
@@ -54,6 +54,7 @@ class Runner:
         self.busy = False
         self.completed_turns = 0
         self.owns_run = False
+        self.resume_history_admitted = False
         self.pending_wake = False
         self.pending_input = None
         self.exit_requested = False
@@ -278,6 +279,8 @@ class Runner:
         self.owns_run = True
         with os.fdopen(log_fd, "wb") as log, selectors.DefaultSelector() as selector:
             self.selector = selector
+            validate_resume_history(self.client, self.run, self.plan)
+            self.resume_history_admitted = True
             self.bind()
             self.process = SupervisedNative()
             self.process.start(self.plan_path)
@@ -373,7 +376,9 @@ class Runner:
             if task is not None and task.get("spawn_id") != self.intent.get("child_spawn_id"):
                 raise B1Error("FRESH_CHILD_BINDING_MISMATCH")
             resources = task.get("resources", []) if task is not None else []
-            if resources:
+            # A refused historical policy did not start a new native job.
+            # Keep any existing reservations for the operator to recover.
+            if resources and self.resume_history_admitted:
                 asyncio.run(self.client.call("release_reservations", {"paths": resources}))
         if cleanup_error is not None:
             raise cleanup_error

@@ -573,6 +573,51 @@ def test_native_resume_refuses_unproven_history_without_task_or_mail(tmp_path, m
     asyncio.run(run())
 
 
+def test_resume_refuses_legacy_hook_policy_before_native_start(tmp_path, monkeypatch):
+    import hashlib
+
+    async def run():
+        async with live(tmp_path) as (_, _, parent, _):
+            work = tmp_path / 'work';work.mkdir()
+            async with launched(parent, work, monkeypatch) as (client, first, trace, first_log, _):
+                await until(lambda: 'native turn 1: SUCCESS' in first_log.read_text(),
+                            first, first_log, trace=trace)
+                original = native_run(client)
+                session_id = _read_private(original / 'session.json')['native_session_id']
+                await stop_runner(client, first, first_log)
+                path = original / 'antigravity/integration/.agents/hooks.json'
+                config = _read_private(path)
+                group = next(iter(config.values()))
+                for handler in [*group['SessionStart'], *group['PreInvocation'],
+                                *group['PreToolUse'][0]['hooks']]:
+                    handler['command'] = handler['command'].replace(' -P -m ', ' -m ')
+                path.write_text(json.dumps(config))
+                plan_path = original / 'antigravity/plan.json'
+                old = _read_private(plan_path)
+                old['config_hashes']['integration/.agents/hooks.json'] = hashlib.sha256(path.read_bytes()).hexdigest()
+                plan_path.write_text(json.dumps(old))
+                # Simulate an existing held reservation before the refused resume.
+                await client.call('reserve_files', {'paths': [str(work / 'owned.txt')]})
+                # Reflect a historically generated policy and matching origin
+                # proof, rather than only testing detection of a hash mismatch.
+                origin_path = original / 'antigravity/hook-origin.json'
+                origin = _read_private(origin_path)
+                origin['source_plan_digest'] = digest(old)
+                origin_path.write_text(json.dumps(origin))
+                async with native_resume(client, work, session_id) as (resumed, resume_trace, resume_log):
+                    assert await asyncio.wait_for(resumed.wait(), timeout=60) != 0
+                    assert 'FRESH_ANTIGRAVITY_CONFIG_CHANGED' in resume_log.read_text()
+                    assert not resume_trace.exists(), resume_log.read_text()
+                    folder = native_run(client)
+                    assert (folder / 'antigravity/native-not-started.json').exists()
+                    assert not (folder / 'antigravity/native-process.json').exists()
+                    assert (folder / 'ended.json').exists()
+                    assert 'FRESH_ANTIGRAVITY_CLEANUP_INCOMPLETE' not in resume_log.read_text()
+                    with pytest.raises(B1Error, match='RESERVATION_CONFLICT'):
+                        await parent.call('reserve_files', {'paths': [str(work / 'owned.txt')]})
+    asyncio.run(run())
+
+
 def test_historical_hook_policy_only_normalizes_launch_identifiers(tmp_path):
     async def run():
         async with live(tmp_path) as (_, _, client, _):

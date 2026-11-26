@@ -251,6 +251,65 @@ def _historical_plan(client, run, current, session_id, receipt):
     return plan
 
 
+def validate_resume_history(client, run, current):
+    """Reject incompatible known integration history before native resume.
+
+    Native resume can load historical hook/MCP commands before a current hook
+    has a chance to validate them. Never rewrite those immutable receipts.
+    This checks ORRERY's history, not arbitrary native workspace configuration.
+    """
+    from .fresh_antigravity_end import _observation, _record
+    from .fresh_end import present, read_run_end, run_directory, validate_intent
+    from .fresh_launch import identity, pinned
+
+    session_id = current['resume_session_id']
+    if session_id is None:
+        return
+    receipt = _session_index(client, session_id)
+    found = False
+    for source in sorted(run.parent.iterdir()):
+        if source == run or not present(source / 'antigravity'):
+            continue
+        run_directory(client, source)
+        intent = _read_private(source / 'intent.json')
+        validate_intent(client, source, intent)
+        if intent['provider'] != 'antigravity':
+            raise B1Error('FRESH_LAUNCH_RECEIPT_MISMATCH')
+        state = source / 'antigravity'
+        _directory(state)
+        identifiers = {intent['resume_session_id']} - {None}
+        for path in (source / 'session.json', state / 'hook-session.json',
+                     state / 'native-session.json'):
+            if present(path):
+                row = _read_private(path)
+                pinned(client, row)
+                identifiers.add(native_session_id(row.get('native_session_id')))
+        if len(identifiers) > 1:
+            raise B1Error('FRESH_NATIVE_SESSION_MISMATCH')
+        if identifiers and session_id not in identifiers:
+            continue
+        # A proven non-start cannot have registered a native workspace.
+        if present(state / 'native-not-started.json'):
+            _, record, native = _record(client, intent['wrapper_root'], source,
+                                        require_current=False)
+            if (native or read_run_end(client, source) is None
+                    or _read_private(state / 'native-ended.json') != dict(
+                        launch_id=source.name, context_digest=client.context_digest,
+                        observation=_observation(record, False), **identity(client))):
+                raise B1Error('FRESH_LAUNCH_OUTCOME_UNKNOWN')
+            continue
+        if not identifiers:
+            # An earlier native start without a known session may have left
+            # a workspace reference. We cannot safely classify its history.
+            raise B1Error('FRESH_ANTIGRAVITY_HISTORY_UNKNOWN')
+        previous = _historical_plan(client, source, current, session_id, receipt)
+        if not same_hook_policy(previous, current):
+            raise B1Error('FRESH_ANTIGRAVITY_CONFIG_CHANGED')
+        found = True
+    if not found:
+        raise B1Error('FRESH_ANTIGRAVITY_HISTORY_UNKNOWN')
+
+
 def read_hook_plan(plan_path, session_id):
     """Resolve persisted hook configuration without redirecting runner authority."""
     from .fresh_client import FreshBoundClient
