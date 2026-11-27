@@ -11,6 +11,7 @@ Temporary runtime and HOME only; Mail is a stand-in.
 from __future__ import annotations
 
 import json
+import shlex
 import tomllib
 from pathlib import Path
 
@@ -19,6 +20,9 @@ import pytest
 from dashboard import server
 from hooks import child_resume
 from test_claude_resume_mail import NAME, TOKEN, private, resume  # noqa: F401 - fixture
+from test_codex_resume_flags import (  # noqa: F401 - fixture
+    _invoke_resume_entry, _seed_child_identity, policy_env,
+)
 
 
 PARENT = "ParentAgent"
@@ -41,6 +45,8 @@ def test_the_parent_survives_exit_and_reaches_the_resumed_proxy(resume):  # noqa
     result = server.do_resume(NAME)
 
     assert result["ok"], result
+    assert f"PARENT_AGENT={PARENT}" in launches[0]
+    assert f"export PARENT_AGENT={PARENT};" in launches[0][-1]
     config = json.loads((runtime / "child-agents" / f"{NAME}.mcp.json").read_text())
     assert config["mcpServers"]
     for proxy in config["mcpServers"].values():
@@ -48,12 +54,14 @@ def test_the_parent_survives_exit_and_reaches_the_resumed_proxy(resume):  # noqa
 
 
 def test_a_child_with_no_recorded_parent_is_resumed_without_one(resume):  # noqa: F811
-    runtime, registration, _launches, _calls = resume
+    runtime, registration, launches, _calls = resume
     _child(runtime, registration, parent=None)
 
     result = server.do_resume(NAME)
 
     assert result["ok"], result
+    assert "PARENT_AGENT=" in launches[0]
+    assert "export PARENT_AGENT='';" in launches[0][-1]
     config = json.loads((runtime / "child-agents" / f"{NAME}.mcp.json").read_text())
     assert all("AGENTSTACK_PROXY_PARENT_AGENT" not in proxy["env"] for proxy in config["mcpServers"].values())
 
@@ -114,3 +122,19 @@ def test_a_resumed_codex_home_names_the_recorded_parent(tmp_path, parent):
     assert proxies
     for env in proxies:
         assert env.get("AGENTSTACK_PROXY_PARENT_AGENT") == parent
+
+
+@pytest.mark.parametrize("parent", [PARENT, None], ids=["child", "parentless"])
+def test_codex_resume_restores_parent_to_tmux_and_shell(policy_env, monkeypatch, parent):
+    tmp_path, project = policy_env
+    runtime = tmp_path / "runtime"
+    _seed_child_identity(runtime, project, state_updates={"parent_agent": parent})
+    monkeypatch.setenv("PARENT_AGENT", "UnrelatedInheritedParent")
+
+    result, launches = _invoke_resume_entry(monkeypatch, tmp_path, project, runtime)
+
+    assert result["ok"], result
+    expected = parent or ""
+    assert f"PARENT_AGENT={expected}" in launches[0]
+    assert f"export PARENT_AGENT={shlex.quote(expected)};" in launches[0][-1]
+    assert "UnrelatedInheritedParent" not in str(launches)

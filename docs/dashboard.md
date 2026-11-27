@@ -219,6 +219,8 @@ Codex App runtime には tmux pane がありません。terminal attach、dashbo
 
 NETWORK は「誰から生まれたか」と「誰と通信したか」を一枚の force graph に重ねます。まず、**ノードはエージェント、線は関係**と読んでください。
 
+legacy の親子関係は、再開時に tmux の親情報が欠けても、保存済みの起動記録を現在の登録 ID・project・provider と照合して復元します。Claude / Codex の再開時にも記録済みの親を tmux へ戻します。明示的な standalone は通信相手を親にせず、通信線と親子線を区別します。
+
 次の初期状態では3ノードに対して `0 links · 0 spawn` なので、まだ親子関係も通信もありません。配置の調整は header 右端の `SETTINGS` から開く drawer の NETWORK で行います。
 
 ![NETWORK の初期状態。3ノードで通信線と spawn 線はまだない](images/net_start.png)

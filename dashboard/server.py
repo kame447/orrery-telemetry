@@ -4296,6 +4296,7 @@ def do_resume(session: str, *, open_terminal: bool | None = None, replace_husk: 
     # (#144). Only this session-scoped name is set: AGENTSTACK_CLAUDE_MODEL is
     # the default for agents this session later launches.
     resume_environment["CLAUDE_CHILD_MODEL"] = registration.get("model") or "claude-code"
+    resume_environment["PARENT_AGENT"] = (child_state or {}).get("parent_agent") or ""
     if child_state is not None and chrome_launch_id:
         resume_environment["AGENTSTACK_CLAUDE_LAUNCH_ID"] = chrome_launch_id
     inner = ('unset CHILD_REGISTRATION_TOKEN PARENT_AGENT CLAUDE_CHILD_MCP_CONFIG AGENTSTACK_CLAUDE_LAUNCH_ID; '
@@ -5849,6 +5850,7 @@ def _do_resume_codex(session: str, *, open_terminal: bool | None = None,
         return {"ok": False, "error": "The child's launch origin changed before resume"}
     child_home = ""
     child_profile = ""
+    parent_agent = ""
     try:
         if launch_origin == "child":
             child_home, child_profile, codex_standalone = _codex_resume_child_home(
@@ -5857,6 +5859,10 @@ def _do_resume_codex(session: str, *, open_terminal: bool | None = None,
             _rebuild_codex_child_home(
                 session, registration, child_home, child_profile, cwd or ""
             )
+            if not codex_standalone:
+                parent_agent = _child_resume_module()._recorded_parent(
+                    Path(RUNTIME_DIR) / "child-agents" / f"{session}.json"
+                )
         elif launch_origin == "standalone":
             _validate_codex_standalone_credential(session)
         else:
@@ -5883,6 +5889,7 @@ def _do_resume_codex(session: str, *, open_terminal: bool | None = None,
         'export AGENTSTACK_CODEX_LAUNCH_KIND=resume; '
         f'export AGENTSTACK_CODEX_RESUME_SESSION_ID={shlex.quote(sid)}; '
         f'export AGENTSTACK_CODEX_LAUNCH_ORIGIN={shlex.quote(launch_origin)}; '
+        f'export PARENT_AGENT={shlex.quote(parent_agent)}; '
     )
     if launch_origin == "child":
         generation = _child_resume_module().tools_change_generation()
@@ -5935,6 +5942,7 @@ def _do_resume_codex(session: str, *, open_terminal: bool | None = None,
     resume_environment = {
         "AGENTSTACK_HOME": install_home,
         "AGENTSTACK_RUNTIME_DIR": RUNTIME_DIR,
+        "PARENT_AGENT": parent_agent,
         "AGENTSTACK_PROJECT_KEY": registration["project_key"],
         "AGENTSTACK_HOOKS_DIR": os.path.join(install_home, "hooks"),
         "AGENTSTACK_MCP_URL": _env_text(
