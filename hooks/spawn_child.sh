@@ -1425,7 +1425,7 @@ resolve_codex_bin() {
     local codex_bin
     codex_bin="$(find_codex_bin)"
     if [[ -z "$codex_bin" ]]; then
-        echo "Error: no usable Codex CLI found (reasons above, if any candidate was found). Install Codex where this shell can run it, or set AGENTSTACK_CODEX_BIN to its path (on WSL, a codex under /mnt is the Windows install and cannot run here)." >&2
+        echo "Error: no usable Codex CLI found (reasons above, if any candidate was found). Install Codex where this shell can run it, or set AGENTSTACK_CODEX_BIN to its path (on WSL, a codex under /mnt is the Windows install and cannot run here). See https://github.com/kame447/orrery-telemetry/blob/master/docs/install.md" >&2
         return 1
     fi
     printf '%s\n' "$codex_bin"
