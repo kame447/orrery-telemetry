@@ -7,6 +7,7 @@ import sqlite3
 import pytest
 
 from dashboard import graph_data
+from hooks import child_resume
 
 from test_graph_live_lineage import BASE, PROJECT, _build, _make_db
 
@@ -49,6 +50,34 @@ def test_resumed_child_keeps_recorded_parent_without_tmux_variable_or_mail(recor
     assert "registration_token" not in json.dumps(graph)
 
 
+@pytest.mark.parametrize("name", ["7Child", "Quiet_Child", "Quiet.Child"])
+def test_recorded_child_names_follow_launch_state_contract(recorded, monkeypatch, name):
+    database, path, state = recorded
+    path = path.with_name(f"{name}.json")
+    save(path, {**state, "agent_name": name})
+    runtime = path.parent.parent
+    token = runtime / f"agent_token_{name}"
+    token.write_text(state["registration_token"])
+    token.chmod(0o600)
+    child_resume.prepare_active_state(
+        runtime, name, project_key=PROJECT, program=state["program"], parent_agent="Parent",
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE agents SET name = ? WHERE id = 2", (name,))
+    assert _build(monkeypatch, database, {})["spawn"] == [
+        {"source": "Parent", "target": name, "type": "spawn"}
+    ]
+
+
+def test_recorded_child_name_cannot_escape_its_state_directory(recorded):
+    _database, path, state = recorded
+    name = "../QuietChild"
+    save(path.parent.parent / "QuietChild.json", {**state, "agent_name": name})
+    assert graph_data._recorded_parents(
+        [{"id": state["agent_id"], "name": name, "program": state["program"]}], PROJECT,
+    ) == {}
+
+
 @pytest.mark.parametrize("key,value", [
     ("agent_id", 999),
     ("agent_id", True),
@@ -60,6 +89,7 @@ def test_resumed_child_keeps_recorded_parent_without_tmux_variable_or_mail(recor
     ("schema_version", True),
     ("parent_agent", "QuietChild"),
     ("parent_agent", "../Parent"),
+    ("parent_agent", "7Parent"),
     ("tools_change_generation", "pending-change"),
 ])
 def test_unverified_or_self_parent_is_not_attached(recorded, monkeypatch, key, value):
