@@ -21,8 +21,8 @@ function svgEl(t,attrs){const e=document.createElementNS(SVGNS,t);for(const k in
 function createDefs(gsvg){
   const d=svgEl('defs');
   for(const[id,c]of[['mk-c','var(--amber)'],['mk-s','var(--amber)']]){
-    const m=svgEl('marker',{id,viewBox:'0 0 10 10',refX:9,refY:5,
-      markerWidth:6.5,markerHeight:6.5,orient:'auto-start-reverse'});
+    const m=svgEl('marker',{id,viewBox:'0 0 10 10',refX:10,refY:5,
+      markerUnits:'userSpaceOnUse',markerWidth:6.5,markerHeight:6.5,orient:'auto-start-reverse'});
     m.appendChild(svgEl('path',{d:'M0 0L10 5L0 10z',fill:c,opacity:.85}));
     d.appendChild(m);
   }
@@ -172,20 +172,35 @@ function step(gmap,gedges,gspawn,dims,params,simCool=1){
   return maxMove;
 }
 
+function edgeEndpoints(a,b,NSIZE){
+  const dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy);
+  if(!d)return [a.x,a.y,b.x,b.y];
+  const radius=g=>{
+    const st=g.retired?'retired':(g.state||(g.running?'run':g.present?'finished':'gone'));
+    const scale=st==='run'?1.2:st==='finished'?.78:st==='gone'?.72:1;
+    // Keep the arrow tip outside the portrait and its state-scaled border.
+    return (NR*scale+2)*NSIZE/NR;
+  };
+  const ra=radius(a),rb=radius(b),span=Math.max(d,ra+rb);
+  return [a.x+dx*ra/span,a.y+dy*ra/span,b.x-dx*rb/span,b.y-dy*rb/span];
+}
+
 function paint(gmap,gEls,NSIZE=13){
   for(const o of gEls.edge){
     const a=gmap.get(o.s),b=gmap.get(o.t);if(!a||!b)continue;
-    o.ln.setAttribute('x1',a.x);o.ln.setAttribute('y1',a.y);
-    o.ln.setAttribute('x2',b.x);o.ln.setAttribute('y2',b.y);
+    const [x1,y1,x2,y2]=edgeEndpoints(a,b,NSIZE);
+    o.ln.setAttribute('x1',x1);o.ln.setAttribute('y1',y1);
+    o.ln.setAttribute('x2',x2);o.ln.setAttribute('y2',y2);
     if(o.hit){
-      o.hit.setAttribute('x1',a.x);o.hit.setAttribute('y1',a.y);
-      o.hit.setAttribute('x2',b.x);o.hit.setAttribute('y2',b.y);
+      o.hit.setAttribute('x1',x1);o.hit.setAttribute('y1',y1);
+      o.hit.setAttribute('x2',x2);o.hit.setAttribute('y2',y2);
     }
   }
   for(const o of gEls.badge||[]){
     const a=gmap.get(o.s),b=gmap.get(o.t);if(!a||!b)continue;
-    o.tx.setAttribute('x',(a.x+b.x)/2);
-    o.tx.setAttribute('y',(a.y+b.y)/2);
+    const [x1,y1,x2,y2]=edgeEndpoints(a,b,NSIZE);
+    o.tx.setAttribute('x',(x1+x2)/2);
+    o.tx.setAttribute('y',(y1+y2)/2);
   }
   const nsc=NSIZE/NR;   // ノード一括拡縮（リング/バッジ/ラベルごと <g> 全体に適用）
   for(const[nm,o]of gEls.node){
