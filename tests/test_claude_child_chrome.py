@@ -197,7 +197,7 @@ def test_builder_adds_only_chrome_when_requested():
     assert _builder_output(True) == f"/bin/bash -lc '{CHROME_INNER}'"
 
 
-def test_default_spawn_matches_the_pre_chrome_launcher_exactly(tmp_path):
+def test_default_spawn_preserves_pre_chrome_launch_with_mail_body_guidance(tmp_path):
     """Run the launcher from before this change and this one on the same input."""
     old_hooks = tmp_path / "old" / "hooks"
     old_hooks.mkdir(parents=True)
@@ -229,7 +229,7 @@ def test_default_spawn_matches_the_pre_chrome_launcher_exactly(tmp_path):
             prompts[label] = rest.split("\035\n", 1)[1].split("CALL", 1)[0]
         else:
             raw_inner = launch[-1]
-            # The new one passes the same text as the launch argument instead,
+            # The new one passes the task as the launch argument instead,
             # and runs the claude path it resolved (bare `claude` if none).
             for variable in ("CLAUDE_CHILD_PROMPT_FILE=", "CLAUDE_CHILD_SYSTEM_PROMPT=", "CLAUDE_CHILD_BIN="):
                 index = next(i for i, arg in enumerate(launch) if arg.startswith(variable)) - 1
@@ -248,10 +248,23 @@ def test_default_spawn_matches_the_pre_chrome_launcher_exactly(tmp_path):
             prompts[label] = log.split("ARGV_TASK\034600\034", 1)[1].split("CALL", 1)[0]
             assert "\034load-buffer\034" not in log and "\034paste-buffer\034" not in log
         launches[label] = launch
-    # Without --claude-chrome the child is launched exactly as before, and gets
-    # exactly the prompt it got before; only how the prompt travels changed.
+    # Without --claude-chrome the launch remains identical. The one intended
+    # task-text change is the explicit, route-aware Mail body retrieval guidance.
     assert launches["new"] == launches["old"]
-    assert prompts["new"] == prompts["old"] and "SameChild" in prompts["new"]
+    old_suffix = " and start the task immediately."
+    new_suffix = (
+        ". The canonical task is in your ORRERY Mail inbox. "
+        "Use only the first matching coordination route in the managed instructions. "
+        'For a bound ORRERY proxy, call fetch_inbox with {"include_bodies": true} to read the task. '
+        "The proxy already has your identity and does not need a helper or token file. "
+        "If the provided schema is confirmed raw/direct, follow the managed raw/direct "
+        "authentication or recovery route before calling fetch_inbox with include_bodies set to true. "
+        "A proxy failure is not evidence to switch to raw or a helper. "
+        "Treat the inbox request as authoritative."
+    )
+    assert prompts["old"].count(old_suffix) == 1
+    assert prompts["new"] == prompts["old"].replace(old_suffix, new_suffix, 1)
+    assert "SameChild" in prompts["new"]
     assert raw_inner.replace(ARGV_PROMPT, "").endswith(f"-lc '{PRE_CHROME_INNER}'")
 
 
