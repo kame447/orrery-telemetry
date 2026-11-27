@@ -27,6 +27,8 @@ Claude を会話だけで再開するときも、`/api/jump` に同じ `tools` �
 
 PATH で見つからない場合は `AGENTSTACK_CUA_DRIVER` に実行ファイルの絶対パスを指定します。WSL では `/mnt/c/…/cua-driver.exe` のような WSL 側の絶対パスです。公開される定義は 0.55.0 の確認済みの定義に固定しています。実行時の版・入力・出力 schema のいずれかが違えば、呼び出しを拒否します。更新時は固定した定義と実際の `tools/list` を照合します。
 
+ORRERY の relay が起動する Cua Driver には利用状況送信と自動更新確認の無効化を渡します。既存の Windows daemon や他の Cua Driver の設定は変更しません。ドライバーの更新確認と署名・ハッシュの照合は利用者が行います。
+
 WSL の中継は普通の stdio パイプを使います。動作には起動経路の WSL interop と、Windows ユーザーの対話ログオンが必要です。interop と distro の寿命は WSL の設定に従います。ログイン中の Windows Terminal、昇格なし、Limited から先に確認します。
 
 ## 起動中に権限を変える
