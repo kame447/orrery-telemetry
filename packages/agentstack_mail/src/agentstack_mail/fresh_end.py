@@ -61,6 +61,12 @@ def read_run_end(client, run):
         value = _read_private(run / 'ended.json')
         if (set(value) != {'launch_id', 'exit_code'} or value['launch_id'] != run.name
                 or type(value['exit_code']) is not int):raise B1Error('FRESH_LAUNCH_OUTCOME_UNKNOWN')
+        intent = _read_private(run / 'intent.json')
+        validate_intent(client, run, intent)
+        if intent['provider'] == 'antigravity':
+            from .fresh_antigravity_end import valid_normal_native_end
+            if not valid_normal_native_end(client, intent.get('wrapper_root'), run):
+                raise B1Error('FRESH_LAUNCH_OUTCOME_UNKNOWN')
         return RunEnd('normal', value['exit_code'], value)
     if not resolved:return None
     from .fresh_launch import identity, pinned

@@ -106,7 +106,27 @@ def valid_native_observation(client, wrapper_root, run, value):
     """Validate historical proof without treating later PID reuse as a live run."""
     try:
         _, record, native = _record(client, wrapper_root, run, require_current=False)
+        if native:
+            _require_cleanup(run / 'antigravity', record)
         return value == _observation(record, native)
+    except (B1Error, OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def valid_normal_native_end(client, wrapper_root, run):
+    """Revalidate immutable owner evidence, not the current OS PID state."""
+    from .fresh_end import present
+
+    try:
+        state = run / 'antigravity'
+        runner_pid = None
+        if present(state / 'native-process.json'):
+            runner_pid = _read_private(state / 'native-process.json').get('runner_pid')
+        _, record, native = _record(client, wrapper_root, run,
+                                    runner_pid=runner_pid, require_current=False)
+        if native:
+            _require_cleanup(state, record)
+        return True
     except (B1Error, OSError, ValueError, KeyError, TypeError):
         return False
 

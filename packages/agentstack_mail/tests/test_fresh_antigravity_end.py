@@ -523,3 +523,49 @@ def test_empty_group_without_bound_owner_cleanup_cannot_resolve(closed_candidate
         close(closed_candidate)
     assert not (run / 'resolved-ended.json').exists()
     assert not (run / 'ended.json').exists()
+
+
+@pytest.mark.parametrize('kind', ['normal', 'resolved'])
+@pytest.mark.parametrize('damage', ['missing', 'malformed', 'wrong-record'])
+def test_historical_native_closure_requires_bound_owner_receipt(closed_candidate, monkeypatch, kind, damage):
+    client, run, intent, route, state, api, _ = closed_candidate
+    record = native_record(closed_candidate)
+    monkeypatch.setattr(native_end, 'process_api', lambda _: api)
+    folder = run / 'antigravity'
+    receipt = folder / 'native-cleanup.json'
+    _write_private(receipt, native_end.cleanup_receipt(record))
+    observation = native_end.verify_native_ended(client, ROOT, run)
+    if kind == 'normal':
+        _write_private(folder / 'native-ended.json', dict(
+            launch_id=run.name, context_digest=client.context_digest,
+            observation=observation, **identity(client)))
+        _write_private(run / 'ended.json', dict(launch_id=run.name, exit_code=0))
+    else:
+        assert close(closed_candidate)['end_kind'] == 'resolved'
+    assert end.read_run_end(client, run).kind == kind
+    if damage == 'missing':
+        receipt.unlink()
+    elif damage == 'malformed':
+        receipt.write_bytes(b'incomplete')
+    else:
+        replace(receipt, native_end.cleanup_receipt(dict(record, pid=999)))
+    with pytest.raises(B1Error, match='FRESH_LAUNCH_OUTCOME_UNKNOWN'):
+        end.read_run_end(client, run)
+    with pytest.raises(B1Error, match='FRESH_LAUNCH_OUTCOME_UNKNOWN'):
+        close(closed_candidate)
+
+
+def test_historical_not_started_native_closure_needs_no_owner_receipt(closed_candidate):
+    client, run, intent, *_ = closed_candidate
+    intent['provider'] = 'antigravity'
+    replace(run / 'intent.json', intent)
+    folder = run / 'antigravity'
+    folder.mkdir(mode=0o700)
+    _write_private(folder / 'native-not-started.json', dict(
+        launch_id=run.name, context_digest=client.context_digest, **identity(client)))
+    observation = native_end.verify_native_ended(client, ROOT, run)
+    _write_private(folder / 'native-ended.json', dict(
+        launch_id=run.name, context_digest=client.context_digest,
+        observation=observation, **identity(client)))
+    _write_private(run / 'ended.json', dict(launch_id=run.name, exit_code=1))
+    assert end.read_run_end(client, run).kind == 'normal'
