@@ -142,11 +142,15 @@ async def apply(core, operation, *, expected_server_instance_id, auth, request_i
                             conflicts.append(row)
                 if operation == 'check':
                     unique = {row.id: row for row in conflicts}
+                    wanted = {path.value for path in requested}
+                    exact = [row.id for row in current
+                             if row.agent_id == actor.id and row.path_pattern in wanted]
                     return dict(mail_instance_id=state['instance_id'], actor_agent_id=actor.id,
                                 paths=[path.value for path in requested], conflict_free=not unique,
                                 conflicts=[view(row) for row in list(unique.values())[:100]],
                                 conflicts_truncated=len(unique) > 100,
-                                own_matching_ids=list(dict.fromkeys(own_matches))[:100])
+                                own_matching_ids=list(dict.fromkeys(own_matches))[:100],
+                                own_exact_ids=exact[:100], own_exact_ids_truncated=len(exact) > 100)
                 expires = until(stamp, ttl_seconds)
                 if conflicts:
                     raise B1Error('RESERVATION_CONFLICT')

@@ -379,6 +379,27 @@ def test_native_hooks_proxy_identity_and_reservations_survive_until_sigint(tmp_p
     asyncio.run(run())
 
 
+def test_native_closure_never_releases_reacquired_same_actor_lease(tmp_path, monkeypatch):
+    async def run():
+        async with live(tmp_path) as (_, _, parent, _):
+            work = tmp_path / 'work';work.mkdir()
+            path = str(work / 'owned.txt')
+            async with launched(parent, work, monkeypatch) as (client, process, trace, log, _):
+                await until(lambda: 'native turn 1: SUCCESS' in log.read_text(), process, log, trace=trace)
+                old_ids = _read_private(native_run(client) / 'intent.json')['child_reservation_ids']
+                assert len(old_ids) == 1
+                await client.call('release_reservations', {'file_reservation_ids': old_ids})
+                new = await client.call('reserve_files', {'paths': [path]})
+                new_id = new['reservations'][0]['id']
+                assert new_id not in old_ids
+                await stop_runner(client, process, log)
+                current = await client.call('check_reservations', {'paths': [path]})
+                assert current['own_exact_ids'] == [new_id]
+                with pytest.raises(B1Error, match='RESERVATION_CONFLICT'):
+                    await parent.call('reserve_files', {'paths': [path]})
+    asyncio.run(run())
+
+
 def test_native_mail_wakeup_runs_another_turn_without_inventing_read_or_ack(tmp_path, monkeypatch):
     async def run():
         async with live(tmp_path) as (runtime, _, parent, _):

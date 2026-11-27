@@ -62,6 +62,39 @@ def test_wire_absolute_conflicts_batch_atomicity_and_pure_check(tmp_path, known_
     asyncio.run(run())
 
 
+def test_exact_owned_ids_do_not_include_overlapping_or_reacquired_rows(tmp_path, known_rules):
+    async def run():
+        async with state(tmp_path) as (runtime, people):
+            path = str(tmp_path / 'shared.py')
+            scope = str(tmp_path / '**' / '*.py')
+            async def reserve(value, name):
+                result = await runtime.core.reservation('reserve', **arguments(
+                    runtime, people, request_id=name, paths_input=[value]))
+                return result['reservations'][0]['id']
+
+            async def check():
+                return await runtime.core.reservation('check',
+                    expected_server_instance_id=runtime.config['instance_id'],
+                    auth=people[0]['auth'], paths_input=[path])
+
+            old = await reserve(path, 'original')
+            overlapping = await reserve(scope, 'broader')
+            snapshot = await check()
+            assert set(snapshot['own_matching_ids']) == {old, overlapping}
+            assert snapshot['own_exact_ids'] == [old]
+            assert snapshot['own_exact_ids_truncated'] is False
+            await runtime.core.reservation('release', **arguments(runtime, people,
+                request_id='manual-release', file_reservation_ids=[old]))
+            new = await reserve(path, 'reacquired')
+            assert new != old
+            await runtime.core.reservation('release', **arguments(runtime, people,
+                request_id='late-closure', file_reservation_ids=snapshot['own_exact_ids']))
+            current = await check()
+            assert set(current['own_matching_ids']) == {new, overlapping}
+            assert current['own_exact_ids'] == [new]
+    asyncio.run(run())
+
+
 def test_two_simultaneous_exclusive_requests_commit_only_one(tmp_path, known_rules):
     async def run():
         async with state(tmp_path) as (runtime, people):

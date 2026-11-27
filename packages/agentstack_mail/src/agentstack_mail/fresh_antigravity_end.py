@@ -166,6 +166,24 @@ def verify_native_ended(client, wrapper_root, run, *, runner_pid=None, deadline=
     return _observation(record, True)
 
 
+def checked_release_ids(ids):
+    if (not isinstance(ids, list) or len(ids) > 100
+            or any(type(value) is not int or value < 1 for value in ids)
+            or len(set(ids)) != len(ids)):
+        raise B1Error('FRESH_ANTIGRAVITY_LEASE_SNAPSHOT_INVALID')
+    return ids
+
+
+async def snapshot_release_ids(client, resources):
+    """Capture exact owned row IDs before starting the native launch."""
+    current = await client.call('check_reservations', {'paths': resources})
+    if (current.get('mail_instance_id') != client.context['mail_instance_id']
+            or current.get('actor_agent_id') != client.context['mail_agent_id']
+            or current.get('own_exact_ids_truncated') is not False):
+        raise B1Error('FRESH_ANTIGRAVITY_LEASE_SNAPSHOT_INVALID')
+    return checked_release_ids(current.get('own_exact_ids'))
+
+
 def release_ready(client, run, intent, task, observation):
     from .fresh_launch import identity
 
@@ -190,7 +208,7 @@ def finalize_native_launch(client, root, run, *, runner_pid, code, intent, task)
         observation = verify_native_ended(client, root, run, runner_pid=runner_pid)
         state = run / 'antigravity'
         receipt = state / 'release-ready.json'
-        resources = []
+        release_ids = []
         if present(receipt):
             current_task, _ = launch_task(client)
             if (task is None or current_task != task
@@ -203,26 +221,11 @@ def finalize_native_launch(client, root, run, *, runner_pid, code, intent, task)
                         **identity(client), observation=observation)
                     or _read_private(receipt) != release_ready(client, run, intent, task, observation)):
                 raise B1Error('FRESH_ANTIGRAVITY_RELEASE_BINDING_MISMATCH')
-            resources = task['resources']
+            release_ids = checked_release_ids(intent.get('child_reservation_ids'))
     except (B1Error, OSError, ValueError, KeyError, TypeError):
         raise B1Error('FRESH_LAUNCH_OUTCOME_UNKNOWN', launch_id=run.name) from None
     _write_private(run / 'ended.json', {'launch_id': run.name, 'exit_code': code})
-    if resources:
-        asyncio.run(release_closed_resources(client, resources))
-
-
-async def release_closed_resources(client, resources):
-    try:
-        await client.call('release_reservations', {'paths': resources})
-    except B1Error as error:
-        if error.code != 'LEASE_NOT_FOUND':
-            raise
-        # A read-only resume can legitimately have no active leases. A
-        # path-based release refuses the entire set if even one is absent.
-        # Confirm that none of our overlapping leases remain; never retry
-        # a release against a potentially changed reservation generation.
-        current = await client.call('check_reservations', {'paths': resources})
-        if (current.get('mail_instance_id') != client.context['mail_instance_id']
-                or current.get('actor_agent_id') != client.context['mail_agent_id']
-                or current.get('own_matching_ids') != []):
-            raise error
+    if release_ids:
+        # ID selection remains safe if the same actor releases and reacquires
+        # a path after launch. Never resolve the paths again during closure.
+        asyncio.run(client.call('release_reservations', {'file_reservation_ids': release_ids}))

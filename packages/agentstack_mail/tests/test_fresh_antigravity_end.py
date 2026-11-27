@@ -34,7 +34,7 @@ def runner_cleanup(tmp_path, monkeypatch):
     runner.state = tmp_path / 'antigravity';runner.state.mkdir(mode=0o700)
     runner.expected = dict(mail_instance_id='fixture-instance', mail_agent_id=3, credential_generation=1)
     runner.plan = {'wrapper_root': str(ROOT)}
-    runner.intent = {'child_spawn_id': 'fixture-spawn'}
+    runner.intent = {'child_spawn_id': 'fixture-spawn', 'child_reservation_ids': [7]}
     runner.owns_run = True
     runner.resume_history_admitted = True
     runner.listener = runner.socket_path = None
@@ -220,7 +220,7 @@ def test_launcher_closes_before_releasing_reservations(runner_cleanup, monkeypat
         finalize()
         assert _read_private(runner.run / 'ended.json')['exit_code'] == 130
         assert state['events'] == ['wait', 'verify', 'verify'] + (
-            [('release_reservations', {'paths': resources})] if failure is None else [])
+            [('release_reservations', {'file_reservation_ids': [7]})] if failure is None else [])
 
 
 def test_release_failure_after_closure_is_not_retried(runner_cleanup, monkeypatch):
@@ -244,43 +244,56 @@ def test_release_failure_after_closure_is_not_retried(runner_cleanup, monkeypatc
     assert _read_private(runner.run / 'ended.json')['exit_code'] == 130
     with pytest.raises(FileExistsError):
         finalize()
-    assert calls == [('release_reservations', {'paths': resources})]
+    assert calls == [('release_reservations', {'file_reservation_ids': [7]})]
 
-@pytest.mark.parametrize('matching,identity_ok,accepted', [
-    ([], True, True), ([19], True, False), ([], False, False),
-    (None, True, False),
+@pytest.mark.parametrize('ids,identity_ok,truncated,accepted', [
+    ([], True, False, True), ([7, 19], True, False, True),
+    ([7], False, False, False), ([7], True, True, False),
+    (None, True, False, False), ([True], True, False, False),
+    ([7, 7], True, False, False), ([0], True, False, False),
 ])
-def test_missing_closed_lease_is_only_noop_when_absence_is_confirmed(
-        runner_cleanup, matching, identity_ok, accepted):
-    runner, state, resources = runner_cleanup
-    state['status'] = 'Z'
-    runner.close()
-    task = {'spawn_id': 'fixture-spawn', 'resources': resources}
-    calls = []
+def test_snapshot_only_accepts_bounded_exact_owned_ids(ids, identity_ok, truncated, accepted):
+    import asyncio
 
     async def call(name, args):
-        assert (runner.run / 'ended.json').is_file()
-        calls.append((name, args))
-        if name == 'release_reservations':
-            raise B1Error('LEASE_NOT_FOUND')
-        return dict(mail_instance_id=runner.client.context['mail_instance_id'],
-                    actor_agent_id=runner.client.context['mail_agent_id'] if identity_ok else -1,
-                    own_matching_ids=matching)
+        assert (name, args) == ('check_reservations', {'paths': ['/declared']})
+        return dict(mail_instance_id='fixture-instance',
+                    actor_agent_id=3 if identity_ok else -1,
+                    own_matching_ids=[42], own_exact_ids=ids,
+                    own_exact_ids_truncated=truncated)
 
-    runner.client.call = call
+    client = SimpleNamespace(context=dict(mail_instance_id='fixture-instance', mail_agent_id=3),
+                             call=call)
+    if accepted:
+        assert asyncio.run(native_end.snapshot_release_ids(client, ['/declared'])) == ids
+    else:
+        with pytest.raises(B1Error, match='FRESH_ANTIGRAVITY_LEASE_SNAPSHOT_INVALID'):
+            asyncio.run(native_end.snapshot_release_ids(client, ['/declared']))
 
-    def finalize():
+
+def test_read_only_launch_does_not_release_later_reservation(runner_cleanup):
+    runner, state, resources = runner_cleanup
+    state['status'] = 'Z'
+    runner.intent['child_reservation_ids'] = []
+    runner.close()
+    task = {'spawn_id': 'fixture-spawn', 'resources': resources}
+    native_end.finalize_native_launch(runner.client, ROOT, runner.run,
+        runner_pid=os.getpid(), code=130, intent=runner.intent, task=task)
+    assert state['events'] == ['wait', 'verify', 'verify']
+    assert (runner.run / 'ended.json').is_file()
+
+
+def test_missing_snapshot_retains_reservation(runner_cleanup):
+    runner, state, resources = runner_cleanup
+    state['status'] = 'Z'
+    del runner.intent['child_reservation_ids']
+    runner.close()
+    task = {'spawn_id': 'fixture-spawn', 'resources': resources}
+    with pytest.raises(B1Error, match='FRESH_LAUNCH_OUTCOME_UNKNOWN'):
         native_end.finalize_native_launch(runner.client, ROOT, runner.run,
             runner_pid=os.getpid(), code=130, intent=runner.intent, task=task)
-
-    if accepted:
-        finalize()
-    else:
-        with pytest.raises(B1Error, match='LEASE_NOT_FOUND'):
-            finalize()
-    assert _read_private(runner.run / 'ended.json')['exit_code'] == 130
-    assert calls == [('release_reservations', {'paths': resources}),
-                     ('check_reservations', {'paths': resources})]
+    assert not (runner.run / 'ended.json').exists()
+    assert state['events'] == ['wait', 'verify', 'verify']
 
 
 def native_record(fixture, *, pid=201, start='native-birth'):

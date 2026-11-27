@@ -354,6 +354,10 @@ def launch(client, wrapper_root, provider, cwd, *, session_id=None, persistent=N
                 args += model_args
                 config_args += model_args
             intent['child_spawn_id'] = task['spawn_id']
+            if antigravity and task.get('resources'):
+                from .fresh_antigravity_end import snapshot_release_ids
+                intent['child_reservation_ids'] = asyncio.run(
+                    snapshot_release_ids(client, task['resources']))
         environment = dict(os.environ)
         if persistent is not None:environment.update(persistent.get('environment', {}))
         if persistent is not None:
