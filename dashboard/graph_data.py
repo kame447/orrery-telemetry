@@ -143,10 +143,11 @@ def _live_parents(project_key: str) -> dict[str, str]:
     if not tmux:
         _LIVE_PARENT_CACHE.update(ts=now, value={})
         return {}
+    listing_args = [tmux, "list-sessions", "-F",
+                    "#{session_name}\t#{session_id}\t#{session_created}\t#{pid}"]
     try:
         listing = subprocess.run(
-            [tmux, "list-sessions", "-F",
-             "#{session_name}\t#{session_id}\t#{session_created}\t#{pid}"],
+            listing_args,
             capture_output=True, text=True, timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
@@ -160,6 +161,8 @@ def _live_parents(project_key: str) -> dict[str, str]:
         return {}
     parents: dict[str, tuple[str, str]] = {}
     seen: set[str] = set()
+    observed_generations: dict[str, tuple[str, ...]] = {}
+    queried_generation = False
     for line in listing.stdout.split("\n"):
         # name, id, creation time, server pid. The pid tells apart a session of
         # a restarted tmux server that got the same id in the same second.
@@ -169,6 +172,8 @@ def _live_parents(project_key: str) -> dict[str, str]:
         if not session:
             continue
         seen.add(session)
+        if generation is not None:
+            observed_generations[session] = generation
         known = _PARENT_BY_SESSION.get(session)
         if (generation is not None and known is not None and known[0] == generation
                 and now - known[3] < _PARENT_MISS_TTL):
@@ -178,6 +183,7 @@ def _live_parents(project_key: str) -> dict[str, str]:
         # Read only the two named values in one tmux command queue, using the
         # session ID where available rather than a potentially reused name.
         target = generation[0] if generation is not None else "=" + session
+        queried_generation |= generation is not None
         try:
             shown = subprocess.run(
                 [tmux, "show-environment", "-t", target, "PARENT_AGENT", ";",
@@ -197,9 +203,33 @@ def _live_parents(project_key: str) -> dict[str, str]:
             parents[session] = (parent, scope)
         if generation is not None and (shown.returncode == 0 or shown.returncode == 1):
             _PARENT_BY_SESSION[session] = (generation, parent, scope, now)
+    # A new tmux server can reuse a session ID between list-sessions and the
+    # environment lookup. Recheck the whole generation before adopting a new
+    # observation; never associate the replacement server's metadata with the
+    # old name. A failed recheck is not evidence of an empty server.
+    stable = True
+    if queried_generation:
+        current: dict[str, tuple[str, ...]] = {}
+        try:
+            verified = subprocess.run(listing_args, capture_output=True, text=True, timeout=5)
+            if verified.returncode == 0:
+                for line in verified.stdout.splitlines():
+                    fields = line.rsplit("\t", 3)
+                    if len(fields) == 4:
+                        current[fields[0].strip()] = tuple(fields[1:])
+        except (OSError, subprocess.SubprocessError):
+            pass
+        for session, generation in observed_generations.items():
+            if current.get(session) != generation:
+                parents.pop(session, None)
+                _PARENT_BY_SESSION.pop(session, None)
+                stable = False
     for gone in set(_PARENT_BY_SESSION) - seen:
         _PARENT_BY_SESSION.pop(gone, None)  # a POST may have cleared it meanwhile
-    _LIVE_PARENT_CACHE.update(ts=now, value=dict(parents))
+    if stable:
+        _LIVE_PARENT_CACHE.update(ts=now, value=dict(parents))
+    else:
+        _LIVE_PARENT_CACHE.update(ts=0.0, value=None)
     return {child: parent for child, (parent, scope) in parents.items()
             if scope == project_key} if project_key else {}
 
