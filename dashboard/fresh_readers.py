@@ -266,9 +266,15 @@ class Reader:
             selected={n['mail_agent_id'] for n in nodes if show_all or n['last_active']>=now-days*86400}
             nodes=[n for n in nodes if n['mail_agent_id'] in selected]
             edges=[e for e in edges if e['source_agent_id'] in selected and e['target_agent_id'] in selected]
-            return dict(mail_instance_id=instance,nodes=[] if q.get('spawn_only') in ('1','true') else nodes,
-                edges=[] if q.get('spawn_only') in ('1','true') else edges,spawn=[],total=len(nodes),
-                _selected=selected,degraded=len(counts)>10000,timestamp_diagnostics=dict(invalid_count=0,fields={}),ts=int(now))
+            spawn_only=q.get('spawn_only') in ('1','true')
+            topology_only=not spawn_only and q.get('topology_only') in ('1','true')
+            if topology_only:
+                pairs={(e['source'],e['target']) for e in edges}
+                edges=[dict(source=source,target=target) for source,target in sorted(pairs)]
+            return dict(mail_instance_id=instance,nodes=[] if spawn_only or topology_only else nodes,
+                edges=[] if spawn_only else edges,spawn=[],total=len(nodes),
+                _selected=selected,degraded=len(counts)>10000,timestamp_diagnostics=dict(invalid_count=0,fields={}),
+                ts=int(now),**({'topology_only':True} if topology_only else {}))
         pair=None
         if route=='/api/edge-messages':
             pair=tuple(self.resolve(owner,instance,q.get(k),q.get(k+'_id'),q.get('mail_instance_id')) for k in ('a','b'))
@@ -327,7 +333,7 @@ class Reader:
 
 
 ROUTES = {
-    '/api/graph': {'all','days','spawn_only'},
+    '/api/graph': {'all','days','spawn_only','topology_only'},
     '/api/edge-messages': {'a','b','a_id','b_id','limit'},
     '/api/messages-since': {'since','limit'},
     '/api/agent-history': {'name','names','mail_agent_id','hours','include_pane_states'},
