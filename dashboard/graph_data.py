@@ -204,15 +204,9 @@ _LINEAGE_PROVIDERS = {
 }
 
 
-def _lineage_state(directory: Path, name: str) -> dict:
-    """Read bounded, owner-private launch metadata without following symlinks."""
-    if directory.is_symlink() or any(
-        (directory / filename).exists() or (directory / filename).is_symlink()
-        for filename in (f".{name}.registration-pending.json", f".{name}.legacy-migration.json")
-    ):
-        return {}
+def _lineage_private_json(path: Path) -> dict:
+    """Read bounded, owner-private JSON without following the file's symlink."""
     try:
-        path = directory / f"{name}.json"
         if path.is_symlink():
             return {}
         descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
@@ -231,39 +225,57 @@ def _lineage_state(directory: Path, name: str) -> dict:
     return state if isinstance(state, dict) else {}
 
 
-@functools.lru_cache(maxsize=8)
-def _lineage_resume_module(path: str):
-    spec = importlib.util.spec_from_file_location("agentstack_graph_child_resume", path)
+def _lineage_state(directory: Path, name: str) -> dict:
+    if directory.is_symlink() or any(
+        (directory / filename).exists() or (directory / filename).is_symlink()
+        for filename in (f".{name}.registration-pending.json", f".{name}.legacy-migration.json")
+    ):
+        return {}
+    return _lineage_private_json(directory / f"{name}.json")
+
+
+@functools.lru_cache(maxsize=1)
+def _lineage_native_connections():
+    path = Path(__file__).resolve().parents[1] / "hooks" / "native_connections.py"
+    spec = importlib.util.spec_from_file_location("agentstack_graph_native_connections", path)
     if spec is None or spec.loader is None:
-        raise ValueError("Child launch validator is unavailable")
+        raise ValueError("Native connection validator is unavailable")
     module = importlib.util.module_from_spec(spec)
     try:
         spec.loader.exec_module(module)
     except Exception as exc:
-        raise ValueError("Child launch validator is unavailable") from exc
+        raise ValueError("Native connection validator is unavailable") from exc
     return module
 
 
 def _native_recorded_standalone(directory: Path, state: dict) -> bool:
-    """Use only the native launch selected by this verified child state."""
-    configured = _env_path("AGENTSTACK_CHILD_RESUME_HELPER")
-    install_home = _env_path("AGENTSTACK_HOME")
-    if install_home:
-        candidates = [configured, os.path.join(install_home, "hooks", "child_resume.py")]
-    else:
-        candidates = [
-            configured,
-            os.path.join(_env_path("AGENTSTACK_HOOKS_DIR", "~/.agentstack/hooks"), "child_resume.py"),
-            str(Path(__file__).resolve().parents[1] / "hooks" / "child_resume.py"),
-        ]
-    path = next((path for path in candidates if path and os.path.isfile(path)), "")
-    if not path:
+    """Verify selected launch identity without requiring a resumable session."""
+    if state.get("harness") != state.get("program"):
+        return False
+    raw_directory = state.get("harness_state_dir")
+    if not isinstance(raw_directory, str):
         return False
     try:
-        launch = _lineage_resume_module(path).native_resume_input(directory.parent, state)
+        runtime = directory.parent.resolve()
+        owned = runtime / "child-agents" / (state["agent_name"] + ".harness")
+        selected = Path(raw_directory)
+        if (not selected.is_absolute() or selected.is_symlink() or owned.is_symlink()
+                or not selected.is_dir() or not owned.is_dir()
+                or (selected != owned and selected.parent != owned)):
+            return False
+        kind_args = {"kind": state["harness_backend_kind"]} if "harness_backend_kind" in state else {}
+        kind = _lineage_native_connections().connection_kind(state.get("harness_backend"), **kind_args)
+        launch = _lineage_private_json(selected / "input.json")
     except (OSError, ValueError, TypeError, KeyError, AttributeError, ImportError):
         return False
-    return "parent_agent" in launch and launch["parent_agent"] is None
+    return (launch.get("agent_name") == state["agent_name"]
+            and launch.get("program") == state["program"]
+            and launch.get("project_key") == state["project_key"]
+            and launch.get("backend_id") == state["harness_backend"]
+            and launch.get("backend_kind", kind) == kind
+            and launch.get("runtime_dir") == str(runtime)
+            and launch.get("state_dir") == str(selected)
+            and "parent_agent" in launch and launch["parent_agent"] is None)
 
 
 def _recorded_parents(registrations: list[dict], project_key: str) -> dict[str, str]:

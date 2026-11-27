@@ -219,7 +219,7 @@ Codex App runtime には tmux pane がありません。terminal attach、dashbo
 
 NETWORK は「誰から生まれたか」と「誰と通信したか」を一枚の force graph に重ねます。まず、**ノードはエージェント、線は関係**と読んでください。
 
-legacy の親子関係は、再開時に tmux の親情報が欠けても、保存済みの起動記録を現在の登録 ID・project・provider と照合して復元します。Claude / Codex の再開時にも記録済みの親を tmux へ戻します。保存済み state の standalone 指定、または本人照合した dsh / Hermes 起動入力が無親を明示した場合は、通信相手を親にしません。親記録がないだけの row（この軽量経路で正確な conversation を照合していない Claude を含む）は standalone と断定せず、従来の message 推測の対象になります。
+legacy の親子関係は、再開時に tmux の親情報が欠けても、保存済みの起動記録を現在の登録 ID・project・provider と照合して復元します。Claude / Codex の再開時にも記録済みの親を tmux へ戻します。保存済み state の standalone 指定、または本人照合した dsh / Hermes 起動入力が無親を明示した場合は、通信相手を親にしません。dsh / Hermes は現在の state が選ぶ起動入力の本人・接続先・runtime を照合するため、その記録が有効なら作業ディレクトリの削除や native session 記録の有無で系譜は変わりません。再開可否の検証は従来どおり別途行います。親記録がないだけの row（この軽量経路で正確な conversation を照合していない Claude を含む）は standalone と断定せず、従来の message 推測の対象になります。
 
 次の初期状態では3ノードに対して `0 links · 0 spawn` なので、まだ親子関係も通信もありません。配置の調整は header 右端の `SETTINGS` から開く drawer の NETWORK で行います。
 

@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from pathlib import Path
 
 import pytest
+
+from dashboard import graph_data
 
 from test_graph_live_lineage import BASE, PROJECT, _build, _make_db
 
@@ -152,8 +153,6 @@ def native_recorded(recorded, monkeypatch, request):
         "harness": program, "agent_name": "QuietChild", "native_session_id": "native-session",
         "created_at": "2026-11-27T00:00:00+00:00",
     })
-    monkeypatch.setenv("AGENTSTACK_CHILD_RESUME_HELPER", str(
-        Path(__file__).resolve().parents[1] / "hooks" / "child_resume.py"))
     first_high_message(database)
     return database, path, state, directory, launch
 
@@ -167,7 +166,8 @@ def test_verified_native_standalone_stays_parentless_after_high_mail(native_reco
 
 @pytest.mark.parametrize("invalid", [
     "missing_parent", "foreign_project", "foreign_program", "foreign_agent", "symlink", "unselected_generation",
-    "unavailable_validator",
+    "unavailable_validator", "foreign_runtime", "foreign_state_dir", "foreign_backend", "foreign_kind",
+    "public_input", "oversized_input", "directory_symlink", "malformed_input",
 ])
 def test_unverified_native_launch_does_not_claim_standalone(native_recorded, monkeypatch, invalid):
     database, path, state, directory, launch = native_recorded
@@ -184,10 +184,28 @@ def test_unverified_native_launch_does_not_claim_standalone(native_recorded, mon
         current.mkdir()
         save(path, {**state, "harness_state_dir": str(current)})
     elif invalid == "unavailable_validator":
-        helper = directory / "broken-validator.py"
-        helper.write_text("raise RuntimeError('unavailable')\n")
-        monkeypatch.setenv("AGENTSTACK_CHILD_RESUME_HELPER", str(helper))
+        def unavailable():
+            raise ValueError("unavailable")
+        monkeypatch.setattr(graph_data, "_lineage_native_connections", unavailable)
+    elif invalid == "foreign_runtime":
+        launch["runtime_dir"] = str(directory / "other-runtime")
+    elif invalid == "foreign_state_dir":
+        launch["state_dir"] = str(directory.with_name("b" * 32))
+    elif invalid == "foreign_backend":
+        launch["backend_id"] = "deepseek"
+    elif invalid == "foreign_kind":
+        launch["backend_kind"] = "deepseek"
+    elif invalid == "oversized_input":
+        launch["padding"] = "x" * 65537
     save(directory / "input.json", launch)
+    if invalid == "public_input":
+        (directory / "input.json").chmod(0o644)
+    elif invalid == "directory_symlink":
+        target = directory.with_name("b" * 32)
+        directory.rename(target)
+        directory.symlink_to(target, target_is_directory=True)
+    elif invalid == "malformed_input":
+        (directory / "input.json").write_text('{"nested":' + '[' * 10000 + '0' + ']' * 10000 + '}')
     if invalid == "symlink":
         target = directory / "saved-input.json"
         (directory / "input.json").rename(target)
@@ -217,3 +235,42 @@ def test_missing_parent_without_launch_evidence_is_not_standalone(recorded, monk
     assert _build(monkeypatch, database, {})["spawn"] == [
         {"source": "Parent", "target": "QuietChild", "type": "spawn"}
     ]
+
+
+
+@pytest.mark.parametrize("unavailable", ["cwd_removed", "native_session_missing", "native_session_invalid"])
+def test_native_standalone_lineage_does_not_require_resume_material(native_recorded, monkeypatch, unavailable):
+    database, path, _state, directory, launch = native_recorded
+    if unavailable == "cwd_removed":
+        cwd = directory / "former-cwd"
+        cwd.mkdir()
+        launch["cwd"] = str(cwd)
+        save(directory / "input.json", launch)
+        assert _build(monkeypatch, database, {})["spawn"] == []
+        cwd.rmdir()
+    elif unavailable == "native_session_missing":
+        (directory / "native-session.json").unlink()
+    else:
+        (directory / "native-session.json").write_text("invalid session metadata")
+    state_before = path.read_bytes()
+    input_before = (directory / "input.json").read_bytes()
+    assert _build(monkeypatch, database, {})["spawn"] == []
+    assert path.read_bytes() == state_before
+    assert (directory / "input.json").read_bytes() == input_before
+
+
+def test_native_standalone_reader_does_not_execute_resume_helper(native_recorded, monkeypatch):
+    database, _path, _state, directory, _launch = native_recorded
+    helper = directory / "broken-resume.py"
+    helper.write_text("raise RuntimeError('resume helper must not run')\n")
+    monkeypatch.setenv("AGENTSTACK_CHILD_RESUME_HELPER", str(helper))
+    assert _build(monkeypatch, database, {})["spawn"] == []
+
+
+def test_native_standalone_keeps_named_connection_identity(native_recorded, monkeypatch):
+    database, path, state, directory, launch = native_recorded
+    state.update(harness_backend="strata-epyc", harness_backend_kind="strata")
+    launch.update(backend_id="strata-epyc", backend_kind="strata")
+    save(path, state)
+    save(directory / "input.json", launch)
+    assert _build(monkeypatch, database, {})["spawn"] == []
