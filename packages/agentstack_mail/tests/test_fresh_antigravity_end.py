@@ -246,6 +246,43 @@ def test_release_failure_after_closure_is_not_retried(runner_cleanup, monkeypatc
         finalize()
     assert calls == [('release_reservations', {'paths': resources})]
 
+@pytest.mark.parametrize('matching,identity_ok,accepted', [
+    ([], True, True), ([19], True, False), ([], False, False),
+    (None, True, False),
+])
+def test_missing_closed_lease_is_only_noop_when_absence_is_confirmed(
+        runner_cleanup, matching, identity_ok, accepted):
+    runner, state, resources = runner_cleanup
+    state['status'] = 'Z'
+    runner.close()
+    task = {'spawn_id': 'fixture-spawn', 'resources': resources}
+    calls = []
+
+    async def call(name, args):
+        assert (runner.run / 'ended.json').is_file()
+        calls.append((name, args))
+        if name == 'release_reservations':
+            raise B1Error('LEASE_NOT_FOUND')
+        return dict(mail_instance_id=runner.client.context['mail_instance_id'],
+                    actor_agent_id=runner.client.context['mail_agent_id'] if identity_ok else -1,
+                    own_matching_ids=matching)
+
+    runner.client.call = call
+
+    def finalize():
+        native_end.finalize_native_launch(runner.client, ROOT, runner.run,
+            runner_pid=os.getpid(), code=130, intent=runner.intent, task=task)
+
+    if accepted:
+        finalize()
+    else:
+        with pytest.raises(B1Error, match='LEASE_NOT_FOUND'):
+            finalize()
+    assert _read_private(runner.run / 'ended.json')['exit_code'] == 130
+    assert calls == [('release_reservations', {'paths': resources}),
+                     ('check_reservations', {'paths': resources})]
+
+
 def native_record(fixture, *, pid=201, start='native-birth'):
     client, run, intent, route, *_ = fixture
     intent['provider'] = 'antigravity';replace(run / 'intent.json', intent)

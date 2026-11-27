@@ -208,4 +208,21 @@ def finalize_native_launch(client, root, run, *, runner_pid, code, intent, task)
         raise B1Error('FRESH_LAUNCH_OUTCOME_UNKNOWN', launch_id=run.name) from None
     _write_private(run / 'ended.json', {'launch_id': run.name, 'exit_code': code})
     if resources:
-        asyncio.run(client.call('release_reservations', {'paths': resources}))
+        asyncio.run(release_closed_resources(client, resources))
+
+
+async def release_closed_resources(client, resources):
+    try:
+        await client.call('release_reservations', {'paths': resources})
+    except B1Error as error:
+        if error.code != 'LEASE_NOT_FOUND':
+            raise
+        # A read-only resume can legitimately have no active leases. A
+        # path-based release refuses the entire set if even one is absent.
+        # Confirm that none of our overlapping leases remain; never retry
+        # a release against a potentially changed reservation generation.
+        current = await client.call('check_reservations', {'paths': resources})
+        if (current.get('mail_instance_id') != client.context['mail_instance_id']
+                or current.get('actor_agent_id') != client.context['mail_agent_id']
+                or current.get('own_matching_ids') != []):
+            raise error
