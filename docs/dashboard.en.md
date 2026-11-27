@@ -197,7 +197,7 @@ A Codex App runtime has no tmux pane. The dashboard performs no terminal attach,
 
 NETWORK overlays “who spawned whom” and “who communicated” in one force graph. Read **nodes as agents and lines as relationships**.
 
-In legacy mode, a resumed agent whose tmux parent metadata is missing retains its recorded lineage after the saved launch record is matched to the current registration ID, project, and provider. Claude and Codex resume also restore the recorded parent to tmux. Explicit standalone agents do not acquire a parent from their messages; communication and spawn lines remain distinct.
+In legacy mode, a resumed agent whose tmux parent metadata is missing retains its recorded lineage after the saved launch record is matched to the current registration ID, project, and provider. Claude and Codex resume also restore the recorded parent to tmux. A standalone marker in the saved state, or an identity-checked dsh / Hermes launch input explicitly recording no parent, suppresses message-based parent inference. Missing parent metadata alone does not prove standalone; rows without that evidence, including Claude rows whose exact conversation is not verified on this lightweight path, still use the legacy message heuristic.
 
 The initial state below has three nodes and `0 links · 0 spawn`, so there are no parent-child relationships or communications yet. Layout is adjusted under NETWORK in the drawer opened by `SETTINGS` at the right end of the header.
 

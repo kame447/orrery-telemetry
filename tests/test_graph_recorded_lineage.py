@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -119,3 +120,100 @@ def test_normal_mail_without_launch_record_stays_communication(recorded, monkeyp
     graph = _build(monkeypatch, database, {})
     assert graph["spawn"] == []
     assert [(edge["source"], edge["target"]) for edge in graph["edges"]] == [("Parent", "QuietChild")]
+
+
+def first_high_message(database):
+    with sqlite3.connect(database) as connection:
+        connection.execute("INSERT INTO messages VALUES (1, 1, 1, ?, 'high')", ((BASE + 120) * 1_000_000,))
+        connection.execute("INSERT INTO message_recipients VALUES (1, 2, 'to')")
+
+
+@pytest.fixture(params=["dsh", "hermes"])
+def native_recorded(recorded, monkeypatch, request):
+    database, path, state = recorded
+    program = request.param
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE agents SET program = ? WHERE id = 2", (program,))
+    directory = path.parent / "QuietChild.harness" / ("a" * 32)
+    directory.mkdir(parents=True)
+    directory = directory.resolve()
+    state.update(program=program, provider=program, harness=program,
+                 harness_backend="strata", harness_state_dir=str(directory))
+    state.pop("parent_agent")
+    save(path, state)
+    launch = {
+        "agent_name": "QuietChild", "program": program, "project_key": PROJECT,
+        "backend_id": "strata", "state_dir": str(directory),
+        "runtime_dir": str(path.parent.parent.resolve()), "cwd": str(directory),
+        "parent_agent": None,
+    }
+    save(directory / "input.json", launch)
+    save(directory / "native-session.json", {
+        "harness": program, "agent_name": "QuietChild", "native_session_id": "native-session",
+        "created_at": "2026-11-27T00:00:00+00:00",
+    })
+    monkeypatch.setenv("AGENTSTACK_CHILD_RESUME_HELPER", str(
+        Path(__file__).resolve().parents[1] / "hooks" / "child_resume.py"))
+    first_high_message(database)
+    return database, path, state, directory, launch
+
+
+def test_verified_native_standalone_stays_parentless_after_high_mail(native_recorded, monkeypatch):
+    database, _path, _state, _directory, _launch = native_recorded
+    graph = _build(monkeypatch, database, {})
+    assert graph["spawn"] == []
+    assert [(edge["source"], edge["target"]) for edge in graph["edges"]] == [("Parent", "QuietChild")]
+
+
+@pytest.mark.parametrize("invalid", [
+    "missing_parent", "foreign_project", "foreign_program", "foreign_agent", "symlink", "unselected_generation",
+    "unavailable_validator",
+])
+def test_unverified_native_launch_does_not_claim_standalone(native_recorded, monkeypatch, invalid):
+    database, path, state, directory, launch = native_recorded
+    if invalid == "missing_parent":
+        launch.pop("parent_agent")
+    elif invalid == "foreign_project":
+        launch["project_key"] = "/another-project"
+    elif invalid == "foreign_program":
+        launch["program"] = "claude-code"
+    elif invalid == "foreign_agent":
+        launch["agent_name"] = "DifferentChild"
+    elif invalid == "unselected_generation":
+        current = directory.with_name("b" * 32)
+        current.mkdir()
+        save(path, {**state, "harness_state_dir": str(current)})
+    elif invalid == "unavailable_validator":
+        helper = directory / "broken-validator.py"
+        helper.write_text("raise RuntimeError('unavailable')\n")
+        monkeypatch.setenv("AGENTSTACK_CHILD_RESUME_HELPER", str(helper))
+    save(directory / "input.json", launch)
+    if invalid == "symlink":
+        target = directory / "saved-input.json"
+        (directory / "input.json").rename(target)
+        (directory / "input.json").symlink_to(target)
+    assert _build(monkeypatch, database, {})["spawn"] == [
+        {"source": "Parent", "target": "QuietChild", "type": "spawn"}
+    ]
+
+
+def test_native_recorded_parent_is_not_erased_by_standalone_metadata(native_recorded, monkeypatch):
+    database, path, state, _directory, _launch = native_recorded
+    save(path, {**state, "parent_agent": "Parent", "codex_standalone": True})
+    assert _build(monkeypatch, database, {})["spawn"] == [
+        {"source": "Parent", "target": "QuietChild", "type": "spawn"}
+    ]
+
+
+@pytest.mark.parametrize("program,provider", [("claude-code", "claude"), ("dsh", "dsh"), ("hermes", "hermes")])
+def test_missing_parent_without_launch_evidence_is_not_standalone(recorded, monkeypatch, program, provider):
+    database, path, state = recorded
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE agents SET program = ? WHERE id = 2", (program,))
+    state.update(program=program, provider=provider, codex_standalone=True)
+    state.pop("parent_agent")
+    save(path, state)
+    first_high_message(database)
+    assert _build(monkeypatch, database, {})["spawn"] == [
+        {"source": "Parent", "target": "QuietChild", "type": "spawn"}
+    ]

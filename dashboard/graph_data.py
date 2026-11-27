@@ -1,4 +1,6 @@
 import json
+import functools
+import importlib.util
 import hashlib
 import math
 import secrets
@@ -229,6 +231,41 @@ def _lineage_state(directory: Path, name: str) -> dict:
     return state if isinstance(state, dict) else {}
 
 
+@functools.lru_cache(maxsize=8)
+def _lineage_resume_module(path: str):
+    spec = importlib.util.spec_from_file_location("agentstack_graph_child_resume", path)
+    if spec is None or spec.loader is None:
+        raise ValueError("Child launch validator is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        raise ValueError("Child launch validator is unavailable") from exc
+    return module
+
+
+def _native_recorded_standalone(directory: Path, state: dict) -> bool:
+    """Use only the native launch selected by this verified child state."""
+    configured = _env_path("AGENTSTACK_CHILD_RESUME_HELPER")
+    install_home = _env_path("AGENTSTACK_HOME")
+    if install_home:
+        candidates = [configured, os.path.join(install_home, "hooks", "child_resume.py")]
+    else:
+        candidates = [
+            configured,
+            os.path.join(_env_path("AGENTSTACK_HOOKS_DIR", "~/.agentstack/hooks"), "child_resume.py"),
+            str(Path(__file__).resolve().parents[1] / "hooks" / "child_resume.py"),
+        ]
+    path = next((path for path in candidates if path and os.path.isfile(path)), "")
+    if not path:
+        return False
+    try:
+        launch = _lineage_resume_module(path).native_resume_input(directory.parent, state)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, ImportError):
+        return False
+    return "parent_agent" in launch and launch["parent_agent"] is None
+
+
 def _recorded_parents(registrations: list[dict], project_key: str) -> dict[str, str]:
     """Recover explicit launch lineage after resume loses its tmux environment."""
     directory = Path(_env_path("AGENTSTACK_RUNTIME_DIR", "~/.agentstack/runtime")) / "child-agents"
@@ -249,7 +286,8 @@ def _recorded_parents(registrations: list[dict], project_key: str) -> dict[str, 
                 or state.get("launch_origin") not in ("child", "standalone")
                 or state.get("tools_change_generation")):
             continue
-        if state.get("launch_origin") == "standalone" or state.get("codex_standalone") is True:
+        if (state.get("launch_origin") == "standalone"
+                or provider == "codex" and state.get("codex_standalone") is True):
             parents[name] = ""
             continue
         if state.get("launch_origin") != "child":
@@ -257,6 +295,8 @@ def _recorded_parents(registrations: list[dict], project_key: str) -> dict[str, 
         parent = state.get("parent_agent")
         if isinstance(parent, str) and parent != name and _LINEAGE_NAME.fullmatch(parent):
             parents[name] = parent
+        elif parent is None and provider in ("dsh", "hermes") and _native_recorded_standalone(directory, state):
+            parents[name] = ""
     return parents
 
 
