@@ -618,7 +618,8 @@ def _preflight(base: Any, request: dict, resources: str) -> tuple[dict, str]:
             return {}, f"Gemini provider helper is not installed: {helper}"
     path = _launch_path()
     if not _which(os.environ.get("AGENTSTACK_GEMINI_BIN") or "agy", path):
-        return {}, "Antigravity CLI not found for provider gemini (expected agy)"
+        return {}, ("Antigravity CLI not found for provider gemini (expected agy). "
+                    "See https://github.com/kame447/orrery-telemetry/blob/master/docs/antigravity.md")
     for command, label in (
         (os.environ.get("AGENTSTACK_PYTHON") or "python3", "selected Python"),
         ("tmux", "tmux"),

@@ -372,3 +372,21 @@ def test_model_projection_prefers_complete_raw_identifier_to_display(raw):
     roster['agents'][0].update(model='GPT-'+raw[4:].title(),model_raw=raw)
     data=snapshot(FakeDashboard(LEGACY,roster),'legacy',project_key=PROJECT)
     assert data.agents[0]['model']==raw
+
+
+@pytest.mark.parametrize("mode", ["legacy", "fresh"])
+def test_api48_preserves_mode_and_scope_guards(mode):
+    version, roster = deepcopy((LEGACY, AGENTS_LEGACY) if mode == "legacy" else (FRESH, AGENTS_FRESH))
+    version["api"] = 48
+    key = PROJECT if mode == "legacy" else None
+    data = snapshot(FakeDashboard(version, roster), mode, project_key=key)
+    assert data.api == 48
+    if mode == "legacy":
+        roster["project_key"] = "/fixture/foreign"
+    else:
+        roster["mail_instance_id"] = "f" * 32
+    with pytest.raises(DashboardError):
+        snapshot(FakeDashboard(version, roster), mode, project_key=key)
+    with pytest.raises(DashboardError):
+        snapshot(FakeDashboard(version, roster), "fresh" if mode == "legacy" else "legacy",
+                 project_key=None if mode == "legacy" else PROJECT)

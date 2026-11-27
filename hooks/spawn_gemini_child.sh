@@ -121,7 +121,7 @@ case "$RESOURCE_TTL" in
 esac
 
 command -v tmux >/dev/null 2>&1 || { echo "$PROG: tmux not found" >&2; exit 1; }
-command -v "$GEMINI_BIN" >/dev/null 2>&1 || { echo "$PROG: Antigravity CLI not found (expected agy)" >&2; exit 1; }
+command -v "$GEMINI_BIN" >/dev/null 2>&1 || { echo "$PROG: Antigravity CLI (agy) not found on PATH. See https://github.com/kame447/orrery-telemetry/blob/master/docs/antigravity.md" >&2; exit 1; }
 command -v "$PYTHON_BIN" >/dev/null 2>&1 || [[ -x "$PYTHON_BIN" ]] || { echo "$PROG: selected Python is unavailable: $PYTHON_BIN" >&2; exit 1; }
 [[ -x "$PREREGISTER" ]] || { echo "$PROG: missing $PREREGISTER" >&2; exit 1; }
 [[ -x "$MAIL_HELPER" ]] || { echo "$PROG: missing $MAIL_HELPER" >&2; exit 1; }

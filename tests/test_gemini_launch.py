@@ -10,6 +10,8 @@ import subprocess
 import tempfile
 from types import SimpleNamespace
 
+import pytest
+
 from dashboard import gemini_provider_runtime
 
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -249,12 +251,18 @@ def test_mcp_setup_check_reports_availability_without_writing(tmp_path):
     command.parent.mkdir(parents=True)
     command.write_text('#!/bin/sh\nexit 1\n')
     command.chmod(0o700)
-    assert _run_setup(config, '--check').returncode != 0
+    result = _run_setup(config, '--check')
+    assert result.returncode != 0
+    assert 'scripts/install-gemini-provider.sh --dry-run --configure-mcp' in result.stderr
+    assert 'scripts/install-gemini-provider.sh --configure-mcp' in result.stderr
     assert not config.exists()
 
     config.write_text(json.dumps({'mcpServers': {'orrery-mail': dict(entry, disabled=True)}}))
     before = config.read_bytes()
-    assert _run_setup(config, '--check').returncode != 0
+    result = _run_setup(config, '--check')
+    assert result.returncode != 0
+    assert 'missing, disabled or points to a different command' in result.stderr
+    assert 'scripts/install-gemini-provider.sh --dry-run --configure-mcp' in result.stderr
     assert config.read_bytes() == before
 
     assert _run_setup(config).returncode == 0
@@ -302,6 +310,42 @@ def test_mcp_setup_uninstall_removes_only_orrery_entry() -> None:
         assert rendered["mcpServers"]["keep-me"] == {
             "serverUrl": "https://example.invalid/mcp"
         }
+
+
+@pytest.mark.parametrize("launcher, cli_var, name, guide", [
+    ("agent-start", "AGENTSTACK_CLAUDE_BIN", "Claude Code CLI (claude)", "install.md"),
+    ("agent-start-codex", "AGENTSTACK_CODEX_BIN", "Codex CLI (codex)", "install.md"),
+    ("agent-start-gemini", "AGENTSTACK_GEMINI_BIN", "Antigravity CLI (agy)", "antigravity.md"),
+])
+def test_missing_top_level_cli_has_install_hint(tmp_path, launcher, cli_var, name, guide):
+    home = tmp_path / "home"
+    home.mkdir()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    tmux = fake_bin / "tmux"
+    tmux.write_text("#!/bin/sh\nexit 99\n")
+    tmux.chmod(0o700)
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith("AGENTSTACK_") and key not in ("TMUX", "AGENT_NAME", "PARENT_AGENT")}
+    env.update(HOME=str(home), AGENTSTACK_HOME=str(home / ".agentstack"),
+               AGENTSTACK_RUNTIME_MODE="legacy", AGENTSTACK_PROJECT_KEY="/fixture",
+               PATH=str(fake_bin) + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin"))
+    env[cli_var] = str(tmp_path / "absent-cli")
+    result = subprocess.run(["bash", str(_ROOT / "bin" / launcher), str(home)],
+                            env=env, text=True, capture_output=True, timeout=20)
+    assert result.returncode == 1, result.stderr
+    assert name in result.stderr and cli_var in result.stderr
+    assert "https://github.com/kame447/orrery-telemetry/blob/master/docs/" + guide in result.stderr
+    assert not (home / ".agentstack").exists()
+
+
+def test_missing_mcp_runner_has_install_hint_without_writing(tmp_path):
+    config = tmp_path / "mcp_config.json"
+    result = _run_setup(config, "--check")
+    assert result.returncode != 0
+    assert "session-bound MCP runner is not installed" in result.stderr
+    assert "https://github.com/kame447/orrery-telemetry/blob/master/docs/antigravity.md" in result.stderr
+    assert not config.exists()
 
 
 def test_top_level_hydrogen_xhigh_dry_run(tmp_path) -> None:
