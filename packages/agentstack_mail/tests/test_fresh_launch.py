@@ -54,6 +54,14 @@ provider = os.environ['TEST_PROVIDER']
 args = sys.argv[1:]
 home = pathlib.Path(os.environ['CODEX_HOME' if provider == 'codex' else 'CLAUDE_CONFIG_DIR'])
 ''' + CODEX_APP_SERVER + r'''
+if os.environ.get('TEST_BLOCK'):
+    ready = pathlib.Path(os.environ['TEST_BLOCK'])
+    ready.write_text('ready')
+    release = pathlib.Path(os.environ['TEST_RELEASE'])
+    deadline = time.monotonic() + 60
+    while not release.exists() and time.monotonic() < deadline:
+        time.sleep(.05)
+    if not release.exists():sys.exit(18)
 if '--resume' in args:session = args[args.index('--resume')+1]
 elif 'resume' in args:session = args[args.index('resume')+1]
 else:session = str(uuid.uuid4())
@@ -98,9 +106,6 @@ result = dict(provider=provider, args=args, session_id=session, session_hook_rc=
     runtime=os.environ.get('AGENTSTACK_RUNTIME_DIR'),
     old_identity_present=any(key in os.environ for key in ('PROJECT_KEY','AGENTSTACK_PROJECT_KEY','CHILD_REGISTRATION_TOKEN','MCP_AGENT_MAIL_TOKEN')))
 pathlib.Path(os.environ['TEST_TRACE']).write_text(json.dumps(result))
-if os.environ.get('TEST_BLOCK'):
-    pathlib.Path(os.environ['TEST_BLOCK']).write_text('ready')
-    time.sleep(8)
 sys.exit(0 if recorded.returncode == 0 and guarded.returncode == 0 and proxied.returncode == 0 else 17)
 '''
 
@@ -147,7 +152,7 @@ def prepare(client, provider, tmp_path):
     return home, binary
 
 
-async def invoke(client, provider, binary, tmp_path, *, session=None, extra=None, wrapper_root=ROOT):
+async def invoke(client, provider, binary, tmp_path, *, session=None, extra=None, wrapper_root=ROOT, timeout=60):
     env = environment(client, AGENTSTACK_RUNTIME_MODE='fresh',
         **{'AGENTSTACK_' + provider.upper() + '_BIN': str(binary)},
         TEST_PROVIDER=provider, TEST_TRACE=str(tmp_path / 'native-trace.json'),
@@ -158,7 +163,7 @@ async def invoke(client, provider, binary, tmp_path, *, session=None, extra=None
     else:
         args = [sys.executable, str(wrapper_root / 'bin/agentstack-resume'), provider, str(tmp_path), '--session-id', session]
     return await asyncio.to_thread(subprocess.run, args, cwd=tmp_path, env=env,
-                                   capture_output=True, text=True, timeout=60)
+                                   capture_output=True, text=True, timeout=timeout)
 
 
 @pytest.mark.parametrize('provider', ['claude', 'codex'])
@@ -382,15 +387,21 @@ def test_one_context_cannot_start_two_native_processes(tmp_path):
             home, binary = prepare(client, 'claude', tmp_path)
             await grant(runtime, people, [tmp_path / 'note.py'])
             ready = tmp_path / 'provider-ready'
-            first = asyncio.create_task(invoke(client, 'claude', binary, tmp_path, extra={'TEST_BLOCK':str(ready)}))
+            release = tmp_path / 'provider-release'
+            first = asyncio.create_task(invoke(client, 'claude', binary, tmp_path,
+                extra={'TEST_BLOCK':str(ready), 'TEST_RELEASE':str(release)}, timeout=120))
             try:
-                for _ in range(120):
-                    if ready.exists():break
+                for _ in range(300):
+                    if ready.exists() or first.done():break
                     await asyncio.sleep(0.1)
-                assert ready.exists()
-                second = await invoke(client, 'claude', binary, tmp_path)
+                if first.done():
+                    pytest.fail('fixture exited before launch lock handshake: ' + (await first).stderr)
+                assert ready.exists(), 'fixture provider did not reach launch lock handshake'
+                second = await invoke(client, 'claude', binary, tmp_path, timeout=30)
                 assert second.returncode == 2 and 'FRESH_LAUNCH_BUSY' in second.stderr
+                assert not first.done(), 'fixture exited before lock contention was verified'
             finally:
+                release.touch()
                 result = await first
             assert result.returncode == 0, result.stderr
     asyncio.run(run())
