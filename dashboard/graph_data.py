@@ -197,6 +197,8 @@ def _live_parents() -> dict[str, str]:
     return parents
 
 
+# Child filenames follow child_resume.SAFE_NAME; parent names follow the proxy rule.
+_LINEAGE_CHILD_NAME = re.compile(r"[A-Za-z0-9_.-]+")
 _LINEAGE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,127}")
 _LINEAGE_PROVIDERS = {
     "claude": "claude", "claude-code": "claude",
@@ -285,7 +287,7 @@ def _recorded_parents(registrations: list[dict], project_key: str) -> dict[str, 
     for registration in registrations:
         name = registration["name"]
         provider = _LINEAGE_PROVIDERS.get(registration["program"])
-        if not isinstance(name, str) or not _LINEAGE_NAME.fullmatch(name) or not provider:
+        if not isinstance(name, str) or not _LINEAGE_CHILD_NAME.fullmatch(name) or not provider:
             continue
         state = _lineage_state(directory, name)
         if (type(state.get("schema_version")) is not int or state["schema_version"] != 1
