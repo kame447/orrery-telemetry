@@ -531,7 +531,20 @@ class _Watcher(threading.Thread):
         }
         self.listener_baseline = {port: _listener_pids(port) for port in _mail_listener_ports(settings)}
         self.disturbed: dict[str, str] = {}
+        # A missing observation is not evidence of an outage, but neither
+        # can a later healthy sample establish continuity across that gap.
+        self.unobserved: dict[str, str] = {}
         self.crashed: BaseException | None = None
+        if REAL_LAUNCH_AGENTS is not None:
+            for label, baseline in self.baseline.items():
+                if baseline == UNKNOWN:
+                    self.unobserved[label] = "initial launchd observation unavailable"
+            for port, baseline in self.listener_baseline.items():
+                if baseline == UNKNOWN:
+                    self.unobserved[f"mail listener :{port}"] = "initial listener observation unavailable"
+
+    def _record_gap(self, key: str) -> None:
+        self.unobserved.setdefault(key, f"observation unavailable while running {_CURRENT_TEST}")
 
     def _check_listener(self) -> None:
         for port, baseline in self.listener_baseline.items():
@@ -540,6 +553,7 @@ class _Watcher(threading.Thread):
                 continue
             current = _listener_pids(port)
             if current == UNKNOWN:
+                self._record_gap(key)
                 continue
             if not current:
                 self.disturbed[key] = f"stopped serving {port} while running {_CURRENT_TEST}"
@@ -553,11 +567,15 @@ class _Watcher(threading.Thread):
             if baseline is None or baseline is False or baseline == UNKNOWN or label in self.disturbed:
                 continue
             if label in self.periodic:
-                if _loaded(label) is False:
+                current = _loaded(label)
+                if current == UNKNOWN:
+                    self._record_gap(label)
+                elif current is False:
                     self.disturbed[label] = f"timer unloaded while running {_CURRENT_TEST}"
                 continue
             current = _job_pid(label)
             if current == UNKNOWN:
+                self._record_gap(label)
                 continue
             if current is None:
                 self.disturbed[label] = f"stopped while running {_CURRENT_TEST}"
@@ -612,6 +630,12 @@ def _the_suite_leaves_real_services_alone():
             + "; ".join(f"{label}: {why}" for label, why in watcher.disturbed.items())
             + ". A test must act only on its own label "
             "(AGENTSTACK_MAIL_LAUNCHD_LABEL / AGENTSTACK_LABEL_PREFIX).",
+            pytrace=False,
+        )
+    if watcher.unobserved:
+        pytest.fail(
+            "production-service continuity could not be established (not evidence of an outage): "
+            + "; ".join(f"{key}: {why}" for key, why in watcher.unobserved.items()),
             pytrace=False,
         )
 

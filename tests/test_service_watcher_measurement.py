@@ -1004,3 +1004,45 @@ def test_loading_probe_distinguishes_error_from_unloaded(tmp_path):
     assert module._loaded("org.example") == module.UNKNOWN
     module.LAUNCHCTL = str(_fake_tool(tmp_path, "launchctl", "exit 113\n"))
     assert module._loaded("org.example") is False
+
+
+@pytest.mark.parametrize("target", ["listener", "persistent_job", "timer"])
+def test_observation_gap_survives_recovery(tmp_path, monkeypatch, target):
+    module = _load_conftest()
+    label, jobs, loaded, listeners = _periodic_mail_fixture(tmp_path, monkeypatch, module)
+    mapping, key, expected = {
+        "listener": (listeners, 18765, "mail listener :18765"),
+        "persistent_job": (jobs, "org.orrery.mail", "org.orrery.mail"),
+        "timer": (loaded, label, label),
+    }[target]
+    watcher = module._Watcher((label, "org.orrery.mail"))
+    before = mapping[key]
+    mapping[key] = module.UNKNOWN
+    _sample_once(watcher)
+    assert watcher.disturbed == {}
+    assert expected in watcher.unobserved
+    mapping[key] = before
+    _sample_once(watcher)
+    assert watcher.disturbed == {}
+    assert expected in watcher.unobserved
+
+
+def test_unknown_initial_mac_baseline_is_not_success(tmp_path, monkeypatch):
+    module = _load_conftest()
+    label, jobs, loaded, listeners = _periodic_mail_fixture(tmp_path, monkeypatch, module)
+    loaded[label] = module.UNKNOWN
+    listeners[18765] = module.UNKNOWN
+    watcher = module._Watcher((label, "org.orrery.mail"))
+    assert set(watcher.unobserved) == {label, "mail listener :18765"}
+    assert watcher.disturbed == {}
+
+
+def test_final_observation_gap_fails_session_guard(tmp_path, monkeypatch):
+    module = _load_conftest()
+    label, jobs, loaded, listeners = _periodic_mail_fixture(tmp_path, monkeypatch, module)
+    monkeypatch.setattr(module, "PRODUCTION_LABELS", (label, "org.orrery.mail"))
+    guard = module._the_suite_leaves_real_services_alone()
+    next(guard)
+    listeners[18765] = module.UNKNOWN
+    with pytest.raises(pytest.fail.Exception, match="continuity could not be established"):
+        next(guard)
