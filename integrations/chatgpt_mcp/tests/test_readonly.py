@@ -320,7 +320,7 @@ def test_http_legacy_mode_and_mode_mismatch(tmp_path):
             assert response[1]["result"]["structuredContent"]["error"]["code"] == "dashboard_unavailable"
 
 
-@pytest.mark.parametrize("api", [34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47])
+@pytest.mark.parametrize("api", [34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48])
 def test_supported_fresh_generations_still_require_fresh_contract(api):
     version = {**FRESH, "api": api}
     data = snapshot(FakeDashboard(version, AGENTS_FRESH), "fresh")
@@ -330,7 +330,7 @@ def test_supported_fresh_generations_still_require_fresh_contract(api):
 
 
 @pytest.mark.parametrize("mode", ["legacy", "fresh"])
-@pytest.mark.parametrize("api", [999, 48, 33, True, "39", None])
+@pytest.mark.parametrize("api", [999, 49, 33, True, "39", None])
 def test_unknown_generations_are_rejected_before_roster_read(api, mode):
     version, roster = (LEGACY, AGENTS_LEGACY) if mode == "legacy" else (FRESH, AGENTS_FRESH)
     backend = FakeDashboard({**version, "api": api}, roster)
@@ -371,3 +371,21 @@ def test_model_projection_prefers_complete_raw_identifier_to_display(raw):
     roster['agents'][0].update(model='GPT-'+raw[4:].title(),model_raw=raw)
     data=snapshot(FakeDashboard(LEGACY,roster),'legacy',project_key=PROJECT)
     assert data.agents[0]['model']==raw
+
+
+@pytest.mark.parametrize("mode", ["legacy", "fresh"])
+def test_api48_preserves_mode_and_scope_guards(mode):
+    version, roster = deepcopy((LEGACY, AGENTS_LEGACY) if mode == "legacy" else (FRESH, AGENTS_FRESH))
+    version["api"] = 48
+    key = PROJECT if mode == "legacy" else None
+    data = snapshot(FakeDashboard(version, roster), mode, project_key=key)
+    assert data.api == 48
+    if mode == "legacy":
+        roster["project_key"] = "/fixture/foreign"
+    else:
+        roster["mail_instance_id"] = "f" * 32
+    with pytest.raises(DashboardError):
+        snapshot(FakeDashboard(version, roster), mode, project_key=key)
+    with pytest.raises(DashboardError):
+        snapshot(FakeDashboard(version, roster), "fresh" if mode == "legacy" else "legacy",
+                 project_key=None if mode == "legacy" else PROJECT)
