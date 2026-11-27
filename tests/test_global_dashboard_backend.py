@@ -74,6 +74,7 @@ def test_every_nonstatic_route_passes_admission_before_dispatch(ui,method):
 
 @pytest.mark.parametrize('path,reason',[
     ('/api/mail/recent','UI_VIEWPOINT_REQUIRED'),
+    ('/api/graph?all=1&topology_only=1','UI_VIEWPOINT_REQUIRED'),
     ('/api/mail/recent?view_as_agent_id=bad','QUERY_INVALID'),
     ('/api/mail/recent?view_as_agent_id=2&limit=101','QUERY_INVALID'),
     ('/api/mail/legacy-label?view_as_agent_id=2&label=old&source=1','QUERY_INVALID'),

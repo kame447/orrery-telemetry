@@ -1,4 +1,6 @@
 import json
+import functools
+import importlib.util
 import hashlib
 import math
 import secrets
@@ -8,6 +10,9 @@ from contextlib import contextmanager
 import os
 import shutil
 import sqlite3
+import stat
+import re
+from pathlib import Path
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -189,6 +194,121 @@ def _live_parents() -> dict[str, str]:
     for gone in set(_PARENT_BY_SESSION) - seen:
         _PARENT_BY_SESSION.pop(gone, None)  # a POST may have cleared it meanwhile
     _LIVE_PARENT_CACHE.update(ts=now, value=dict(parents))
+    return parents
+
+
+_LINEAGE_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,127}")
+_LINEAGE_PROVIDERS = {
+    "claude": "claude", "claude-code": "claude",
+    "codex": "codex", "codex-cli": "codex", "dsh": "dsh", "hermes": "hermes",
+}
+
+
+def _lineage_private_json(path: Path) -> dict:
+    """Read bounded, owner-private JSON without following the file's symlink."""
+    try:
+        if path.is_symlink():
+            return {}
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                             | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(descriptor, "rb") as source:
+            info = os.fstat(source.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) & 0o077 or info.st_size > 65536):
+                return {}
+            raw = source.read(65537)
+        if len(raw) > 65536:
+            return {}
+        state = json.loads(raw)
+    except (OSError, ValueError, RecursionError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def _lineage_state(directory: Path, name: str) -> dict:
+    if directory.is_symlink() or any(
+        (directory / filename).exists() or (directory / filename).is_symlink()
+        for filename in (f".{name}.registration-pending.json", f".{name}.legacy-migration.json")
+    ):
+        return {}
+    return _lineage_private_json(directory / f"{name}.json")
+
+
+@functools.lru_cache(maxsize=1)
+def _lineage_native_connections():
+    path = Path(__file__).resolve().parents[1] / "hooks" / "native_connections.py"
+    spec = importlib.util.spec_from_file_location("agentstack_graph_native_connections", path)
+    if spec is None or spec.loader is None:
+        raise ValueError("Native connection validator is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        raise ValueError("Native connection validator is unavailable") from exc
+    return module
+
+
+def _native_recorded_standalone(directory: Path, state: dict) -> bool:
+    """Verify selected launch identity without requiring a resumable session."""
+    if state.get("harness") != state.get("program"):
+        return False
+    raw_directory = state.get("harness_state_dir")
+    if not isinstance(raw_directory, str):
+        return False
+    try:
+        runtime = directory.parent.resolve()
+        owned = runtime / "child-agents" / (state["agent_name"] + ".harness")
+        selected = Path(raw_directory)
+        if (not selected.is_absolute() or selected.is_symlink() or owned.is_symlink()
+                or not selected.is_dir() or not owned.is_dir()
+                or (selected != owned and selected.parent != owned)):
+            return False
+        kind_args = {"kind": state["harness_backend_kind"]} if "harness_backend_kind" in state else {}
+        kind = _lineage_native_connections().connection_kind(state.get("harness_backend"), **kind_args)
+        launch = _lineage_private_json(selected / "input.json")
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, ImportError):
+        return False
+    return (launch.get("agent_name") == state["agent_name"]
+            and launch.get("program") == state["program"]
+            and launch.get("project_key") == state["project_key"]
+            and launch.get("backend_id") == state["harness_backend"]
+            and launch.get("backend_kind", kind) == kind
+            and launch.get("runtime_dir") == str(runtime)
+            and launch.get("state_dir") == str(selected)
+            and "parent_agent" in launch and launch["parent_agent"] is None)
+
+
+def _recorded_parents(registrations: list[dict], project_key: str) -> dict[str, str]:
+    """Recover explicit launch lineage after resume loses its tmux environment."""
+    directory = Path(_env_path("AGENTSTACK_RUNTIME_DIR", "~/.agentstack/runtime")) / "child-agents"
+    parents = {}
+    for registration in registrations:
+        name = registration["name"]
+        provider = _LINEAGE_PROVIDERS.get(registration["program"])
+        if not isinstance(name, str) or not _LINEAGE_NAME.fullmatch(name) or not provider:
+            continue
+        state = _lineage_state(directory, name)
+        if (type(state.get("schema_version")) is not int or state["schema_version"] != 1
+                or type(state.get("agent_id")) is not int
+                or state["agent_id"] <= 0 or state["agent_id"] != registration["id"]
+                or state.get("agent_name") != name or state.get("project_key") != project_key
+                or state.get("provider") != provider
+                or not isinstance(state.get("program"), str)
+                or _LINEAGE_PROVIDERS.get(state["program"]) != provider
+                or state.get("launch_origin") not in ("child", "standalone")
+                or state.get("tools_change_generation")):
+            continue
+        if (state.get("launch_origin") == "standalone"
+                or provider == "codex" and state.get("codex_standalone") is True):
+            parents[name] = ""
+            continue
+        if state.get("launch_origin") != "child":
+            continue
+        parent = state.get("parent_agent")
+        if isinstance(parent, str) and parent != name and _LINEAGE_NAME.fullmatch(parent):
+            parents[name] = parent
+        elif parent is None and provider in ("dsh", "hermes") and _native_recorded_standalone(directory, state):
+            parents[name] = ""
     return parents
 
 
@@ -624,7 +744,7 @@ def build_graph() -> dict:
         )
         cur.execute(
             f"""
-            SELECT name, model, program, task_description,
+            SELECT id, name, model, program, task_description,
                    {retired_select}, last_active_ts, inception_ts
             FROM agents
             WHERE project_id = ?
@@ -632,7 +752,9 @@ def build_graph() -> dict:
             (PROJECT_ID,),
         )
         nodes = []
+        registrations = []
         for r in cur.fetchall():
+            registrations.append({"id": r["id"], "name": r["name"], "program": r["program"]})
             last_active = _to_epoch(
                 r["last_active_ts"],
                 field="agents.last_active_ts",
@@ -727,16 +849,24 @@ def build_graph() -> dict:
         )
         spawn = []
         seen = set()
-        # Live sessions first: PARENT_AGENT is the spawn relationship itself,
-        # not a trace of it, so it holds for a child that has not spoken yet.
+        inbound = cur.fetchall()
+        project_key = con.execute(
+            "SELECT human_key FROM projects WHERE id = ?", (PROJECT_ID,)
+        ).fetchone()["human_key"]
+        # Saved launch identity survives a resumed or stopped session. Current
+        # session-local parent metadata wins; ordinary mail never replaces either.
+        parents = _recorded_parents(registrations, project_key)
+        parents.update(_live_parents())
         node_names = {n["name"] for n in nodes}
-        for child, parent in _live_parents().items():
-            if child in node_names and parent in node_names and child != parent:
-                seen.add(child)
+        for child, parent in parents.items():
+            if child not in node_names:
+                continue
+            seen.add(child)
+            if parent in node_names and child != parent:
                 spawn.append(
                     {"source": parent, "target": child, "type": "spawn"}
                 )
-        for r in cur.fetchall():
+        for r in inbound:
             child = r["child"]
             if child in seen:
                 continue            # ASC なので最初=最古 inbound

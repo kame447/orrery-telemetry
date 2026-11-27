@@ -49,7 +49,7 @@ POST の Origin は、検証済み Host に対応する固定 origin とだけ�
 | GET | `/api/agents` | なし | `{ts, agents}` |
 | GET / POST | `/api/computer-use` | operator capability | [起動世代の権限](#computer-use-api) |
 | GET | `/api/agents/<name>/history-binding` | なし | `{ok, agent}`（1人分の会話の記録の binding、API 36） |
-| GET | `/api/graph` | `days`, `all` | `{nodes, edges, spawn, timestamp_diagnostics, degraded, ts}` |
+| GET | `/api/graph` | `days`, `all`, `spawn_only`, `topology_only` | `{nodes, edges, spawn, timestamp_diagnostics, degraded, ts}` |
 | GET | `/api/history` | `session`, `limit` | transcript events |
 | GET | `/api/agent-history` | `name` または `names`, `hours`, `include_pane_states` | agent event timeline |
 | GET | `/api/edge-messages` | `a`, `b`, `limit` | 二者間 messages |
@@ -88,7 +88,7 @@ curl -s http://127.0.0.1:8770/api/version
 ```
 
 ```json
-{"name":"orrery-telemetry","version":"2026.09.16.1","api":47}
+{"name":"orrery-telemetry","version":"2026.09.16.1","api":48}
 ```
 
 version の解決順は [インストール](install.md#version)を参照してください。
@@ -152,7 +152,7 @@ history は raw transcript、内部 transcript/context/binding path、現在の 
 
 | URL | 外形と上限 |
 |---|---|
-| `/api/graph?all=&days=&spawn_only=` | 既存 nodes/edges/spawn、最大5000 agent・10000辺。PC graph は既存どおり全 kind。上限超過は degraded。spawn は保存済みの保護 family の論理親だけで、standalone の準備元を親へ推測しない。lineage は native 起動／生存の証明ではない |
+| `/api/graph?all=&days=&spawn_only=&topology_only=` | 既存 nodes/edges/spawn、最大5000 agent・10000辺。PC graph は既存どおり全 kind。上限超過は degraded。spawn は保存済みの保護 family の論理親だけで、standalone の準備元を親へ推測しない。lineage は native 起動／生存の証明ではない |
 | `/api/edge-messages?a=&b=&limit=` | `{ok,a,b,count,messages}`、最大200件、既存の全 kind、body/read_ts/ack_ts は表示だけ |
 | `/api/messages-since?since=&limit=` | `{ok,now,since,messages}`、最大200件、遡り最大300秒。各配送を展開し時系列順に返す |
 | `/api/agent-history?name=&names=&hours=` | 最大200件・最大168hの Mail／登録／retire のイベントと range/initial_state。旧 provider log や pane state は参照しない |
@@ -476,6 +476,8 @@ response:
 
 ## GET `/api/graph`
 
+API 世代48では、legacy / fresh に `topology_only=1`（または `true`）を追加します。`nodes` は空配列、`edges` は重複を除いた方向付きの `{source, target}` だけ、`spawn` は従来と同じ親子関係を返します。`topology_only: true` と既存の `timestamp_diagnostics` / `degraded` / `ts` も返します。`all` / `days` の対象範囲は通常の graph と同じで、通信の有無を親子関係へ変換しません。ノードごとの会話再開可否・状態観測を省くため、コックピットが通信関係を継続表示する定期取得に使えます。`spawn_only=1` を同時に指定した場合は既存の `spawn_only` 応答を優先します。global は既存の視点別 activity API のままで、operator admission と `view_as_agent_id` が必要です。この projection を全体の閲覧権限へ読み替えません。
+
 API 世代26では `/api/graph` の node に正規化前の `model_raw` を追加します。`provider=strata` / `locality=local` を既存の Local 六角形で表示し、`model_raw` を優先して Qwen などの maker を選びます。未知の maker は空の六角形です。provider / locality の意味は変わりません。
 
 query:
@@ -484,6 +486,8 @@ query:
 | --- | --- | --- |
 | `days` | `4` | mail / spawn history の期間 |
 | `all` | `0` | `1` / `true` で全 agent を含める |
+| `spawn_only` | `0` | `1` / `true` で親子関係だけを返す |
+| `topology_only` | `0` | `1` / `true` で親子関係と通信の接続先だけを返す（API 48） |
 
 ```bash
 curl -s 'http://127.0.0.1:8770/api/graph?days=4&all=0'

@@ -138,7 +138,7 @@ def graph_http(monkeypatch):
     monkeypatch.setattr(server, "_GRAPH_REUSE", server._TimedReuse(4.0, lambda: now[0]))
     calls = []
     monkeypatch.setattr(server, "_graph_response",
-                        lambda days, show_all, spawn_only: calls.append((days, show_all, spawn_only)) or {"n": len(calls)})
+                        lambda days, show_all, spawn_only, topology_only=False: calls.append((days, show_all, spawn_only, topology_only)) or {"n": len(calls)})
     server._HTTP_SINGLE_FLIGHT.clear()
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -169,8 +169,12 @@ def test_graph_is_reused_within_the_window_and_per_query(graph_http):
     assert get("/api/graph?all=1") == {"n": 1}
     get("/api/graph?all=1&spawn_only=1")
     assert len(calls) == 2  # a different query is its own answer
+    assert get("/api/graph?all=1&topology_only=1") == {"n": 3}
+    assert get("/api/graph?all=1&topology_only=1") == {"n": 3}
+    assert get("/api/graph?all=1") == {"n": 1}
+    assert calls[-1] == (4.0, True, False, True)
     now[0] += 0.2
-    assert get("/api/graph?all=1") == {"n": 3}
+    assert get("/api/graph?all=1") == {"n": 4}
 
 
 def test_a_post_drops_the_graph_answer(graph_http):

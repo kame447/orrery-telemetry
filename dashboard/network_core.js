@@ -1,7 +1,7 @@
 /* Shared PC/mobile NETWORK primitives. No network, storage or operation APIs. */
 (function(root){
 'use strict';
-const SVGNS='http://www.w3.org/2000/svg',NR=13;
+const SVGNS='http://www.w3.org/2000/svg',NR=13,ARROW_SIZE=6.5;
 const defaults=Object.freeze({NSIZE:13,L:110,LWMUL:1,KR:2600,GR:.012,KS:.012});
 const parameters=Object.freeze({
  NSIZE:{label:'Node size',min:6,max:28,step:1,apply:'repaint'},
@@ -21,8 +21,8 @@ function svgEl(t,attrs){const e=document.createElementNS(SVGNS,t);for(const k in
 function createDefs(gsvg){
   const d=svgEl('defs');
   for(const[id,c]of[['mk-c','var(--amber)'],['mk-s','var(--amber)']]){
-    const m=svgEl('marker',{id,viewBox:'0 0 10 10',refX:9,refY:5,
-      markerWidth:6.5,markerHeight:6.5,orient:'auto-start-reverse'});
+    const m=svgEl('marker',{id,viewBox:'0 0 10 10',refX:0,refY:5,
+      markerUnits:'userSpaceOnUse',markerWidth:ARROW_SIZE,markerHeight:ARROW_SIZE,orient:'auto-start-reverse'});
     m.appendChild(svgEl('path',{d:'M0 0L10 5L0 10z',fill:c,opacity:.85}));
     d.appendChild(m);
   }
@@ -60,7 +60,7 @@ function buildElements(gsvg,gmap,gedges,gspawn,options){
   // pair 単位 (向き非依存) で合計し、各 pair に 1 個だけバッジを出す。
   // /api/edge-messages も双方向集計なので、これで drawer の count と一致する。
   const pairKey=(s,t)=>s<t?s+'|'+t:t+'|'+s;
-  const pairTotal=new Map();
+  const pairTotal=new Map(),directions=new Set(gedges.map(e=>e.source+'|'+e.target));
   for(const e of gedges){
     const k=pairKey(e.source,e.target);
     pairTotal.set(k,(pairTotal.get(k)||0)+(e.count||0));
@@ -73,14 +73,14 @@ function buildElements(gsvg,gmap,gedges,gspawn,options){
     if(options.onEdgeClick)hit.addEventListener('click',options.onEdgeClick);
     gsvg.appendChild(hit);
     const attrs={class:cls};
-    if(mid)attrs['marker-end']=`url(#${mid})`;   // 通信のみ矢印
+    if(mid){attrs['marker-end']=`url(#${mid})`;attrs['stroke-linecap']='butt';} // 通信のみ矢印
     const ln=svgEl('line',attrs);
     if(cls==='edge'){
       const sw=LWMUL*Math.max(1,Math.min(6,1+Math.log2((e.count||1)+1)));
       ln.setAttribute('stroke-width',sw.toFixed(2));
     }
     gsvg.appendChild(ln);
-    gEls.edge.push({ln,hit,s:e.source,t:e.target,cls});
+    gEls.edge.push({ln,hit,s:e.source,t:e.target,cls,hasReverse:!!mid&&directions.has(e.target+'|'+e.source)});
   };
   gedges.forEach(e=>mk(e,'edge','mk-c'));        // 通信: シアン+矢印
   gspawn.forEach(e=>mk(e,'edge spawn',null));    // 親子: 破線・矢印なし
@@ -172,20 +172,46 @@ function step(gmap,gedges,gspawn,dims,params,simCool=1){
   return maxMove;
 }
 
+function edgeEndpoints(a,b,NSIZE){
+  const dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy);
+  if(!d)return [a.x,a.y,b.x,b.y];
+  const radius=g=>{
+    const st=g.retired?'retired':(g.state||(g.running?'run':g.present?'finished':'gone'));
+    const scale=st==='run'?1.2:st==='finished'?.78:st==='gone'?.72:1;
+    // Keep the arrow tip outside the portrait and its state-scaled border.
+    return (NR*scale+2)*NSIZE/NR;
+  };
+  const ra=radius(a),rb=radius(b),span=Math.max(d,ra+rb);
+  return [a.x+dx*ra/span,a.y+dy*ra/span,b.x-dx*rb/span,b.y-dy*rb/span];
+}
+
 function paint(gmap,gEls,NSIZE=13){
   for(const o of gEls.edge){
     const a=gmap.get(o.s),b=gmap.get(o.t);if(!a||!b)continue;
-    o.ln.setAttribute('x1',a.x);o.ln.setAttribute('y1',a.y);
-    o.ln.setAttribute('x2',b.x);o.ln.setAttribute('y2',b.y);
+    const [x1,y1,x2,y2]=edgeEndpoints(a,b,NSIZE);
+    let sx1=x1,sy1=y1,sx2=x2,sy2=y2;
+    if(o.cls==='edge'){
+      const dx=x2-x1,dy=y2-y1,span=Math.hypot(dx,dy),startInset=o.hasReverse?ARROW_SIZE:0;
+      const arrow=span>ARROW_SIZE+startInset;
+      o.ln.setAttribute('marker-end',arrow?'url(#mk-c)':'none');
+      if(arrow){
+        // Leave the heads outside both shafts when communication is reciprocal.
+        sx1+=dx/span*startInset;sy1+=dy/span*startInset;
+        sx2-=dx/span*ARROW_SIZE;sy2-=dy/span*ARROW_SIZE;
+      }
+    }
+    o.ln.setAttribute('x1',sx1);o.ln.setAttribute('y1',sy1);
+    o.ln.setAttribute('x2',sx2);o.ln.setAttribute('y2',sy2);
     if(o.hit){
-      o.hit.setAttribute('x1',a.x);o.hit.setAttribute('y1',a.y);
-      o.hit.setAttribute('x2',b.x);o.hit.setAttribute('y2',b.y);
+      o.hit.setAttribute('x1',x1);o.hit.setAttribute('y1',y1);
+      o.hit.setAttribute('x2',x2);o.hit.setAttribute('y2',y2);
     }
   }
   for(const o of gEls.badge||[]){
     const a=gmap.get(o.s),b=gmap.get(o.t);if(!a||!b)continue;
-    o.tx.setAttribute('x',(a.x+b.x)/2);
-    o.tx.setAttribute('y',(a.y+b.y)/2);
+    const [x1,y1,x2,y2]=edgeEndpoints(a,b,NSIZE);
+    o.tx.setAttribute('x',(x1+x2)/2);
+    o.tx.setAttribute('y',(y1+y2)/2);
   }
   const nsc=NSIZE/NR;   // ノード一括拡縮（リング/バッジ/ラベルごと <g> 全体に適用）
   for(const[nm,o]of gEls.node){

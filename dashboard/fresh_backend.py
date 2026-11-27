@@ -79,11 +79,12 @@ class Backend:
         try:
             async with runtime.core.owner_transaction(context['mail_instance_id'], proof) as owner:
                 result = await self.reader.read(owner, context['mail_instance_id'], route, query)
+                graph_ids={a.id:dict(name=a.name) for a in owner.records.values()} if result.get('topology_only') else None
             if route == '/api/graph':
                 selected=result.pop('_selected')
                 # Only saved, verified logical families; never infer parenthood
                 # from a preparation root, matching name, or latest job.
-                ids={a['mail_agent_id']:a for a in (await self.roster())['agents']}
+                ids=graph_ids if graph_ids is not None else {a['mail_agent_id']:a for a in (await self.roster())['agents']}
                 for aid, clients in self._contexts().items():
                     if len(clients)!=1 or aid not in ids or aid not in selected:continue
                     try:
