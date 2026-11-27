@@ -320,7 +320,7 @@ def test_http_legacy_mode_and_mode_mismatch(tmp_path):
             assert response[1]["result"]["structuredContent"]["error"]["code"] == "dashboard_unavailable"
 
 
-@pytest.mark.parametrize("api", [34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47])
+@pytest.mark.parametrize("api", [34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48])
 def test_supported_fresh_generations_still_require_fresh_contract(api):
     version = {**FRESH, "api": api}
     data = snapshot(FakeDashboard(version, AGENTS_FRESH), "fresh")
@@ -330,7 +330,7 @@ def test_supported_fresh_generations_still_require_fresh_contract(api):
 
 
 @pytest.mark.parametrize("mode", ["legacy", "fresh"])
-@pytest.mark.parametrize("api", [999, 48, 33, True, "39", None])
+@pytest.mark.parametrize("api", [999, 49, 33, True, "39", None])
 def test_unknown_generations_are_rejected_before_roster_read(api, mode):
     version, roster = (LEGACY, AGENTS_LEGACY) if mode == "legacy" else (FRESH, AGENTS_FRESH)
     backend = FakeDashboard({**version, "api": api}, roster)
@@ -339,15 +339,16 @@ def test_unknown_generations_are_rejected_before_roster_read(api, mode):
     assert backend.calls == ["/api/version"]
 
 
+@pytest.mark.parametrize("api", [38, 48])
 @pytest.mark.parametrize("mode", ["legacy", "fresh"])
 @pytest.mark.parametrize("tool", ["orrery_status", "orrery_list_agents", "orrery_get_agent"])
-def test_api38_annotations_and_tasks_never_extend_public_projection(mode, tool):
+def test_annotations_and_tasks_never_extend_public_projection(api, mode, tool):
     version, roster = deepcopy((LEGACY, AGENTS_LEGACY) if mode == "legacy" else (FRESH, AGENTS_FRESH))
     for row in roster["agents"]:
         row.update(annot={"role": "private-marker-role", "emoji": "private-marker-emoji",
                           "group": "private-marker-group", "task": "private-marker-override"},
                    task="private-marker-registered-task", future_field="private-marker-future")
-    backend = FakeDashboard(version, roster)
+    backend = FakeDashboard({**version, "api": api}, roster)
     args = {"name": "QuietBohr"} if tool == "orrery_get_agent" else {}
     result = invoke(tool, args, backend, mode, project_key=PROJECT if mode == "legacy" else None)
     assert "private-marker" not in json.dumps(result)
