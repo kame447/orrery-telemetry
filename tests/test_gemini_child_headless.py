@@ -232,3 +232,9 @@ if __name__ == "__main__":
     import pytest
 
     raise SystemExit(pytest.main([__file__]))
+
+
+def test_child_launchers_bind_tmux_lineage_to_registered_project() -> None:
+    for path in (CHILD, PREREGISTERED):
+        launch = path.read_text(encoding="utf-8").rsplit("tmux new-session", 1)[1]
+        assert '-e "AGENTSTACK_PROJECT_KEY=$PROJECT_KEY"' in launch

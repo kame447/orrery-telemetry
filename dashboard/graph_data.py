@@ -111,15 +111,15 @@ _LIVE_PARENT_TTL = 10.0
 # found or not: a variable set just after the session appeared, or set again
 # later, is picked up. Any POST drops the memo too (forget_parents).
 _PARENT_MISS_TTL = 60.0
-_PARENT_BY_SESSION: dict[str, tuple[tuple[str, ...], str, float]] = {}
+_PARENT_BY_SESSION: dict[str, tuple[tuple[str, ...], str, str, float]] = {}
 
 
 def forget_parents() -> None:
     _PARENT_BY_SESSION.clear()
 
 
-def _live_parents() -> dict[str, str]:
-    """child session name -> parent agent name, read from live tmux sessions.
+def _live_parents(project_key: str) -> dict[str, str]:
+    """Child -> parent from live tmux sessions bound to the resolved project.
 
     The message-derived lineage below infers a parent from the child's oldest
     high-importance inbound message, which was the delegation mail. Spawning
@@ -137,7 +137,8 @@ def _live_parents() -> dict[str, str]:
     now = time.monotonic()
     cached = _LIVE_PARENT_CACHE["value"]
     if cached is not None and now - float(_LIVE_PARENT_CACHE["ts"]) < _LIVE_PARENT_TTL:
-        return dict(cached)  # type: ignore[arg-type]
+        return {child: parent for child, (parent, scope) in cached.items()
+                if scope == project_key} if project_key else {}
     tmux = shutil.which("tmux")
     if not tmux:
         _LIVE_PARENT_CACHE.update(ts=now, value={})
@@ -157,7 +158,7 @@ def _live_parents() -> dict[str, str]:
         # one `list-sessions`; the expensive part is the per-session lookup
         # below, which this path never reaches.
         return {}
-    parents: dict[str, str] = {}
+    parents: dict[str, tuple[str, str]] = {}
     seen: set[str] = set()
     for line in listing.stdout.split("\n"):
         # name, id, creation time, server pid. The pid tells apart a session of
@@ -170,31 +171,37 @@ def _live_parents() -> dict[str, str]:
         seen.add(session)
         known = _PARENT_BY_SESSION.get(session)
         if (generation is not None and known is not None and known[0] == generation
-                and now - known[2] < _PARENT_MISS_TTL):
-            if known[1]:
-                parents[session] = known[1]
+                and now - known[3] < _PARENT_MISS_TTL):
+            if known[1] and known[2]:
+                parents[session] = (known[1], known[2])
             continue
+        # Read only the two named values in one tmux command queue, using the
+        # session ID where available rather than a potentially reused name.
+        target = generation[0] if generation is not None else "=" + session
         try:
             shown = subprocess.run(
-                [tmux, "show-environment", "-t", session, "PARENT_AGENT"],
+                [tmux, "show-environment", "-t", target, "PARENT_AGENT", ";",
+                 "show-environment", "-t", target, "AGENTSTACK_PROJECT_KEY"],
                 capture_output=True, text=True, timeout=5,
             )
         except (OSError, subprocess.SubprocessError):
             continue
-        parent = ""
-        if shown.returncode == 0:      # otherwise unset for this session
-            value = shown.stdout.strip()
-            # "-PARENT_AGENT" marks the variable as removed; only NAME=VALUE counts.
-            if value.startswith("PARENT_AGENT="):
-                parent = value.split("=", 1)[1].strip()
-        if parent:
-            parents[session] = parent
+        parent = scope = ""
+        if shown.returncode == 0:
+            lines = shown.stdout.splitlines()
+            if (len(lines) == 2 and lines[0].startswith("PARENT_AGENT=")
+                    and lines[1].startswith("AGENTSTACK_PROJECT_KEY=")):
+                parent = lines[0].split("=", 1)[1].strip()
+                scope = lines[1].split("=", 1)[1]
+        if parent and scope:
+            parents[session] = (parent, scope)
         if generation is not None and (shown.returncode == 0 or shown.returncode == 1):
-            _PARENT_BY_SESSION[session] = (generation, parent, now)
+            _PARENT_BY_SESSION[session] = (generation, parent, scope, now)
     for gone in set(_PARENT_BY_SESSION) - seen:
         _PARENT_BY_SESSION.pop(gone, None)  # a POST may have cleared it meanwhile
     _LIVE_PARENT_CACHE.update(ts=now, value=dict(parents))
-    return parents
+    return {child: parent for child, (parent, scope) in parents.items()
+            if scope == project_key} if project_key else {}
 
 
 # Child filenames follow child_resume.SAFE_NAME; parent names follow the proxy rule.
@@ -858,7 +865,7 @@ def build_graph() -> dict:
         # Saved launch identity survives a resumed or stopped session. Current
         # session-local parent metadata wins; ordinary mail never replaces either.
         parents = _recorded_parents(registrations, project_key)
-        parents.update(_live_parents())
+        parents.update(_live_parents(project_key))
         node_names = {n["name"] for n in nodes}
         for child, parent in parents.items():
             if child not in node_names:

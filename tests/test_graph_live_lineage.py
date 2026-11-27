@@ -62,12 +62,12 @@ def _make_db(path: pathlib.Path) -> pathlib.Path:
     return path
 
 
-def _fake_tmux(directory: pathlib.Path, show_environment_case: str) -> pathlib.Path:
+def _fake_tmux(directory: pathlib.Path, show_environment_case: str, *, session: str = "child") -> pathlib.Path:
     fake = directory / "tmux"
     fake.write_text(
         "#!/bin/sh\n"
         'case "$1" in\n'
-        '  list-sessions) printf "child\\n" ;;\n'
+        f'  list-sessions) printf "{session}\\n" ;;\n'
         f"{show_environment_case}"
         "esac\n",
         encoding="utf-8",
@@ -80,7 +80,7 @@ def _build(monkeypatch, database: pathlib.Path, live: dict[str, str]) -> dict:
     monkeypatch.setattr(graph_data, "DB_PATH", str(database))
     monkeypatch.setattr(graph_data, "PROJECT_HUMAN_KEY", PROJECT)
     monkeypatch.setattr(graph_data, "PROJECT_ID", 1)
-    monkeypatch.setattr(graph_data, "_live_parents", lambda: dict(live))
+    monkeypatch.setattr(graph_data, "_live_parents", lambda project_key: dict(live))
     return graph_data.build_graph()
 
 
@@ -143,7 +143,7 @@ def test_unknown_and_self_referential_sessions_are_ignored(tmp_path, monkeypatch
 )
 def test_live_parents_parses_tmux_environment(tmp_path, monkeypatch, stdout, expected):
     env_output = tmp_path / "env-output"
-    env_output.write_text(stdout, encoding="utf-8")
+    env_output.write_text(stdout + f"AGENTSTACK_PROJECT_KEY={PROJECT}\n", encoding="utf-8")
     _fake_tmux(
         tmp_path,
         f'  show-environment) cat "{env_output}" ;;\n',
@@ -153,7 +153,7 @@ def test_live_parents_parses_tmux_environment(tmp_path, monkeypatch, stdout, exp
         graph_data, "_LIVE_PARENT_CACHE", {"ts": 0.0, "value": None}
     )
 
-    assert graph_data._live_parents() == expected
+    assert graph_data._live_parents(PROJECT) == expected
 
 
 def test_live_parents_does_not_cache_a_missing_tmux_server(tmp_path, monkeypatch):
@@ -170,7 +170,7 @@ def test_live_parents_does_not_cache_a_missing_tmux_server(tmp_path, monkeypatch
         "  list-sessions)\n"
         f'    if [ -e "{marker}" ]; then printf "child\\n"\n'
         f'    else : > "{marker}"; exit 1; fi ;;\n'
-        '  show-environment) printf "PARENT_AGENT=Parent\\n" ;;\n'
+        '  show-environment) printf "PARENT_AGENT=Parent\\nAGENTSTACK_PROJECT_KEY=/lineage-fixture\\n" ;;\n'
         "esac\n",
         encoding="utf-8",
     )
@@ -180,8 +180,8 @@ def test_live_parents_does_not_cache_a_missing_tmux_server(tmp_path, monkeypatch
         graph_data, "_LIVE_PARENT_CACHE", {"ts": 0.0, "value": None}
     )
 
-    assert graph_data._live_parents() == {}
-    assert graph_data._live_parents() == {"child": "Parent"}
+    assert graph_data._live_parents(PROJECT) == {}
+    assert graph_data._live_parents(PROJECT) == {"child": "Parent"}
 
 
 @pytest.mark.parametrize('raw', ['qwen3.8-flash-next-iq3_xxs', 'glm-5.3-flash', 'deepseek-v4.1-flash'])
@@ -217,3 +217,43 @@ def test_graph_registered_gpt_models_keep_complete_display_and_raw(monkeypatch,r
     assert payload['nodes'][0]['model_raw']==raw
     assert payload['nodes'][0]['provider']=='openai'
     assert len(payload['nodes'])==1 and payload['edges']==[]
+
+
+def test_live_lineage_project_scope_survives_cache_reuse(tmp_path, monkeypatch):
+    database = _make_db(tmp_path / "mail.sqlite3")
+    foreign = "/foreign-project"
+    with sqlite3.connect(database) as connection:
+        connection.execute("INSERT INTO projects VALUES (2, ?)", (foreign,))
+        connection.execute(
+            "INSERT INTO agents SELECT id+2,2,name,model,program,task_description,"
+            "last_active_ts,inception_ts,retired_at FROM agents WHERE project_id=1"
+        )
+    _fake_tmux(
+        tmp_path,
+        '  show-environment) printf "PARENT_AGENT=Parent\\n'
+        'AGENTSTACK_PROJECT_KEY=/foreign-project\\n" ;;\n',
+        session="QuietChild",
+    )
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    monkeypatch.setenv("AGENTSTACK_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setattr(graph_data, "DB_PATH", str(database))
+    monkeypatch.setattr(graph_data, "_LIVE_PARENT_CACHE", {"ts": 0.0, "value": None})
+    monkeypatch.setattr(graph_data, "_PARENT_BY_SESSION", {})
+    monkeypatch.setattr(graph_data, "PROJECT_HUMAN_KEY", PROJECT)
+    assert graph_data.build_graph()["spawn"] == []
+    monkeypatch.setattr(graph_data, "PROJECT_HUMAN_KEY", foreign)
+    assert graph_data.build_graph()["spawn"] == [
+        {"source": "Parent", "target": "QuietChild", "type": "spawn"}
+    ]
+    monkeypatch.setattr(graph_data, "PROJECT_HUMAN_KEY", PROJECT)
+    assert graph_data.build_graph()["spawn"] == []
+
+
+@pytest.mark.parametrize("scope", ["", "-AGENTSTACK_PROJECT_KEY", "AGENTSTACK_PROJECT_KEY=", "AGENTSTACK_PROJECT_KEY=/foreign"])
+def test_live_lineage_requires_explicit_matching_scope(tmp_path, monkeypatch, scope):
+    env_output = tmp_path / "env-output"
+    env_output.write_text(f"PARENT_AGENT=Parent\n{scope}\n")
+    _fake_tmux(tmp_path, f'  show-environment) cat "{env_output}" ;;\n')
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    monkeypatch.setattr(graph_data, "_LIVE_PARENT_CACHE", {"ts": 0.0, "value": None})
+    assert graph_data._live_parents(PROJECT) == {}
