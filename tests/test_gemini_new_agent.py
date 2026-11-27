@@ -773,7 +773,8 @@ def test_preflight_failures_do_not_register_junk_identities(gemini_env, monkeypa
     assert [label for label, error in checks if not error] == []
     errors = dict(checks)
     assert errors["helper"].startswith("Gemini provider helper is not installed")
-    assert errors["agy"] == "Antigravity CLI not found for provider gemini (expected agy)"
+    assert errors["agy"] == ("Antigravity CLI not found for provider gemini (expected agy). "
+                             "See https://github.com/kame447/orrery-telemetry/blob/master/docs/antigravity.md")
     assert errors["git"] == "provider gemini requires a git repository"
     assert errors["base"] == "could not resolve worktree base for provider gemini: no-such-rev"
     assert errors["base-option"].startswith("worktree base must not start with '-'")

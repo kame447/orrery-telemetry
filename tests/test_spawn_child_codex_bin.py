@@ -151,6 +151,7 @@ def test_nothing_usable_is_an_error_that_says_why(tmp_path):
     assert f"skipping codex {windows}" in err
     assert "no usable Codex CLI found" in err
     assert "a codex under /mnt is the Windows install" in err
+    assert "https://github.com/kame447/orrery-telemetry/blob/master/docs/install.md" in err
 
 
 def test_outside_wsl_a_path_under_mnt_is_an_ordinary_candidate(tmp_path):
