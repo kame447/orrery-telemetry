@@ -226,6 +226,46 @@ def test_parallel_admissions_never_lose_or_duplicate_peers(profile):
     assert saved["peers"][0] == {"name": "ExistingPeer", "id": 102}
 
 
+def test_snapshot_unlinked_by_concurrent_atomic_append_is_changed(profile, monkeypatch):
+    from dataclasses import replace
+    from orrery_chatgpt_mcp import auto_allowlist
+
+    winner = verify_mcp_spawn(**observations())
+    loser = replace(winner, name="NovaBohr", agent_id=203)
+    digest = snapshot_profile(profile)
+    original_open = os.open
+    replaced = False
+
+    def open_then_replace(path, flags, *args, **kwargs):
+        nonlocal replaced
+        fd = original_open(path, flags, *args, **kwargs)
+        if not replaced and Path(path) == profile and flags & os.O_ACCMODE == os.O_RDONLY:
+            replaced = True
+            try:
+                assert append_verified_peer(profile, winner, expected_sha256=digest) == "registered"
+                assert os.fstat(fd).st_nlink == 0
+            except BaseException:
+                os.close(fd)
+                raise
+        return fd
+
+    monkeypatch.setattr(auto_allowlist.os, "open", open_then_replace)
+    with pytest.raises(AdmissionError, match="profile_changed"):
+        append_verified_peer(profile, loser, expected_sha256=digest)
+    assert replaced
+    assert json.loads(profile.read_text())["peers"] == [
+        {"name": "ExistingPeer", "id": 102}, {"name": winner.name, "id": winner.agent_id}]
+
+
+def test_hardlinked_profile_remains_unsafe_for_compare_and_swap(profile):
+    digest = snapshot_profile(profile)
+    os.link(profile, profile.parent / "alias.json")
+    before = profile.read_bytes()
+    with pytest.raises(AdmissionError, match="unsafe_profile_file"):
+        append_verified_peer(profile, verify_mcp_spawn(**observations()), expected_sha256=digest)
+    assert profile.read_bytes() == before
+
+
 def test_invalid_candidate_never_changes_profile(profile):
     from dataclasses import replace
     good = verify_mcp_spawn(**observations())
@@ -622,14 +662,15 @@ def test_worker_full_profile_reports_failure_without_evicting(profile, tmp_path)
     assert profile.read_bytes() == original
 
 
-def test_worker_retries_contention_without_spawning_again(profile, tmp_path, monkeypatch):
+@pytest.mark.parametrize("reason", ["sender_busy", "profile_changed"])
+def test_worker_retries_contention_without_spawning_again(profile, tmp_path, monkeypatch, reason):
     from orrery_chatgpt_mcp import auto_allowlist
     config, dash, operator, registry = _gateway_fixture(profile, tmp_path)
     calls = []
     def admit(**kwargs):
         calls.append(kwargs)
         if len(calls) == 1:
-            raise AdmissionError("sender_busy")
+            raise AdmissionError(reason)
         return "registered"
     monkeypatch.setattr(auto_allowlist, "admit_mcp_spawn", admit)
     _launch(registry, operator)

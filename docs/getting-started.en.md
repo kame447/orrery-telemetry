@@ -18,6 +18,7 @@ First [install and verify the shared components](#standalone-installation-and-ve
 | Provider | After the shared install |
 | --- | --- |
 | Claude Code / Codex | Install and sign in to the chosen CLI, then [start the first agent](#3-start-the-first-agent-and-watch-it-on-the-dashboard) |
+| Gemini (Antigravity) | Follow the [Gemini setup guide](antigravity.en.md) for CLI sign-in, optional provider installation and launch requirements |
 | DeepSeek / Local LLMs | Follow [API setup](native-setup.en.md) for dsh/Hermes, key storage and connection settings, then launch from NEW AGENT. Claude/Codex login is not required |
 
 Open DECK / NETWORK to observe configured agents. To connect them, continue with the [Mail check](#5-play-shiritori-as-an-end-to-end-check). Check the [supported API combinations and limitations (Japanese)](managed-catalog.md) too.
@@ -81,6 +82,8 @@ agentstack-selftest
 **Success**: the required `agentstack-doctor` checks show `ok:` with no `missing:` entries; inspect any `warn:` entries and their suggested fixes (informational `note:` and `mail-features:` lines are also normal), and `agentstack-selftest` ends with `self-test passed: two agents registered, exchanged messages, ...`. If either stops, go to the matching section of [Troubleshooting](troubleshooting.en.md).
 
 ### 3. Start the first agent and watch it on the dashboard
+
+**For Gemini**: Follow the [Gemini setup guide](antigravity.en.md) to sign in to the CLI and install the optional provider. Restart Dashboard after active agents have finished and released their reservations, then select a parent agent, Antigravity model and effort in NEW AGENT. If you do not have a parent agent yet, start a supported parent first. Check the DECK card and Mail connection.
 
 **For DeepSeek / Local LLMs**: Complete [API setup](native-setup.en.md), then choose the configured Model and Harness in NEW AGENT at `http://127.0.0.1:8770/` and launch. When a card with the scientist's name appears in DECK, try the guide's short conversation check and the [Mail check below](#5-play-shiritori-as-an-end-to-end-check).
 

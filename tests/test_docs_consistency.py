@@ -273,3 +273,44 @@ def test_child_tool_docs_explain_approval_refusal_reports_and_repair():
         "(#人がやること事前の設定と接続操作時の許可)",
     ):
         assert link in japanese
+
+
+def test_codex_app_installer_reference_options_are_documented() -> None:
+    installer = _read("scripts/lib/codex-app-integration.sh")
+    for option, variable in (
+        ("--agent-mail-env", "MAIL_ENV"),
+        ("--signals-dir", "SIGNALS_DIR"),
+        ("--python-bin", "PYTHON_BIN"),
+    ):
+        assert f'{option}) {variable}="$2"' in installer
+        for name in ("docs/codex-app.md", "docs/codex-app.en.md"):
+            assert f"| `{option} PATH` |" in _read(name), (name, option)
+
+
+def test_dashboard_service_log_settings_are_documented() -> None:
+    for suffix, default in (
+        ("LOG", "$RUNTIME_DIR/dashboard.log"),
+        ("LOG_MAX_BYTES", "5242880"),
+        ("LOG_BACKUPS", "3"),
+        ("RESTART_DELAY", "5"),
+    ):
+        key = f"AGENTSTACK_DASHBOARD_{suffix}"
+        assert f"resolve_setting DASHBOARD_{suffix} {key} " in INSTALLER
+        assert f'"{key}": "$DASHBOARD_{suffix}"' in INSTALLER
+        import shlex
+
+        setting_line = next(line for line in INSTALLER.splitlines()
+                            if line.startswith(f"resolve_setting DASHBOARD_{suffix} {key} "))
+        assert shlex.split(setting_line)[3] == default
+        documented = default.replace("$RUNTIME_DIR", "$AGENTSTACK_RUNTIME_DIR")
+        for name in ("docs/configuration.md", "docs/configuration.en.md"):
+            assert f"| `{key}` | `{documented}`" in _read(name), (name, key)
+    runner = _read("dashboard/service_runner.py")
+    assert "if not SELF_RESTART:" in runner
+    assert "time.sleep(RESTART_DELAY)" in runner
+    plist = _read("dashboard/agentdashboard.plist.template")
+    assert re.search(r"<key>ThrottleInterval</key>\s*<integer>5</integer>", plist)
+    assert re.search(r"<key>KeepAlive</key>\s*<true/>", plist)
+    for name in ("docs/configuration.md", "docs/configuration.en.md"):
+        assert "supervised-background" in _read(name)
+        assert "KeepAlive / ThrottleInterval" in _read(name)

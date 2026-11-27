@@ -2,7 +2,7 @@
 
 [English](README.en.md)
 
-Claude Code・Codex・DeepSeek・Local LLMのagentが直接話し、仕事を分担し、結果を確かめ合う。その働きとMailの往復を一枚の画面で見渡せるのがORRERY Telemetryです。Claude CodeとCodexは各CLI、DeepSeekとLocal LLMはdshまたはHermesを使います。使いたい系統を選んで準備でき、DeepSeek・LocalのためにClaude CodeやCodexを先に入れる必要はありません。ターミナルも同じ画面で使う[ORRERY cockpit](https://github.com/gyroid-eth/orrery)と組み合わせて使えます。
+Claude Code・Codex・Gemini・DeepSeek・Local LLMのagentが直接話し、仕事を分担し、結果を確かめ合う。その働きとMailの往復を一枚の画面で見渡せるのがORRERY Telemetryです。Claude CodeとCodexは各CLI、Geminiは追加導入するGoogle Antigravity CLI（`agy`）、DeepSeekとLocal LLMはdshまたはHermesを使います。使いたい系統を選んで準備でき、DeepSeek・LocalのためにClaude CodeやCodexを先に入れる必要はありません。ターミナルも同じ画面で使う[ORRERY cockpit](https://github.com/gyroid-eth/orrery)と組み合わせて使えます。
 
 ![NETWORK を開いたまま子が加わり、ready の後にしりとりの Mail が3往復する](docs/img/network-mail.gif)
 
@@ -12,6 +12,7 @@ Claude Code・Codex・DeepSeek・Local LLMのagentが直接話し、仕事を分
 | --- | --- |
 | 手元のagentの働きを見る | 準備済みのagentを起動し、DECK / NETWORKを開く |
 | Claude CodeやCodexで始める | 共通部分を導入し、使うCLIにログインして[最初のagentを起動する](docs/getting-started.md#3-最初の-agent-を起動しdashboard-で見る) |
+| Geminiで始める | [Geminiの導入ガイド](docs/antigravity.md)でCLIのサインインと追加providerの導入、NEW AGENTの起動条件を確認する |
 | DeepSeekやLocal LLMで始める | 共通部分を導入し、[APIの初期設定ガイド](docs/native-setup.md)でdsh/Hermesの追加・キーの保存・接続設定・画面からの起動へ進む。Claude/Codexのログインは不要 |
 | agent 同士で仕事を分担する | [delegate と Mail の通し確認](docs/getting-started.md#5-しりとりで通しの確認をする)へ進む |
 
@@ -38,9 +39,10 @@ top-level / delegated child の起動は、選択した作業フォルダ（Git 
 `--project-key`は、agentに作業させるfolderの絶対パスです（このrepositoryではありません）。変更内容を確認・承認して導入し、`~/.agentstack/bin/agentstack-doctor`と`~/.agentstack/bin/agentstack-selftest`で共通部分を確かめます。その後、使う系統に合わせて準備します。
 
 - **Claude Code / Codex**: 同じOS環境に使うCLIを入れてログインし、`~/.agentstack/bin/agent-start <project folder>`または`~/.agentstack/bin/agent-start-codex <project folder>`で起動します。
+- **Gemini (Antigravity)**: [Geminiの導入ガイド](docs/antigravity.md)に従い、`agy`へのサインインと追加providerの導入を済ませます。稼働中のagentの作業終了と予約の解放後にDashboardを再起動し、NEW AGENTで親agentとAntigravityのmodel・effortを選びます。
 - **DeepSeek / Local LLM**: [APIの初期設定ガイド](docs/native-setup.md)でdshまたはHermes、キー、接続設定を準備し、`http://127.0.0.1:8770/`のNEW AGENTから選んで起動します。上のinstallだけでは、このAPI設定は済みません。
 
-どちらもDECKにagentが現れることを確認します。[単独の導入手順](docs/getting-started.md#telemetry-単独の導入と確認)に、準備・起動・Mail確認の流れがあります。
+起動後はDECKにagentが現れることを確認します。[単独の導入手順](docs/getting-started.md#telemetry-単独の導入と確認)に、準備・起動・Mail確認の流れがあります。
 
 子に渡す道具の既定は installer の `--child-default-tools`（既定は空）で選べます。明示の指定を優先し、使えない既定の項目は通知して外します。[道具の選び方](docs/delegation.md#installer-の既定の道具)を参照してください。
 
@@ -121,7 +123,7 @@ global network の稼働状態・本人照合と unknown の境界は [観測の
 | 隔離 global client を起動・配送する | [起動・配送・operator 復旧](docs/global-delivery-client.md)（既定は旧 mode） |
 | 利用者単位の指示へ移す | [block の移行と復旧](docs/instruction-migration.md) |
 
-[Obsidian と一緒に使う](docs/obsidian.md)と公開の [demo vault](https://github.com/gyroid-eth/orrery-demo-vault)で、作業ログ・論文ノート・タスクをノートにできます。Obsidian は必須ではありません。CLI 以外の [Codex App](docs/codex-app.md)、[Antigravity / Gemini](docs/antigravity.md)は optional provider です。
+[Obsidian と一緒に使う](docs/obsidian.md)と公開の [demo vault](https://github.com/gyroid-eth/orrery-demo-vault)で、作業ログ・論文ノート・タスクをノートにできます。Obsidian は必須ではありません。[Codex App](docs/codex-app.md)とCLIの[Antigravity / Gemini](docs/antigravity.md)は optional provider です。
 
 install 前に雰囲気を見るなら[公開デモ](https://agentstack-demo.pages.dev/)、考え方の図解は[紹介動画](https://youtu.be/JXoa93TQolU)。開発への変更は [CONTRIBUTING.md](CONTRIBUTING.md)を参照してください。
 
