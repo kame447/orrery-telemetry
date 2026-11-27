@@ -921,3 +921,86 @@ def test_runtime_fixture_inventory_failure_does_not_skip_other_cleanup(tmp_path,
         with pytest.raises(AssertionError, match="cannot inspect recorded Mail runner"):
             next(teardown)
     assert cleaned == [(harness, home)]
+
+
+def _periodic_mail_fixture(tmp_path, monkeypatch, module):
+    import plistlib
+
+    label = "org.agentstack.mail"
+    agents = tmp_path / "LaunchAgents"
+    agents.mkdir()
+    (agents / f"{label}.plist").write_bytes(plistlib.dumps({
+        "Label": label, "KeepAlive": False, "StartInterval": 300,
+    }))
+    home = tmp_path / "home"
+    (home / ".agentstack").mkdir(parents=True)
+    (home / ".agentstack" / "env.sh").write_text(
+        "export AGENTSTACK_MCP_URL='http://127.0.0.1:18765/mcp'\n"
+        "export AGENTSTACK_MAIL_LAUNCHD_LABEL=''\n"
+    )
+    monkeypatch.setattr(module, "REAL_LAUNCH_AGENTS", str(agents))
+    monkeypatch.setattr(module, "_REAL_HOME", home, raising=False)
+    monkeypatch.delenv("AGENTSTACK_MCP_URL", raising=False)
+    jobs = {label: 123, "org.orrery.mail": 456}
+    loaded = {label: True}
+    listeners = {8765: (), 18765: (789,)}
+    monkeypatch.setattr(module, "_job_pid", lambda key: jobs.get(key))
+    monkeypatch.setattr(module, "_loaded", lambda key: loaded.get(key, False))
+    monkeypatch.setattr(module, "_listener_pids", lambda port=8765: listeners.get(port, ()))
+    return label, jobs, loaded, listeners
+
+
+def _sample_once(watcher):
+    ticks = iter((False, True))
+    watcher.stop.wait = lambda _: next(ticks)
+    watcher._watch()
+
+
+def test_periodic_timer_exit_is_not_mail_outage(tmp_path, monkeypatch):
+    module = _load_conftest()
+    label, jobs, loaded, listeners = _periodic_mail_fixture(tmp_path, monkeypatch, module)
+    watcher = module._Watcher((label, "org.orrery.mail"))
+    jobs[label] = None
+    _sample_once(watcher)
+    assert watcher.disturbed == {}
+    loaded[label] = False
+    _sample_once(watcher)
+    assert "timer unloaded" in watcher.disturbed[label]
+
+
+@pytest.mark.parametrize("after,reason", [((), "stopped"), ((999,), "replaced")])
+def test_actual_nondefault_mail_listener_loss_is_detected(tmp_path, monkeypatch, after, reason):
+    module = _load_conftest()
+    label, jobs, loaded, listeners = _periodic_mail_fixture(tmp_path, monkeypatch, module)
+    watcher = module._Watcher((label, "org.orrery.mail"))
+    listeners[18765] = module.UNKNOWN
+    _sample_once(watcher)
+    assert watcher.disturbed == {}
+    listeners[18765] = after
+    _sample_once(watcher)
+    assert reason in watcher.disturbed["mail listener :18765"]
+    jobs["org.orrery.mail"] = None
+    _sample_once(watcher)
+    assert "stopped" in watcher.disturbed["org.orrery.mail"]
+
+
+def test_periodic_detection_does_not_ignore_keepalive(tmp_path, monkeypatch):
+    import plistlib
+
+    module = _load_conftest()
+    label, jobs, loaded, listeners = _periodic_mail_fixture(tmp_path, monkeypatch, module)
+    (Path(module.REAL_LAUNCH_AGENTS) / f"{label}.plist").write_bytes(plistlib.dumps({
+        "Label": label, "KeepAlive": True, "StartInterval": 300,
+    }))
+    watcher = module._Watcher((label,))
+    jobs[label] = None
+    _sample_once(watcher)
+    assert "stopped" in watcher.disturbed[label]
+
+
+def test_loading_probe_distinguishes_error_from_unloaded(tmp_path):
+    module = _load_conftest()
+    module.LAUNCHCTL = str(_fake_tool(tmp_path, "launchctl", "exit 2\n"))
+    assert module._loaded("org.example") == module.UNKNOWN
+    module.LAUNCHCTL = str(_fake_tool(tmp_path, "launchctl", "exit 113\n"))
+    assert module._loaded("org.example") is False

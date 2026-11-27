@@ -19,16 +19,21 @@ machine loses its coordination for the duration. So this samples throughout.
 from __future__ import annotations
 
 import os
+import plistlib
 import re
+import shlex
 import shutil
 import sys
 import threading
 import time
+from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
 from _env_isolation import (
     REAL_USER_INSTRUCTION_FILES,
+    _REAL_HOME,
     digest_files,
     is_inherited_stack_variable,
     real_windows_wslconfig,
@@ -418,7 +423,64 @@ def _loaded(label: str) -> bool | str:
                       capture_output=True, text=True, timeout=10)
     except (OSError, _SUBPROCESS.SubprocessError):
         return UNKNOWN
-    return result.returncode == 0
+    if result.returncode == 0:
+        return True
+    return False if result.returncode == 113 else UNKNOWN
+
+
+def _real_mail_settings(env_file: Path) -> dict[str, str]:
+    """Read only literal assignments; never source the operator's shell file."""
+    wanted = {
+        "AGENTSTACK_MCP_URL", "AGENTSTACK_MAIL_AUTOSTART_LABEL",
+        "AGENTSTACK_MAIL_LAUNCHD_LABEL",
+    }
+    settings = {}
+    try:
+        lines = env_file.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return settings
+    for line in lines:
+        try:
+            words = shlex.split(line, comments=True)
+        except ValueError:
+            continue
+        if words[:1] == ["export"]:
+            words = words[1:]
+        if len(words) != 1:
+            continue
+        key, sep, value = words[0].partition("=")
+        if sep and key in wanted:
+            settings[key] = value
+    return settings
+
+
+def _mail_listener_ports(settings: dict[str, str]) -> tuple[int, ...]:
+    # Keep the historical probe as well as the actual configured endpoint.
+    ports = {8765}
+    for url in (settings.get("AGENTSTACK_MCP_URL", ""), os.environ.get("AGENTSTACK_MCP_URL", "")):
+        try:
+            parsed = urlsplit(url)
+            if parsed.scheme in ("http", "https") and parsed.hostname in ("127.0.0.1", "::1", "localhost"):
+                ports.add(parsed.port or (443 if parsed.scheme == "https" else 80))
+        except ValueError:
+            continue
+    return tuple(sorted(ports))
+
+
+def _periodic_job(label: str) -> bool:
+    """A launchd timer is allowed to exit between invocations, not unload."""
+    if REAL_LAUNCH_AGENTS is None or not ORRERY_LABEL.fullmatch(label):
+        return False
+    try:
+        with (Path(REAL_LAUNCH_AGENTS) / f"{label}.plist").open("rb") as stream:
+            job = plistlib.load(stream)
+    except (OSError, ValueError, plistlib.InvalidFileException):
+        return False
+    return (
+        isinstance(job, dict) and job.get("Label") == label
+        and job.get("KeepAlive", False) is False
+        and ("StartInterval" in job or "StartCalendarInterval" in job)
+    )
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -455,28 +517,54 @@ def _the_suite_leaves_real_launch_agents_alone():
 class _Watcher(threading.Thread):
     def __init__(self, labels: tuple[str, ...]) -> None:
         super().__init__(daemon=True)
-        self.labels = labels
+        settings = _real_mail_settings(_REAL_HOME / ".agentstack" / "env.sh")
+        self.labels = tuple(dict.fromkeys(
+            (*labels, *(settings[key] for key in (
+                "AGENTSTACK_MAIL_AUTOSTART_LABEL", "AGENTSTACK_MAIL_LAUNCHD_LABEL",
+            ) if ORRERY_LABEL.fullmatch(settings.get(key, ""))))
+        ))
         self.stop = threading.Event()
-        self.baseline = {label: _job_pid(label) for label in labels}
-        self.listener_baseline = _listener_pids()
+        self.periodic = {label for label in self.labels if _periodic_job(label)}
+        self.baseline = {
+            label: _loaded(label) if label in self.periodic else _job_pid(label)
+            for label in self.labels
+        }
+        self.listener_baseline = {port: _listener_pids(port) for port in _mail_listener_ports(settings)}
         self.disturbed: dict[str, str] = {}
         self.crashed: BaseException | None = None
 
     def _check_listener(self) -> None:
-        if self.listener_baseline == UNKNOWN or not self.listener_baseline:
-            return
-        if "mail listener" in self.disturbed:
-            return
-        current = _listener_pids()
-        if current == UNKNOWN:
-            return
-        if not current:
-            self.disturbed["mail listener"] = f"stopped serving 8765 while running {_CURRENT_TEST}"
-        elif current != self.listener_baseline:
-            self.disturbed["mail listener"] = (
-                f"replaced while running {_CURRENT_TEST} "
-                f"(pids {self.listener_baseline} -> {current})"
-            )
+        for port, baseline in self.listener_baseline.items():
+            key = f"mail listener :{port}"
+            if baseline == UNKNOWN or not baseline or key in self.disturbed:
+                continue
+            current = _listener_pids(port)
+            if current == UNKNOWN:
+                continue
+            if not current:
+                self.disturbed[key] = f"stopped serving {port} while running {_CURRENT_TEST}"
+            elif current != baseline:
+                self.disturbed[key] = (
+                    f"replaced while running {_CURRENT_TEST} (pids {baseline} -> {current})"
+                )
+
+    def _check_jobs(self) -> None:
+        for label, baseline in self.baseline.items():
+            if baseline is None or baseline is False or baseline == UNKNOWN or label in self.disturbed:
+                continue
+            if label in self.periodic:
+                if _loaded(label) is False:
+                    self.disturbed[label] = f"timer unloaded while running {_CURRENT_TEST}"
+                continue
+            current = _job_pid(label)
+            if current == UNKNOWN:
+                continue
+            if current is None:
+                self.disturbed[label] = f"stopped while running {_CURRENT_TEST}"
+            elif current != baseline:
+                self.disturbed[label] = (
+                    f"replaced while running {_CURRENT_TEST} (pid {baseline} -> {current})"
+                )
 
     def run(self) -> None:
         try:
@@ -490,21 +578,7 @@ class _Watcher(threading.Thread):
     def _watch(self) -> None:
         while not self.stop.wait(SAMPLE_SECONDS):
             self._check_listener()
-            for label, baseline_pid in self.baseline.items():
-                if baseline_pid is None or baseline_pid == UNKNOWN:
-                    continue  # not this machine's, already down, or unmeasurable
-                if label in self.disturbed:
-                    continue
-                current = _job_pid(label)
-                if current == UNKNOWN:
-                    continue
-                if current is None:
-                    self.disturbed[label] = f"stopped while running {_CURRENT_TEST}"
-                elif current != baseline_pid:
-                    self.disturbed[label] = (
-                        f"replaced while running {_CURRENT_TEST} "
-                        f"(pid {baseline_pid} -> {current})"
-                    )
+            self._check_jobs()
 
 
 def _the_suite_leaves_real_services_alone():
@@ -525,18 +599,7 @@ def _the_suite_leaves_real_services_alone():
             )
         watcher._check_listener()
         # One last look, for a disturbance in the final seconds.
-        for label, baseline_pid in watcher.baseline.items():
-            if baseline_pid is None or baseline_pid == UNKNOWN or label in watcher.disturbed:
-                continue
-            current = _job_pid(label)
-            if current == UNKNOWN:
-                continue
-            if current is None:
-                watcher.disturbed[label] = f"stopped by the end of the run (last test: {_CURRENT_TEST})"
-            elif current != baseline_pid:
-                watcher.disturbed[label] = (
-                    f"replaced by the end of the run (pid {baseline_pid} -> {current})"
-                )
+        watcher._check_jobs()
     if watcher.crashed is not None:
         pytest.fail(
             "the production-service watcher stopped watching during this run: "
