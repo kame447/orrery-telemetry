@@ -258,3 +258,37 @@ def test_graph_logical_parent_excludes_standalone_preparation_root(tmp_path):
             assert solo['mail_agent_id']!=child['mail_agent_id'] and await snapshot(runtime)==before
     asyncio.run(run())
 
+
+
+def test_topology_http_keeps_relations_without_runtime_observation(tmp_path, monkeypatch):
+    async def run():
+        async with live(tmp_path) as (runtime, people, parent, _):
+            await seed(runtime, people)
+            child = await prepare(parent, 'topology_child', 'TopologyChild', 'codex', 'fixture', 'fixture')
+            await prepare(parent, 'topology_solo', 'TopologySolo', 'codex', 'fixture', 'fixture', standalone=True)
+            backend = Backend(parent.path, ROOT)
+            full = await backend.read('/api/graph', dict(all='1'))
+            before = await snapshot(runtime)
+            async def forbidden_roster():
+                raise AssertionError('topology projection observed per-node runtime')
+            monkeypatch.setattr(backend, 'roster', forbidden_roster)
+            with dashboard(parent, backend, monkeypatch, tmp_path) as (_, request):
+                code, compact = await asyncio.to_thread(request, '/api/graph?all=1&topology_only=1')
+                assert code == 200 and compact['topology_only'] is True, compact
+                assert compact['nodes'] == []
+                assert compact['edges'] == [dict(source='Alpha', target='Beta')]
+                assert compact['spawn'] == full['spawn']
+                assert compact['spawn'][0]['target_agent_id'] == child['mail_agent_id']
+                assert compact['mail_instance_id'] == runtime.config['instance_id']
+                assert compact['degraded'] == full['degraded']
+                assert compact['timestamp_diagnostics'] == full['timestamp_diagnostics']
+                assert '_selected' not in compact
+                for path, status in [
+                    ('/api/graph?all=1&topology_only=1&project_key=other', 400),
+                    ('/api/graph?all=1&topology_only=1&mail_instance_id=' + '0' * 32, 409),
+                    ('/api/graph?all=1&topology_only=1&topology_only=0', 400),
+                ]:
+                    code, _ = await asyncio.to_thread(request, path)
+                    assert code == status, path
+            assert await snapshot(runtime) == before
+    asyncio.run(run())

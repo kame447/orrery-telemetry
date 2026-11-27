@@ -50,7 +50,7 @@ from collections import deque
 from urllib.parse import urlparse, parse_qs
 
 # Public dashboard compatibility generation (docs/tests read this source).
-API_GENERATION = 47
+API_GENERATION = 48
 # Mode admission is shared with hooks and operator/service entry points.
 import runpy as _runtime_runpy
 _MODE_API = _runtime_runpy.run_path(str(Path(__file__).resolve().parents[1] / 'bin/lib/runtime_client.py'))
@@ -3048,12 +3048,15 @@ def _graph_keep(nodes: list[dict], days: float, show_all: bool):
     return keep, mx, sessions, codex_apps, process_tree
 
 
-def _graph_response(days: float, show_all: bool, spawn_only: bool) -> dict:
-    """The /api/graph body. spawn_only computes nothing per row."""
+def _graph_response(days: float, show_all: bool, spawn_only: bool, topology_only: bool = False) -> dict:
+    """Graph projections omit the full payload's per-node enrichment."""
     try:
         if spawn_only:
             payload = {"nodes": [], "edges": [], "spawn_only": True,
                        **graph_spawn_payload(days, show_all)}
+        elif topology_only:
+            payload = {"nodes": [], "topology_only": True,
+                       **graph_spawn_payload(days, show_all, include_communication=True)}
         else:
             payload = graph_payload(days, show_all)
     except Exception as e:  # noqa: BLE001
@@ -3063,13 +3066,14 @@ def _graph_response(days: float, show_all: bool, spawn_only: bool) -> dict:
                        "invalid_count": 0, "fields": {},
                    },
                    "degraded": True,
-                   **({"spawn_only": True} if spawn_only else {})}
+                   **({"spawn_only": True} if spawn_only else
+                      {"topology_only": True} if topology_only else {})}
     payload["ts"] = int(time.time())
     return payload
 
 
-def graph_spawn_payload(days: float, show_all: bool) -> dict:
-    """Only the parent/child lineage, for `spawn_only` callers (the cockpit).
+def graph_spawn_payload(days: float, show_all: bool, *, include_communication: bool = False) -> dict:
+    """Parent/child lineage and optional communication endpoints, without nodes.
 
     The cockpit polls this every 6 s. It never needed the per-row resume
     capability, Mail fields or runtime reads of the full payload, which cost
@@ -3080,10 +3084,15 @@ def graph_spawn_payload(days: float, show_all: bool) -> dict:
         keep = {n["name"] for n in nodes}
     else:
         keep = _graph_keep(nodes, days, show_all)[0] if nodes else set()
-    return {
+    payload = {
         "spawn": [s for s in g.get("spawn", []) if s["source"] in keep and s["target"] in keep],
         **_graph_health(g),
     }
+    if include_communication:
+        pairs = {(e["source"], e["target"]) for e in g.get("edges", [])
+                 if e["source"] in keep and e["target"] in keep}
+        payload["edges"] = [{"source": source, "target": target} for source, target in sorted(pairs)]
+    return payload
 
 
 @_with_registration_batch
@@ -11268,11 +11277,12 @@ class Handler(BaseHTTPRequestHandler):
             # lineage.  The ORRERY cockpit is one — it was pulling the full
             # node+edge payload every 6s just to read `spawn` out of it.
             spawn_only = (q.get("spawn_only") or ["0"])[0] in ("1", "true")
-            key = ("graph", days, show_all, spawn_only)
+            topology_only = not spawn_only and (q.get("topology_only") or ["0"])[0] in ("1", "true")
+            key = ("graph", days, show_all, spawn_only, topology_only)
 
             def compute_graph():
                 mark = _GRAPH_REUSE.begin()
-                made = json.dumps(_graph_response(days, show_all, spawn_only),
+                made = json.dumps(_graph_response(days, show_all, spawn_only, topology_only),
                                   ensure_ascii=False).encode()
                 _GRAPH_REUSE.put(key, made, mark)
                 return made

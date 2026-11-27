@@ -50,7 +50,7 @@ with HTTP 400. A media-type mismatch is HTTP 415, a cross-origin POST is HTTP 40
 | GET | `/api/agents` | none | `{ts, agents}` |
 | GET / POST | `/api/computer-use` | Operator capability | [Launch permission](#computer-use-api) |
 | GET | `/api/agents/<name>/history-binding` | none | `{ok, agent}` (one agent's conversation-record binding, API 36) |
-| GET | `/api/graph` | `days`, `all` | `{nodes, edges, spawn, timestamp_diagnostics, degraded, ts}` |
+| GET | `/api/graph` | `days`, `all`, `spawn_only`, `topology_only` | `{nodes, edges, spawn, timestamp_diagnostics, degraded, ts}` |
 | GET | `/api/history` | `session`, `limit` | transcript events |
 | GET | `/api/agent-history` | `name` or `names`, `hours`, `include_pane_states` | agent event timeline |
 | GET | `/api/edge-messages` | `a`, `b`, `limit` | messages between two agents |
@@ -89,7 +89,7 @@ curl -s http://127.0.0.1:8770/api/version
 ```
 
 ```json
-{"name":"orrery-telemetry","version":"2026.09.16.1","api":47}
+{"name":"orrery-telemetry","version":"2026.09.16.1","api":48}
 ```
 
 See [Installation](install.en.md#version) for version resolution order.
@@ -153,7 +153,7 @@ The product assumes one person per machine whose agents trust each other. ORM re
 
 | URL | Shape and bounds |
 |---|---|
-| `/api/graph?all=&days=&spawn_only=` | Existing nodes/edges/spawn; maximum5000 agents/10000 edges. PC graph retains all kinds. Overflow is degraded. Spawn follows saved protected logical families, never a standalone preparation root. Lineage does not prove native startup or liveness |
+| `/api/graph?all=&days=&spawn_only=&topology_only=` | Existing nodes/edges/spawn; maximum5000 agents/10000 edges. PC graph retains all kinds. Overflow is degraded. Spawn follows saved protected logical families, never a standalone preparation root. Lineage does not prove native startup or liveness |
 | `/api/edge-messages?a=&b=&limit=` | `{ok,a,b,count,messages}`, maximum200, existing all-kind scope; body/read_ts/ack_ts are display only |
 | `/api/messages-since?since=&limit=` | `{ok,now,since,messages}`, maximum200/300 seconds back. Expand deliveries in chronological order |
 | `/api/agent-history?name=&names=&hours=` | Maximum200 Mail/registration/retirement events over168h with range/initial_state. No old provider logs or pane states |
@@ -473,6 +473,8 @@ Response:
 
 ## GET `/api/graph`
 
+API generation 48 adds `topology_only=1` (or `true`) in legacy and fresh modes. It returns empty `nodes`, deduplicated directed `{source, target}` communication `edges`, unchanged parent/child `spawn` relationships, and `topology_only: true` alongside the existing `timestamp_diagnostics`, `degraded` and `ts`. The `all` / `days` selection matches the full graph; communication never becomes evidence of parenthood. Per-node resume checks and runtime observations are omitted, allowing the cockpit to retain communication topology in its regular poll. When both projection flags are set, the existing `spawn_only=1` response takes precedence. Global mode keeps its viewpoint-specific activity contract, operator admission and required `view_as_agent_id`; this projection grants no broader visibility.
+
 API generation 26 adds the unnormalized `model_raw` field to `/api/graph` nodes. The dashboard displays `provider=strata` / `locality=local` with the existing Local hexagon and prefers `model_raw` when selecting a maker such as Qwen. Unknown makers keep an empty hexagon. Provider and locality meanings are unchanged.
 
 Query:
@@ -481,6 +483,8 @@ Query:
 | --- | --- | --- |
 | `days` | `4` | Period for mail / spawn history |
 | `all` | `0` | Include every agent with `1` / `true` |
+| `spawn_only` | `0` | Return only parent/child relationships with `1` / `true` |
+| `topology_only` | `0` | Return parent/child relationships and communication endpoints with `1` / `true` (API 48) |
 
 ```bash
 curl -s 'http://127.0.0.1:8770/api/graph?days=4&all=0'

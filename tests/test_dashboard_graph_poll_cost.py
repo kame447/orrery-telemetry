@@ -145,6 +145,64 @@ def test_spawn_only_poll_does_no_per_row_work(roster, http, monkeypatch):
     assert elapsed < 1.0
 
 
+def topology_edges(roster, monkeypatch):
+    graph = server._raw_graph()
+    names = roster['names']
+    graph['edges'] = [
+        {'source': names[0], 'target': names[1], 'count': 3, 'kind': 'to'},
+        {'source': names[0], 'target': names[1], 'count': 1, 'kind': 'cc'},
+        {'source': names[1], 'target': names[0], 'count': 2, 'kind': 'to'},
+        {'source': names[-2], 'target': names[-1], 'count': 7, 'kind': 'to'},
+        {'source': 'Absent', 'target': names[0], 'count': 1},
+    ]
+    monkeypatch.setattr(server, '_raw_graph', lambda: graph)
+    return graph
+
+
+def test_topology_only_poll_does_no_per_row_work(roster, http, monkeypatch):
+    topology_edges(roster, monkeypatch)
+    calls = []
+    monkeypatch.setattr(server, '_resume_capability_for_row', lambda *a, **k: calls.append(a) or 'ready')
+    started = time.perf_counter()
+    payload = http('/api/graph?all=1&topology_only=1')
+    assert time.perf_counter() - started < 1.0
+    assert payload['topology_only'] is True and payload['nodes'] == []
+    assert payload['spawn'] == roster['spawn']
+    names = roster['names']
+    assert payload['edges'] == [
+        {'source': names[0], 'target': names[1]},
+        {'source': names[1], 'target': names[0]},
+        {'source': names[-2], 'target': names[-1]},
+    ]
+    assert calls == [] and roster['opened'] == []
+
+
+@pytest.mark.parametrize('query', ['all=1', 'days=4', 'days=0.00001'])
+def test_topology_only_matches_full_relation_window(roster, http, monkeypatch, query):
+    topology_edges(roster, monkeypatch)
+    compact = http('/api/graph?' + query + '&topology_only=true')
+    full = http('/api/graph?' + query)
+    assert compact['nodes'] == [] and compact['spawn'] == full['spawn']
+    assert {(e['source'], e['target']) for e in compact['edges']} == {
+        (e['source'], e['target']) for e in full['edges']}
+    assert compact['timestamp_diagnostics'] == full['timestamp_diagnostics']
+    assert compact['degraded'] == full['degraded']
+
+
+def test_topology_failure_stays_degraded_and_spawn_only_keeps_precedence(roster, http, monkeypatch):
+    topology_edges(roster, monkeypatch)
+    spawn = http('/api/graph?all=1&spawn_only=1&topology_only=1')
+    assert spawn['spawn_only'] is True and 'topology_only' not in spawn
+    assert spawn['nodes'] == spawn['edges'] == []
+    def unavailable():
+        raise OSError('fixture data unavailable')
+    monkeypatch.setattr(server, '_raw_graph', unavailable)
+    compact = http('/api/graph?all=1&topology_only=1')
+    assert compact['topology_only'] is True and compact['degraded'] is True
+    assert compact['nodes'] == compact['edges'] == compact['spawn'] == []
+    assert compact['error'] == 'OSError: fixture data unavailable'
+
+
 def test_spawn_only_keeps_the_recency_window(roster, http):
     """Without all=1 only edges between recently active (or running) rows remain."""
     payload = http("/api/graph?days=0.00001&spawn_only=1")
