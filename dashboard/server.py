@@ -1405,15 +1405,23 @@ _STOPPED_BINDING_REUSE = _TimedReuse(_STOPPED_BINDING_REUSE_SECONDS)
 def invalidate_display_reuse() -> None:
     """Forget every reused display answer; call after any state change."""
     _AGENTS_REUSE.invalidate()
+    try:
+        _card_local_tmux_value.cache_clear()
+        with _parent_env_lock:
+            _parent_env_memo.clear()
+        for module_name in ("graph_data", "dashboard.graph_data"):
+            module = sys.modules.get(module_name)
+            if module is not None and hasattr(module, "forget_parents"):
+                module.forget_parents()
+    finally:
+        _invalidate_graph_reuse()
+        _STOPPED_BINDING_REUSE.invalidate()
+
+
+def _invalidate_graph_reuse() -> None:
+    # Invalidate inner graph observations before their reusable HTTP answer.
+    _invalidate_raw_graph()
     _GRAPH_REUSE.invalidate()
-    _card_local_tmux_value.cache_clear()
-    with _parent_env_lock:
-        _parent_env_memo.clear()
-    for module_name in ("graph_data", "dashboard.graph_data"):
-        module = sys.modules.get(module_name)
-        if module is not None and hasattr(module, "forget_parents"):
-            module.forget_parents()
-    _STOPPED_BINDING_REUSE.invalidate()
 
 
 def _agents_answer(history_days: float | None, single_flight) -> "_AgentsAnswer | None":
@@ -2573,6 +2581,17 @@ def _open_codex_app(name: str) -> dict:
 
 _GRAPH_CACHE: dict = {"ts": 0, "data": None, "mail": None}
 _GRAPH_BUILD_LOCK = threading.Lock()
+_GRAPH_STATE_LOCK = threading.Lock()
+_GRAPH_CACHE_EPOCH = 0
+
+
+def _invalidate_raw_graph() -> None:
+    global _GRAPH_CACHE_EPOCH
+    # Never wait on a potentially slow graph build during a mutation. A build
+    # that started before this epoch may finish, but cannot republish its data.
+    with _GRAPH_STATE_LOCK:
+        _GRAPH_CACHE_EPOCH += 1
+        _GRAPH_CACHE.update(ts=0, data=None, mail=None)
 
 
 def _raw_graph() -> dict:
@@ -2596,15 +2615,20 @@ def _raw_graph() -> dict:
                 and (mark is None or mark == _GRAPH_CACHE["mail"]))
 
     mark = graph_data.mail_mark()
-    if fresh(mark):
-        return _GRAPH_CACHE["data"]
-    with _GRAPH_BUILD_LOCK:
-        mark = graph_data.mail_mark()
+    with _GRAPH_STATE_LOCK:
         if fresh(mark):
             return _GRAPH_CACHE["data"]
-        now = time.time()
+    with _GRAPH_BUILD_LOCK:
+        mark = graph_data.mail_mark()
+        with _GRAPH_STATE_LOCK:
+            if fresh(mark):
+                return _GRAPH_CACHE["data"]
+            epoch = _GRAPH_CACHE_EPOCH
+            now = time.time()
         data = graph_data.build_graph()
-        _GRAPH_CACHE.update(ts=now, data=data, mail=mark)
+        with _GRAPH_STATE_LOCK:
+            if epoch == _GRAPH_CACHE_EPOCH:
+                _GRAPH_CACHE.update(ts=now, data=data, mail=mark)
         return data
 
 

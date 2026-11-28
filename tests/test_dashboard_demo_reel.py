@@ -118,3 +118,33 @@ def test_reel_phase_beats_have_settle_time_without_retiming_captions():
         {"at": 25.0, "text": "HUMAN IN THE LOOP"},
         {"at": 31.0, "text": "ONE CLICK · SYSTEM MOVES"},
     ]
+
+
+def test_reel_server_invalidates_through_graph_epoch_on_wal_change(tmp_path, monkeypatch):
+    import runpy
+    import sys
+    from types import SimpleNamespace
+
+    reel = _load_reel()
+    (tmp_path / "payload").mkdir()
+    (tmp_path / "mail").mkdir()
+    wrapper = reel._create_reel_server(tmp_path)
+    calls = []
+
+    class Handler:
+        def do_GET(self):
+            calls.append("get")
+
+    fake = SimpleNamespace(Handler=Handler, _invalidate_graph_reuse=lambda: calls.append("invalidate"),
+                           _GRAPH_CACHE={"data": "old"})
+    monkeypatch.setitem(sys.modules, "server", fake)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    ns = runpy.run_path(str(wrapper))
+    handler = object.__new__(ns["ReadOnlyReelHandler"])
+    handler.path = "/api/graph"
+    handler.do_GET()
+    handler.do_GET()
+    (tmp_path / "mail" / "storage.sqlite3-wal").write_bytes(b"new")
+    handler.do_GET()
+    assert calls == ["invalidate", "get", "get", "invalidate", "get"]
+    assert fake._GRAPH_CACHE == {"data": "old"}

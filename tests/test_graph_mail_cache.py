@@ -198,3 +198,267 @@ async function netTick(){
     out = subprocess.run(["node", "-e", harness],
                          capture_output=True, text=True, timeout=10, check=True)
     assert out.stdout == "5,6"  # 遅れた古い応答（4）で戻らず、次の新しい応答（6）は描く
+
+
+def test_display_invalidation_discards_raw_graph_without_new_mail(mail):
+    builds, _ = mail
+    assert server._raw_graph()["n"] == 1
+    server.invalidate_display_reuse()
+    assert server._raw_graph()["n"] == 2
+    assert server._raw_graph()["n"] == 2
+    assert len(builds) == 2
+
+
+def test_display_invalidation_does_not_republish_inflight_raw_graph(mail, monkeypatch):
+    builds, _ = mail
+    started, release = threading.Event(), threading.Event()
+    answers = []
+
+    def build():
+        builds.append(1)
+        n = len(builds)
+        if n == 1:
+            started.set()
+            assert release.wait(5)
+        return {"n": n}
+
+    monkeypatch.setattr(graph_data, "build_graph", build)
+    worker = threading.Thread(target=lambda: answers.append(server._raw_graph()))
+    worker.start()
+    try:
+        assert started.wait(5)
+        # Must not wait on the build lock; the builder is blocked on release.
+        server.invalidate_display_reuse()
+    finally:
+        release.set()
+        worker.join(5)
+    assert not worker.is_alive()
+    assert answers == [{"n": 1}]
+    assert server._raw_graph()["n"] == 2
+    assert server._raw_graph()["n"] == 2
+
+
+def test_display_invalidation_reaches_both_http_graph_projections(mail, monkeypatch):
+    from http.server import ThreadingHTTPServer
+    from urllib.request import urlopen
+
+    builds, _ = mail
+    lineage = [{"source": "Parent", "target": "Child", "type": "spawn"}]
+
+    def build():
+        builds.append(1)
+        return {"nodes": [{"name": "Parent"}, {"name": "Child"}],
+                "edges": [], "spawn": list(lineage)}
+
+    monkeypatch.setattr(graph_data, "build_graph", build)
+    monkeypatch.setattr(server, "_GRAPH_REUSE", server._TimedReuse(5.0))
+    http = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    worker = threading.Thread(target=http.serve_forever, daemon=True)
+    worker.start()
+    try:
+        def fetch(projection):
+            with urlopen(f"http://127.0.0.1:{http.server_port}/api/graph?all=1&{projection}=1", timeout=10) as response:
+                data = json.load(response)
+            assert not data.get("degraded"), data
+            return data["spawn"]
+
+        assert fetch("spawn_only") == lineage
+        assert fetch("topology_only") == lineage
+        assert len(builds) == 1
+        lineage.clear()
+        server.invalidate_display_reuse()
+        assert fetch("spawn_only") == []
+        assert fetch("topology_only") == []
+        assert len(builds) == 2
+    finally:
+        http.shutdown()
+        http.server_close()
+        worker.join(5)
+
+
+@pytest.mark.parametrize("projection", ["spawn_only", "topology_only"])
+def test_inflight_http_projection_is_not_reused_after_invalidation(mail, monkeypatch, projection):
+    from http.server import ThreadingHTTPServer
+    from urllib.request import urlopen
+
+    builds, write = mail
+    started, release = threading.Event(), threading.Event()
+    edge = {"source": "Parent", "target": "Child", "type": "spawn"}
+    answers = []
+
+    def build():
+        builds.append(1)
+        first = len(builds) == 1
+        if first:
+            started.set()
+            assert release.wait(10)
+        return {"nodes": [{"name": "Parent"}, {"name": "Child"}],
+                "edges": [], "spawn": [edge] if first else []}
+
+    monkeypatch.setattr(graph_data, "build_graph", build)
+    monkeypatch.setattr(server, "_GRAPH_REUSE", server._TimedReuse(5.0))
+    http = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    worker = threading.Thread(target=http.serve_forever, daemon=True)
+    worker.start()
+
+    def fetch():
+        with urlopen(f"http://127.0.0.1:{http.server_port}/api/graph?all=1&{projection}=1", timeout=15) as response:
+            data = json.load(response)
+        assert not data.get("degraded"), data
+        return data["spawn"]
+
+    request = threading.Thread(target=lambda: answers.append(fetch()))
+    request.start()
+    try:
+        assert started.wait(10)
+        server.invalidate_display_reuse()
+        release.set()
+        request.join(10)
+        assert not request.is_alive()
+        assert answers == [[edge]]
+        assert fetch() == []
+        assert fetch() == []
+        assert len(builds) == 2
+        write("INSERT INTO messages VALUES (2, 'b')")
+        # The raw cache must still respond to Mail changes after invalidation;
+        # the outer HTTP reuse retains its existing independent TTL.
+        assert server._raw_graph()["spawn"] == []
+        assert len(builds) == 3
+    finally:
+        release.set()
+        request.join(15)
+        http.shutdown()
+        http.server_close()
+        worker.join(5)
+
+
+def test_waiter_queued_before_invalidation_builds_current_graph(mail, monkeypatch):
+    builds, _ = mail
+    started, queued, release = threading.Event(), threading.Event(), threading.Event()
+    results = {}
+    lock = threading.Lock()
+
+    class ObservedLock:
+        def __enter__(self):
+            if threading.current_thread().name == "graph-waiter":
+                # Prove the first builder still owns the lock when the waiter
+                # tries to acquire it, not merely when the waiter starts.
+                if lock.acquire(blocking=False):
+                    lock.release()
+                    raise AssertionError("waiter was not contending with the first build")
+                queued.set()
+            lock.acquire()
+            return self
+
+        def __exit__(self, *args):
+            lock.release()
+
+    def build():
+        builds.append(1)
+        n = len(builds)
+        if n == 1:
+            started.set()
+            assert release.wait(10)
+        return {"n": n}
+
+    monkeypatch.setattr(server, "_GRAPH_BUILD_LOCK", ObservedLock())
+    monkeypatch.setattr(graph_data, "build_graph", build)
+    first = threading.Thread(target=lambda: results.update(first=server._raw_graph()))
+    waiter = threading.Thread(name="graph-waiter", target=lambda: results.update(waiter=server._raw_graph()))
+    first.start()
+    try:
+        assert started.wait(10)
+        waiter.start()
+        assert queued.wait(10)
+        server.invalidate_display_reuse()
+    finally:
+        release.set()
+        first.join(10)
+        if waiter.ident is not None:
+            waiter.join(10)
+    assert not first.is_alive() and not waiter.is_alive()
+    assert results == {"first": {"n": 1}, "waiter": {"n": 2}}
+    assert server._raw_graph() == {"n": 2}
+    assert len(builds) == 2
+
+
+@pytest.mark.parametrize("failure_point", ["card", "parent"])
+def test_graph_invalidation_survives_memo_cleanup_error(mail, monkeypatch, failure_point):
+    builds, _ = mail
+    monkeypatch.setattr(server, "_GRAPH_REUSE", server._TimedReuse(5.0))
+    monkeypatch.setattr(server, "_STOPPED_BINDING_REUSE", server._TimedReuse(30.0))
+    stopped = server._STOPPED_BINDING_REUSE
+    stopped.put(("stopped",), "old", stopped.begin())
+    assert stopped.get(("stopped",)) == "old"
+    assert server._raw_graph()["n"] == 1
+    mark = server._GRAPH_REUSE.begin()
+    key = ("test",)
+    server._GRAPH_REUSE.put(key, {"n": 1}, mark)
+    assert server._GRAPH_REUSE.get(key) == {"n": 1}
+
+    def fail():
+        raise RuntimeError("injected parent memo failure")
+
+    if failure_point == "card":
+        monkeypatch.setattr(server._card_local_tmux_value, "cache_clear", fail)
+    else:
+        monkeypatch.setattr(graph_data, "forget_parents", fail)
+    with pytest.raises(RuntimeError, match="injected parent memo failure"):
+        server.invalidate_display_reuse()
+    assert stopped.get(("stopped",)) is None
+    assert server._GRAPH_REUSE.get(key) is None
+    assert server._raw_graph()["n"] == 2
+    assert len(builds) == 2
+
+
+def test_demo_wal_change_invalidates_real_http_graph_reuse(mail, monkeypatch, tmp_path):
+    import importlib.util
+    import runpy
+    from http.server import ThreadingHTTPServer
+    from urllib.request import urlopen
+
+    builds, _ = mail
+    spec = importlib.util.spec_from_file_location(
+        "dashboard_demo_reel", INDEX.parents[1] / "scripts" / "dashboard-demo-reel.py"
+    )
+    reel = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(reel)
+    (tmp_path / "payload").mkdir()
+    (tmp_path / "mail").mkdir()
+    wrapper = reel._create_reel_server(tmp_path)
+    edge = {"source": "Parent", "target": "Child", "type": "spawn"}
+    lineage = [edge]
+
+    def build():
+        builds.append(1)
+        return {"nodes": [{"name": "Parent"}, {"name": "Child"}],
+                "edges": [], "spawn": list(lineage)}
+
+    monkeypatch.setattr(graph_data, "build_graph", build)
+    monkeypatch.setattr(server, "_GRAPH_REUSE", server._TimedReuse(5.0, clock=lambda: 1.0))
+    monkeypatch.setitem(sys.modules, "server", server)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    ns = runpy.run_path(str(wrapper))
+    http = ThreadingHTTPServer(("127.0.0.1", 0), ns["ReadOnlyReelHandler"])
+    worker = threading.Thread(target=http.serve_forever, daemon=True)
+    worker.start()
+    try:
+        def fetch(projection):
+            url = f"http://127.0.0.1:{http.server_port}/api/graph?all=1&{projection}=1"
+            with urlopen(url, timeout=10) as response:
+                data = json.load(response)
+            assert not data.get("degraded"), data
+            return data["spawn"]
+
+        assert fetch("spawn_only") == [edge]
+        assert fetch("topology_only") == [edge]
+        assert len(builds) == 1
+        lineage.clear()
+        (tmp_path / "mail" / "storage.sqlite3-wal").write_bytes(b"new")
+        assert fetch("spawn_only") == []
+        assert fetch("topology_only") == []
+        assert len(builds) == 2
+    finally:
+        http.shutdown()
+        http.server_close()
+        worker.join(5)
