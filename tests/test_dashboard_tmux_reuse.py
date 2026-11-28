@@ -48,7 +48,7 @@ def test_stall_sampler_never_keeps_an_empty_or_failed_answer(monkeypatch):
 def test_a_post_drops_the_remembered_parents(monkeypatch):
     monkeypatch.setattr(server, "_tmux", lambda args: "PARENT_AGENT=Boss\n")
     server._stall_parent("Kid", "g1")
-    graph_data._PARENT_BY_SESSION["Kid"] = (("$1", "1"), "Boss", 0.0)
+    graph_data._PARENT_BY_SESSION["Kid"] = (("$1", "1"), "Boss", "/scope", 0.0)
     server.invalidate_display_reuse()
     assert server._parent_env_memo == {} and graph_data._PARENT_BY_SESSION == {}
 
@@ -61,8 +61,8 @@ def _fake_tmux(tmp_path, sessions, pid="100"):
         "#!/bin/sh\n"
         f'echo "$@" >> "{log}"\n'
         'case "$1" in\n'
-        f'  list-sessions) printf "{rows}\\n" ;;\n'
-        '  show-environment) case "$3" in Kid) echo PARENT_AGENT=Boss ;; *) exit 1 ;; esac ;;\n'
+        f"  list-sessions) printf '{rows}\\n' ;;\n"
+        '  show-environment) case "$3" in "$"1|"$"9|"$"0|=Kid) printf "PARENT_AGENT=Boss\\nAGENTSTACK_PROJECT_KEY=/scope\\n" ;; *) exit 1 ;; esac ;;\n'
         "esac\n", encoding="utf-8")
     script.chmod(0o755)
     return log
@@ -71,64 +71,64 @@ def _fake_tmux(tmp_path, sessions, pid="100"):
 def test_lineage_reads_each_session_once_across_refreshes(tmp_path, monkeypatch):
     log = _fake_tmux(tmp_path, [("Kid", "$1", "10"), ("Loner", "$2", "11")])
     monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
-    assert graph_data._live_parents() == {"Kid": "Boss"}
-    first = log.read_text().count("show-environment")
+    assert graph_data._live_parents("/scope") == {"Kid": "Boss"}
+    first = sum(line.startswith("show-environment ") for line in log.read_text().splitlines())
     assert first == 2
     graph_data._LIVE_PARENT_CACHE.update(ts=0.0)  # the 10 s refresh comes round
-    assert graph_data._live_parents() == {"Kid": "Boss"}
-    assert log.read_text().count("show-environment") == first  # nothing asked again
+    assert graph_data._live_parents("/scope") == {"Kid": "Boss"}
+    assert sum(line.startswith("show-environment ") for line in log.read_text().splitlines()) == first  # nothing asked again
 
 
 def test_lineage_reads_a_replaced_session_again(tmp_path, monkeypatch):
     log = _fake_tmux(tmp_path, [("Kid", "$1", "10")])
     monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
-    graph_data._live_parents()
+    graph_data._live_parents("/scope")
     _fake_tmux(tmp_path, [("Kid", "$9", "99")])  # same name, a new session
     graph_data._LIVE_PARENT_CACHE.update(ts=0.0)
-    graph_data._live_parents()
-    assert log.read_text().count("show-environment") == 2
+    graph_data._live_parents("/scope")
+    assert sum(line.startswith("show-environment ") for line in log.read_text().splitlines()) == 2
 
 
 def test_lineage_notices_a_parent_set_again_after_the_memo_expires(tmp_path, monkeypatch):
     log = _fake_tmux(tmp_path, [("Kid", "$1", "10")])
     monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
-    assert graph_data._live_parents() == {"Kid": "Boss"}
-    (tmp_path / "tmux").write_text((tmp_path / "tmux").read_text().replace("Kid) echo PARENT_AGENT=Boss", "Kid) echo PARENT_AGENT=Other"))
+    assert graph_data._live_parents("/scope") == {"Kid": "Boss"}
+    (tmp_path / "tmux").write_text((tmp_path / "tmux").read_text().replace("PARENT_AGENT=Boss", "PARENT_AGENT=Other"))
     graph_data._LIVE_PARENT_CACHE.update(ts=0.0)
-    assert graph_data._live_parents() == {"Kid": "Boss"}  # within the memo: kept
+    assert graph_data._live_parents("/scope") == {"Kid": "Boss"}  # within the memo: kept
     monkeypatch.setattr(graph_data, "_PARENT_MISS_TTL", 0.0)
     graph_data._LIVE_PARENT_CACHE.update(ts=0.0)
-    assert graph_data._live_parents() == {"Kid": "Other"}
-    assert log.read_text().count("show-environment") == 2
+    assert graph_data._live_parents("/scope") == {"Kid": "Other"}
+    assert sum(line.startswith("show-environment ") for line in log.read_text().splitlines()) == 2
 
 
 def test_lineage_reads_again_after_the_tmux_server_restarts_with_the_same_ids(tmp_path, monkeypatch):
     """A new server's first session can have the same id and creation second."""
     log = _fake_tmux(tmp_path, [("Kid", "$0", "10")], pid="100")
     monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
-    graph_data._live_parents()
+    graph_data._live_parents("/scope")
     _fake_tmux(tmp_path, [("Kid", "$0", "10")], pid="200")
     graph_data._LIVE_PARENT_CACHE.update(ts=0.0)
-    graph_data._live_parents()
-    assert log.read_text().count("show-environment") == 2
+    graph_data._live_parents("/scope")
+    assert sum(line.startswith("show-environment ") for line in log.read_text().splitlines()) == 2
 
 
 def test_lineage_without_the_pid_field_still_works(tmp_path, monkeypatch):
     script = tmp_path / "tmux"
     script.write_text('#!/bin/sh\ncase "$1" in\n  list-sessions) printf "Kid\\n" ;;\n'
-                      '  show-environment) echo PARENT_AGENT=Boss ;;\nesac\n', encoding="utf-8")
+                      '  show-environment) printf "PARENT_AGENT=Boss\\nAGENTSTACK_PROJECT_KEY=/scope\\n" ;;\nesac\n', encoding="utf-8")
     script.chmod(0o755)
     monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
-    assert graph_data._live_parents() == {"Kid": "Boss"}
+    assert graph_data._live_parents("/scope") == {"Kid": "Boss"}
 
 
 def test_lineage_forgets_a_session_that_is_gone(tmp_path, monkeypatch):
     _fake_tmux(tmp_path, [("Kid", "$1", "10")])
     monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
-    graph_data._live_parents()
+    graph_data._live_parents("/scope")
     _fake_tmux(tmp_path, [("Other", "$2", "11")])
     graph_data._LIVE_PARENT_CACHE.update(ts=0.0)
-    graph_data._live_parents()
+    graph_data._live_parents("/scope")
     assert set(graph_data._PARENT_BY_SESSION) == {"Other"}
 
 
@@ -199,7 +199,7 @@ def test_a_clear_racing_the_prune_does_not_break_the_lineage(tmp_path, monkeypat
     _fake_tmux(tmp_path, [("Keep", "$1", "10")])
     monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
     graph_data._PARENT_BY_SESSION.update({
-        "GoneA": (("$7", "1", "1"), "Boss", 0.0), "GoneB": (("$8", "1", "1"), "Boss", 0.0)})
+        "GoneA": (("$7", "1", "1"), "Boss", "/scope", 0.0), "GoneB": (("$8", "1", "1"), "Boss", "/scope", 0.0)})
 
     class Racing(dict):
         def __iter__(self):
@@ -208,4 +208,148 @@ def test_a_clear_racing_the_prune_does_not_break_the_lineage(tmp_path, monkeypat
             return iter(keys)
 
     monkeypatch.setattr(graph_data, "_PARENT_BY_SESSION", Racing(graph_data._PARENT_BY_SESSION))
-    graph_data._live_parents()
+    graph_data._live_parents("/scope")
+
+
+def test_lineage_cache_validates_generation_but_reuses_environment(tmp_path, monkeypatch):
+    log = _fake_tmux(tmp_path, [("Kid", "$1", "10")])
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    assert graph_data._live_parents("/scope") == {"Kid": "Boss"}
+    before = log.read_text().splitlines()
+    assert graph_data._live_parents("/scope") == {"Kid": "Boss"}
+    after = log.read_text().splitlines()[len(before):]
+    assert len(after) == 1 and after[0].startswith("list-sessions ")
+
+
+def test_lineage_cache_invalidation_rechecks_unchanged_generation(tmp_path, monkeypatch):
+    _fake_tmux(tmp_path, [("Kid", "$1", "10")])
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    assert graph_data._live_parents("/scope") == {"Kid": "Boss"}
+    script = tmp_path / "tmux"
+    script.write_text(script.read_text().replace("PARENT_AGENT=Boss", "PARENT_AGENT=Other"))
+    graph_data.forget_parents()
+    assert graph_data._live_parents("/scope") == {"Kid": "Other"}
+
+
+def test_inflight_lineage_cannot_republish_after_invalidation(tmp_path, monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+
+    _fake_tmux(tmp_path, [("Kid", "$1", "10")])
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    script = tmp_path / "tmux"
+    real_run = subprocess.run
+    invalidated = False
+
+    def run(args, **kwargs):
+        nonlocal invalidated
+        result = real_run(args, **kwargs)
+        if args[1] == "show-environment" and not invalidated:
+            invalidated = True
+            script.write_text(script.read_text().replace("PARENT_AGENT=Boss", "PARENT_AGENT=Other"))
+            graph_data.forget_parents()
+        return result
+
+    monkeypatch.setattr(graph_data, "subprocess", SimpleNamespace(
+        run=run, SubprocessError=subprocess.SubprocessError))
+    assert graph_data._live_parents("/scope") == {}
+    assert invalidated
+    assert graph_data._PARENT_BY_SESSION == {}
+    assert graph_data._LIVE_PARENT_CACHE["value"] is None
+    assert graph_data._live_parents("/scope") == {"Kid": "Other"}
+
+
+def test_incomplete_lineage_listing_is_not_aggregate_cached(tmp_path, monkeypatch):
+    script = tmp_path / "tmux"
+    script.write_text('#!/bin/sh\ncase "$1" in\n  list-sessions) printf "Kid\\n" ;;\n'
+                      '  show-environment) printf "PARENT_AGENT=Boss\\nAGENTSTACK_PROJECT_KEY=/scope\\n" ;;\nesac\n')
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    assert graph_data._live_parents("/scope") == {"Kid": "Boss"}
+    assert graph_data._LIVE_PARENT_CACHE["value"] is None
+    script.write_text(script.read_text().replace("PARENT_AGENT=Boss", "PARENT_AGENT=Other"))
+    assert graph_data._live_parents("/scope") == {"Kid": "Other"}
+
+
+def test_mixed_lineage_listing_never_memoizes_an_incomplete_generation(tmp_path, monkeypatch):
+    log = tmp_path / "calls"
+    script = tmp_path / "tmux"
+    script.write_text(
+        '#!/bin/sh\n'
+        f'echo "$@" >> "{log}"\n'
+        'case "$1" in\n'
+        '  list-sessions) printf "Kid\\t\\$1\\t10\\t100\\nPartial\\t\\$2\\t11\\t\\nOld\\n" ;;\n'
+        '  show-environment) case "$3" in\n'
+        '    "$"1) printf "PARENT_AGENT=Boss\\nAGENTSTACK_PROJECT_KEY=/scope\\n" ;;\n'
+        '    "$"2|=Partial) printf "PARENT_AGENT=First\\nAGENTSTACK_PROJECT_KEY=/scope\\n" ;;\n'
+        '    =Old) printf "PARENT_AGENT=Legacy\\nAGENTSTACK_PROJECT_KEY=/scope\\n" ;;\n'
+        '    *) exit 1 ;; esac ;;\n'
+        'esac\n'
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    assert graph_data._live_parents("/scope") == {
+        "Kid": "Boss", "Partial": "First", "Old": "Legacy"}
+    assert graph_data._LIVE_PARENT_CACHE["value"] is None
+    script.write_text(script.read_text().replace("PARENT_AGENT=First", "PARENT_AGENT=Second"))
+    assert graph_data._live_parents("/scope") == {
+        "Kid": "Boss", "Partial": "Second", "Old": "Legacy"}
+    assert set(graph_data._PARENT_BY_SESSION) == {"Kid"}
+    calls = log.read_text().splitlines()
+    assert sum(line.startswith("show-environment -t $1 ") for line in calls) == 1
+
+
+def test_incomplete_generation_discards_an_earlier_complete_memo(tmp_path, monkeypatch):
+    _fake_tmux(tmp_path, [("Kid", "$1", "10")])
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    script = tmp_path / "tmux"
+    complete = script.read_text()
+    assert graph_data._live_parents("/scope") == {"Kid": "Boss"}
+    script.write_text(complete.replace(r"\t100", r"\t").replace("PARENT_AGENT=Boss", "PARENT_AGENT=Other"))
+    assert graph_data._live_parents("/scope") == {"Kid": "Other"}
+    assert "Kid" not in graph_data._PARENT_BY_SESSION
+    script.write_text(complete.replace("PARENT_AGENT=Boss", "PARENT_AGENT=New"))
+    assert graph_data._live_parents("/scope") == {"Kid": "New"}
+
+
+def test_partial_id_observation_is_discarded_when_the_listed_name_changes(tmp_path, monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+
+    _fake_tmux(tmp_path, [("Kid", "$1", "10")], pid="")
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    real_run = subprocess.run
+    script = tmp_path / "tmux"
+
+    def run(args, **kwargs):
+        result = real_run(args, **kwargs)
+        if args[1] == "show-environment":
+            script.write_text(script.read_text().replace("Kid", "Replacement"))
+        return result
+
+    monkeypatch.setattr(graph_data, "subprocess", SimpleNamespace(
+        run=run, SubprocessError=subprocess.SubprocessError))
+    assert graph_data._live_parents("/scope") == {}
+    assert graph_data._PARENT_BY_SESSION == {}
+    assert graph_data._LIVE_PARENT_CACHE["value"] is None
+
+
+@pytest.mark.parametrize("created,pid", [("10", "²"), ("²", "100"), ("10", "0")])
+def test_malformed_lineage_numbers_are_not_generation_keys(tmp_path, monkeypatch, created, pid):
+    _fake_tmux(tmp_path, [("Kid", "$1", created)], pid=pid)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    assert graph_data._live_parents("/scope") == {"Kid": "Boss"}
+    assert graph_data._PARENT_BY_SESSION == {}
+    assert graph_data._LIVE_PARENT_CACHE["value"] is None
+
+
+@pytest.mark.parametrize("session_id", ["$1", "invalid"])
+def test_partial_lineage_verification_positive_control(tmp_path, monkeypatch, session_id):
+    log = _fake_tmux(tmp_path, [("Kid", session_id, "10")], pid="")
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    assert graph_data._live_parents("/scope") == {"Kid": "Boss"}
+    expected_target = "$1" if session_id == "$1" else "=Kid"
+    assert any(line.startswith(f"show-environment -t {expected_target} ")
+               for line in log.read_text().splitlines())
+    assert graph_data._PARENT_BY_SESSION == {}
+    assert graph_data._LIVE_PARENT_CACHE["value"] is None

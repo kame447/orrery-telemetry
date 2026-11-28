@@ -294,7 +294,7 @@ def test_explicit_project_never_falls_back_to_another_project(
     monkeypatch.setattr(graph_data, "DB_PATH", str(database))
     monkeypatch.setattr(graph_data, "PROJECT_HUMAN_KEY", project_key)
     monkeypatch.setattr(graph_data, "PROJECT_ID", 1)
-    monkeypatch.setattr(graph_data, "_live_parents", lambda: {})
+    monkeypatch.setattr(graph_data, "_live_parents", lambda project_key: {})
 
     data = graph_data.build_graph()
 
@@ -323,7 +323,7 @@ def test_project_resolution_errors_survive_graph_http_wrapper(
     monkeypatch.setattr(graph_data, "DB_PATH", str(database))
     monkeypatch.setattr(graph_data, "PROJECT_HUMAN_KEY", "/missing-project")
     monkeypatch.setattr(graph_data, "PROJECT_ID", 1)
-    monkeypatch.setattr(graph_data, "_live_parents", lambda: {})
+    monkeypatch.setattr(graph_data, "_live_parents", lambda project_key: {})
     data = graph_data.build_graph()
     assert data["nodes"] == data["edges"] == data["spawn"] == []
     assert data["degraded"] is True

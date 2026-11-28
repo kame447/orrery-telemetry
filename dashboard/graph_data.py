@@ -104,22 +104,28 @@ PROJECT_ID = 1  # フォールバック既定（projects に human_key 不一致
 ACT_WINDOW_SEC = 6 * 3600
 
 
-_LIVE_PARENT_CACHE: dict[str, object] = {"ts": 0.0, "value": None}
+_LIVE_PARENT_CACHE: dict[str, object] = {"ts": 0.0, "value": None, "generations": None}
+_PARENT_CACHE_LOCK = threading.Lock()
+_PARENT_CACHE_EPOCH = 0
 _LIVE_PARENT_TTL = 10.0
 # PARENT_AGENT is read once per session generation (name, id, creation time, server pid)
 # rather than on every refresh, and asked again after this long, whether it was
 # found or not: a variable set just after the session appeared, or set again
 # later, is picked up. Any POST drops the memo too (forget_parents).
 _PARENT_MISS_TTL = 60.0
-_PARENT_BY_SESSION: dict[str, tuple[tuple[str, ...], str, float]] = {}
+_PARENT_BY_SESSION: dict[str, tuple[tuple[str, ...], str, str, float]] = {}
 
 
 def forget_parents() -> None:
-    _PARENT_BY_SESSION.clear()
+    global _PARENT_CACHE_EPOCH
+    with _PARENT_CACHE_LOCK:
+        _PARENT_CACHE_EPOCH += 1
+        _PARENT_BY_SESSION.clear()
+        _LIVE_PARENT_CACHE.update(ts=0.0, value=None, generations=None)
 
 
-def _live_parents() -> dict[str, str]:
-    """child session name -> parent agent name, read from live tmux sessions.
+def _live_parents(project_key: str) -> dict[str, str]:
+    """Child -> parent from live tmux sessions bound to the resolved project.
 
     The message-derived lineage below infers a parent from the child's oldest
     high-importance inbound message, which was the delegation mail. Spawning
@@ -130,25 +136,25 @@ def _live_parents() -> dict[str, str]:
     directly and is available the moment the session exists.
 
     Reading it costs one tmux call per session -- 238ms of a 326ms graph build
-    on a machine with 42 of them -- so the answer is cached briefly. Lineage
-    only changes when something is spawned, and the node itself appears without
-    waiting for this.
+    on a machine with 42 of them -- so the answer is cached briefly. Every
+    lookup still lists session generations: a replaced server or session must
+    not inherit a cached edge. Environment changes within a single generation
+    are picked up on the existing per-session memo expiry or invalidation.
     """
     now = time.monotonic()
-    cached = _LIVE_PARENT_CACHE["value"]
-    if cached is not None and now - float(_LIVE_PARENT_CACHE["ts"]) < _LIVE_PARENT_TTL:
-        return dict(cached)  # type: ignore[arg-type]
+    with _PARENT_CACHE_LOCK:
+        epoch = _PARENT_CACHE_EPOCH
     tmux = shutil.which("tmux")
     if not tmux:
-        _LIVE_PARENT_CACHE.update(ts=now, value={})
         return {}
+    listing_args = [tmux, "list-sessions", "-F",
+                    "#{session_name}\t#{session_id}\t#{session_created}\t#{pid}"]
     try:
         listing = subprocess.run(
-            [tmux, "list-sessions", "-F",
-             "#{session_name}\t#{session_id}\t#{session_created}\t#{pid}"],
+            listing_args,
             capture_output=True, text=True, timeout=5,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
         return {}
     if listing.returncode != 0:
         # No server, or one that was briefly unreachable -- the exit code does
@@ -157,44 +163,120 @@ def _live_parents() -> dict[str, str]:
         # one `list-sessions`; the expensive part is the per-session lookup
         # below, which this path never reaches.
         return {}
-    parents: dict[str, str] = {}
+    # The cheap listing is required even during the aggregate cache TTL.
+    # Never reuse a cached result for an incomplete (old/demo) listing.
+    rows = [line.rsplit("\t", 3) for line in listing.stdout.splitlines() if line.strip()]
+    def valid_generation(fields):
+        return (len(fields) == 4 and fields[0].strip()
+                and re.fullmatch(r"\$[0-9]+", fields[1])
+                and re.fullmatch(r"[0-9]+", fields[2])
+                and re.fullmatch(r"[0-9]+", fields[3])
+                and any(d != "0" for d in fields[3]))
+
+    generations = {fields[0].strip(): tuple(fields[1:]) for fields in rows
+                   if valid_generation(fields)}
+    complete = len(generations) == len(rows)
+    with _PARENT_CACHE_LOCK:
+        if epoch != _PARENT_CACHE_EPOCH:
+            return {}
+        cache = _LIVE_PARENT_CACHE
+        cached = cache["value"]
+        if (complete and cached is not None and cache.get("generations") == generations
+                and now - float(cache["ts"]) < _LIVE_PARENT_TTL):
+            return {child: parent for child, (parent, scope) in cached.items()
+                    if scope == project_key} if project_key else {}
+        memo = _PARENT_BY_SESSION.copy()
+    # Accumulate observations locally. A POST can invalidate while tmux is
+    # running; never publish any pre-invalidation observations afterwards.
+    pending_memo = {}
+    invalid_generations = set()
+    parents: dict[str, tuple[str, str]] = {}
     seen: set[str] = set()
-    for line in listing.stdout.split("\n"):
+    observed_generations: dict[str, tuple[str, ...]] = {}
+    queried_generation = False
+    read_failed = False
+    for fields in rows:
         # name, id, creation time, server pid. The pid tells apart a session of
         # a restarted tmux server that got the same id in the same second.
-        fields = line.rsplit("\t", 3)
         session = fields[0].strip()
-        generation = tuple(fields[1:]) if len(fields) == 4 else None
+        generation = tuple(fields[1:]) if valid_generation(fields) else None
         if not session:
             continue
         seen.add(session)
-        known = _PARENT_BY_SESSION.get(session)
+        # Partial rows cannot be cached, but retain the available fields for
+        # the post-read check when targeting a session ID.
+        row_identity = tuple(fields[1:]) if len(fields) == 4 else None
+        if row_identity is not None:
+            observed_generations[session] = row_identity
+        if generation is None:
+            invalid_generations.add(session)
+        known = memo.get(session)
         if (generation is not None and known is not None and known[0] == generation
-                and now - known[2] < _PARENT_MISS_TTL):
-            if known[1]:
-                parents[session] = known[1]
+                and now - known[3] < _PARENT_MISS_TTL):
+            if known[1] and known[2]:
+                parents[session] = (known[1], known[2])
             continue
+        # Read only the two named values in one tmux command queue, using the
+        # session ID where available rather than a potentially reused name.
+        target = (fields[1] if len(fields) == 4 and re.fullmatch(r"\$[0-9]+", fields[1])
+                  else "=" + session)
+        queried_generation |= row_identity is not None
         try:
             shown = subprocess.run(
-                [tmux, "show-environment", "-t", session, "PARENT_AGENT"],
+                [tmux, "show-environment", "-t", target, "PARENT_AGENT", ";",
+                 "show-environment", "-t", target, "AGENTSTACK_PROJECT_KEY"],
                 capture_output=True, text=True, timeout=5,
             )
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
+            # An unavailable or undecodable read is not a negative observation.
+            # Retry next poll instead of caching a missing edge.
+            read_failed = True
+            invalid_generations.add(session)
             continue
-        parent = ""
-        if shown.returncode == 0:      # otherwise unset for this session
-            value = shown.stdout.strip()
-            # "-PARENT_AGENT" marks the variable as removed; only NAME=VALUE counts.
-            if value.startswith("PARENT_AGENT="):
-                parent = value.split("=", 1)[1].strip()
-        if parent:
-            parents[session] = parent
+        parent = scope = ""
+        if shown.returncode == 0:
+            lines = shown.stdout.splitlines()
+            if (len(lines) == 2 and lines[0].startswith("PARENT_AGENT=")
+                    and lines[1].startswith("AGENTSTACK_PROJECT_KEY=")):
+                parent = lines[0].split("=", 1)[1].strip()
+                scope = lines[1].split("=", 1)[1]
+        if parent and scope:
+            parents[session] = (parent, scope)
         if generation is not None and (shown.returncode == 0 or shown.returncode == 1):
-            _PARENT_BY_SESSION[session] = (generation, parent, now)
-    for gone in set(_PARENT_BY_SESSION) - seen:
-        _PARENT_BY_SESSION.pop(gone, None)  # a POST may have cleared it meanwhile
-    _LIVE_PARENT_CACHE.update(ts=now, value=dict(parents))
-    return parents
+            pending_memo[session] = (generation, parent, scope, now)
+    # A new tmux server can reuse a session ID between list-sessions and the
+    # environment lookup. Recheck the whole generation before adopting a new
+    # observation; never associate the replacement server's metadata with the
+    # old name. A failed recheck is not evidence of an empty server.
+    stable = not read_failed
+    if queried_generation:
+        current: dict[str, tuple[str, ...]] = {}
+        try:
+            verified = subprocess.run(listing_args, capture_output=True, text=True, timeout=5)
+            if verified.returncode == 0:
+                for line in verified.stdout.splitlines():
+                    fields = line.rsplit("\t", 3)
+                    if len(fields) == 4:
+                        current[fields[0].strip()] = tuple(fields[1:])
+        except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
+            pass
+        for session, generation in observed_generations.items():
+            if current.get(session) != generation:
+                parents.pop(session, None)
+                invalid_generations.add(session)
+                stable = False
+    with _PARENT_CACHE_LOCK:
+        if epoch != _PARENT_CACHE_EPOCH:
+            return {}
+        _PARENT_BY_SESSION.update(pending_memo)
+        for gone in (set(_PARENT_BY_SESSION) - seen) | invalid_generations:
+            _PARENT_BY_SESSION.pop(gone, None)
+        if stable and complete:
+            _LIVE_PARENT_CACHE.update(ts=now, value=dict(parents), generations=generations)
+        else:
+            _LIVE_PARENT_CACHE.update(ts=0.0, value=None, generations=None)
+    return {child: parent for child, (parent, scope) in parents.items()
+            if scope == project_key} if project_key else {}
 
 
 # Child filenames follow child_resume.SAFE_NAME; parent names follow the proxy rule.
@@ -858,7 +940,7 @@ def build_graph() -> dict:
         # Saved launch identity survives a resumed or stopped session. Current
         # session-local parent metadata wins; ordinary mail never replaces either.
         parents = _recorded_parents(registrations, project_key)
-        parents.update(_live_parents())
+        parents.update(_live_parents(project_key))
         node_names = {n["name"] for n in nodes}
         for child, parent in parents.items():
             if child not in node_names:
