@@ -201,9 +201,12 @@ def _live_parents(project_key: str) -> dict[str, str]:
         if not session:
             continue
         seen.add(session)
-        if generation is not None:
-            observed_generations[session] = generation
-        else:
+        # Partial rows cannot be cached, but retain the available fields for
+        # the post-read check when targeting a session ID.
+        row_identity = tuple(fields[1:]) if len(fields) == 4 else None
+        if row_identity is not None:
+            observed_generations[session] = row_identity
+        if generation is None:
             invalid_generations.add(session)
         known = memo.get(session)
         if (generation is not None and known is not None and known[0] == generation
@@ -215,7 +218,7 @@ def _live_parents(project_key: str) -> dict[str, str]:
         # session ID where available rather than a potentially reused name.
         target = (fields[1] if len(fields) == 4 and re.fullmatch(r"\$[0-9]+", fields[1])
                   else "=" + session)
-        queried_generation |= generation is not None
+        queried_generation |= row_identity is not None
         try:
             shown = subprocess.run(
                 [tmux, "show-environment", "-t", target, "PARENT_AGENT", ";",
@@ -247,7 +250,7 @@ def _live_parents(project_key: str) -> dict[str, str]:
             if verified.returncode == 0:
                 for line in verified.stdout.splitlines():
                     fields = line.rsplit("\t", 3)
-                    if valid_generation(fields):
+                    if len(fields) == 4:
                         current[fields[0].strip()] = tuple(fields[1:])
         except (OSError, subprocess.SubprocessError):
             pass

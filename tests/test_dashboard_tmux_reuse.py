@@ -310,3 +310,25 @@ def test_incomplete_generation_discards_an_earlier_complete_memo(tmp_path, monke
     assert "Kid" not in graph_data._PARENT_BY_SESSION
     script.write_text(complete.replace("PARENT_AGENT=Boss", "PARENT_AGENT=New"))
     assert graph_data._live_parents("/scope") == {"Kid": "New"}
+
+
+def test_partial_id_observation_is_discarded_when_the_listed_name_changes(tmp_path, monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+
+    _fake_tmux(tmp_path, [("Kid", "$1", "10")], pid="")
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    real_run = subprocess.run
+    script = tmp_path / "tmux"
+
+    def run(args, **kwargs):
+        result = real_run(args, **kwargs)
+        if args[1] == "show-environment":
+            script.write_text(script.read_text().replace("Kid", "Replacement"))
+        return result
+
+    monkeypatch.setattr(graph_data, "subprocess", SimpleNamespace(
+        run=run, SubprocessError=subprocess.SubprocessError))
+    assert graph_data._live_parents("/scope") == {}
+    assert graph_data._PARENT_BY_SESSION == {}
+    assert graph_data._LIVE_PARENT_CACHE["value"] is None
