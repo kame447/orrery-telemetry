@@ -51,3 +51,40 @@ def test_lineage_does_not_bind_reused_session_id_to_old_name(monkeypatch):
         finally:
             for sock in sockets:
                 call(sock, 'kill-server', check=False)
+
+@pytest.mark.parametrize("before_creation", [True, False])
+def test_global_project_environment_is_not_lineage_scope(monkeypatch, before_creation):
+    tmux = shutil.which('tmux')
+    if not tmux:
+        pytest.skip('real tmux required')
+    base = '/private/tmp' if Path('/private/tmp').is_dir() else None
+    with tempfile.TemporaryDirectory(prefix='lineage-global-', dir=base) as path:
+        root = Path(path)
+        sock = root / 's'
+        def call(*args, check=True):
+            return subprocess.run([tmux, '-S', str(sock), '-f', '/dev/null', *args],
+                                  capture_output=True, text=True, check=check, timeout=10)
+        try:
+            call('new-session', '-d', '-s', 'Seed', 'sleep 60')
+            if before_creation:
+                call('set-environment', '-g', 'AGENTSTACK_PROJECT_KEY', '/a')
+            call('new-session', '-d', '-s', 'Old', '-e', 'PARENT_AGENT=Boss', 'sleep 60')
+            if not before_creation:
+                call('set-environment', '-g', 'AGENTSTACK_PROJECT_KEY', '/a')
+            call('new-session', '-d', '-s', 'Bound', '-e', 'PARENT_AGENT=Boss',
+                 '-e', 'AGENTSTACK_PROJECT_KEY=/b', 'sleep 60')
+            assert call('display-message', '-p', '-t', 'Old',
+                        '#{AGENTSTACK_PROJECT_KEY}').stdout.strip() == '/a'
+            assert call('show-environment', '-t', '=Old', 'AGENTSTACK_PROJECT_KEY',
+                        check=False).returncode != 0
+            wrapper = root / 'tmux'
+            wrapper.write_text('#!/bin/sh\nexec ' + shlex.quote(tmux) + ' -S ' +
+                               shlex.quote(str(sock)) + ' "$@"\n')
+            wrapper.chmod(0o700)
+            monkeypatch.setenv('PATH', str(root) + os.pathsep + os.environ['PATH'])
+            monkeypatch.setattr(graph_data, '_LIVE_PARENT_CACHE', {'ts': 0.0, 'value': None})
+            monkeypatch.setattr(graph_data, '_PARENT_BY_SESSION', {})
+            assert graph_data._live_parents('/a') == {}
+            assert graph_data._live_parents('/b') == {'Bound': 'Boss'}
+        finally:
+            call('kill-server', check=False)
