@@ -476,7 +476,16 @@ def test_codex_spawn_passes_model_effort_and_readback_name(monkeypatch, tmp_path
     monkeypatch.setattr(server, "_spawn_name_status", lambda _: "available")
     monkeypatch.setattr(server, "_mcp_call", mcp)
     monkeypatch.setattr(server.time, "sleep", lambda _: None)
-    monkeypatch.setattr(server.subprocess, "Popen", lambda args, **kwargs: (environments.append(kwargs["env"]), launched.append(args))[-1])
+    class CompletedLauncher:
+        def wait(self, timeout):
+            return 0
+
+    def popen(args, **kwargs):
+        environments.append(kwargs["env"])
+        launched.append(args)
+        return CompletedLauncher()
+
+    monkeypatch.setattr(server.subprocess, "Popen", popen)
     monkeypatch.setattr(server.subprocess, "run", lambda *a, **k: type("R", (), {"returncode": 0})())
     result = server.do_spawn({"parent": "Parent", "name": "Sunny-Curie", "task": "work", "dir": str(tmp_path), "provider": "codex", "model": model, "effort": "high", "async": asynchronous})
 
@@ -488,6 +497,7 @@ def test_codex_spawn_passes_model_effort_and_readback_name(monkeypatch, tmp_path
     if not model:
         assert "from gpt-6.1-sol to gpt-6-luna" in result["model_note"]
         assert result["model_note"] in (tmp_path / "logs/spawn.log").read_text()
+        assert not list((tmp_path / "logs").glob("spawn-SunnyCurie-*.log"))
         if asynchronous:
             assert records[0]["model_note"] == records[-1]["model_note"] == result["model_note"]
     else:
