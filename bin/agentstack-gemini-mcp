@@ -8,6 +8,9 @@
 set -euo pipefail
 
 BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ "${AGENTSTACK_FRESH_CLIENT_CONTEXT+x}" == x || "${AGENTSTACK_RUNTIME_MODE:-legacy}" == fresh ]]; then
+  exec /bin/bash "$BIN_DIR/agentstack-runtime-client" proxy "$@"
+fi
 AGENTSTACK_HOME_DIR="${AGENTSTACK_HOME:-$(cd "$BIN_DIR/.." && pwd)}"
 . "$BIN_DIR/lib/global-client-loader.sh" || { return 2 2>/dev/null || exit 2; }
 ags_client_select "$@" && _ags_selected_rc=0 || _ags_selected_rc=$?

@@ -3,7 +3,21 @@
 ORRERY can use Google Antigravity CLI (`agy`) alongside Claude Code and Codex.
 The integration uses the user's signed-in Antigravity account; it does not set an API key or auto-approve permissions.
 
-## Prerequisites
+## Projectless fresh runtime (fork)
+
+The fork connects `program=antigravity` to fresh owner registration, parent relationships, absolute-path reservations and native launch evidence. Legacy runtime keeps its existing route. Fresh NEW AGENT supports standalone and parented tasks with explicit resources. Prepare the working directory first; fresh does not create a git worktree automatically. The overall cutover requirements remain in the [fresh migration guide](fresh-global-update.en.md).
+
+Fresh uses the official `agy --input-format stream-json --output-format stream-json` interface and keeps the conversation open for subsequent Mail instructions. A TTY also accepts line-oriented input and `/exit`. This is a stream interface rather than the native full-screen TUI. Resume verifies the saved owner and native conversation ID without replaying the original task. Native transcript rendering in Cockpit remains outside this change.
+
+A small launch-specific folder is passed with `--add-dir`. Its `.agents/hooks.json` and `.agents/mcp_config.json` provide the reservation guard and a uniquely named fresh Mail server. The user's HOME, login, permissions and existing workspace configuration are unchanged. Hooks and MCP definitions are not supplied through `--settings`. Owner credential values never enter prompts, argv or MCP configuration, and the entry does not fall back to legacy project keys or Mail credentials.
+
+The first turn is initialization only. The real CLI init and a real hook must agree on the conversation ID, owner, instance and current launch, followed by a nonempty successful response, before the task is sent. A new conversation requires SessionStart; resuming the same conversation requires PreInvocation from the current launch. If resume also restores hooks from earlier workspaces, their origin, conversation and confirmed termination are checked. Only a hook from the current launch can establish its initialization evidence. Missing hook evidence stops the launch before task delivery. The guard uses the native `decision=deny` response and an internal deadline shorter than the native hook timeout. It checks `Path` for `write_file`/`edit_file` and `TargetFile` for the earlier `write_to_file`/`replace_file_content`/`multi_replace_file_content` tools. Missing or mixed target selectors are refused without falling back to another key. Hook configuration is stored per launch; load an update through a new launch or explicit resume. The dedicated `notebook_edit` and `sed_file` tools are refused until their target-path contracts are verified. Native permissions are not broadened; denied headless MCP operations are not reported as successful work.
+
+A protected private socket wakes the runner, which reads its authenticated pending notifications and submits a subsequent stream turn. Submission, notification handoff, read, ACK and completed work remain separate facts. Notification handoff does not mark a message read or acknowledged. A wake received while busy is reconsidered after the current turn.
+
+Shutdown requires both an empty native process group and a launch-bound cleanup receipt from the direct supervisor before releasing only the child's declared reservations. Observed group escape, missing or invalid receipts and guard loss retain reservations as unknown. After releasing the native gate, the supervisor must receive an explicit guardian acknowledgement that the leader is a zombie and no other member remains before issuing the cleanup receipt. Forced group escalation without this acknowledgement retains reservations even if the group is empty. `resolve-ended` also refuses native-started runs without the receipt; an empty group alone is insufficient. Reading historical normal or operator-resolved closure also requires the original matching cleanup receipt for a started native run, without making a fresh claim about reused PIDs. This is not OS containment of arbitrary descendants, and safe recovery when the receipt cannot be obtained remains unresolved. Before each child launch or resume, an authenticated check captures the bounded set of active, exactly matching owned reservation row IDs in its launch intent. Shutdown releases only those IDs, never reselects by path, and never retries an uncertain release. An empty snapshot (for example a read-only resume) releases nothing; a missing, invalid or truncated snapshot is refused. A new row created after launch, including a release-and-reacquire by the same actor, must be managed separately; renewals of an existing row are not a new row generation. Other processes, existing services and legacy Mail are not stopped. Acceptance must distinguish real CLI, MCP, continuation, guard and shutdown observations from synthetic-provider regression tests.
+
+## Legacy provider prerequisites
 
 Start with ORRERY core installed and ORRERY Mail running. Follow the
 [Google installation guide](https://antigravity.google/docs/getting-started?tab=cli)
@@ -227,7 +241,7 @@ leaves the launcher-owned shell runner alive so report/release/retire/cleanup ca
 finish. For a top-level interactive Antigravity session, `EXIT` keeps the normal
 interactive `/exit` path.
 
-ORRERY does not currently implement Antigravity conversation resume or native
+The legacy runtime does not implement Antigravity conversation resume or native
 transcript history. Gone or retired Antigravity entries therefore fail closed
 instead of falling through to Claude/Codex transcript lookup. A top-level
 Antigravity session whose `agy` process has exited but whose human shell remains

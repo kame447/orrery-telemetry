@@ -59,7 +59,7 @@ def running(client, tmp_path, monkeypatch):
     home.parent.mkdir(mode=0o700, exist_ok=True);home.mkdir(mode=0o700, exist_ok=True)
     native = home / (session_id + '.jsonl');native.write_text(transcript.read_text())
     _write_private(run / 'intent.json', dict(kind='orrery-fresh-launch-v1', launch_id=launch_id,
-        provider='claude', context_digest=client.context_digest, nonce=nonce,
+        provider='claude', cwd=str(tmp_path.resolve()), context_digest=client.context_digest, nonce=nonce,
         resume_session_id=None, wrapper_root=str(ROOT), **identity(client)))
     _write_private(base / 'current.json', {'launch_id':launch_id})
     monkeypatch.setenv('AGENTSTACK_FRESH_LAUNCH_ID', launch_id)

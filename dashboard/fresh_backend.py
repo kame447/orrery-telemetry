@@ -254,6 +254,8 @@ class Backend:
 
     async def spawn(self, payload, spec, roots):
         request=self.validate(payload,roots)
+        if spec.program=='antigravity' and not request['resources']:
+            raise B1Error('FRESH_CHILD_RESOURCES_REQUIRED')
         # Resolve first, including retired same-name candidates. Never replace
         # an explicitly requested parent with the preparation root.
         parent=self.client if payload.get('standalone') else self.context_for(await self.resolve(

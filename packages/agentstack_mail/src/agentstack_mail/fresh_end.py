@@ -44,7 +44,7 @@ def validate_intent(client, run, intent):
     from .fresh_launch import pinned
     pinned(client, intent)
     if (intent.get('kind') != 'orrery-fresh-launch-v1' or intent.get('launch_id') != run.name
-            or intent.get('provider') not in {'claude', 'codex', 'dsh', 'hermes'}
+            or intent.get('provider') not in {'claude', 'codex', 'dsh', 'hermes', 'antigravity'}
             or not isinstance(intent.get('cwd'), str) or not Path(intent['cwd']).is_absolute()
             or not isinstance(intent.get('nonce'), str) or not intent['nonce']
             or 'resume_session_id' not in intent
@@ -61,6 +61,12 @@ def read_run_end(client, run):
         value = _read_private(run / 'ended.json')
         if (set(value) != {'launch_id', 'exit_code'} or value['launch_id'] != run.name
                 or type(value['exit_code']) is not int):raise B1Error('FRESH_LAUNCH_OUTCOME_UNKNOWN')
+        intent = _read_private(run / 'intent.json')
+        validate_intent(client, run, intent)
+        if intent['provider'] == 'antigravity':
+            from .fresh_antigravity_end import valid_normal_native_end
+            if not valid_normal_native_end(client, intent.get('wrapper_root'), run):
+                raise B1Error('FRESH_LAUNCH_OUTCOME_UNKNOWN')
         return RunEnd('normal', value['exit_code'], value)
     if not resolved:return None
     from .fresh_launch import identity, pinned
@@ -69,6 +75,12 @@ def read_run_end(client, run):
     route = _read_private(run / 'tmux.json');pinned(client, route)
     keys = {'kind', 'launch_id', 'context_digest', *identity(client), 'intent_digest',
             'route_digest', 'reason', 'confirmed_at', 'provider_exit_code', 'observation'}
+    native_valid = True
+    if intent['provider'] == 'antigravity':
+        from .fresh_antigravity_end import valid_native_observation
+        keys.add('native_observation')
+        native_valid = valid_native_observation(client, intent.get('wrapper_root'), run,
+                                               value.get('native_observation'))
     pinned(client, value)
     try:
         stamp = datetime.fromisoformat(value['confirmed_at'])
@@ -79,6 +91,7 @@ def read_run_end(client, run):
             or value.get('intent_digest') != digest(intent) or value.get('route_digest') != digest(route)
             or value.get('reason') != 'operator-confirmed-ended' or not valid_stamp
             or value.get('provider_exit_code') is not None
+            or not native_valid
             or not valid_observation(route, value.get('observation'))):
         raise B1Error('FRESH_LAUNCH_OUTCOME_UNKNOWN')
     return RunEnd('resolved', None, value)
@@ -250,6 +263,10 @@ def resolve_ended(client, wrapper_root, launch_id, *, confirm_ended=False):
         route = _read_private(run / 'tmux.json');pinned(client, route)
         if route.get('launch_id') != launch_id:raise B1Error('FRESH_LAUNCH_BINDING_MISMATCH')
         deadline = time.monotonic() + 10
+        native_observation = None
+        if intent['provider'] == 'antigravity':
+            from .fresh_antigravity_end import verify_native_ended
+            native_observation = verify_native_ended(client, root, run, deadline=deadline)
         observation = observe_ended(route, root, deadline=deadline)
         # Reauthenticate and reread immutable records while holding the launch mutex.
         asyncio.run(verified_owner(client))
@@ -258,11 +275,15 @@ def resolve_ended(client, wrapper_root, launch_id, *, confirm_ended=False):
         if read_run_end(client, run) is not None:raise B1Error('FRESH_RESOLVE_TARGET_CHANGED')
         if observe_ended(route, root, deadline=deadline) != observation:
             raise B1Error('FRESH_RESOLVE_TARGET_CHANGED')
+        if (native_observation is not None
+                and verify_native_ended(client, root, run, deadline=deadline) != native_observation):
+            raise B1Error('FRESH_RESOLVE_TARGET_CHANGED')
         if records() != (run, intent) or _read_private(run / 'tmux.json') != route:
             raise B1Error('FRESH_RESOLVE_TARGET_CHANGED')
         value = dict(kind=KIND, launch_id=launch_id, context_digest=client.context_digest,
             intent_digest=digest(intent), route_digest=digest(route), reason='operator-confirmed-ended',
             confirmed_at=datetime.now(timezone.utc).isoformat(), provider_exit_code=None,
             observation=observation, **identity(client))
+        if native_observation is not None:value['native_observation'] = native_observation
         _write_private(run / 'resolved-ended.json', value)
         return dict(ok=True, launch_id=launch_id, end_kind='resolved', provider_exit_code=None)

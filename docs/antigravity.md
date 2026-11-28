@@ -3,7 +3,23 @@
 ORRERY では、Claude Code や Codex と並んで Google Antigravity CLI（`agy`）を
 使えます。利用者が Antigravity でサインインしたアカウントを使います。
 
-## Prerequisites
+## Projectless fresh runtime（fork）
+
+fork の fresh runtime は `program=antigravity` を正規の本人登録、親子関係、絶対pathの予約、起動証跡へ接続します。通常の旧runtimeは従来の経路を使います。fresh の NEW AGENT では親あり・親なしのどちらも利用でき、編集対象の resources を明示します。fresh 自体の worktree 自動生成は未対応のため、作業folderは先に用意します。全体の移行条件は [fresh移行手順](fresh-global-update.md) に従います。
+
+fresh 起動は公式 `agy --input-format stream-json --output-format stream-json` を使用し、同じ会話を維持して Mail から追加指示を受け取ります。TTYから起動した場合は行単位の入力と `/exit` も使えます。これはネイティブの全画面TUIとは異なる操作画面です。再開は保存された本人・native conversation IDを照合し、元の依頼を自動で繰り返しません。Cockpitのnative transcript readerは今回の対象に含みません。
+
+起動専用の小さなfolderを `--add-dir` で渡し、その `.agents/hooks.json` と `.agents/mcp_config.json` から予約guardと一意名のfresh Mail接続を読み込みます。利用者のHOME、ログイン、permissions、作業folderの既存設定は変更しません。`--settings` にhooksやMCP定義を入れて読み込ませる方式ではありません。owner資格値をprompt、argv、MCP設定へ入れず、旧project key／旧Mail資格へfallbackしません。
+
+最初のturnは初期化確認だけです。実CLIのinitと実hookが返したconversation ID、本人、instance、現在のlaunchが一致し、非空の正常応答が得られてから依頼内容を送ります。新規の会話では SessionStart、同じ会話の再開では現在の起動の PreInvocation を確認します。再開時に過去の作業領域のフックも読み込まれる場合は、その出自・同一会話・終了を検査し、新しい起動のフックだけが初期化の証拠を作ります。hookが読み込まれなければ依頼を渡さず停止します。予約guardはagyの正式な `decision=deny` で拒否し、native hook timeoutより短いdeadlineで失敗を返します。`write_file`／`edit_file` は `Path`、従来の `write_to_file`／`replace_file_content`／`multi_replace_file_content` は `TargetFile` を検査します。対象キーが欠ける場合や両方のキーがある場合は拒否し、別のキーへ読み替えません。guard設定は起動ごとに保存するため、更新後は新規起動または明示的な再開で読み込み直します。対象パスの契約が未確認の `notebook_edit` と `sed_file` は明示拒否します。ネイティブ権限は広げません。必要なMCP操作をheadlessで承認できない場合も、拒否を成功として扱いません。
+
+Mail通知は保護されたprivate socketで待機中のrunnerを起こし、本人のpendingを正規APIから取得して次のstream turnへ渡します。送信、通知引渡し、既読、ACK、モデルの仕事完了は別の事実です。通知の引渡しだけで既読やACKを付けません。busy中に受けたwakeは現在のturnが終わってから再確認します。
+
+fresh の native CLI はrunnerと独立した専用supervisorが直接の親として保持します。起動時はprivate gateを閉じたままPID・起動時刻・UID・process groupを照合し、起動証跡の保存に成功してからCLIをexecします。runnerとのprivate lifetime channelが閉じるとsupervisorは終了処理を行います。観測不能なら未回収の直接の子を保持して再確認し、無関係なgroupを推測で停止しません。runnerの待機がtimeoutしてもsupervisorを強制終了しないため、持続する観測不能は運用上の調査が必要です。supervisor自体が強制終了した場合まで自動復旧を保証するものではありません。
+
+終了時はこの起動が作ったnative process groupの消滅と、直接のsupervisorによる起動証跡に束縛されたcleanup receiptの両方を確認してから、この子に宣言した予約だけを解放します。観測されたgroup離脱、receipt欠落・不整合、guard喪失は終了不明として予約を保持します。 native gateの解放後は、leaderがzombieで他のgroup memberが残っていないことをguardian自身が明示応答した場合にのみsupervisorがcleanup receiptを発行します。この応答を得られない強制group停止では、groupが空でも予約を保持します。`resolve-ended` もreceiptのないnative起動をgroup消滅だけで閉じません。過去の正常終了・明示終了解決を再利用するときも、native起動のcleanup receiptの存在と一致を再検証します。過去のPIDを再観測して終了とみなすことはしません。任意の子孫の離脱を完全に防ぐOS隔離ではなく、receiptを得られない故障の安全な復旧方法は未確立です。子の起動・再開前に、本人認証済みの確認で宣言pathに完全一致する有効な自身の予約行IDを上限付きで取得し、起動intentに固定します。終了時はそのIDだけを解放し、pathによる再選択や結果不明の解放の再試行を行いません。読み取り専用の再開などで取得結果が空なら解放しません。取得証跡の欠落・不正・切り詰めは拒否します。起動後の同一actorによる解放・再取得を含む新しい予約行は別途管理が必要です。同じ行の延長は新しい行世代とは扱いません。別のprocess、既存サービス、旧Mailは停止しません。実CLI・MCP・追加指示・編集guard・終了を確認した範囲と、模擬providerによる回帰試験を区別して受け入れます。
+
+## Legacy provider prerequisites
 
 先に ORRERY core と稼働中の ORRERY Mail を用意します。
 [Google の手順](https://antigravity.google/docs/getting-started?tab=cli)で CLI を導入し、
@@ -222,7 +238,7 @@ leaves the launcher-owned shell runner alive so report/release/retire/cleanup ca
 finish. For a top-level interactive Antigravity session, `EXIT` keeps the normal
 interactive `/exit` path.
 
-ORRERY does not currently implement Antigravity conversation resume or native
+The legacy runtime does not implement Antigravity conversation resume or native
 transcript history. Gone or retired Antigravity entries therefore fail closed
 instead of falling through to Claude/Codex transcript lookup. A top-level
 Antigravity session whose `agy` process has exited but whose human shell remains
