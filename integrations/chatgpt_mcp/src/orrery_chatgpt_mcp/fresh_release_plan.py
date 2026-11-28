@@ -100,7 +100,7 @@ class Plan:
         if (not isinstance(self.mail_instance_id, str) or not HEX32.fullmatch(self.mail_instance_id)
                 or type(self.sender_agent_id) is not int or self.sender_agent_id <= 0):
             raise PlanError("FRESH_AUTHORITY_INVALID")
-        if not isinstance(self.recipients, tuple) or not 1 <= len(self.recipients) <= 128:
+        if not isinstance(self.recipients, tuple) or not 1 <= len(self.recipients) <= 16:
             raise PlanError("FRESH_AUTHORITY_INVALID")
         seen = set()
         for recipient in self.recipients:
