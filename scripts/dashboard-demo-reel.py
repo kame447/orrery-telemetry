@@ -634,7 +634,7 @@ class ReadOnlyReelHandler(server.Handler):
             signature = tuple(signature_parts)
             if signature != graph_signature:
                 graph_signature = signature
-                server._GRAPH_CACHE.update(ts=0, data=None)
+                server._invalidate_graph_reuse()
         super().do_GET()
 
     def do_POST(self):

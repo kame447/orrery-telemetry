@@ -1405,17 +1405,23 @@ _STOPPED_BINDING_REUSE = _TimedReuse(_STOPPED_BINDING_REUSE_SECONDS)
 def invalidate_display_reuse() -> None:
     """Forget every reused display answer; call after any state change."""
     _AGENTS_REUSE.invalidate()
-    _card_local_tmux_value.cache_clear()
-    with _parent_env_lock:
-        _parent_env_memo.clear()
-    for module_name in ("graph_data", "dashboard.graph_data"):
-        module = sys.modules.get(module_name)
-        if module is not None and hasattr(module, "forget_parents"):
-            module.forget_parents()
+    try:
+        _card_local_tmux_value.cache_clear()
+        with _parent_env_lock:
+            _parent_env_memo.clear()
+        for module_name in ("graph_data", "dashboard.graph_data"):
+            module = sys.modules.get(module_name)
+            if module is not None and hasattr(module, "forget_parents"):
+                module.forget_parents()
+    finally:
+        _invalidate_graph_reuse()
+        _STOPPED_BINDING_REUSE.invalidate()
+
+
+def _invalidate_graph_reuse() -> None:
     # Invalidate inner graph observations before their reusable HTTP answer.
     _invalidate_raw_graph()
     _GRAPH_REUSE.invalidate()
-    _STOPPED_BINDING_REUSE.invalidate()
 
 
 def _agents_answer(history_days: float | None, single_flight) -> "_AgentsAnswer | None":

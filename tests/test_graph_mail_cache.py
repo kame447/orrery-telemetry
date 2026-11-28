@@ -330,3 +330,68 @@ def test_inflight_http_projection_is_not_reused_after_invalidation(mail, monkeyp
         http.shutdown()
         http.server_close()
         worker.join(5)
+
+
+def test_waiter_queued_before_invalidation_builds_current_graph(mail, monkeypatch):
+    builds, _ = mail
+    started, queued, release = threading.Event(), threading.Event(), threading.Event()
+    results = {}
+    lock = threading.Lock()
+
+    class ObservedLock:
+        def __enter__(self):
+            if threading.current_thread().name == "graph-waiter":
+                queued.set()
+            lock.acquire()
+            return self
+
+        def __exit__(self, *args):
+            lock.release()
+
+    def build():
+        builds.append(1)
+        n = len(builds)
+        if n == 1:
+            started.set()
+            assert release.wait(10)
+        return {"n": n}
+
+    monkeypatch.setattr(server, "_GRAPH_BUILD_LOCK", ObservedLock())
+    monkeypatch.setattr(graph_data, "build_graph", build)
+    first = threading.Thread(target=lambda: results.update(first=server._raw_graph()))
+    waiter = threading.Thread(name="graph-waiter", target=lambda: results.update(waiter=server._raw_graph()))
+    first.start()
+    try:
+        assert started.wait(10)
+        waiter.start()
+        assert queued.wait(10)
+        server.invalidate_display_reuse()
+    finally:
+        release.set()
+        first.join(10)
+        if waiter.ident is not None:
+            waiter.join(10)
+    assert not first.is_alive() and not waiter.is_alive()
+    assert results == {"first": {"n": 1}, "waiter": {"n": 2}}
+    assert server._raw_graph() == {"n": 2}
+    assert len(builds) == 2
+
+
+def test_graph_invalidation_survives_parent_memo_cleanup_error(mail, monkeypatch):
+    builds, _ = mail
+    monkeypatch.setattr(server, "_GRAPH_REUSE", server._TimedReuse(5.0))
+    assert server._raw_graph()["n"] == 1
+    mark = server._GRAPH_REUSE.begin()
+    key = ("test",)
+    server._GRAPH_REUSE.put(key, {"n": 1}, mark)
+    assert server._GRAPH_REUSE.get(key) == {"n": 1}
+
+    def fail():
+        raise RuntimeError("injected parent memo failure")
+
+    monkeypatch.setattr(graph_data, "forget_parents", fail)
+    with pytest.raises(RuntimeError, match="injected parent memo failure"):
+        server.invalidate_display_reuse()
+    assert server._GRAPH_REUSE.get(key) is None
+    assert server._raw_graph()["n"] == 2
+    assert len(builds) == 2
