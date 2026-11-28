@@ -127,8 +127,8 @@ def format_notification(message):
     if isinstance(body, str) and len(body) <= 2000:
         return text + ' Body (complete; no inbox fetch needed): ' + line(body.replace('\r', ' ').replace('\n', ' ⏎ '))
     if isinstance(body, str):
-        return text + ' Body preview: ' + line(body[:2000].replace('\r', ' ').replace('\n', ' ⏎ ')) + ' Fetch inbox to read the rest.'
-    return text + ' Please call fetch_inbox to read it.'
+        return text + ' Body preview: ' + line(body[:2000].replace('\r', ' ').replace('\n', ' ⏎ ')) + ' Fetch inbox to read the rest (pass include_bodies=true when the tool accepts it; legacy Mail omits bodies by default).'
+    return text + ' Please call fetch_inbox to read it (pass include_bodies=true when the tool accepts it; legacy Mail omits bodies by default).'
 
 
 def policy_blocked(row):
