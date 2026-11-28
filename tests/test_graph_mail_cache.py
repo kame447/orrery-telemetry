@@ -341,6 +341,11 @@ def test_waiter_queued_before_invalidation_builds_current_graph(mail, monkeypatc
     class ObservedLock:
         def __enter__(self):
             if threading.current_thread().name == "graph-waiter":
+                # Prove the first builder still owns the lock when the waiter
+                # tries to acquire it, not merely when the waiter starts.
+                if lock.acquire(blocking=False):
+                    lock.release()
+                    raise AssertionError("waiter was not contending with the first build")
                 queued.set()
             lock.acquire()
             return self
@@ -377,9 +382,14 @@ def test_waiter_queued_before_invalidation_builds_current_graph(mail, monkeypatc
     assert len(builds) == 2
 
 
-def test_graph_invalidation_survives_parent_memo_cleanup_error(mail, monkeypatch):
+@pytest.mark.parametrize("failure_point", ["card", "parent"])
+def test_graph_invalidation_survives_memo_cleanup_error(mail, monkeypatch, failure_point):
     builds, _ = mail
     monkeypatch.setattr(server, "_GRAPH_REUSE", server._TimedReuse(5.0))
+    monkeypatch.setattr(server, "_STOPPED_BINDING_REUSE", server._TimedReuse(30.0))
+    stopped = server._STOPPED_BINDING_REUSE
+    stopped.put(("stopped",), "old", stopped.begin())
+    assert stopped.get(("stopped",)) == "old"
     assert server._raw_graph()["n"] == 1
     mark = server._GRAPH_REUSE.begin()
     key = ("test",)
@@ -389,9 +399,13 @@ def test_graph_invalidation_survives_parent_memo_cleanup_error(mail, monkeypatch
     def fail():
         raise RuntimeError("injected parent memo failure")
 
-    monkeypatch.setattr(graph_data, "forget_parents", fail)
+    if failure_point == "card":
+        monkeypatch.setattr(server._card_local_tmux_value, "cache_clear", fail)
+    else:
+        monkeypatch.setattr(graph_data, "forget_parents", fail)
     with pytest.raises(RuntimeError, match="injected parent memo failure"):
         server.invalidate_display_reuse()
+    assert stopped.get(("stopped",)) is None
     assert server._GRAPH_REUSE.get(key) is None
     assert server._raw_graph()["n"] == 2
     assert len(builds) == 2
