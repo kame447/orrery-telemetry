@@ -240,7 +240,7 @@ Update the repo and re-run `bash scripts/install.sh`; from then on takeover succ
 
 ## Dashboard spawn disappears immediately
 
-1. Read the end of `dashboard/logs/spawn.log`
+1. Check API error `detail` and the relevant entry in `dashboard/logs/spawn.log` (also check `spawn-<name>-*.log` in the same directory if termination or cleanup is unconfirmed)
 2. Check `tmux has-session -t '<child-name>'`
 3. Check that `~/.local/bin/claude`, `codex`, or the selected CLI is visible from the service's `PATH`
 4. Check `AGENTSTACK_SPAWN_SCRIPT` and working directory

@@ -35,6 +35,7 @@ import asyncio
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tomllib
@@ -9078,10 +9079,26 @@ def _spawn_launch_record(name: str, result: dict) -> None:
 
 
 _SPAWN_REASON_PREFIX = "[spawn_child] reason: "
+_SPAWN_LOG_LOCK = threading.Lock()
 
 
-def _spawn_log_tail_and_reason(log_path, start_offset: int = 0) -> tuple[str, str]:
-    """The current launch interval's tail and first applicable cause line.
+def _archive_spawn_log(log, *, completed: bool):
+    """Retain private per-launch output until the launcher has been reaped."""
+    path = Path(log.name)
+    log.close()
+    if not completed:
+        logging.warning("Launcher completion or cleanup unconfirmed; retained output at %s", path)
+        return
+    try:
+        with _SPAWN_LOG_LOCK, path.open("rb") as source, (path.parent / "spawn.log").open("ab") as history:
+            shutil.copyfileobj(source, history)
+        path.unlink()
+    except OSError as exc:
+        logging.warning("Could not archive launcher output at %s: %s", path, exc)
+
+
+def _spawn_log_tail_and_reason(log_path) -> tuple[str, str]:
+    """The current launch's tail and first applicable cause line.
 
     spawn_child.sh writes "[spawn_child] reason: ..." when it stops on
     something only the user can resolve (Claude Code's first-run setup, its
@@ -9090,7 +9107,6 @@ def _spawn_log_tail_and_reason(log_path, start_offset: int = 0) -> tuple[str, st
     """
     try:
         with open(log_path, "rb") as f:
-            f.seek(start_offset)
             text = f.read().decode("utf-8", errors="replace")
     except OSError:
         return "", ""
@@ -10019,7 +10035,7 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
     token_created = False
     log_fh = None
     log_path = None
-    log_start_offset = 0
+    launcher_completed = False
 
     token_key = re.sub(r"[^A-Za-z0-9_.-]", "_", child_name)
     owner_credential = os.path.join(RUNTIME_DIR, f"agent_token_{token_key}")
@@ -10110,7 +10126,7 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
         if log_path is None:
             # Logging failed before the launcher started: no session ownership.
             return False
-        tail, _ = _spawn_log_tail_and_reason(log_path, log_start_offset)
+        tail, _ = _spawn_log_tail_and_reason(log_path)
         if any(marker in tail for marker in (
                 "Harness start/stop unconfirmed; recovery state retained",
                 "[spawn_child] creation unconfirmed; recovery state and worktree retained")):
@@ -10227,9 +10243,9 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
     try:
         log_dir = os.path.join(HERE, "logs")
         os.makedirs(log_dir, exist_ok=True)
-        log_fh = open(os.path.join(log_dir, "spawn.log"), "ab", buffering=0)
+        log_fh = tempfile.NamedTemporaryFile(
+            dir=log_dir, prefix=f"spawn-{token_key}-", suffix=".log", mode="w+b", buffering=0, delete=False)
         log_path = log_fh.name
-        log_start_offset = log_fh.tell()
         ts = datetime.now(timezone.utc).isoformat()
         log_fh.write(
             f"\n=== {ts} spawn child={child_name} parent={parent} "
@@ -10257,9 +10273,11 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
 
         def stop_launcher() -> bool:
             """TERM the launcher; True when it exited within its grace."""
+            nonlocal launcher_completed
             try:
                 signal_launcher(signal.SIGTERM)
                 proc.wait(timeout=grace)
+                launcher_completed = True
                 return True
             except Exception:  # noqa: BLE001
                 pass
@@ -10269,14 +10287,17 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
                 pass
             try:
                 proc.wait(timeout=_SPAWN_KILL_REAP_SECONDS)
+                # Forced cleanup may leave descendant writers; retain the evidence.
             except Exception:  # noqa: BLE001
                 pass
             return False
 
         def settle() -> dict:
+            nonlocal launcher_completed
             if hasattr(proc, "wait"):
                 try:
                     returncode = proc.wait(timeout=_SPAWN_READINESS_TIMEOUT_SECONDS)
+                    launcher_completed = True
                 except subprocess.TimeoutExpired:
                     stopped = stop_launcher()
                     kill_spawn_session()
@@ -10297,7 +10318,7 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
                         cleanup_incomplete=True, **fields)
                 if returncode != 0:
                     kill_spawn_session()
-                    tail, reason = _spawn_log_tail_and_reason(log_path, log_start_offset)
+                    tail, reason = _spawn_log_tail_and_reason(log_path)
                     error = f"spawn launcher exited with status {returncode}"
                     return failed_spawn_result(
                         f"{reason} ({error})" if reason else error,
@@ -10306,7 +10327,7 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
             probe = _tmux_run(['has-session', '-t', f'={child_name}'], capture_output=True, text=True)
             if probe.returncode:
                 kill_spawn_session()
-                tail, reason = _spawn_log_tail_and_reason(log_path, log_start_offset)
+                tail, reason = _spawn_log_tail_and_reason(log_path)
                 error = "spawn launcher exited before a live tmux session was created"
                 return failed_spawn_result(
                     f"{reason} ({error})" if reason else error,
@@ -10353,7 +10374,6 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
             }
             _spawn_launch_record(child_name, pending)
             owned_log = log_fh
-            log_fh = None
 
             def runner() -> None:
                 try:
@@ -10362,11 +10382,12 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
                     kill_spawn_session()
                     verdict = failed_spawn_result(f"spawn launch failed: {e}")
                 finally:
-                    owned_log.close()
+                    _archive_spawn_log(owned_log, completed=launcher_completed)
                     discard_handoff()
                 _spawn_launch_record(child_name, verdict)
 
             threading.Thread(target=runner, name=f"spawn-{child_name}", daemon=True).start()
+            log_fh = None
             handoff["transferred"] = True
             return pending
 
@@ -10376,7 +10397,7 @@ def _spawn_launch(payload: dict, request: dict, spec: SpawnLaunchSpec,
         return failed_spawn_result(f"spawn launch failed: {e}")
     finally:
         if log_fh is not None:
-            log_fh.close()
+            _archive_spawn_log(log_fh, completed=launcher_completed)
 
     return result
 

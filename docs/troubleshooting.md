@@ -255,7 +255,7 @@ repo を更新して `bash scripts/install.sh` を再実行すれば、以後の
 
 ## Dashboard spawn がすぐ消える
 
-1. `dashboard/logs/spawn.log` の末尾を見る
+1. API error の `detail` と対象の `dashboard/logs/spawn.log` を確認する（終了・cleanup が未確認なら同じディレクトリの `spawn-<name>-*.log` も確認）
 2. `tmux has-session -t '<child-name>'` を確認
 3. `~/.local/bin/claude`、`codex`、指定 CLI が service の `PATH` から見えるか確認
 4. `AGENTSTACK_SPAWN_SCRIPT` と working directory を確認

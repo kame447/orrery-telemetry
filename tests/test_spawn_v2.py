@@ -1281,6 +1281,9 @@ def test_async_killed_cleanup_reports_recovery_credential_via_spawn_status(monke
     assert f"installed from the unconsumed one-shot handoff at {owner}" in status["error"]
     assert list((runtime / "spawn-tokens").iterdir()) == []
     assert _group_gone(int((tmp_path / "mark.pid").read_text()))
+    retained = list((tmp_path / "logs").glob("spawn-QuietCurie-*.log"))
+    assert len(retained) == 1
+    assert stat.S_IMODE(retained[0].stat().st_mode) == 0o600
 
 
 @pytest.mark.parametrize("provider", ["claude", "codex"])
@@ -1830,6 +1833,65 @@ def test_all_failed_candidates_keep_windows_and_node_notes_in_order(tmp_path):
     log.write_text("\n".join([*notes, "Error: no usable Codex CLI found"]))
     assert server._spawn_log_tail_and_reason(log)[1] == "; ".join(
         [*notes, "Error: no usable Codex CLI found"])
+
+
+def test_unconfirmed_launcher_log_is_retained_privately(tmp_path):
+    import tempfile
+    log = tempfile.NamedTemporaryFile(dir=tmp_path, mode="w+b", delete=False)
+    path = pathlib.Path(log.name)
+    log.write(b"incomplete output")
+    server._archive_spawn_log(log, completed=False)
+    assert log.closed
+    assert path.read_bytes() == b"incomplete output"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert not (tmp_path / "spawn.log").exists()
+
+
+def test_overlapping_launches_report_only_their_own_details(monkeypatch, tmp_path):
+    launcher, _ = _prepare_real_spawn(monkeypatch, tmp_path)
+    spec = _cleanup_spec(launcher, tmp_path, cleanup_seconds=0)
+    first_waiting, second_finished = threading.Event(), threading.Event()
+    results = {}
+
+    def mcp(method, args, **kwargs):
+        data = dict(id=73, name=args["name"], registration_token="fixture-token") if method == "register_agent" else {}
+        return {"ok": True, "data": data}
+
+    def popen(argv, *, stdout, **kwargs):
+        name = argv[2]
+
+        class Process:
+            def wait(self, timeout):
+                if name == "QuietCurie":
+                    first_waiting.set()
+                    assert second_finished.wait(10)
+                stdout.write(f"Error: diagnostic for {name}\n".encode())
+                return 1
+
+        return Process()
+
+    def launch(name):
+        results[name] = server.spawn_with_launch_spec(
+            {"standalone": True, "name": name, "task": "work", "dir": str(tmp_path)}, spec)
+
+    monkeypatch.setattr(server, "_mcp_call", mcp)
+    monkeypatch.setattr(server.subprocess, "Popen", popen)
+    worker = threading.Thread(target=launch, args=("QuietCurie",))
+    worker.start()
+    try:
+        assert first_waiting.wait(10)
+        launch("CleverNewton")
+    finally:
+        second_finished.set()
+        worker.join(10)
+    assert not worker.is_alive()
+    for name, other in (("QuietCurie", "CleverNewton"), ("CleverNewton", "QuietCurie")):
+        result = results[name]
+        assert result["error"].startswith(f"Error: diagnostic for {name}")
+        assert f"diagnostic for {name}" in result["detail"]
+        assert other not in result["detail"]
+    history = (tmp_path / "logs/spawn.log").read_text()
+    assert all(f"diagnostic for {name}" in history for name in results)
 
 
 def test_all_failed_candidates_report_omitted_count_within_limit(tmp_path):

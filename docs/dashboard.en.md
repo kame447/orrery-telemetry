@@ -354,7 +354,7 @@ With no parent, the request sends `standalone: true` and starts an independent a
 6. Wait up to 120 seconds for launcher readiness verdict
 7. Recheck the live tmux session
 
-On failure, clean up the tmux session and token / child credential file and include the end of `dashboard/logs/spawn.log` in API error `detail`. A registered identity is retained because the server lacks delete authority, explicitly reported as `registration_retained: true`.
+On failure, clean up the tmux session and token / child credential file and include the end of that launch’s own log in API error `detail`. Output from normally reaped launchers is appended to `dashboard/logs/spawn.log` in completion order; if termination or cleanup is unconfirmed, the private `spawn-<name>-*.log` is retained in the same directory. A registered identity is retained because the server lacks delete authority, explicitly reported as `registration_retained: true`.
 
 For Codex, pass `--codex --model <model> --effort <effort>`. The non-Git-directory trust dialog is accepted with `C-m` up to ten times and fails fast if it remains.
 
