@@ -395,3 +395,56 @@ def test_graph_invalidation_survives_parent_memo_cleanup_error(mail, monkeypatch
     assert server._GRAPH_REUSE.get(key) is None
     assert server._raw_graph()["n"] == 2
     assert len(builds) == 2
+
+
+def test_demo_wal_change_invalidates_real_http_graph_reuse(mail, monkeypatch, tmp_path):
+    import importlib.util
+    import runpy
+    from http.server import ThreadingHTTPServer
+    from urllib.request import urlopen
+
+    builds, _ = mail
+    spec = importlib.util.spec_from_file_location(
+        "dashboard_demo_reel", INDEX.parents[1] / "scripts" / "dashboard-demo-reel.py"
+    )
+    reel = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(reel)
+    (tmp_path / "payload").mkdir()
+    (tmp_path / "mail").mkdir()
+    wrapper = reel._create_reel_server(tmp_path)
+    edge = {"source": "Parent", "target": "Child", "type": "spawn"}
+    lineage = [edge]
+
+    def build():
+        builds.append(1)
+        return {"nodes": [{"name": "Parent"}, {"name": "Child"}],
+                "edges": [], "spawn": list(lineage)}
+
+    monkeypatch.setattr(graph_data, "build_graph", build)
+    monkeypatch.setattr(server, "_GRAPH_REUSE", server._TimedReuse(5.0, clock=lambda: 1.0))
+    monkeypatch.setitem(sys.modules, "server", server)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    ns = runpy.run_path(str(wrapper))
+    http = ThreadingHTTPServer(("127.0.0.1", 0), ns["ReadOnlyReelHandler"])
+    worker = threading.Thread(target=http.serve_forever, daemon=True)
+    worker.start()
+    try:
+        def fetch(projection):
+            url = f"http://127.0.0.1:{http.server_port}/api/graph?all=1&{projection}=1"
+            with urlopen(url, timeout=10) as response:
+                data = json.load(response)
+            assert not data.get("degraded"), data
+            return data["spawn"]
+
+        assert fetch("spawn_only") == [edge]
+        assert fetch("topology_only") == [edge]
+        assert len(builds) == 1
+        lineage.clear()
+        (tmp_path / "mail" / "storage.sqlite3-wal").write_bytes(b"new")
+        assert fetch("spawn_only") == []
+        assert fetch("topology_only") == []
+        assert len(builds) == 2
+    finally:
+        http.shutdown()
+        http.server_close()
+        worker.join(5)
