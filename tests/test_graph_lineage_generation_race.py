@@ -177,7 +177,8 @@ def test_partial_generation_on_real_tmux_never_reuses_stale_memo(monkeypatch):
 
 
 @pytest.mark.parametrize("phase", ["listing", "environment", "verification"])
-def test_invalid_tmux_output_is_not_a_cached_lineage_observation(monkeypatch, phase):
+@pytest.mark.parametrize("seeded", [False, True])
+def test_invalid_tmux_output_is_not_a_cached_lineage_observation(monkeypatch, phase, seeded):
     """Inject an undecodable byte into one real isolated tmux response."""
     tmux = shutil.which("tmux")
     if not tmux:
@@ -197,6 +198,7 @@ def test_invalid_tmux_output_is_not_a_cached_lineage_observation(monkeypatch, ph
             wrapper = root / "tmux"
             command = f"{shlex.quote(tmux)} -S {shlex.quote(str(sock))}"
             marker = shlex.quote(str(root / "injected"))
+            armed = shlex.quote(str(root / "armed"))
             seen = shlex.quote(str(root / "listed"))
             condition = {
                 "listing": '[ "$1" = list-sessions ]',
@@ -205,7 +207,7 @@ def test_invalid_tmux_output_is_not_a_cached_lineage_observation(monkeypatch, ph
             }[phase]
             wrapper.write_text(
                 "#!/bin/sh\n"
-                f"if [ ! -e {marker} ] && {{ {condition}; }}; then\n"
+                f"if [ -e {armed} ] && [ ! -e {marker} ] && {{ {condition}; }}; then\n"
                 f"  : > {marker}\n"
                 f"  {command} \"$@\" || exit $?\n"
                 "  printf '\\377'\n"
@@ -218,12 +220,30 @@ def test_invalid_tmux_output_is_not_a_cached_lineage_observation(monkeypatch, ph
             monkeypatch.setenv("PATH", str(root) + os.pathsep + os.environ["PATH"])
             monkeypatch.setattr(graph_data, "_LIVE_PARENT_CACHE", {"ts": 0.0, "value": None})
             monkeypatch.setattr(graph_data, "_PARENT_BY_SESSION", {})
-            monkeypatch.setattr(graph_data, "time", SimpleNamespace(monotonic=lambda: 100.0))
+            clock = [100.0]
+            monkeypatch.setattr(graph_data, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+            if seeded:
+                assert graph_data._live_parents("/a") == {"Kid": "Boss"}
+                assert graph_data._PARENT_BY_SESSION["Kid"][1:3] == ("Boss", "/a")
+                assert graph_data._LIVE_PARENT_CACHE["value"] == {"Kid": ("Boss", "/a")}
+                # The same live generation changes scope after its memo expires.
+                call("set-environment", "-t", "=Kid", "PARENT_AGENT", "BossNew")
+                call("set-environment", "-t", "=Kid", "AGENTSTACK_PROJECT_KEY", "/b")
+                clock[0] += graph_data._PARENT_MISS_TTL + 1
+                (root / "listed").unlink(missing_ok=True)
+            (root / "armed").touch()
             assert graph_data._live_parents("/a") == {}
             assert (root / "injected").exists()
-            assert graph_data._PARENT_BY_SESSION == {}
-            assert graph_data._LIVE_PARENT_CACHE["value"] is None
-            assert graph_data._live_parents("/a") == {"Kid": "Boss"}
-            assert graph_data._live_parents("/b") == {}
+            if not seeded or phase != "listing":
+                assert graph_data._PARENT_BY_SESSION == {}
+                assert graph_data._LIVE_PARENT_CACHE["value"] is None
+            # The early listing failure may retain the expired cache, but it
+            # must never return its old scope and must recover on the next poll.
+            expected_scope, expected_parent = ("/b", "BossNew") if seeded else ("/a", "Boss")
+            other_scope = "/a" if seeded else "/b"
+            assert graph_data._live_parents(expected_scope) == {"Kid": expected_parent}
+            assert graph_data._live_parents(other_scope) == {}
+            assert graph_data._PARENT_BY_SESSION["Kid"][1:3] == (expected_parent, expected_scope)
+            assert graph_data._LIVE_PARENT_CACHE["value"] == {"Kid": (expected_parent, expected_scope)}
         finally:
             call("kill-server", check=False)
