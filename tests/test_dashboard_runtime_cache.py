@@ -371,6 +371,55 @@ def test_long_codex_work_with_background_terminals_and_tip_is_work():
     assert parsed["work_disp"] == "48m48s"
 
 
+_CODEX_WRAPPED_WEEKLY_INPUT = (
+    "› Ask Codex to do anything\n\n"
+    "  GPT-6.2-Sol high · Context 74% left · ~/workspace ·\n"
+    "  weekly 50% left\n"
+    "  ← for agents · ? for shortcuts                 ⚠ 3 warnings · f2 to view\n"
+)
+
+
+@pytest.mark.parametrize("status,seconds,display", [
+    ("• Working (11s • esc to interrupt)", 11, "11s"),
+    ("• Working (10m 58s • esc to interrupt) · 1 background terminal running · /ps to…", 658, "10m58s"),
+])
+def test_codex_work_above_wrapped_weekly_footer(status, seconds, display):
+    screen = status + "\n  └ Tip: A synthetic tip.\n\n" + _CODEX_WRAPPED_WEEKLY_INPUT
+    parsed = server._parse_runtime(screen)
+    assert (parsed["act_state"], parsed["work_secs"], parsed["work_disp"]) == ("work", seconds, display)
+    assert parsed["ctx_used"] == 26
+
+
+def test_wrapped_weekly_footer_without_current_codex_work_is_idle():
+    screen = "• Working (10m 58s • esc to…\n\n• Finished.\n\n" + _CODEX_WRAPPED_WEEKLY_INPUT
+    assert server._runtime_activity(screen) == ("wait", "")
+
+
+def test_codex_work_above_three_row_footer_preserves_minutes():
+    screen = (
+        "• Working (1m 32s • esc to interrupt)\n\n\n"
+        "› Ask Codex to do anything\n\n"
+        "  GPT-6.2-Sol high · Context 46% left ·\n"
+        "  ~/workspace · weekly\n"
+        "  50% left\n"
+        "  ← for agents         ⚠ 5 warnings · f2 to view\n"
+    )
+    parsed = server._parse_runtime(screen)
+    assert (parsed["act_state"], parsed["work_secs"], parsed["work_disp"]) == ("work", 92, "1m32s")
+    assert parsed["ctx_used"] == 54
+
+
+@pytest.mark.parametrize("footer", [
+    _CODEX_WRAPPED_WEEKLY_INPUT.replace("~/workspace ·", "~/workspace"),
+    _CODEX_WRAPPED_WEEKLY_INPUT.replace("weekly 50%", "weekly 101%"),
+    _CODEX_WRAPPED_WEEKLY_INPUT.replace("  weekly 50%", "  Example: weekly 50%"),
+    _CODEX_WRAPPED_WEEKLY_INPUT.replace("› Ask Codex", "❯ Ask Claude"),
+])
+def test_unverified_codex_weekly_footer_does_not_admit_truncated_work(footer):
+    screen = "• Working (10m 58s • esc to…\n\n" + footer
+    assert server._runtime_activity(screen) == ("wait", "")
+
+
 @pytest.mark.parametrize("suffix", [
     " · 0 background terminals running · /ps to view · /stop to close",
     " · 1 background terminal running · /ps to view · /stop to close; arbitrary output",
