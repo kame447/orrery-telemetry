@@ -116,6 +116,7 @@ _PARENT_BY_SESSION: dict[str, tuple[tuple[str, ...], str, str, float]] = {}
 
 def forget_parents() -> None:
     _PARENT_BY_SESSION.clear()
+    _LIVE_PARENT_CACHE.update(ts=0.0, value=None, generations=None)
 
 
 def _live_parents(project_key: str) -> dict[str, str]:
@@ -130,18 +131,15 @@ def _live_parents(project_key: str) -> dict[str, str]:
     directly and is available the moment the session exists.
 
     Reading it costs one tmux call per session -- 238ms of a 326ms graph build
-    on a machine with 42 of them -- so the answer is cached briefly. Lineage
-    only changes when something is spawned, and the node itself appears without
-    waiting for this.
+    on a machine with 42 of them -- so the answer is cached briefly. Every
+    lookup still lists session generations: a replaced server or session must
+    not inherit a cached edge. Environment changes within a single generation
+    are picked up on the existing per-session memo expiry or invalidation.
     """
     now = time.monotonic()
-    cached = _LIVE_PARENT_CACHE["value"]
-    if cached is not None and now - float(_LIVE_PARENT_CACHE["ts"]) < _LIVE_PARENT_TTL:
-        return {child: parent for child, (parent, scope) in cached.items()
-                if scope == project_key} if project_key else {}
     tmux = shutil.which("tmux")
     if not tmux:
-        _LIVE_PARENT_CACHE.update(ts=now, value={})
+        _LIVE_PARENT_CACHE.update(ts=0.0, value=None, generations=None)
         return {}
     listing_args = [tmux, "list-sessions", "-F",
                     "#{session_name}\t#{session_id}\t#{session_created}\t#{pid}"]
@@ -159,14 +157,28 @@ def _live_parents(project_key: str) -> dict[str, str]:
         # one `list-sessions`; the expensive part is the per-session lookup
         # below, which this path never reaches.
         return {}
+    # The cheap listing is required even during the aggregate cache TTL.
+    # Never reuse a cached result for an incomplete (old/demo) listing.
+    rows = [line.rsplit("\t", 3) for line in listing.stdout.splitlines() if line.strip()]
+    generations = {fields[0].strip(): tuple(fields[1:]) for fields in rows if len(fields) == 4}
+    complete = len(generations) == len(rows) and all(
+        name and re.fullmatch(r"\$[0-9]+", gen[0])
+        and gen[1].isdigit() and gen[2].isdigit() and int(gen[2]) > 0
+        for name, gen in generations.items()
+    )
+    cache = _LIVE_PARENT_CACHE.copy()
+    cached = cache["value"]
+    if (complete and cached is not None and cache.get("generations") == generations
+            and now - float(cache["ts"]) < _LIVE_PARENT_TTL):
+        return {child: parent for child, (parent, scope) in cached.items()
+                if scope == project_key} if project_key else {}
     parents: dict[str, tuple[str, str]] = {}
     seen: set[str] = set()
     observed_generations: dict[str, tuple[str, ...]] = {}
     queried_generation = False
-    for line in listing.stdout.split("\n"):
+    for fields in rows:
         # name, id, creation time, server pid. The pid tells apart a session of
         # a restarted tmux server that got the same id in the same second.
-        fields = line.rsplit("\t", 3)
         session = fields[0].strip()
         generation = tuple(fields[1:]) if len(fields) == 4 else None
         if not session:
@@ -226,10 +238,10 @@ def _live_parents(project_key: str) -> dict[str, str]:
                 stable = False
     for gone in set(_PARENT_BY_SESSION) - seen:
         _PARENT_BY_SESSION.pop(gone, None)  # a POST may have cleared it meanwhile
-    if stable:
-        _LIVE_PARENT_CACHE.update(ts=now, value=dict(parents))
+    if stable and complete:
+        _LIVE_PARENT_CACHE.update(ts=now, value=dict(parents), generations=generations)
     else:
-        _LIVE_PARENT_CACHE.update(ts=0.0, value=None)
+        _LIVE_PARENT_CACHE.update(ts=0.0, value=None, generations=None)
     return {child: parent for child, (parent, scope) in parents.items()
             if scope == project_key} if project_key else {}
 

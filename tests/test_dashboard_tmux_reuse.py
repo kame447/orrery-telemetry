@@ -209,3 +209,23 @@ def test_a_clear_racing_the_prune_does_not_break_the_lineage(tmp_path, monkeypat
 
     monkeypatch.setattr(graph_data, "_PARENT_BY_SESSION", Racing(graph_data._PARENT_BY_SESSION))
     graph_data._live_parents("/scope")
+
+
+def test_lineage_cache_validates_generation_but_reuses_environment(tmp_path, monkeypatch):
+    log = _fake_tmux(tmp_path, [("Kid", "$1", "10")])
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    assert graph_data._live_parents("/scope") == {"Kid": "Boss"}
+    before = log.read_text().splitlines()
+    assert graph_data._live_parents("/scope") == {"Kid": "Boss"}
+    after = log.read_text().splitlines()[len(before):]
+    assert len(after) == 1 and after[0].startswith("list-sessions ")
+
+
+def test_lineage_cache_invalidation_rechecks_unchanged_generation(tmp_path, monkeypatch):
+    _fake_tmux(tmp_path, [("Kid", "$1", "10")])
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    assert graph_data._live_parents("/scope") == {"Kid": "Boss"}
+    script = tmp_path / "tmux"
+    script.write_text(script.read_text().replace("PARENT_AGENT=Boss", "PARENT_AGENT=Other"))
+    graph_data.forget_parents()
+    assert graph_data._live_parents("/scope") == {"Kid": "Other"}

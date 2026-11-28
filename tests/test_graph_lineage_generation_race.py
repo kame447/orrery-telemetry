@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+from types import SimpleNamespace
 
 import pytest
 from dashboard import graph_data
@@ -88,3 +89,46 @@ def test_global_project_environment_is_not_lineage_scope(monkeypatch, before_cre
             assert graph_data._live_parents('/b') == {'Bound': 'Boss'}
         finally:
             call('kill-server', check=False)
+
+
+def test_cached_lineage_does_not_survive_server_replacement(monkeypatch):
+    tmux = shutil.which('tmux')
+    if not tmux:
+        pytest.skip('real tmux required')
+    base = '/private/tmp' if Path('/private/tmp').is_dir() else None
+    with tempfile.TemporaryDirectory(prefix='lineage-cache-', dir=base) as path:
+        root = Path(path)
+        sockets = [root / 'old', root / 'new']
+
+        def call(sock, *args, check=True):
+            return subprocess.run([tmux, '-S', str(sock), '-f', '/dev/null', *args],
+                                  capture_output=True, text=True, check=check, timeout=10)
+
+        try:
+            for sock, project, parent in zip(sockets, ['/a', '/b'], ['BossA', 'BossB']):
+                call(sock, 'new-session', '-d', '-s', 'Kid', '-e', f'PARENT_AGENT={parent}',
+                     '-e', f'AGENTSTACK_PROJECT_KEY={project}', 'sleep 60')
+            fmt = '#{session_name}|#{session_id}|#{pid}'
+            old, new = [call(sock, 'list-sessions', '-F', fmt).stdout.strip().split('|')
+                        for sock in sockets]
+            assert old[:2] == new[:2] == ['Kid', '$0'] and old[2] != new[2]
+            wrapper = root / 'tmux'
+            quote = shlex.quote
+            wrapper.write_text('#!/bin/sh\n'
+                f'if [ -e {quote(str(root / "switch"))} ]; then\n'
+                f'  exec {quote(tmux)} -S {quote(str(sockets[1]))} "$@"\n'
+                'fi\n'
+                f'exec {quote(tmux)} -S {quote(str(sockets[0]))} "$@"\n')
+            wrapper.chmod(0o700)
+            monkeypatch.setenv('PATH', str(root) + os.pathsep + os.environ['PATH'])
+            monkeypatch.setattr(graph_data, '_LIVE_PARENT_CACHE', {'ts': 0.0, 'value': None})
+            monkeypatch.setattr(graph_data, '_PARENT_BY_SESSION', {})
+            # Keep the clock fixed: expiry is not a substitute for generation validation.
+            monkeypatch.setattr(graph_data, 'time', SimpleNamespace(monotonic=lambda: 100.0))
+            assert graph_data._live_parents('/a') == {'Kid': 'BossA'}
+            (root / 'switch').touch()
+            assert graph_data._live_parents('/a') == {}
+            assert graph_data._live_parents('/b') == {'Kid': 'BossB'}
+        finally:
+            for sock in sockets:
+                call(sock, 'kill-server', check=False)
