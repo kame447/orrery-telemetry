@@ -7,7 +7,10 @@ unresolved, never permission to register a different identity. Without any
 identity/binding, skip Mail registration and notifications. Editing guards
 still enforce the configured unmanaged-session policy (default block).
 
-__ORRERY_IDENTITY_UNAVAILABLE__
+If there is no ORRERY identity, registration, or session binding,
+an ORRERY hook can report this diagnostic:
+
+> `__ORRERY_IDENTITY_UNAVAILABLE__`
 
 
 # Global preparation context
@@ -110,7 +113,10 @@ Do not create an identity from a bare raw session. Ask the operator to use the
 coordinated launcher. An unresolved existing registration needs recovery of
 that same identity; do not substitute a new name.
 
-__ORRERY_IDENTITY_BINDING_UNRESOLVED__
+If an existing ORRERY registration has an unresolved identity binding,
+an ORRERY hook can report this diagnostic:
+
+> `__ORRERY_IDENTITY_BINDING_UNRESOLVED__`
 
 ### Shared boundaries
 
