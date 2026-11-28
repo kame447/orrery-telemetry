@@ -441,7 +441,8 @@ def test_read_only_reservation_guard_status(tmp_path, monkeypatch, state, expect
             assert method == 'hooks/list' and params == {'cwds': [str(tmp_path)]}
             return {'data': [{'cwd': str(tmp_path), 'hooks': [] if state == 'missing' else [hook],
                               'errors': ['discovery failed'] if state == 'broken' else []}]}
-    assert diagnostic.status(Server(), tmp_path, PLUGIN_ID) == expected
+    hooks = diagnostic.plugin_hooks(Server(), tmp_path, PLUGIN_ID)
+    assert diagnostic.reservation_status(hooks) == expected
 
 
 @pytest.mark.parametrize('field,value', [('matcher', '^Bash$'), ('pluginId', 'other@local'),
@@ -461,4 +462,16 @@ def test_unrelated_or_changed_hook_cannot_claim_protection(tmp_path, monkeypatch
         def request(self, method, params):
             assert method == 'hooks/list'
             return {'data': [{'cwd': str(tmp_path), 'hooks': [hook], 'errors': []}]}
-    assert diagnostic.status(Server(), tmp_path, PLUGIN_ID) in {'unknown', 'missing'}
+    hooks = diagnostic.plugin_hooks(Server(), tmp_path, PLUGIN_ID)
+    assert diagnostic.reservation_status(hooks) in {'unknown', 'missing'}
+
+
+@pytest.mark.parametrize('handler', [None, [], 'invalid'])
+def test_malformed_reservation_handler_is_unknown(tmp_path, monkeypatch, handler):
+    import importlib.util
+    monkeypatch.syspath_prepend(str(ROOT / 'scripts'))
+    spec = importlib.util.spec_from_file_location('reservation_status', ROOT / 'scripts/codex-reservation-status.py')
+    diagnostic = importlib.util.module_from_spec(spec); spec.loader.exec_module(diagnostic)
+    hook = dict(eventName='preToolUse', matcher='^apply_patch$', handler=handler,
+                command='"$PLUGIN_ROOT/scripts/run-reservation-guard.sh"', trustStatus='trusted')
+    assert diagnostic.reservation_status([hook]) == 'unknown'
