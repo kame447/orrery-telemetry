@@ -373,9 +373,13 @@ def test_explicit_cli_http_process_config_health_send_peek_and_shutdown(tmp_path
                     if process.poll() is None:
                         process.terminate()
                     try:
-                        process.wait(timeout=5)
+                        process.wait(timeout=12)
                     except subprocess.TimeoutExpired:
                         process.kill()
                         process.wait(timeout=5)
+                        pytest.fail('fresh Mail did not stop within the supervisor grace')
                     assert process.poll() is not None
+            shutdown_log = log_path.read_text()
+            assert 'Application shutdown complete.' in shutdown_log
+            assert 'timeout graceful shutdown exceeded' not in shutdown_log
     asyncio.run(run())
