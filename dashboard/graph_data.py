@@ -154,7 +154,7 @@ def _live_parents(project_key: str) -> dict[str, str]:
             listing_args,
             capture_output=True, text=True, timeout=5,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
         return {}
     if listing.returncode != 0:
         # No server, or one that was briefly unreachable -- the exit code does
@@ -194,6 +194,7 @@ def _live_parents(project_key: str) -> dict[str, str]:
     seen: set[str] = set()
     observed_generations: dict[str, tuple[str, ...]] = {}
     queried_generation = False
+    read_failed = False
     for fields in rows:
         # name, id, creation time, server pid. The pid tells apart a session of
         # a restarted tmux server that got the same id in the same second.
@@ -226,7 +227,11 @@ def _live_parents(project_key: str) -> dict[str, str]:
                  "show-environment", "-t", target, "AGENTSTACK_PROJECT_KEY"],
                 capture_output=True, text=True, timeout=5,
             )
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
+            # An unavailable or undecodable read is not a negative observation.
+            # Retry next poll instead of caching a missing edge.
+            read_failed = True
+            invalid_generations.add(session)
             continue
         parent = scope = ""
         if shown.returncode == 0:
@@ -243,7 +248,7 @@ def _live_parents(project_key: str) -> dict[str, str]:
     # environment lookup. Recheck the whole generation before adopting a new
     # observation; never associate the replacement server's metadata with the
     # old name. A failed recheck is not evidence of an empty server.
-    stable = True
+    stable = not read_failed
     if queried_generation:
         current: dict[str, tuple[str, ...]] = {}
         try:
@@ -253,7 +258,7 @@ def _live_parents(project_key: str) -> dict[str, str]:
                     fields = line.rsplit("\t", 3)
                     if len(fields) == 4:
                         current[fields[0].strip()] = tuple(fields[1:])
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
             pass
         for session, generation in observed_generations.items():
             if current.get(session) != generation:

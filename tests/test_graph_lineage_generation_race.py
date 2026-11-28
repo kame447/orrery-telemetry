@@ -174,3 +174,56 @@ def test_partial_generation_on_real_tmux_never_reuses_stale_memo(monkeypatch):
             assert graph_data._LIVE_PARENT_CACHE["value"] is None
         finally:
             call("kill-server", check=False)
+
+
+@pytest.mark.parametrize("phase", ["listing", "environment", "verification"])
+def test_invalid_tmux_output_is_not_a_cached_lineage_observation(monkeypatch, phase):
+    """Inject an undecodable byte into one real isolated tmux response."""
+    tmux = shutil.which("tmux")
+    if not tmux:
+        pytest.skip("real tmux required")
+    base = "/private/tmp" if Path("/private/tmp").is_dir() else None
+    with tempfile.TemporaryDirectory(prefix="lineage-decode-", dir=base) as path:
+        root = Path(path)
+        sock = root / "s"
+
+        def call(*args, check=True):
+            return subprocess.run([tmux, "-S", str(sock), "-f", "/dev/null", *args],
+                                  capture_output=True, text=True, check=check, timeout=10)
+
+        try:
+            call("new-session", "-d", "-s", "Kid", "-e", "PARENT_AGENT=Boss",
+                 "-e", "AGENTSTACK_PROJECT_KEY=/a", "sleep 60")
+            wrapper = root / "tmux"
+            command = f"{shlex.quote(tmux)} -S {shlex.quote(str(sock))}"
+            marker = shlex.quote(str(root / "injected"))
+            seen = shlex.quote(str(root / "listed"))
+            condition = {
+                "listing": '[ "$1" = list-sessions ]',
+                "environment": '[ "$1" = show-environment ]',
+                "verification": f'[ "$1" = list-sessions ] && [ -e {seen} ]',
+            }[phase]
+            wrapper.write_text(
+                "#!/bin/sh\n"
+                f"if [ ! -e {marker} ] && {{ {condition}; }}; then\n"
+                f"  : > {marker}\n"
+                f"  {command} \"$@\" || exit $?\n"
+                "  printf '\\377'\n"
+                "  exit 0\n"
+                "fi\n"
+                f'if [ "$1" = list-sessions ]; then : > {seen}; fi\n'
+                f'exec {command} "$@"\n'
+            )
+            wrapper.chmod(0o700)
+            monkeypatch.setenv("PATH", str(root) + os.pathsep + os.environ["PATH"])
+            monkeypatch.setattr(graph_data, "_LIVE_PARENT_CACHE", {"ts": 0.0, "value": None})
+            monkeypatch.setattr(graph_data, "_PARENT_BY_SESSION", {})
+            monkeypatch.setattr(graph_data, "time", SimpleNamespace(monotonic=lambda: 100.0))
+            assert graph_data._live_parents("/a") == {}
+            assert (root / "injected").exists()
+            assert graph_data._PARENT_BY_SESSION == {}
+            assert graph_data._LIVE_PARENT_CACHE["value"] is None
+            assert graph_data._live_parents("/a") == {"Kid": "Boss"}
+            assert graph_data._live_parents("/b") == {}
+        finally:
+            call("kill-server", check=False)
