@@ -126,6 +126,7 @@ def test_cached_lineage_does_not_survive_server_replacement(monkeypatch):
             # Keep the clock fixed: expiry is not a substitute for generation validation.
             monkeypatch.setattr(graph_data, 'time', SimpleNamespace(monotonic=lambda: 100.0))
             assert graph_data._live_parents('/a') == {'Kid': 'BossA'}
+            assert graph_data._LIVE_PARENT_CACHE['generations']['Kid'][0] == '$0'
             (root / 'switch').touch()
             assert graph_data._live_parents('/a') == {}
             assert graph_data._live_parents('/b') == {'Kid': 'BossB'}

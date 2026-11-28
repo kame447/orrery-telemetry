@@ -104,7 +104,9 @@ PROJECT_ID = 1  # フォールバック既定（projects に human_key 不一致
 ACT_WINDOW_SEC = 6 * 3600
 
 
-_LIVE_PARENT_CACHE: dict[str, object] = {"ts": 0.0, "value": None}
+_LIVE_PARENT_CACHE: dict[str, object] = {"ts": 0.0, "value": None, "generations": None}
+_PARENT_CACHE_LOCK = threading.Lock()
+_PARENT_CACHE_EPOCH = 0
 _LIVE_PARENT_TTL = 10.0
 # PARENT_AGENT is read once per session generation (name, id, creation time, server pid)
 # rather than on every refresh, and asked again after this long, whether it was
@@ -115,8 +117,11 @@ _PARENT_BY_SESSION: dict[str, tuple[tuple[str, ...], str, str, float]] = {}
 
 
 def forget_parents() -> None:
-    _PARENT_BY_SESSION.clear()
-    _LIVE_PARENT_CACHE.update(ts=0.0, value=None, generations=None)
+    global _PARENT_CACHE_EPOCH
+    with _PARENT_CACHE_LOCK:
+        _PARENT_CACHE_EPOCH += 1
+        _PARENT_BY_SESSION.clear()
+        _LIVE_PARENT_CACHE.update(ts=0.0, value=None, generations=None)
 
 
 def _live_parents(project_key: str) -> dict[str, str]:
@@ -137,9 +142,10 @@ def _live_parents(project_key: str) -> dict[str, str]:
     are picked up on the existing per-session memo expiry or invalidation.
     """
     now = time.monotonic()
+    with _PARENT_CACHE_LOCK:
+        epoch = _PARENT_CACHE_EPOCH
     tmux = shutil.which("tmux")
     if not tmux:
-        _LIVE_PARENT_CACHE.update(ts=0.0, value=None, generations=None)
         return {}
     listing_args = [tmux, "list-sessions", "-F",
                     "#{session_name}\t#{session_id}\t#{session_created}\t#{pid}"]
@@ -166,12 +172,20 @@ def _live_parents(project_key: str) -> dict[str, str]:
         and gen[1].isdigit() and gen[2].isdigit() and int(gen[2]) > 0
         for name, gen in generations.items()
     )
-    cache = _LIVE_PARENT_CACHE.copy()
-    cached = cache["value"]
-    if (complete and cached is not None and cache.get("generations") == generations
-            and now - float(cache["ts"]) < _LIVE_PARENT_TTL):
-        return {child: parent for child, (parent, scope) in cached.items()
-                if scope == project_key} if project_key else {}
+    with _PARENT_CACHE_LOCK:
+        if epoch != _PARENT_CACHE_EPOCH:
+            return {}
+        cache = _LIVE_PARENT_CACHE
+        cached = cache["value"]
+        if (complete and cached is not None and cache.get("generations") == generations
+                and now - float(cache["ts"]) < _LIVE_PARENT_TTL):
+            return {child: parent for child, (parent, scope) in cached.items()
+                    if scope == project_key} if project_key else {}
+        memo = _PARENT_BY_SESSION.copy()
+    # Accumulate observations locally. A POST can invalidate while tmux is
+    # running; never publish any pre-invalidation observations afterwards.
+    pending_memo = {}
+    invalid_generations = set()
     parents: dict[str, tuple[str, str]] = {}
     seen: set[str] = set()
     observed_generations: dict[str, tuple[str, ...]] = {}
@@ -186,7 +200,7 @@ def _live_parents(project_key: str) -> dict[str, str]:
         seen.add(session)
         if generation is not None:
             observed_generations[session] = generation
-        known = _PARENT_BY_SESSION.get(session)
+        known = memo.get(session)
         if (generation is not None and known is not None and known[0] == generation
                 and now - known[3] < _PARENT_MISS_TTL):
             if known[1] and known[2]:
@@ -214,7 +228,7 @@ def _live_parents(project_key: str) -> dict[str, str]:
         if parent and scope:
             parents[session] = (parent, scope)
         if generation is not None and (shown.returncode == 0 or shown.returncode == 1):
-            _PARENT_BY_SESSION[session] = (generation, parent, scope, now)
+            pending_memo[session] = (generation, parent, scope, now)
     # A new tmux server can reuse a session ID between list-sessions and the
     # environment lookup. Recheck the whole generation before adopting a new
     # observation; never associate the replacement server's metadata with the
@@ -234,14 +248,18 @@ def _live_parents(project_key: str) -> dict[str, str]:
         for session, generation in observed_generations.items():
             if current.get(session) != generation:
                 parents.pop(session, None)
-                _PARENT_BY_SESSION.pop(session, None)
+                invalid_generations.add(session)
                 stable = False
-    for gone in set(_PARENT_BY_SESSION) - seen:
-        _PARENT_BY_SESSION.pop(gone, None)  # a POST may have cleared it meanwhile
-    if stable and complete:
-        _LIVE_PARENT_CACHE.update(ts=now, value=dict(parents), generations=generations)
-    else:
-        _LIVE_PARENT_CACHE.update(ts=0.0, value=None, generations=None)
+    with _PARENT_CACHE_LOCK:
+        if epoch != _PARENT_CACHE_EPOCH:
+            return {}
+        _PARENT_BY_SESSION.update(pending_memo)
+        for gone in (set(_PARENT_BY_SESSION) - seen) | invalid_generations:
+            _PARENT_BY_SESSION.pop(gone, None)
+        if stable and complete:
+            _LIVE_PARENT_CACHE.update(ts=now, value=dict(parents), generations=generations)
+        else:
+            _LIVE_PARENT_CACHE.update(ts=0.0, value=None, generations=None)
     return {child: parent for child, (parent, scope) in parents.items()
             if scope == project_key} if project_key else {}
 

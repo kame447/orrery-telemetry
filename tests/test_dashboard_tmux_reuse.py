@@ -229,3 +229,43 @@ def test_lineage_cache_invalidation_rechecks_unchanged_generation(tmp_path, monk
     script.write_text(script.read_text().replace("PARENT_AGENT=Boss", "PARENT_AGENT=Other"))
     graph_data.forget_parents()
     assert graph_data._live_parents("/scope") == {"Kid": "Other"}
+
+
+def test_inflight_lineage_cannot_republish_after_invalidation(tmp_path, monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+
+    _fake_tmux(tmp_path, [("Kid", "$1", "10")])
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    script = tmp_path / "tmux"
+    real_run = subprocess.run
+    invalidated = False
+
+    def run(args, **kwargs):
+        nonlocal invalidated
+        result = real_run(args, **kwargs)
+        if args[1] == "show-environment" and not invalidated:
+            invalidated = True
+            script.write_text(script.read_text().replace("PARENT_AGENT=Boss", "PARENT_AGENT=Other"))
+            graph_data.forget_parents()
+        return result
+
+    monkeypatch.setattr(graph_data, "subprocess", SimpleNamespace(
+        run=run, SubprocessError=subprocess.SubprocessError))
+    assert graph_data._live_parents("/scope") == {}
+    assert invalidated
+    assert graph_data._PARENT_BY_SESSION == {}
+    assert graph_data._LIVE_PARENT_CACHE["value"] is None
+    assert graph_data._live_parents("/scope") == {"Kid": "Other"}
+
+
+def test_incomplete_lineage_listing_is_not_aggregate_cached(tmp_path, monkeypatch):
+    script = tmp_path / "tmux"
+    script.write_text('#!/bin/sh\ncase "$1" in\n  list-sessions) printf "Kid\\n" ;;\n'
+                      '  show-environment) printf "PARENT_AGENT=Boss\\nAGENTSTACK_PROJECT_KEY=/scope\\n" ;;\nesac\n')
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    assert graph_data._live_parents("/scope") == {"Kid": "Boss"}
+    assert graph_data._LIVE_PARENT_CACHE["value"] is None
+    script.write_text(script.read_text().replace("PARENT_AGENT=Boss", "PARENT_AGENT=Other"))
+    assert graph_data._live_parents("/scope") == {"Kid": "Other"}
