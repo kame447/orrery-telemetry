@@ -67,6 +67,13 @@ test -d "$quota_runtime" && touch "$quota_runtime/antigravity-quota.enabled"
 `unavailable / no windows` が続く場合は、marker の場所、CLI のバージョン、サインインを確認し、
 `agy -p /usage --output-format json` が利用枠を返すか確認します。利用枠の表示には Gemini API キーは不要です。
 
+Gemini CLIの既定モデル・effortを明示指定する場合は
+`AGENTSTACK_GEMINI_MODEL` と `AGENTSTACK_GEMINI_EFFORT` を設定します。
+core installerはこれらを他のユーザー設定と同様に `env.sh` へ保存し、
+以後のcore更新で引き継ぎます（`--reset-settings` で初期化）。
+これらはCLI起動時の既定であり、Dashboard NEW AGENTの既定モデル
+（Flash）や明示effort選択は変更しません。
+
 既存のGemini環境を更新する場合は、coreの更新後、同じ検証済みrevisionから
 この追加インストーラーも再実行し、作業中のエージェントが終了してから
 Dashboardを再起動してください。coreだけの再インストールは既存providerを

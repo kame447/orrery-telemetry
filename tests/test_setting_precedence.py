@@ -184,6 +184,78 @@ def _dry_run(home: pathlib.Path, *args: str, **extra: str) -> subprocess.Complet
     )
 
 
+def test_gemini_defaults_survive_reinstall_reset_and_explicit_override(tmp_path):
+    home, _ = _previous_install(
+        tmp_path,
+        GEMINI_MODEL_SETTING="gemini-4-hydrogen-xhigh",
+        GEMINI_EFFORT_SETTING="xhigh",
+    )
+    names = ("GEMINI_MODEL_SETTING", "GEMINI_EFFORT_SETTING")
+    assert _resolve_like_the_installer(home, *names) == [
+        "gemini-4-hydrogen-xhigh", "xhigh"
+    ]
+    assert _resolve_like_the_installer(
+        home, *names, args=("--reset-settings",)
+    ) == ["", ""]
+    assert _resolve_like_the_installer(
+        home, *names, env={
+            "AGENTSTACK_GEMINI_MODEL": "gemini-4-argon-medium",
+            "AGENTSTACK_GEMINI_EFFORT": "medium",
+        }
+    ) == ["gemini-4-argon-medium", "medium"]
+    assert _resolve_like_the_installer(
+        home, *names, env={
+            "AGENTSTACK_GEMINI_MODEL": "",
+            "AGENTSTACK_GEMINI_EFFORT": "",
+        }
+    ) == ["", ""]
+
+
+def test_gemini_defaults_are_written_and_launcher_keeps_explicit_override(tmp_path):
+    home, _ = _previous_install(
+        tmp_path,
+        GEMINI_MODEL_SETTING="gemini-4-hydrogen-xhigh",
+        GEMINI_EFFORT_SETTING="xhigh",
+    )
+    installed_env = home / ".agentstack" / "env.sh"
+    contents = installed_env.read_text()
+    assert "export AGENTSTACK_GEMINI_MODEL=gemini-4-hydrogen-xhigh" in contents
+    assert "export AGENTSTACK_GEMINI_EFFORT=xhigh" in contents
+
+    body = f'. {shlex.quote(str(CONTEXT))}; agentstack_load_installed_env "$1"; printf "%s\n%s\n" "$AGENTSTACK_GEMINI_MODEL" "$AGENTSTACK_GEMINI_EFFORT"'
+    result = subprocess.run(
+        [BASH, "-c", body, "fixture", str(installed_env)],
+        env=_scrubbed_env(home), capture_output=True, text=True, check=True
+    )
+    assert result.stdout.splitlines() == ["gemini-4-hydrogen-xhigh", "xhigh"]
+
+    override = subprocess.run(
+        [BASH, "-c", body, "fixture", str(installed_env)],
+        env=_scrubbed_env(home,
+                          AGENTSTACK_GEMINI_MODEL="gemini-4-argon-medium",
+                          AGENTSTACK_GEMINI_EFFORT="medium"),
+        capture_output=True, text=True, check=True
+    )
+    assert override.stdout.splitlines() == ["gemini-4-argon-medium", "medium"]
+
+
+@pytest.mark.parametrize("model,effort,key", [
+    ("gpt-6-sol", "high", "AGENTSTACK_GEMINI_MODEL"),
+    ("gemini-4-hydrogen-xhigh", "max", "AGENTSTACK_GEMINI_EFFORT"),
+    ("gemini-foo;touch", "xhigh", "AGENTSTACK_GEMINI_MODEL"),
+])
+def test_invalid_gemini_default_rejected_before_installer_writes(tmp_path, model, effort, key):
+    home, _ = _previous_install(tmp_path)
+    installed_env = home / ".agentstack" / "env.sh"
+    original = installed_env.read_bytes()
+    result = _dry_run(
+        home, AGENTSTACK_GEMINI_MODEL=model, AGENTSTACK_GEMINI_EFFORT=effort
+    )
+    assert result.returncode != 0
+    assert key in result.stderr
+    assert installed_env.read_bytes() == original
+
+
 # --- #137: the installer -----------------------------------------------------
 
 

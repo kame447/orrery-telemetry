@@ -68,6 +68,13 @@ If it still says `unavailable / no windows`, check the marker location, CLI
 version and sign-in, then check whether `agy -p /usage --output-format json`
 returns quota windows. A Gemini API key is unnecessary for this display.
 
+To choose a CLI default model and effort, set `AGENTSTACK_GEMINI_MODEL` and
+`AGENTSTACK_GEMINI_EFFORT`. The core installer now saves these like other user
+settings in `env.sh` and preserves them on subsequent core upgrades.
+`--reset-settings` resets both choices to the built-in defaults. These apply
+to CLI launches; they do not change the Dashboard NEW AGENT's initial Flash
+selection or its requirement to choose an effort.
+
 To update an existing Gemini installation, rerun the optional installer from
 the same verified revision after updating core, then restart the Dashboard
 when active agents have finished. A core-only reinstall deliberately leaves
