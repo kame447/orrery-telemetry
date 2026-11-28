@@ -48,6 +48,7 @@ def test_neutral_identity_and_all_shared_sections_are_kept_byte_for_byte():
     output = render()
     assert not any(word in output.lower() for word in (b'codex', b'claude-code', b'claude code'))
     assert b'__ORRERY_' not in output and b'<!-- include:' not in output
+    assert not any(message.encode() in output for message in renderer.MESSAGES.values())
     template = (ROOT / 'bin/lib/harness_instructions.md').read_bytes()
     includes = re.findall(rb'^<!-- include: (.+) UNTIL (.+) -->$', template, re.M)
     # Keep the common startup, fail-closed, pointer and notification rules.
@@ -78,9 +79,24 @@ def test_shared_boundary_changes_fail_instead_of_silently_dropping_rules(mutatio
         render(broken)
 
 
+@pytest.mark.parametrize('provider,name', [('claude', 'CLAUDE.md'), ('codex', 'AGENTS.md')])
+def test_managed_identity_messages_are_conditional_hook_diagnostics(provider, name):
+    template = (ROOT / provider / name).read_bytes()
+    output = renderer.render(provider, template, '/fixture/install', '/fixture/project').decode()
+    conditions = {
+        'identity-unavailable': 'If there is no ORRERY identity, registration, or session binding,',
+        'identity-binding-unresolved': 'If an existing ORRERY registration has an unresolved identity binding,',
+    }
+    for key, condition in conditions.items():
+        message = renderer.MESSAGES[key]
+        assert not any(line.lstrip().startswith(message) for line in output.splitlines())
+        assert f'{condition}\nan ORRERY hook can report this diagnostic:\n\n> `{message}`' in output
+        assert output.count(message) == 1
+
+
 @pytest.mark.parametrize('provider,name,digest', [
-    ('claude', 'CLAUDE.md', '9dee4418499f8705b5418d0721dc9d9a4c8d2d05745b3dbaf7d049e6a61a165b'),
-    ('codex', 'AGENTS.md', '65457aee465c25cec6b50e7e1dec12dc3dcb2b9dd32a80fe5982a6dc74973275'),
+    ('claude', 'CLAUDE.md', 'd4ea1d061bfb69fb75b2ed53377694f08b5589c6bd8131d52a35467a5624fd89'),
+    ('codex', 'AGENTS.md', '350341ff6eee9705513f04c0f448cafb9a32400af0adcc4aa3ca216b1f22585e'),
 ])
 def test_program_output_matches_scope_adjusted_baseline(provider, name, digest):
     # Reviewed against af1e33d0: each provider template adds exactly four lines
@@ -88,7 +104,8 @@ def test_program_output_matches_scope_adjusted_baseline(provider, name, digest):
     # the same paths for renew/release, unchanged legacy paths/globs, and no
     # inferred cwd. Then each adds the eight-line "## Showing Files" section
     # (show_files before the final message). The renderer is unchanged; pin
-    # the intended full output.
+    # the intended full output. #630 quotes each identity diagnostic only
+    # under the condition in which a hook can report it.
     output = renderer.render(provider, (ROOT / provider / name).read_bytes(), '/fixture/install', '/fixture/project')
     assert hashlib.sha256(output).hexdigest() == digest
 
