@@ -146,6 +146,38 @@ def test_windows_fallback_and_linux_preference(wsl, monkeypatch):
     assert mobile.tailscale_bin() is None
 
 
+@pytest.mark.parametrize("result,invalidates", [(None, True), (1, True), (0, False)])
+def test_windows_tailscale_failure_invalidates_only_selected_socket(monkeypatch, result, invalidates):
+    monkeypatch.setattr(systemd, "is_wsl", lambda: True)
+    env = {"WSL_INTEROP": "/fixture/verified_interop"}
+    monkeypatch.setattr(mobile.wsl_anchor, "interop_env", lambda: env)
+    invalidated = []
+    monkeypatch.setattr(mobile.wsl_anchor, "invalidate_interop", invalidated.append)
+    seen = []
+    outcome = None if result is None else SimpleNamespace(returncode=result)
+
+    def run(argv, *, timeout, env):
+        seen.append((argv, env))
+        return outcome
+
+    monkeypatch.setattr(mobile, "_run", run)
+    argv = ["tailscale.exe", "serve", "status", "--json"]
+    assert mobile.tailscale_run(argv) is outcome
+    assert seen == [(argv, env)]
+    assert invalidated == ([env["WSL_INTEROP"]] if invalidates else [])
+
+
+def test_windows_tailscale_unverified_socket_never_executes(monkeypatch):
+    monkeypatch.setattr(systemd, "is_wsl", lambda: True)
+
+    def unavailable():
+        raise mobile.wsl_anchor.InteropUnavailable("no verified connection")
+
+    monkeypatch.setattr(mobile.wsl_anchor, "interop_env", unavailable)
+    monkeypatch.setattr(mobile, "_run", lambda *a, **kw: pytest.fail("unexpected Windows execution"))
+    assert mobile.tailscale_run(["tailscale.exe", "status", "--json"]) is None
+
+
 def test_windows_status_is_read_only(wsl):
     view = mobile.status()
     assert view['tailscale']['signed_in'] and view['tailscale']['serve'] == 'missing'
