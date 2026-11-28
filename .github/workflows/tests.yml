@@ -1,5 +1,9 @@
 name: tests
 
+env:
+  PIP_INDEX_URL: https://pypi.flatt.tech/simple/
+  UV_DEFAULT_INDEX: https://pypi.flatt.tech/simple/
+
 on:
   # PR の branch への push は pull_request の run と同じ試験になる。macOS の job は
   # 同時に回せる数が少なく、両方を走らせると待ち行列が倍になるので、push は master だけ。
