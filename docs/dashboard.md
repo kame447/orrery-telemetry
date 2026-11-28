@@ -376,7 +376,7 @@ parent を選ばないと `standalone: true` を送り、`PARENT_AGENT` のな�
 6. launcher の readiness verdict を最大120秒待つ
 7. live tmux session を再確認
 
-失敗時は tmux session と token / child credential file を cleanup し、`dashboard/logs/spawn.log` の末尾を API error の `detail` に含めます。登録済み identity は server に削除権限がないため保持され、response の `registration_retained: true` で明示されます。
+失敗時は tmux session と token / child credential file を cleanup し、その起動専用ログの末尾を API error の `detail` に含めます。正常に回収した launcher の出力は完了順に `dashboard/logs/spawn.log` に追記し、終了・cleanup が未確認の場合は同じディレクトリの `spawn-<name>-*.log` を保全します。登録済み identity は server に削除権限がないため保持され、response の `registration_retained: true` で明示されます。
 
 Codex では `--codex --model <model> --effort <effort>` を渡します。non-git directory の trust dialog は `C-m` で最大10回受理を試み、残り続ける場合は fail-fast します。
 
