@@ -166,12 +166,15 @@ def _live_parents(project_key: str) -> dict[str, str]:
     # The cheap listing is required even during the aggregate cache TTL.
     # Never reuse a cached result for an incomplete (old/demo) listing.
     rows = [line.rsplit("\t", 3) for line in listing.stdout.splitlines() if line.strip()]
-    generations = {fields[0].strip(): tuple(fields[1:]) for fields in rows if len(fields) == 4}
-    complete = len(generations) == len(rows) and all(
-        name and re.fullmatch(r"\$[0-9]+", gen[0])
-        and gen[1].isdigit() and gen[2].isdigit() and int(gen[2]) > 0
-        for name, gen in generations.items()
-    )
+    def valid_generation(fields):
+        return (len(fields) == 4 and fields[0].strip()
+                and re.fullmatch(r"\$[0-9]+", fields[1])
+                and fields[2].isdigit() and fields[3].isdigit()
+                and int(fields[3]) > 0)
+
+    generations = {fields[0].strip(): tuple(fields[1:]) for fields in rows
+                   if valid_generation(fields)}
+    complete = len(generations) == len(rows)
     with _PARENT_CACHE_LOCK:
         if epoch != _PARENT_CACHE_EPOCH:
             return {}
@@ -194,12 +197,14 @@ def _live_parents(project_key: str) -> dict[str, str]:
         # name, id, creation time, server pid. The pid tells apart a session of
         # a restarted tmux server that got the same id in the same second.
         session = fields[0].strip()
-        generation = tuple(fields[1:]) if len(fields) == 4 else None
+        generation = tuple(fields[1:]) if valid_generation(fields) else None
         if not session:
             continue
         seen.add(session)
         if generation is not None:
             observed_generations[session] = generation
+        else:
+            invalid_generations.add(session)
         known = memo.get(session)
         if (generation is not None and known is not None and known[0] == generation
                 and now - known[3] < _PARENT_MISS_TTL):
@@ -208,7 +213,8 @@ def _live_parents(project_key: str) -> dict[str, str]:
             continue
         # Read only the two named values in one tmux command queue, using the
         # session ID where available rather than a potentially reused name.
-        target = generation[0] if generation is not None else "=" + session
+        target = (fields[1] if len(fields) == 4 and re.fullmatch(r"\$[0-9]+", fields[1])
+                  else "=" + session)
         queried_generation |= generation is not None
         try:
             shown = subprocess.run(
@@ -241,7 +247,7 @@ def _live_parents(project_key: str) -> dict[str, str]:
             if verified.returncode == 0:
                 for line in verified.stdout.splitlines():
                     fields = line.rsplit("\t", 3)
-                    if len(fields) == 4:
+                    if valid_generation(fields):
                         current[fields[0].strip()] = tuple(fields[1:])
         except (OSError, subprocess.SubprocessError):
             pass

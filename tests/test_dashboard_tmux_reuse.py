@@ -269,3 +269,44 @@ def test_incomplete_lineage_listing_is_not_aggregate_cached(tmp_path, monkeypatc
     assert graph_data._LIVE_PARENT_CACHE["value"] is None
     script.write_text(script.read_text().replace("PARENT_AGENT=Boss", "PARENT_AGENT=Other"))
     assert graph_data._live_parents("/scope") == {"Kid": "Other"}
+
+
+def test_mixed_lineage_listing_never_memoizes_an_incomplete_generation(tmp_path, monkeypatch):
+    log = tmp_path / "calls"
+    script = tmp_path / "tmux"
+    script.write_text(
+        '#!/bin/sh\n'
+        f'echo "$@" >> "{log}"\n'
+        'case "$1" in\n'
+        '  list-sessions) printf "Kid\\t\\$1\\t10\\t100\\nPartial\\t\\$2\\t11\\t\\nOld\\n" ;;\n'
+        '  show-environment) case "$3" in\n'
+        '    "$"1) printf "PARENT_AGENT=Boss\\nAGENTSTACK_PROJECT_KEY=/scope\\n" ;;\n'
+        '    "$"2|=Partial) printf "PARENT_AGENT=First\\nAGENTSTACK_PROJECT_KEY=/scope\\n" ;;\n'
+        '    =Old) printf "PARENT_AGENT=Legacy\\nAGENTSTACK_PROJECT_KEY=/scope\\n" ;;\n'
+        '    *) exit 1 ;; esac ;;\n'
+        'esac\n'
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    assert graph_data._live_parents("/scope") == {
+        "Kid": "Boss", "Partial": "First", "Old": "Legacy"}
+    assert graph_data._LIVE_PARENT_CACHE["value"] is None
+    script.write_text(script.read_text().replace("PARENT_AGENT=First", "PARENT_AGENT=Second"))
+    assert graph_data._live_parents("/scope") == {
+        "Kid": "Boss", "Partial": "Second", "Old": "Legacy"}
+    assert set(graph_data._PARENT_BY_SESSION) == {"Kid"}
+    calls = log.read_text().splitlines()
+    assert sum(line.startswith("show-environment -t $1 ") for line in calls) == 1
+
+
+def test_incomplete_generation_discards_an_earlier_complete_memo(tmp_path, monkeypatch):
+    _fake_tmux(tmp_path, [("Kid", "$1", "10")])
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    script = tmp_path / "tmux"
+    complete = script.read_text()
+    assert graph_data._live_parents("/scope") == {"Kid": "Boss"}
+    script.write_text(complete.replace(r"\t100", r"\t").replace("PARENT_AGENT=Boss", "PARENT_AGENT=Other"))
+    assert graph_data._live_parents("/scope") == {"Kid": "Other"}
+    assert "Kid" not in graph_data._PARENT_BY_SESSION
+    script.write_text(complete.replace("PARENT_AGENT=Boss", "PARENT_AGENT=New"))
+    assert graph_data._live_parents("/scope") == {"Kid": "New"}
