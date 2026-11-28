@@ -7327,6 +7327,8 @@ _CODEX_EFFORT = r"(?:low|medium|high|xhigh|max|ultra)"
 _CODEX_MODEL_FOOTER_RE = re.compile(
     rf"^\s*gpt-\S+(?: (?!{_CODEX_EFFORT}\b)[a-z0-9_]+(?:-[a-z0-9_]+)*)?"
     rf"\s+{_CODEX_EFFORT}\s+[·•]", re.IGNORECASE)
+_CODEX_WRAPPED_FOOTER_RE = re.compile(
+    r"(?:(?:~?[/\\]|[A-Za-z]:[/\\])[^·]+ · )?weekly (?:100|[1-9]?\d)% left")
 _MODEL_PANE_RE = re.compile(
     r"\b(Opus|Sonnet|Haiku|Fable|Mythos)\s+(\d+(?:\.\d+)?)\b"
     r"|\b(gpt-\d+(?:\.\d+)?)(?:-([a-z0-9_]+(?:-[a-z0-9_]+)*)"
@@ -7624,6 +7626,19 @@ def _runtime_activity(text: str) -> tuple[str, str]:
         return (not row or rule(row) or bool(_STATUSLINE_HINT_RE.search(row)) or usage_footer(row)
                 or row.startswith(("? for shortcuts", "⏵", "←", "→")))
 
+    def codex_wrapped_chrome(suffix):
+        # Narrow panes can wrap the working directory and weekly usage across
+        # two extra rows. Join only indented rows after a model field separator.
+        rows = [row for row in suffix if row.strip()]
+        if not rows or not _CODEX_MODEL_FOOTER_RE.match(rows[0]) or not rows[0].rstrip().endswith(" ·"):
+            return False
+        for end in range(2, min(4, len(rows) + 1)):
+            continuation = rows[1:end]
+            if (all(row.startswith("  ") for row in continuation)
+                    and _CODEX_WRAPPED_FOOTER_RE.fullmatch(" ".join(row.strip() for row in continuation))):
+                return all(chrome(row) for row in rows[end:])
+        return False
+
     # Only a complete composer suffix can supersede old modal text. Numbered
     # choices use the same pointer, but are not an ordinary input prompt.
     composer = None
@@ -7635,7 +7650,9 @@ def _runtime_activity(text: str) -> tuple[str, str]:
         suffix = lines[index + 1:]
         if (any(_STATUSLINE_HINT_RE.search(row) or usage_footer(row) or mode_footer(row)
                 or row.strip().startswith("? for shortcuts")
-                for row in suffix) and all(chrome(row) for row in suffix)):
+                for row in suffix)
+                and (all(chrome(row) for row in suffix)
+                     or (lines[index].startswith("›") and codex_wrapped_chrome(suffix)))):
             composer = index
             break
     codex_composer = (composer is not None and lines[composer].startswith('›')
