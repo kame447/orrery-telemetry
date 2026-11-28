@@ -332,3 +332,24 @@ def test_partial_id_observation_is_discarded_when_the_listed_name_changes(tmp_pa
     assert graph_data._live_parents("/scope") == {}
     assert graph_data._PARENT_BY_SESSION == {}
     assert graph_data._LIVE_PARENT_CACHE["value"] is None
+
+
+@pytest.mark.parametrize("created,pid", [("10", "²"), ("²", "100"), ("10", "0")])
+def test_malformed_lineage_numbers_are_not_generation_keys(tmp_path, monkeypatch, created, pid):
+    _fake_tmux(tmp_path, [("Kid", "$1", created)], pid=pid)
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    assert graph_data._live_parents("/scope") == {"Kid": "Boss"}
+    assert graph_data._PARENT_BY_SESSION == {}
+    assert graph_data._LIVE_PARENT_CACHE["value"] is None
+
+
+@pytest.mark.parametrize("session_id", ["$1", "invalid"])
+def test_partial_lineage_verification_positive_control(tmp_path, monkeypatch, session_id):
+    log = _fake_tmux(tmp_path, [("Kid", session_id, "10")], pid="")
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    assert graph_data._live_parents("/scope") == {"Kid": "Boss"}
+    expected_target = "$1" if session_id == "$1" else "=Kid"
+    assert any(line.startswith(f"show-environment -t {expected_target} ")
+               for line in log.read_text().splitlines())
+    assert graph_data._PARENT_BY_SESSION == {}
+    assert graph_data._LIVE_PARENT_CACHE["value"] is None

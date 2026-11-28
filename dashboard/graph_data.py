@@ -169,8 +169,9 @@ def _live_parents(project_key: str) -> dict[str, str]:
     def valid_generation(fields):
         return (len(fields) == 4 and fields[0].strip()
                 and re.fullmatch(r"\$[0-9]+", fields[1])
-                and fields[2].isdigit() and fields[3].isdigit()
-                and int(fields[3]) > 0)
+                and re.fullmatch(r"[0-9]+", fields[2])
+                and re.fullmatch(r"[0-9]+", fields[3])
+                and any(d != "0" for d in fields[3]))
 
     generations = {fields[0].strip(): tuple(fields[1:]) for fields in rows
                    if valid_generation(fields)}

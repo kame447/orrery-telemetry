@@ -133,3 +133,44 @@ def test_cached_lineage_does_not_survive_server_replacement(monkeypatch):
         finally:
             for sock in sockets:
                 call(sock, 'kill-server', check=False)
+
+
+def test_partial_generation_on_real_tmux_never_reuses_stale_memo(monkeypatch):
+    """Mask the PID in an isolated real tmux listing; this is fault injection."""
+    tmux = shutil.which("tmux")
+    if not tmux:
+        pytest.skip("real tmux required")
+    base = "/private/tmp" if Path("/private/tmp").is_dir() else None
+    with tempfile.TemporaryDirectory(prefix="lineage-partial-", dir=base) as path:
+        root = Path(path)
+        sock = root / "s"
+
+        def call(*args, check=True):
+            return subprocess.run([tmux, "-S", str(sock), "-f", "/dev/null", *args],
+                                  capture_output=True, text=True, check=check, timeout=10)
+
+        try:
+            call("new-session", "-d", "-s", "Kid", "-e", "PARENT_AGENT=BossA",
+                 "-e", "AGENTSTACK_PROJECT_KEY=/a", "sleep 60")
+            wrapper = root / "tmux"
+            command = f"{shlex.quote(tmux)} -S {shlex.quote(str(sock))}"
+            wrapper.write_text(
+                '#!/bin/sh\n'
+                'if [ "$1" = list-sessions ]; then\n'
+                + command + ' "$@" | awk -F "\\t" \'BEGIN {OFS="\\t"} {$4=""; print}\'\n'
+                'else\nexec ' + command + ' "$@"\nfi\n'
+            )
+            wrapper.chmod(0o700)
+            monkeypatch.setenv("PATH", str(root) + os.pathsep + os.environ["PATH"])
+            monkeypatch.setattr(graph_data, "_LIVE_PARENT_CACHE", {"ts": 0.0, "value": None})
+            monkeypatch.setattr(graph_data, "_PARENT_BY_SESSION", {})
+            monkeypatch.setattr(graph_data, "time", SimpleNamespace(monotonic=lambda: 100.0))
+            assert graph_data._live_parents("/a") == {"Kid": "BossA"}
+            call("set-environment", "-t", "=Kid", "PARENT_AGENT", "BossB")
+            call("set-environment", "-t", "=Kid", "AGENTSTACK_PROJECT_KEY", "/b")
+            assert graph_data._live_parents("/a") == {}
+            assert graph_data._live_parents("/b") == {"Kid": "BossB"}
+            assert graph_data._PARENT_BY_SESSION == {}
+            assert graph_data._LIVE_PARENT_CACHE["value"] is None
+        finally:
+            call("kill-server", check=False)
